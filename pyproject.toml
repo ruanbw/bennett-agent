@@ -1,0 +1,11 @@
+[project]
+name = "bennett-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.104.0",
+    "pydantic-ai>=2.31.1",
+    "python-dotenv>=1.2.4",
+]
