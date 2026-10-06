@@ -12,7 +12,7 @@ const toSeconds = (ms: number) => (ms > 0 ? Math.max(1, Math.round(ms / 1000)) :
 interface ReasoningViewProps {
   text?: string;
   isStreaming?: boolean;
-  /** 持久化的思考耗时（毫秒），历史消息用它显示"已深度思考 (Ns)" */
+  /** 持久化的思考耗时（毫秒），历史消息用它显示"已深度思考 (用时 N 秒)" */
   elapsedMs?: number;
 }
 
@@ -22,7 +22,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 新一轮思考（含"重新生成"复用同一组件）开始时：重置计时、恢复自动展开
+  // 新一轮思考开始时：重置计时、恢复自动展开
   if (prevStreaming !== isStreaming) {
     setPrevStreaming(isStreaming);
     if (isStreaming) {
@@ -31,6 +31,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
     }
   }
 
+  // 思考中默认展开；思考结束后若用户没手动操作，则默认优雅收起（DeepSeek 经典逻辑：思考完毕视线聚焦正文）
   const isOpen = userToggled !== null ? userToggled : isStreaming;
   // 流式中用实时计时；结束后优先用持久化的最终耗时
   const elapsed = isStreaming ? liveElapsed : elapsedMs > 0 ? toSeconds(elapsedMs) : liveElapsed;
@@ -59,44 +60,52 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
     <Collapsible
       open={isOpen}
       onOpenChange={setUserToggled}
-      className="my-2.5 w-full overflow-hidden rounded-xl border border-border/60 bg-muted/30 transition-all select-none"
+      className={cn(
+        "my-3 w-full overflow-hidden rounded-xl transition-all select-none",
+        "border border-border/50 bg-muted/20 hover:border-border/80"
+      )}
     >
       <CollapsibleTrigger
         render={
           <button
             type="button"
-            className="flex w-full items-center justify-between px-3.5 py-2 text-xs font-medium text-muted-foreground hover:bg-muted/50 hover:text-foreground transition cursor-pointer"
+            className="flex w-full items-center justify-between px-3.5 py-2.5 text-xs font-medium text-muted-foreground hover:bg-muted/40 hover:text-foreground transition cursor-pointer"
           />
         }
       >
         <div className="flex items-center gap-2">
           {isStreaming ? (
-            <div className="relative flex items-center justify-center size-3.5 text-foreground">
+            <div className="relative flex items-center justify-center size-4 text-sky-400">
               <Brain className="size-3.5 animate-pulse" />
-              <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-emerald-500 animate-ping" />
+              <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-sky-400 animate-ping" />
             </div>
           ) : (
-            <Sparkles className="size-3.5 text-muted-foreground" />
+            <Sparkles className="size-3.5 text-sky-400/80" />
           )}
 
-          <span className="tabular-nums">
+          <div className="flex items-center gap-1.5 tabular-nums">
             {isStreaming ? (
               <span className="font-medium text-foreground flex items-center gap-1.5">
-                Thinking...
-                <span className="text-[11px] font-mono text-muted-foreground">({elapsed}s)</span>
+                <span className="text-sky-400">正在思考中</span>
+                <span className="text-[11px] font-mono text-muted-foreground">({elapsed} 秒)</span>
               </span>
             ) : (
-              <span>Thought for {elapsed > 0 ? `${elapsed}s` : '<1s'}</span>
+              <span className="text-muted-foreground/90 font-medium">
+                已深度思考
+                <span className="text-[11px] font-mono ml-1 text-muted-foreground/70">
+                  (用时 {elapsed > 0 ? `${elapsed} 秒` : '<1 秒'})
+                </span>
+              </span>
             )}
-          </span>
+          </div>
         </div>
 
-        <div className="flex items-center gap-1 text-[11px] text-muted-foreground/80">
-          <span>{isOpen ? 'Collapse' : 'Expand'}</span>
+        <div className="flex items-center gap-1 text-[11px] text-muted-foreground/70 group-hover:text-foreground">
+          <span>{isOpen ? "收起" : "展开"}</span>
           <ChevronDown
             className={cn(
-              'size-3.5 transition-transform duration-200',
-              isOpen && 'rotate-180'
+              "size-3.5 transition-transform duration-200 text-muted-foreground/70",
+              isOpen && "rotate-180"
             )}
           />
         </div>
@@ -105,9 +114,14 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
       <CollapsibleContent className="transition-all data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
         <div
           ref={scrollRef}
-          className="max-h-60 overflow-y-auto border-t border-border/40 bg-background/50 px-4 py-3 font-mono text-xs leading-relaxed text-muted-foreground/90 whitespace-pre-wrap select-text"
+          className="max-h-72 overflow-y-auto border-t border-border/40 bg-muted/10 px-4 py-3 text-xs leading-relaxed text-muted-foreground/80 whitespace-pre-wrap select-text font-sans pl-4.5 border-l-2 border-l-sky-500/40"
         >
-          {text || 'Thinking...'}
+          {text || (
+            <span className="text-muted-foreground/60 italic flex items-center gap-1.5">
+              <span className="size-1.5 rounded-full bg-sky-400 animate-ping" />
+              正在构建推理逻辑...
+            </span>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

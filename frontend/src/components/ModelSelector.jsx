@@ -93,7 +93,7 @@ export function ModelSelector({
   };
 
   const selected = models.find((m) => m.id === currentModel);
-  const label = selected?.name || currentModel || '选择模型';
+  const label = selected?.name || (currentModel ? currentModel.split('/').pop() : '选择模型');
 
   return (
     <div className="relative inline-block" ref={containerRef}>
@@ -110,14 +110,14 @@ export function ModelSelector({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-label="选择模型"
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border/60 bg-background hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
       >
         <Cpu size={13} className="text-muted-foreground shrink-0" />
-        <span className="max-w-[130px] sm:max-w-[170px] truncate text-[11px] font-medium">
+        <span className="max-w-[120px] sm:max-w-[150px] truncate text-xs font-medium">
           {label}
         </span>
         <ChevronDown
-          size={11}
+          size={12}
           className={`text-muted-foreground shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`}
         />
       </button>

@@ -97,13 +97,30 @@
   width: 100%;
 }
 
-/* 屏蔽 @assistant-ui/react-markdown 的呼吸黑圆点 */
+/* 屏蔽 @assistant-ui/react-markdown 的呼吸黑圆点，并替换为 DeepSeek 标志性的闪烁光标 */
 :where(.aui-md[data-status="running"])::after,
 :where(.aui-md[data-status="running"]) *:last-child::after {
   content: none !important;
   display: none !important;
   animation: none !important;
 }
+
+/* DeepSeek 打字机流式光标 */
+.aui-md[data-status="running"] *:last-child:not(pre):not(code)::after {
+  content: "▋";
+  display: inline-block;
+  margin-left: 2px;
+  vertical-align: baseline;
+  font-size: 0.85em;
+  color: #38bdf8; /* sky-400 */
+  animation: ds-caret-blink 1s steps(1) infinite;
+}
+
+@keyframes ds-caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
