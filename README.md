@@ -43,6 +43,8 @@ cp .env.example .env.development
 
 ### 3. 运行 Agent
 
+#### 终端交互模式（CLI）
+
 ```bash
 # 默认开发环境
 uv run python main.py
@@ -50,3 +52,23 @@ uv run python main.py
 # 指定生产环境
 APP_ENV=production uv run python main.py
 ```
+
+#### 现代 Web 界面模式（FastAPI + React + assistant-ui）
+
+1. **构建前端（已有预构建产物，可直接运行）**：
+   ```bash
+   cd frontend
+   npm install
+   npm run build
+   cd ..
+   ```
+
+2. **启动 FastAPI Web 服务**：
+   ```bash
+   uv run python main.py --web
+   ```
+   启动后打开浏览器访问 `http://127.0.0.1:8000` 即可开始匿名对话。
+
+3. **前端开发模式热重载（可选）**：
+   - 终端 1 启动后端：`uv run python main.py --web`
+   - 终端 2 启动前端：`cd frontend && npm run dev`，访问 `http://127.0.0.1:5173`。

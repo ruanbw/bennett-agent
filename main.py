@@ -93,9 +93,27 @@ async def run_interactive_loop(agent: Agent):
             print(f"\n[执行异常]: {err}\n")
 
 
+# =====================================================================
+# 3. 启动模式
+# =====================================================================
 def main():
-    agent = create_agent()
-    asyncio.run(run_interactive_loop(agent))
+    import argparse
+    parser = argparse.ArgumentParser(description="Bennett Agent 运行入口")
+    parser.add_argument("--web", action="store_true", help="启动 FastAPI Web 服务")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument("--port", type=int, default=8000, help="服务端口")
+    args = parser.parse_args()
+
+    if args.web:
+        import uvicorn
+        print("=" * 60)
+        print(f" 启动 Bennett Web 服务: http://{args.host}:{args.port}")
+        print("=" * 60)
+        uvicorn.run("app.server:app", host=args.host, port=args.port, reload=False)
+    else:
+        agent = create_agent()
+        asyncio.run(run_interactive_loop(agent))
+
 
 
 if __name__ == "__main__":
