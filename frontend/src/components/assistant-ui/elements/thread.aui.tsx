@@ -23,6 +23,7 @@ import {
   ArrowUpIcon,
   CheckIcon,
   CopyIcon,
+  GlobeIcon,
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
@@ -36,7 +37,9 @@ interface ThreadProps {
   models?: any[];
   modelsError?: string | null;
   currentModel?: string | null;
+  webSearch?: boolean;
   onSelectModel?: (modelId: string) => void;
+  onToggleWebSearch?: (checked: boolean) => void;
   onRefreshModels?: () => void;
 }
 
@@ -44,7 +47,9 @@ export const Thread: FC<ThreadProps> = ({
   models = [],
   modelsError = null,
   currentModel = null,
+  webSearch = false,
   onSelectModel = () => {},
+  onToggleWebSearch,
   onRefreshModels,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
@@ -99,7 +104,9 @@ export const Thread: FC<ThreadProps> = ({
               models={models}
               modelsError={modelsError}
               currentModel={currentModel}
+              webSearch={webSearch}
               onSelectModel={onSelectModel}
+              onToggleWebSearch={onToggleWebSearch}
               onRefreshModels={onRefreshModels}
             />
           </div>
@@ -133,9 +140,19 @@ const Composer: FC<{
   models: any[];
   modelsError?: string | null;
   currentModel: string | null;
+  webSearch?: boolean;
   onSelectModel: (id: string) => void;
+  onToggleWebSearch?: (checked: boolean) => void;
   onRefreshModels?: () => void;
-}> = ({ models, modelsError = null, currentModel, onSelectModel, onRefreshModels }) => {
+}> = ({
+  models,
+  modelsError = null,
+  currentModel,
+  webSearch = false,
+  onSelectModel,
+  onToggleWebSearch,
+  onRefreshModels,
+}) => {
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
@@ -160,6 +177,31 @@ const Composer: FC<{
                 onRefreshModels={onRefreshModels}
               />
             )}
+
+            <button
+              type="button"
+              onClick={() => onToggleWebSearch?.(!webSearch)}
+              title={webSearch ? "联网搜索已启用（点击关闭）" : "联网搜索已关闭（点击开启）"}
+              aria-pressed={webSearch}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition cursor-pointer select-none shadow-xs",
+                webSearch
+                  ? "border-sky-500/50 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20"
+                  : "border-border/60 bg-background text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+            >
+              <GlobeIcon
+                size={13}
+                className={cn(
+                  "shrink-0 transition-colors",
+                  webSearch ? "text-sky-400" : "text-muted-foreground"
+                )}
+              />
+              <span className="text-[11px] font-medium">联网搜索</span>
+              {webSearch && (
+                <span className="size-1.5 rounded-full bg-sky-400 animate-pulse" />
+              )}
+            </button>
           </div>
 
           {/* 发送/停止合并为同一个位置：生成中显示停止，空闲时显示发送 */}
@@ -242,9 +284,18 @@ const AssistantMessage: FC = () => {
       <div className="text-foreground text-sm leading-relaxed wrap-break-word">
         <MessagePrimitive.Parts
           components={{
+            Empty: ({ status }) =>
+              status.type === "running" ? (
+                <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground font-mono select-none">
+                  <span className="size-2 rounded-full bg-emerald-500 animate-ping" />
+                  <span>Thinking...</span>
+                </div>
+              ) : null,
             Reasoning: (props) => <ReasoningMessage {...props} />,
             Text: () => <MarkdownText />,
-            tool: ({ part }) => part.toolUI ?? <ToolFallback {...part} />,
+            tools: {
+              Fallback: (props) => <ToolFallback {...props} />,
+            },
           }}
         />
         <MessageError />

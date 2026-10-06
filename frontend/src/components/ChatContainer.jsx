@@ -6,7 +6,9 @@ export function ChatContainer({
   models,
   modelsError,
   currentModel,
+  webSearch,
   onSelectModel,
+  onToggleWebSearch,
   onRefreshModels,
   onToggleSidebar,
 }) {
@@ -30,7 +32,9 @@ export function ChatContainer({
           models={models}
           modelsError={modelsError}
           currentModel={currentModel}
+          webSearch={webSearch}
           onSelectModel={onSelectModel}
+          onToggleWebSearch={onToggleWebSearch}
           onRefreshModels={onRefreshModels}
         />
       </div>

@@ -82,17 +82,17 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
           <span className="tabular-nums">
             {isStreaming ? (
               <span className="font-medium text-foreground flex items-center gap-1.5">
-                正在思考中...
+                Thinking...
                 <span className="text-[11px] font-mono text-muted-foreground">({elapsed}s)</span>
               </span>
             ) : (
-              <span>已深度思考 {elapsed > 0 ? `(${elapsed}s)` : ''}</span>
+              <span>Thought for {elapsed > 0 ? `${elapsed}s` : '<1s'}</span>
             )}
           </span>
         </div>
 
         <div className="flex items-center gap-1 text-[11px] text-muted-foreground/80">
-          <span>{isOpen ? '收起思考' : '展开思考'}</span>
+          <span>{isOpen ? 'Collapse' : 'Expand'}</span>
           <ChevronDown
             className={cn(
               'size-3.5 transition-transform duration-200',
@@ -107,7 +107,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
           ref={scrollRef}
           className="max-h-60 overflow-y-auto border-t border-border/40 bg-background/50 px-4 py-3 font-mono text-xs leading-relaxed text-muted-foreground/90 whitespace-pre-wrap select-text"
         >
-          {text || '思考中...'}
+          {text || 'Thinking...'}
         </div>
       </CollapsibleContent>
     </Collapsible>

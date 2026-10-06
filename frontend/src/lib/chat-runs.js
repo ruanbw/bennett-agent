@@ -75,18 +75,20 @@ export function abortChatRun(sessionId) {
  * 启动一次生成。同一会话同时只允许一个运行中的任务。
  * 返回 run 对象（含 assistantMsgId 等），已在运行时返回 null。
  */
-export function startChatRun({ sessionId, assistantMsgId, model }) {
+export function startChatRun({ sessionId, assistantMsgId, model, webSearch = false }) {
   if (isRunActive(sessionId)) return null;
 
   const run = {
     sessionId,
     assistantMsgId,
     model,
+    webSearch,
     controller: new AbortController(),
     startedAt: Date.now(),
     thinking: '',
     content: '',
     thinkingMs: 0,
+    toolCalls: [],
     stopped: false,
     finished: false,
   };
@@ -101,7 +103,7 @@ export function startChatRun({ sessionId, assistantMsgId, model }) {
 }
 
 async function executeRun(run) {
-  const { sessionId, assistantMsgId, model, controller } = run;
+  const { sessionId, assistantMsgId, model, webSearch, controller } = run;
 
   let thinkingStartedAt = null;
   let lastFlushAt = 0;
@@ -117,6 +119,7 @@ async function executeRun(run) {
         content: run.content,
         thinking: run.thinking,
         thinkingMs: run.thinkingMs,
+        toolCalls: run.toolCalls,
       })
       .catch(() => {});
   };
@@ -140,7 +143,12 @@ async function executeRun(run) {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: contextMessages, stream: true }),
+      body: JSON.stringify({
+        model,
+        messages: contextMessages,
+        stream: true,
+        web_search: Boolean(webSearch),
+      }),
       signal: controller.signal,
     });
 
@@ -180,6 +188,35 @@ async function executeRun(run) {
             run.thinkingMs = Date.now() - thinkingStartedAt;
           }
           run.content += event.delta;
+        } else if (event.type === 'tool_call') {
+          // 工具开始调用
+          const tcId = event.tool_call_id;
+          const existing = run.toolCalls.find((t) => t.toolCallId === tcId);
+          if (!existing) {
+            run.toolCalls.push({
+              toolCallId: tcId,
+              toolName: event.tool_name,
+              argsText: event.args || '',
+              result: undefined,
+              status: 'running',
+            });
+          }
+        } else if (event.type === 'tool_result') {
+          // 工具调用完成
+          const tcId = event.tool_call_id;
+          const existing = run.toolCalls.find((t) => t.toolCallId === tcId);
+          if (existing) {
+            existing.result = event.result;
+            existing.status = 'complete';
+          } else {
+            run.toolCalls.push({
+              toolCallId: tcId,
+              toolName: event.tool_name,
+              argsText: '',
+              result: event.result,
+              status: 'complete',
+            });
+          }
         } else if (event.type === 'error') {
           run.content += `\n\n> ⚠️ **错误**: ${event.message}`;
         } else {
@@ -209,6 +246,7 @@ async function executeRun(run) {
         content: run.content,
         thinking: run.thinking,
         thinkingMs: run.thinkingMs,
+        toolCalls: run.toolCalls,
         stopped: aborted,
       });
       await db.sessions.update(sessionId, { updatedAt: Date.now() });

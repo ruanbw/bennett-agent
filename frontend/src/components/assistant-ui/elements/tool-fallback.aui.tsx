@@ -154,6 +154,9 @@ function ToolFallbackTrigger({
           ? `${isCancelled ? "Cancelled" : "Failed"} tool`
           : "Used tool";
 
+  // 对 tavily_search 显示更友好的名称
+  const displayName = toolName === "tavily_search" ? "Tavily Search" : toolName;
+
   return (
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
@@ -168,7 +171,7 @@ function ToolFallbackTrigger({
         className={cn(
           "aui-tool-fallback-trigger-icon size-4 shrink-0",
           isCancelled && "text-muted-foreground",
-          isRunning && "animate-spin [animation-duration:0.6s]",
+          isRunning && "animate-spin [animation-duration:0.6s] text-sky-400",
         )}
       />
       <span
@@ -176,10 +179,10 @@ function ToolFallbackTrigger({
         className={cn(
           "aui-tool-fallback-trigger-label-wrapper inline-block text-start leading-none",
           isCancelled && "text-muted-foreground line-through",
-          isRunning && "shimmer motion-reduce:animate-none",
+          isRunning && "text-foreground font-medium",
         )}
       >
-        {label}: <b>{toolName}</b>
+        {label}: <b>{displayName}</b>
       </span>
       <ToolFallbackDuration />
       <ChevronDownIcon

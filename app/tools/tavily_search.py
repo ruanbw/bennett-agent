@@ -1,0 +1,86 @@
+"""Tavily 网页搜索工具"""
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional
+import httpx
+from pydantic_ai import RunContext
+
+from app.config import settings
+
+
+def _resolve_tavily_api_key() -> Optional[str]:
+    """优先从 settings / 环境变量读取，若无则尝试从 ~/.pi/web-search.json 读取"""
+    if getattr(settings, "tavily_api_key", None):
+        return settings.tavily_api_key
+
+    env_key = os.getenv("TAVILY_API_KEY")
+    if env_key:
+        return env_key
+
+    user_cfg_path = Path.home() / ".pi" / "web-search.json"
+    if user_cfg_path.is_file():
+        try:
+            with open(user_cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                return cfg.get("tavilyApiKey")
+        except Exception:
+            pass
+
+    return None
+
+
+async def tavily_search(
+    ctx: RunContext[None],
+    query: str,
+    max_results: int = 5,
+) -> str:
+    """使用 Tavily 搜索引擎在互联网上实时搜索最新信息、新闻、网页资料等。
+
+    Args:
+        query: 搜索关键词或检索问题，如 'Python 3.13 最新特性' 或 'OpenAI 最新发布'
+        max_results: 返回的最大结果数量（默认为 5）
+    """
+    api_key = _resolve_tavily_api_key()
+    if not api_key:
+        return "错误: 未配置 Tavily API Key，无法执行联网搜索。"
+
+    url = "https://api.tavily.com/search"
+    payload: Dict[str, Any] = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max(1, min(max_results, 10)),
+        "search_depth": "basic",
+        "include_answer": True,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                return f"联网搜索请求失败 (HTTP {response.status_code}): {response.text}"
+
+            data = response.json()
+            lines = []
+
+            direct_answer = data.get("answer")
+            if direct_answer:
+                lines.append(f"【快速摘要】: {direct_answer}\n")
+
+            results = data.get("results") or []
+            if not results:
+                lines.append("未检索到相关网页内容。")
+            else:
+                lines.append("【搜索结果】:")
+                for idx, item in enumerate(results, start=1):
+                    title = item.get("title", "无标题")
+                    item_url = item.get("url", "")
+                    content = item.get("content", "").strip()
+                    lines.append(f"{idx}. {title}\n   链接: {item_url}\n   内容: {content}\n")
+
+            return "\n".join(lines)
+
+    except httpx.TimeoutException:
+        return f"联网搜索超时，关键词: {query}"
+    except Exception as e:
+        return f"联网搜索发生异常: {str(e)}"

@@ -27,6 +27,18 @@ export class ChatDatabase extends Dexie {
             if (typeof message.thinkingMs !== 'number') message.thinkingMs = 0;
           })
       );
+
+    // v3：会话支持记录 webSearch 联网状态与消息记录 webSearch 元数据
+    this.version(3).stores({
+      sessions: 'id, title, model, webSearch, createdAt, updatedAt',
+      messages: 'id, sessionId, role, createdAt',
+    });
+
+    // v4：消息支持保存 toolCalls 结构
+    this.version(4).stores({
+      sessions: 'id, title, model, webSearch, createdAt, updatedAt',
+      messages: 'id, sessionId, role, createdAt',
+    });
   }
 }
 

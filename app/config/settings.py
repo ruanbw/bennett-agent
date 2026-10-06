@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     litellm_api_key: str = Field(default="sk-placeholder", description="LiteLLM API 密钥")
     model_name: str = Field(default="openai/gpt-4o", description="模型标识符（LiteLLM 路由格式）")
     assistant_name: str = Field(default="Bennett", description="助手名称")
+    tavily_api_key: Optional[str] = Field(default=None, description="Tavily 网页搜索 API Key")
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),

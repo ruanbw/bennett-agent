@@ -15,7 +15,7 @@ from app.tools import ALL_TOOLS
 # =====================================================================
 # 1. 工厂方法：装配 Agent (提示词、LiteLLM 模型与工具解耦组合)
 # =====================================================================
-def create_agent() -> Agent:
+def create_agent(enable_web_search: bool = True) -> Agent:
     # 渲染动态系统提示词
     system_prompt = prompt_manager.render(
         "system_prompt.jinja",
@@ -33,11 +33,13 @@ def create_agent() -> Agent:
         provider=provider,
     )
 
+    tools = ALL_TOOLS if enable_web_search else []
+
     # 统一传入解耦的工具列表
     return Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=ALL_TOOLS,
+        tools=tools,
     )
 
 

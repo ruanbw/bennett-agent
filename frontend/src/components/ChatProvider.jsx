@@ -23,17 +23,44 @@ import {
 
 // 把 IndexedDB 记录转换成 runtime 消息
 function toRuntimeMessage(record) {
+  const content = [];
+
+  // 工具调用部件
+  if (Array.isArray(record.toolCalls)) {
+    for (const tc of record.toolCalls) {
+      content.push({
+        type: 'tool-call',
+        toolName: tc.toolName || 'tool',
+        toolCallId: tc.toolCallId || String(Math.random()),
+        argsText: tc.argsText || '',
+        result: tc.result,
+        status: { type: tc.status || 'complete' },
+      });
+    }
+  }
+
+  // 思考过程部件
+  if (record.thinking) {
+    content.push({
+      type: 'reasoning',
+      text: record.thinking,
+      status: { type: 'complete' },
+    });
+  }
+
+  // 最终文本内容
+  if (record.content) {
+    content.push({
+      type: 'text',
+      text: record.content,
+      status: { type: 'complete' },
+    });
+  }
+
   const message = {
     id: record.id,
     role: record.role,
-    content: [
-      ...(record.thinking
-        ? [{ type: 'reasoning', text: record.thinking, status: { type: 'complete' } }]
-        : []),
-      ...(record.content
-        ? [{ type: 'text', text: record.content, status: { type: 'complete' } }]
-        : []),
-    ],
+    content,
     createdAt: new Date(record.createdAt),
     metadata: {
       custom: {
@@ -51,29 +78,44 @@ function toRuntimeMessage(record) {
 // 生成中的消息：内容直接来自内存里的 run，随增量变化
 function buildLiveMessage(run) {
   const reasoningDone = Boolean(run.content) || run.finished;
+  const content = [];
+
+  // 正在或已执行的工具调用部件
+  if (Array.isArray(run.toolCalls)) {
+    for (const tc of run.toolCalls) {
+      content.push({
+        type: 'tool-call',
+        toolName: tc.toolName || 'tool',
+        toolCallId: tc.toolCallId || String(Math.random()),
+        argsText: tc.argsText || '',
+        result: tc.result,
+        status: { type: tc.status || 'complete' },
+      });
+    }
+  }
+
+  // 思考部件
+  if (run.thinking) {
+    content.push({
+      type: 'reasoning',
+      text: run.thinking,
+      status: { type: reasoningDone ? 'complete' : 'running' },
+    });
+  }
+
+  // 文本内容部件
+  if (run.content) {
+    content.push({
+      type: 'text',
+      text: run.content,
+      status: { type: run.finished ? 'complete' : 'running' },
+    });
+  }
+
   return {
     id: run.assistantMsgId,
     role: 'assistant',
-    content: [
-      ...(run.thinking
-        ? [
-            {
-              type: 'reasoning',
-              text: run.thinking,
-              status: { type: reasoningDone ? 'complete' : 'running' },
-            },
-          ]
-        : []),
-      ...(run.content
-        ? [
-            {
-              type: 'text',
-              text: run.content,
-              status: { type: run.finished ? 'complete' : 'running' },
-            },
-          ]
-        : []),
-    ],
+    content,
     createdAt: new Date(run.startedAt),
     metadata: {
       custom: { stopped: run.stopped, thinkingMs: run.thinkingMs },
@@ -81,7 +123,7 @@ function buildLiveMessage(run) {
   };
 }
 
-export function ChatProvider({ children, currentSessionId, currentModel }) {
+export function ChatProvider({ children, currentSessionId, currentModel, webSearch = false }) {
   const [dbMessages, setDbMessages] = useState([]);
   const messageSeqRef = useRef(0);
 
@@ -187,6 +229,7 @@ export function ChatProvider({ children, currentSessionId, currentModel }) {
         content: '',
         thinking: '',
         thinkingMs: 0,
+        toolCalls: [],
         stopped: false,
         createdAt: assistantCreatedAt,
       });
@@ -207,9 +250,14 @@ export function ChatProvider({ children, currentSessionId, currentModel }) {
         },
       ]);
 
-      startChatRun({ sessionId: currentSessionId, assistantMsgId, model: currentModel });
+      startChatRun({
+        sessionId: currentSessionId,
+        assistantMsgId,
+        model: currentModel,
+        webSearch,
+      });
     },
-    [currentSessionId, currentModel, nextTimestamp]
+    [currentSessionId, currentModel, webSearch, nextTimestamp]
   );
 
   // 重新生成 (Reload)
@@ -223,6 +271,7 @@ export function ChatProvider({ children, currentSessionId, currentModel }) {
       content: '',
       thinking: '',
       thinkingMs: 0,
+      toolCalls: [],
       stopped: false,
     });
     setDbMessages((prev) =>
@@ -237,8 +286,13 @@ export function ChatProvider({ children, currentSessionId, currentModel }) {
       )
     );
 
-    startChatRun({ sessionId: currentSessionId, assistantMsgId: lastMsg.id, model: currentModel });
-  }, [currentSessionId, currentModel, messages]);
+    startChatRun({
+      sessionId: currentSessionId,
+      assistantMsgId: lastMsg.id,
+      model: currentModel,
+      webSearch,
+    });
+  }, [currentSessionId, currentModel, webSearch, messages]);
 
   const onCancel = useCallback(() => {
     if (currentSessionId) abortChatRun(currentSessionId);

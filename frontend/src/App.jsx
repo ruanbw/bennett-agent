@@ -15,6 +15,7 @@ export function App() {
   const [models, setModels] = useState([]);
   const [modelsError, setModelsError] = useState(null);
   const [currentModel, setCurrentModel] = useState(null);
+  const [webSearch, setWebSearch] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isMobileViewport());
 
   const currentModelRef = useRef(null);
@@ -71,12 +72,14 @@ export function App() {
       id: 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
       title: '新对话',
       model: currentModelRef.current || null,
+      webSearch: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
     await db.sessions.add(newSession);
     setSessions((prev) => [newSession, ...prev]);
     setCurrentSessionId(newSession.id);
+    setWebSearch(false);
     if (isMobileViewport()) setIsSidebarOpen(false);
     return newSession.id;
   }, []);
@@ -94,6 +97,7 @@ export function App() {
         const first = list[0];
         setCurrentSessionId(first.id);
         applyModel(first.model || data?.default_model);
+        setWebSearch(Boolean(first.webSearch));
       } else {
         await handleCreateSession();
       }
@@ -106,6 +110,7 @@ export function App() {
       setCurrentSessionId(sessionId);
       const target = sessionsRef.current.find((s) => s.id === sessionId);
       if (target?.model) applyModel(target.model);
+      setWebSearch(Boolean(target?.webSearch));
       if (isMobileViewport()) setIsSidebarOpen(false);
     },
     [applyModel]
@@ -155,6 +160,20 @@ export function App() {
     [applyModel, currentSessionId]
   );
 
+  // 切换联网搜索
+  const handleToggleWebSearch = useCallback(
+    async (checked) => {
+      setWebSearch(checked);
+      if (currentSessionId) {
+        await db.sessions.update(currentSessionId, { webSearch: checked, updatedAt: Date.now() });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === currentSessionId ? { ...s, webSearch: checked } : s))
+        );
+      }
+    },
+    [currentSessionId]
+  );
+
   return (
     <div className="dark flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
       {/* 侧边栏 */}
@@ -182,12 +201,15 @@ export function App() {
           key={currentSessionId}
           currentSessionId={currentSessionId}
           currentModel={currentModel}
+          webSearch={webSearch}
         >
           <ChatContainer
             models={models}
             modelsError={modelsError}
             currentModel={currentModel}
+            webSearch={webSearch}
             onSelectModel={handleSelectModel}
+            onToggleWebSearch={handleToggleWebSearch}
             onRefreshModels={refreshModels}
             onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
           />

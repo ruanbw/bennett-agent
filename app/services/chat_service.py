@@ -18,8 +18,8 @@ from app.schemas.chat import ChatMessage
 from app.tools import ALL_TOOLS
 
 
-def get_agent_for_model(model_name: str) -> Agent:
-    """动态根据前端选中的 model_name 装配 Agent"""
+def get_agent_for_model(model_name: str, enable_web_search: bool = False) -> Agent:
+    """动态根据前端选中的 model_name 与是否开启联网装配 Agent"""
     system_prompt = prompt_manager.render(
         "system_prompt.jinja",
         app_env=settings.app_env,
@@ -35,10 +35,12 @@ def get_agent_for_model(model_name: str) -> Agent:
         provider=provider,
     )
 
+    tools = ALL_TOOLS if enable_web_search else []
+
     return Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=ALL_TOOLS,
+        tools=tools,
     )
 
 
@@ -77,9 +79,10 @@ def convert_chat_history(messages: List[ChatMessage]) -> tuple[str, List[ModelMe
 
 async def stream_chat_response(
     model_name: str,
-    messages: List[ChatMessage]
+    messages: List[ChatMessage],
+    web_search: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """通过 SSE 逐字向前端推送流式回复，支持思考过程 (thinking) 与最终内容 (content)"""
+    """通过 SSE 逐字向前端推送流式回复，支持思考过程 (thinking)、工具调用 (tool) 与最终内容 (content)"""
     try:
         current_prompt, history = convert_chat_history(messages)
     except Exception as e:
@@ -87,32 +90,63 @@ async def stream_chat_response(
         return
 
     try:
-        agent = get_agent_for_model(model_name)
+        agent = get_agent_for_model(model_name, enable_web_search=web_search)
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'message': f'模型初始化失败: {str(e)}'}, ensure_ascii=False)}\n\n"
         return
 
     try:
-        last_think_len = 0
-        last_text_len = 0
+        async with agent.run_stream_events(current_prompt, message_history=history) as stream:
+            async for event in stream:
+                ev_type = type(event).__name__
+                if ev_type == "PartDeltaEvent":
+                    delta = getattr(event, "delta", None)
+                    delta_type = type(delta).__name__
+                    if delta_type == "ThinkingPartDelta":
+                        content = getattr(delta, "content_delta", "")
+                        if content:
+                            yield f"data: {json.dumps({'type': 'thinking', 'delta': content}, ensure_ascii=False)}\n\n"
+                    elif delta_type == "TextPartDelta":
+                        content = getattr(delta, "content_delta", "")
+                        if content:
+                            yield f"data: {json.dumps({'type': 'content', 'delta': content}, ensure_ascii=False)}\n\n"
 
-        async with agent.run_stream(current_prompt, message_history=history) as res:
-            async for resp in res.stream_response():
-                for part in resp.parts:
-                    if isinstance(part, ThinkingPart):
-                        content = part.content or ""
-                        if len(content) > last_think_len:
-                            delta = content[last_think_len:]
-                            last_think_len = len(content)
-                            data = json.dumps({"type": "thinking", "delta": delta}, ensure_ascii=False)
-                            yield f"data: {data}\n\n"
-                    elif isinstance(part, TextPart):
-                        content = part.content or ""
-                        if len(content) > last_text_len:
-                            delta = content[last_text_len:]
-                            last_text_len = len(content)
-                            data = json.dumps({"type": "content", "delta": delta}, ensure_ascii=False)
-                            yield f"data: {data}\n\n"
+                elif ev_type == "PartStartEvent":
+                    part = getattr(event, "part", None)
+                    if isinstance(part, TextPart) and part.content:
+                        yield f"data: {json.dumps({'type': 'content', 'delta': part.content}, ensure_ascii=False)}\n\n"
+                    elif isinstance(part, ThinkingPart) and part.content:
+                        yield f"data: {json.dumps({'type': 'thinking', 'delta': part.content}, ensure_ascii=False)}\n\n"
+
+                elif ev_type == "FunctionToolCallEvent":
+                    part = getattr(event, "part", None)
+                    if part:
+                        args = part.args
+                        if isinstance(args, dict):
+                            args_str = json.dumps(args, ensure_ascii=False)
+                        else:
+                            args_str = str(args or "")
+                        data = {
+                            "type": "tool_call",
+                            "tool_call_id": getattr(part, "tool_call_id", ""),
+                            "tool_name": getattr(part, "tool_name", ""),
+                            "args": args_str,
+                        }
+                        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+                elif ev_type == "FunctionToolResultEvent":
+                    part = getattr(event, "part", None)
+                    if part:
+                        content = part.content
+                        if not isinstance(content, str):
+                            content = json.dumps(content, ensure_ascii=False)
+                        data = {
+                            "type": "tool_result",
+                            "tool_call_id": getattr(part, "tool_call_id", ""),
+                            "tool_name": getattr(part, "tool_name", ""),
+                            "result": content,
+                        }
+                        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
