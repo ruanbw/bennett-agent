@@ -137,8 +137,10 @@ export function Sidebar({
 
   return (
     <aside
+      aria-label="历史对话侧边栏"
+      inert={!isOpen ? '' : undefined}
       className={`w-64 border-r flex flex-col h-full select-none transition-transform duration-200 z-30 shrink-0 bg-muted/20 absolute md:relative inset-y-0 left-0 ${
-        isOpen ? 'translate-x-0' : '-translate-x-full md:hidden'
+        isOpen ? 'translate-x-0' : '-translate-x-full md:hidden pointer-events-none'
       }`}
     >
       {/* 头部：新建对话 & 搜索框与多选管理按钮 */}
@@ -163,6 +165,7 @@ export function Sidebar({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索历史会话..."
+              aria-label="搜索历史会话"
               className="w-full bg-background border rounded-md pl-8 pr-7 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-ring/50"
             />
             {searchQuery && (
@@ -263,11 +266,25 @@ export function Sidebar({
             return (
               <div
                 key={session.id}
+                role="button"
+                tabIndex={0}
+                aria-current={currentSessionId === session.id && !isSelectMode ? 'true' : undefined}
                 onClick={() => {
                   if (isSelectMode) {
                     toggleSelect(session.id);
                   } else {
                     onSelectSession(session.id);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    if (editingId === session.id) return;
+                    e.preventDefault();
+                    if (isSelectMode) {
+                      toggleSelect(session.id);
+                    } else {
+                      onSelectSession(session.id);
+                    }
                   }
                 }}
                 className={`group relative flex items-center gap-2 px-3 py-2 rounded-md text-xs cursor-pointer transition-colors ${
@@ -336,7 +353,7 @@ export function Sidebar({
 
                 {/* 单个操作按钮 */}
                 {editingId !== session.id && !isSelectMode && (
-                  <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity shrink-0">
+                  <div className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 flex items-center gap-0.5 transition-opacity shrink-0">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

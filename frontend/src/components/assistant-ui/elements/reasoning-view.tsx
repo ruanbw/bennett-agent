@@ -81,7 +81,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
         )}
 
         <span className="font-medium tracking-tight">
-          思考中
+          {isStreaming ? '思考中' : '已思考'}
           {elapsed > 0 && (
             <span className="ml-1 tabular-nums font-mono text-[11px] text-muted-foreground/70">
               ({elapsed}s)

@@ -181,11 +181,17 @@ const AttachmentUI: FC = () => {
                   )}
                   role={src ? "button" : "group"}
                   tabIndex={0}
-                  aria-label={`${src ? `Preview ${name}` : `${typeLabel} attachment ${name}`}${
+                  onKeyDown={(e) => {
+                    if (src && (e.key === "Enter" || e.key === " ")) {
+                      e.preventDefault();
+                      e.currentTarget.click();
+                    }
+                  }}
+                  aria-label={`${src ? `预览 ${name}` : `${typeLabel} 附件 ${name}`}${
                     isError
-                      ? ", upload failed"
+                      ? ", 上传失败"
                       : isUploading
-                        ? ", uploading"
+                        ? ", 上传中"
                         : ""
                   }`}
                 />

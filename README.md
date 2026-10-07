@@ -16,12 +16,19 @@
 ```text
 .
 ├── app/
+│   ├── api/                # FastAPI 路由与 SSE 端点
 │   ├── config/             # 配置管理 (多环境)
 │   ├── prompts/            # 提示词渲染器 (PromptManager)
-│   └── tools/              # 工具函数与统一注册中心
+│   ├── schemas/            # Pydantic 请求/响应数据模型
+│   ├── services/           # 核心业务服务 (对话流、模型管理)
+│   ├── tools/              # 工具函数与统一注册中心
+│   └── server.py           # FastAPI 服务装配与静态资源挂载
+├── frontend/               # React 19 + assistant-ui 前端项目
+│   ├── src/                # 页面、组件、运行时与 Dexie 本地存储
+│   └── dist/               # 前端预构建静态产物
 ├── prompts/                # 提示词模板 (Jinja2)
 ├── .env.example            # 环境变量模板
-├── main.py                 # 入口与交互式 Agent Loop
+├── main.py                 # 入口 (支持 CLI 流式与 --web FastAPI 服务)
 └── pyproject.toml
 ```
 

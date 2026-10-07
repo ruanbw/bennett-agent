@@ -56,6 +56,14 @@ export function getRunningSessionIds() {
   return ids;
 }
 
+/** 显式移除某个会话关联的所有 run（用于会话删除/清理） */
+export function removeSessionRun(sessionId) {
+  if (runs.has(sessionId)) {
+    runs.delete(sessionId);
+    emit();
+  }
+}
+
 /** UI 已经从数据库读到最终内容，可以安全丢弃内存态 */
 export function clearFinishedRun(sessionId) {
   const run = runs.get(sessionId);
@@ -117,6 +125,12 @@ export function abortChatRun(sessionId) {
 export function startChatRun({ sessionId, assistantMsgId, model, reasoningEffort }) {
   if (isRunActive(sessionId)) return null;
 
+  // 修复 P1-3 竞态：如果旧 run 已处于 finished 状态，在新轮次发起前立刻清理
+  const oldRun = runs.get(sessionId);
+  if (oldRun?.finished) {
+    runs.delete(sessionId);
+  }
+
   const run = {
     sessionId,
     assistantMsgId,
@@ -130,6 +144,7 @@ export function startChatRun({ sessionId, assistantMsgId, model, reasoningEffort
     toolCalls: [],
     stopped: false,
     finished: false,
+    incomplete: false,
   };
 
   runs.set(sessionId, run);
@@ -196,26 +211,37 @@ async function executeRun(run) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
+    let receivedDone = false;
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
+      // 按照 SSE 规范，事件之间以两个换行（\n\n 或 \r\n\r\n）分隔
+      const parts = buffer.split(/\r?\n\r?\n/);
+      buffer = parts.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const dataStr = trimmed.substring(5).trim();
+      for (const part of parts) {
+        if (!part.trim()) continue;
+        const lines = part.split(/\r?\n/);
+        const dataLines = [];
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        }
+
+        if (dataLines.length === 0) continue;
+        const dataStr = dataLines.join('\n');
         if (!dataStr) continue;
 
         let event;
         try {
           event = JSON.parse(dataStr);
         } catch (err) {
-          console.error('SSE JSON 解析错误:', err);
+          console.error('SSE JSON 解析错误:', err, '原始数据:', dataStr);
           continue;
         }
 
@@ -265,6 +291,8 @@ async function executeRun(run) {
           }
         } else if (event.type === 'error') {
           run.content += `\n\n> ⚠️ **错误**: ${event.message}`;
+        } else if (event.type === 'done') {
+          receivedDone = true;
         } else {
           continue;
         }
@@ -272,6 +300,12 @@ async function executeRun(run) {
         emit();
         flushPartial();
       }
+    }
+
+    // 若流正常读取完毕但从未收到 done 事件，且未主动中止，提示可能断流
+    if (!receivedDone && !aborted) {
+      run.incomplete = true;
+      run.content += '\n\n> ⚠️ **连接已中断，回复可能不完整**';
     }
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -304,6 +338,7 @@ async function executeRun(run) {
         thinkingMs: run.thinkingMs,
         toolCalls: run.toolCalls,
         stopped: aborted,
+        incomplete: Boolean(run.incomplete),
         // 持久化意图提问，页面刷新或切换会话后仍可恢复待回答的选项浮层
         clarification: run.clarification
           ? {

@@ -61,9 +61,16 @@ async def tavily_search(
                     title = item.get("title", "无标题")
                     item_url = item.get("url", "")
                     content = item.get("content", "").strip()
+                    # 每条结果正文截断，防御过长内容占满模型上下文及恶意网页注入
+                    if len(content) > 600:
+                        content = content[:600] + "... [已截断]"
                     lines.append(f"{idx}. {title}\n   链接: {item_url}\n   内容: {content}\n")
 
-            return "\n".join(lines)
+            full_text = "\n".join(lines)
+            # 全文总长度设上限（约 6000 字符，控制在 2k-3k token 以内）
+            if len(full_text) > 6000:
+                full_text = full_text[:6000] + "\n... [搜索全文超出上限，已截断]"
+            return full_text
 
     except httpx.TimeoutException:
         return f"联网搜索超时，关键词: {query}"

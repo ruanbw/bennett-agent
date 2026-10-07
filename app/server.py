@@ -14,11 +14,12 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
 
-    # 允许跨域请求（方便前端独立开发与反向代理部署）
+    # 允许跨域请求（移除敏感且不符合安全规范的 allow_credentials=True 全通配）
+    cors_origins = settings.get_cors_origins()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

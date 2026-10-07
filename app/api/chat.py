@@ -1,7 +1,7 @@
 import json
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from sse_starlette.sse import EventSourceResponse
 from app.config import settings
 from app.schemas.chat import (
     ChatMessage,
@@ -66,7 +66,7 @@ async def generate_title(request: TitleGenerateRequest):
 
 
 @router.post("/chat", summary="对话接口（stream=true 时 SSE 流式输出）")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, req: Request):
     """支持客户端无状态上传完整会话历史；stream=true 逐字返回思考过程与生成内容。"""
     model_to_use = request.model or settings.model_name
 
@@ -75,15 +75,26 @@ async def chat_stream(request: ChatRequest):
             model_to_use, request.messages, reasoning_effort=request.reasoning_effort
         )
 
-    return StreamingResponse(
-        stream_chat_response(
+    # 包装为适配 EventSourceResponse 的生成器，并在检测到客户端主动断连时中断生成
+    async def event_generator():
+        async for chunk in stream_chat_response(
             model_to_use, request.messages, reasoning_effort=request.reasoning_effort
-        ),
+        ):
+            if await req.is_disconnected():
+                break
+            # chunk 格式为 'data: {...}\n\n'，EventSourceResponse 会自动添加 data: 前缀与结尾空行
+            raw = chunk.strip()
+            if raw.startswith("data:"):
+                raw = raw[len("data:"):].strip()
+            if raw:
+                yield {"data": raw}
+
+    return EventSourceResponse(
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Content-Type": "text/event-stream; charset=utf-8",
         },
     )

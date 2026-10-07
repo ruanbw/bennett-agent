@@ -3,7 +3,7 @@ import { db } from './db';
 import { Sidebar } from './components/Sidebar';
 import { ChatContainer } from './components/ChatContainer';
 import { ChatProvider } from './components/ChatProvider';
-import { abortChatRun, setSessionsChangedHandler } from './lib/chat-runs';
+import { abortChatRun, removeSessionRun, setSessionsChangedHandler } from './lib/chat-runs';
 import { ThemeProvider } from './context/ThemeContext';
 
 // 侧边栏在移动端是抽屉，在桌面端是常驻栏，收起逻辑需要区分
@@ -173,6 +173,7 @@ export function App() {
     async (sessionIds) => {
       for (const id of sessionIds) {
         abortChatRun(id);
+        removeSessionRun(id);
       }
       await db.transaction('rw', db.sessions, db.messages, async () => {
         for (const id of sessionIds) {
@@ -198,6 +199,7 @@ export function App() {
     // 中止所有会话
     for (const s of sessionsRef.current) {
       abortChatRun(s.id);
+      removeSessionRun(s.id);
     }
     await db.transaction('rw', db.sessions, db.messages, async () => {
       await db.messages.clear();
@@ -210,8 +212,9 @@ export function App() {
   // 删除会话
   const handleDeleteSession = useCallback(
     async (sessionId) => {
-      // 先中止该会话可能正在进行的生成
+      // 先中止该会话可能正在进行的生成并从内存清除
       abortChatRun(sessionId);
+      removeSessionRun(sessionId);
       await db.messages.where('sessionId').equals(sessionId).delete();
       await db.sessions.delete(sessionId);
       const updated = await loadSessions();

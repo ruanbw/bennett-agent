@@ -1,6 +1,9 @@
+import logging
 import httpx
 from app.config import settings
 from app.schemas.chat import ModelItem, ModelListResponse
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch_available_models() -> ModelListResponse:
@@ -56,10 +59,12 @@ async def fetch_available_models() -> ModelListResponse:
                         models[0].is_default = True
                         default_model_id = models[0].id
                     return ModelListResponse(models=models, default_model=default_model_id)
-    except Exception:
-        pass
+            else:
+                logger.warning("上游 /v1/models 响应非 200: %s", resp.status_code)
+    except Exception as exc:
+        logger.warning("从上游网关拉取模型列表失败，将使用默认兜底配置: %s", exc)
 
-    # 兜底逻辑
+    # 兜底逻辑：默认不伪造思考能力与支持等级，避免用户选择后请求失败
     parts = default_model_id.split("/", 1)
     provider, name = (parts[0], parts[1]) if len(parts) == 2 else ("Custom", default_model_id)
     fallback_model = ModelItem(
@@ -67,8 +72,8 @@ async def fetch_available_models() -> ModelListResponse:
         name=name,
         provider=provider,
         description=f"{provider} {name}",
-        reasoning=True,
-        supported_reasoning_levels=["low", "medium", "high"],
+        reasoning=False,
+        supported_reasoning_levels=[],
         is_default=True,
     )
     return ModelListResponse(models=[fallback_model], default_model=default_model_id)

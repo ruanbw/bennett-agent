@@ -40,6 +40,12 @@ export class ChatDatabase extends Dexie {
       messages: 'id, sessionId, role, createdAt',
     });
 
+    // v5：占位版本，保持 Dexie 历史升级链连续性（避免从 v4 升级的用户抛错）
+    this.version(5).stores({
+      sessions: 'id, title, model, webSearch, createdAt, updatedAt',
+      messages: 'id, sessionId, role, createdAt',
+    });
+
     // v6：会话支持置顶 isPinned (0 或 1，方便按 isPinned, updatedAt 排序)
     this.version(6).stores({
       sessions: 'id, title, model, reasoningEffort, webSearch, isPinned, createdAt, updatedAt',

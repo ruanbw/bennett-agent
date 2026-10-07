@@ -27,7 +27,7 @@ def get_agent_for_model(model_name: str, reasoning_effort: str | None = None) ->
 
     provider = LiteLLMProvider(
         api_base=settings.litellm_api_base,
-        api_key=settings.litellm_api_key,
+        api_key=settings.litellm_api_key or "sk-no-key",
     )
 
     model_settings = {}
@@ -56,15 +56,10 @@ def convert_chat_history(messages: List[ChatMessage]) -> tuple[str, List[ModelMe
     if not messages:
         raise ValueError("消息列表不能为空")
 
-    # 取最后一条 user 消息作为当前轮 prompt
+    # 取最后一条消息作为当前轮 prompt
     last_msg = messages[-1]
-    if last_msg.role != "user":
-        # 兼容处理
-        current_prompt = last_msg.content
-        history_msgs = messages[:-1]
-    else:
-        current_prompt = last_msg.content
-        history_msgs = messages[:-1]
+    current_prompt = last_msg.content
+    history_msgs = messages[:-1]
 
     converted_history: List[ModelMessage] = []
     for msg in history_msgs:
@@ -170,7 +165,7 @@ async def generate_title_from_prompt(model_name: str, prompt: str) -> str:
 
     provider = LiteLLMProvider(
         api_base=settings.litellm_api_base,
-        api_key=settings.litellm_api_key,
+        api_key=settings.litellm_api_key or "sk-no-key",
     )
 
     model = OpenAIChatModel(

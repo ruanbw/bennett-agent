@@ -10,6 +10,7 @@ wheels/
 .venv
 
 # Environments
+.env
 .env*.local
 .env.production
 .env.development

@@ -26,10 +26,20 @@ class Settings(BaseSettings):
     """全局应用配置"""
     app_env: str = Field(default="development", description="运行环境")
     litellm_api_base: str = Field(default="http://localhost:4000", description="LiteLLM Proxy API 基础地址")
-    litellm_api_key: str = Field(default="sk-placeholder", description="LiteLLM API 密钥")
+    litellm_api_key: Optional[str] = Field(default=None, description="LiteLLM API 密钥")
     model_name: str = Field(default="openai/gpt-4o", description="模型标识符（LiteLLM 路由格式）")
     assistant_name: str = Field(default="Bennett", description="助手名称")
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily 网页搜索 API Key")
+    cors_allowed_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        description="逗号分隔的 CORS 允许来源，默认开发端口；设为 * 时允许任意源"
+    )
+
+    def get_cors_origins(self) -> List[str]:
+        if not self.cors_allowed_origins:
+            return ["*"]
+        origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
+        return origins or ["*"]
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
