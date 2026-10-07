@@ -308,15 +308,17 @@ const UserMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
       data-role="user"
-      className="flex justify-end w-full"
+      className="flex flex-col justify-end w-full pt-8"
     >
-      <UserMessageAttachments />
-      <div className="bg-muted text-foreground max-w-[85%] rounded-2xl rounded-tr-xs px-4 py-2.5 text-sm leading-relaxed wrap-break-word">
-        <MessagePrimitive.Parts
-          components={{
-            Text: ({ text }) => <span>{text}</span>,
-          }}
-        />
+      <div className="flex justify-end w-full">
+        <UserMessageAttachments />
+        <div className="bg-muted text-foreground max-w-[85%] rounded-2xl rounded-tr-xs px-4 py-2.5 text-sm leading-relaxed wrap-break-word">
+          <MessagePrimitive.Parts
+            components={{
+              Text: ({ text }) => <span>{text}</span>,
+            }}
+          />
+        </div>
       </div>
     </MessagePrimitive.Root>
   );

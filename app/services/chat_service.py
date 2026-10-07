@@ -29,9 +29,17 @@ def get_agent_for_model(model_name: str) -> Agent:
         api_base=settings.litellm_api_base,
         api_key=settings.litellm_api_key,
     )
+    # 启用 reasoning / thinking 参数支持（针对 gemini、deepseek、qwen 等推理模型）
+    model_settings = {
+        "extra_body": {
+            "reasoning_effort": "medium",
+        }
+    }
+
     model = OpenAIChatModel(
         model_name=model_name,
         provider=provider,
+        settings=model_settings,
     )
 
     return Agent(
