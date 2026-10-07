@@ -69,37 +69,34 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
           />
         }
       >
-        {/* 思考中状态栏：固定高度与整洁排列，消除抖动 */}
-        <div className="flex items-center gap-1.5 h-6">
-          {isStreaming ? (
-            <Loader2 className="size-3.5 animate-spin text-muted-foreground/80 shrink-0" />
-          ) : (
-            <ChevronDown
-              className={cn(
-                "size-3.5 text-muted-foreground/70 transition-transform duration-200 group-hover:text-foreground shrink-0",
-                isOpen ? "rotate-0" : "-rotate-90"
-              )}
-            />
-          )}
-
-          <span className="font-medium tracking-tight text-foreground/80">
-            {isStreaming ? "思考中" : "已深度思考"}
-            {elapsed > 0 && (
-              <span className="ml-1 tabular-nums font-mono text-[11px] text-muted-foreground/70">
-                ({elapsed}s)
-              </span>
+        {isStreaming ? (
+          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+        ) : (
+          <ChevronDown
+            className={cn(
+              "size-3.5 transition-transform duration-200 text-muted-foreground/70 group-hover:text-foreground",
+              isOpen ? "rotate-0" : "-rotate-90"
             )}
-          </span>
+          />
+        )}
 
-          {isStreaming && (
-            <ChevronDown
-              className={cn(
-                "size-3 text-muted-foreground/60 transition-transform duration-200 ml-0.5 shrink-0",
-                isOpen ? "rotate-0" : "-rotate-90"
-              )}
-            />
+        <span className="font-medium tracking-tight">
+          思考中
+          {elapsed > 0 && (
+            <span className="ml-1 tabular-nums font-mono text-[11px] text-muted-foreground/70">
+              ({elapsed}s)
+            </span>
           )}
-        </div>
+        </span>
+
+        {isStreaming && (
+          <ChevronDown
+            className={cn(
+              "size-3 transition-transform duration-200 text-muted-foreground/60 ml-0.5",
+              isOpen ? "rotate-0" : "-rotate-90"
+            )}
+          />
+        )}
       </CollapsibleTrigger>
 
       <CollapsibleContent className="transition-all data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">

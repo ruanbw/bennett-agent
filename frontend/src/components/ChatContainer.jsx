@@ -12,7 +12,9 @@ export function ChatContainer({
   onRefreshModels,
   onToggleSidebar,
   onCreateSession,
+  activeClarification,
   onSubmitClarificationAnswer,
+  onDismissClarification,
 }) {
   return (
     <div className="flex-1 flex flex-col h-full bg-background text-foreground overflow-hidden">
@@ -51,7 +53,9 @@ export function ChatContainer({
           onSelectModel={onSelectModel}
           onSelectReasoningEffort={onSelectReasoningEffort}
           onRefreshModels={onRefreshModels}
+          activeClarification={activeClarification}
           onSubmitClarificationAnswer={onSubmitClarificationAnswer}
+          onDismissClarification={onDismissClarification}
         />
       </div>
     </div>

@@ -22,13 +22,14 @@ import {
   subscribeRuns,
 } from '../lib/chat-runs';
 
-// 把 IndexedDB 记录转换成 runtime 消息
+// 把 IndexedDB 记录转换成 runtime 消息（过滤掉内部意图确认工具，不污染历史聊天列表）
 function toRuntimeMessage(record) {
   const content = [];
 
   // 工具调用部件
   if (Array.isArray(record.toolCalls)) {
     for (const tc of record.toolCalls) {
+      if (tc.toolName === 'ask_user_clarification') continue;
       content.push({
         type: 'tool-call',
         toolName: tc.toolName || 'tool',
@@ -76,7 +77,7 @@ function toRuntimeMessage(record) {
   return message;
 }
 
-// 生成中的消息：内容直接来自内存里的 run，随增量变化
+// 生成中的消息：内容直接来自内存里的 run，随增量变化（过滤掉内部意图确认工具）
 function buildLiveMessage(run) {
   const reasoningDone = Boolean(run.content) || run.finished;
   const content = [];
@@ -84,6 +85,7 @@ function buildLiveMessage(run) {
   // 正在或已执行的工具调用部件
   if (Array.isArray(run.toolCalls)) {
     for (const tc of run.toolCalls) {
+      if (tc.toolName === 'ask_user_clarification') continue;
       content.push({
         type: 'tool-call',
         toolName: tc.toolName || 'tool',
@@ -354,12 +356,30 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     }),
   });
 
+  // 当前会话是否有未处理的意图澄清提问
+  let activeClarification = null;
+  if (run?.clarification && !run.clarification.handled) {
+    try {
+      const parsed = JSON.parse(run.clarification.argsText || '{}');
+      if (parsed.question) {
+        activeClarification = {
+          question: parsed.question,
+          options: Array.isArray(parsed.options) ? parsed.options : [],
+          allow_custom_input: parsed.allow_custom_input !== false,
+        };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      {/* 若子组件需要调用提问提交，通过克隆注入或上下文，直接通过 React.cloneElement 传给 ChatContainer */}
       {React.isValidElement(children)
         ? React.cloneElement(children, {
+            activeClarification,
             onSubmitClarificationAnswer: submitClarificationAnswer,
+            onDismissClarification: () => dismissClarification(currentSessionId),
           })
         : children}
     </AssistantRuntimeProvider>

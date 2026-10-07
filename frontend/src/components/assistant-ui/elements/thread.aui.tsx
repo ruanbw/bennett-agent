@@ -29,6 +29,7 @@ import {
 import type { FC } from "react";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
+import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -41,7 +42,13 @@ interface ThreadProps {
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void;
+  activeClarification?: {
+    question: string;
+    options: string[];
+    allow_custom_input?: boolean;
+  } | null;
   onSubmitClarificationAnswer?: (answer: string) => void;
+  onDismissClarification?: () => void;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -52,7 +59,9 @@ export const Thread: FC<ThreadProps> = ({
   onSelectModel = () => {},
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  activeClarification = null,
   onSubmitClarificationAnswer,
+  onDismissClarification,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -89,7 +98,7 @@ export const Thread: FC<ThreadProps> = ({
           {/* 消息流列表 */}
           <div className="mb-6 flex flex-col gap-y-6 empty:hidden">
             <ThreadPrimitive.Messages>
-              {() => <ThreadMessage onSubmitClarificationAnswer={onSubmitClarificationAnswer} />}
+              {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
           </div>
 
@@ -102,6 +111,16 @@ export const Thread: FC<ThreadProps> = ({
               />
             )}
             <ThreadScrollToBottom />
+
+            {/* 输入框正上方弹出的意图澄清浮层卡片：提交后即刻消失 */}
+            {activeClarification && onSubmitClarificationAnswer && (
+              <ClarificationInputPopup
+                clarification={activeClarification}
+                onSubmitAnswer={onSubmitClarificationAnswer}
+                onDismiss={onDismissClarification}
+              />
+            )}
+
             <Composer
               models={models}
               modelsError={modelsError}
@@ -118,12 +137,10 @@ export const Thread: FC<ThreadProps> = ({
   );
 };
 
-const ThreadMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => void }> = ({
-  onSubmitClarificationAnswer,
-}) => {
+const ThreadMessage: FC = () => {
   const role = useAuiState((s) => s.message.role);
   if (role === "user") return <UserMessage />;
-  return <AssistantMessage onSubmitClarificationAnswer={onSubmitClarificationAnswer} />;
+  return <AssistantMessage />;
 };
 
 const ThreadScrollToBottom: FC = () => {
@@ -258,11 +275,7 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
   );
 };
 
-import { ClarificationInline } from "@/components/assistant-ui/elements/clarification-inline";
-
-const AssistantMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => void }> = ({
-  onSubmitClarificationAnswer,
-}) => {
+const AssistantMessage: FC = () => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
 
   return (
@@ -277,14 +290,6 @@ const AssistantMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => v
             Reasoning: (props) => <ReasoningMessage {...props} />,
             Text: () => <MarkdownText />,
             tools: {
-              by_name: {
-                ask_user_clarification: (props) => (
-                  <ClarificationInline
-                    {...props}
-                    onSubmitAnswer={onSubmitClarificationAnswer}
-                  />
-                ),
-              },
               Fallback: (props) => <ToolFallback {...props} />,
             },
           }}
