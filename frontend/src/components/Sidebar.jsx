@@ -5,8 +5,12 @@ import {
   Loader2,
   Edit2,
   Trash2,
+  Sun,
+  Moon,
+  Laptop,
 } from 'lucide-react';
 import { getRunningSessionIds, subscribeRuns } from '../lib/chat-runs';
+import { useTheme } from '../hooks/use-theme';
 
 export function Sidebar({
   sessions,
@@ -50,6 +54,8 @@ export function Sidebar({
     cancelEditRef.current = true;
     setEditingId(null);
   };
+
+  const { theme, setTheme } = useTheme();
 
   return (
     <aside
@@ -143,6 +149,59 @@ export function Sidebar({
             </div>
           ))
         )}
+      </div>
+
+      {/* 底部左下角：三段式主题切换器 */}
+      <div className="p-3 border-t border-border/60">
+        <div className="flex items-center justify-between bg-muted/60 p-1 rounded-lg border border-border/40">
+          <button
+            type="button"
+            onClick={() => setTheme('light')}
+            title="明亮模式"
+            aria-label="明亮模式"
+            aria-pressed={theme === 'light'}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-medium transition cursor-pointer ${
+              theme === 'light'
+                ? 'bg-background text-foreground shadow-xs'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Sun size={14} className={theme === 'light' ? 'text-amber-500' : ''} />
+            <span>浅色</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTheme('system')}
+            title="跟随系统"
+            aria-label="跟随系统"
+            aria-pressed={theme === 'system'}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-medium transition cursor-pointer ${
+              theme === 'system'
+                ? 'bg-background text-foreground shadow-xs'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Laptop size={14} className={theme === 'system' ? 'text-foreground' : ''} />
+            <span>系统</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTheme('dark')}
+            title="暗黑模式"
+            aria-label="暗黑模式"
+            aria-pressed={theme === 'dark'}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-medium transition cursor-pointer ${
+              theme === 'dark'
+                ? 'bg-background text-foreground shadow-xs'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Moon size={14} className={theme === 'dark' ? 'text-sky-400' : ''} />
+            <span>深色</span>
+          </button>
+        </div>
       </div>
     </aside>
   );

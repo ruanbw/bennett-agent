@@ -18,8 +18,7 @@ from app.schemas.chat import ChatMessage
 from app.tools import ALL_TOOLS
 
 
-def get_agent_for_model(model_name: str, enable_web_search: bool = False) -> Agent:
-    """动态根据前端选中的 model_name 与是否开启联网装配 Agent"""
+def get_agent_for_model(model_name: str) -> Agent:
     system_prompt = prompt_manager.render(
         "system_prompt.jinja",
         app_env=settings.app_env,
@@ -35,12 +34,10 @@ def get_agent_for_model(model_name: str, enable_web_search: bool = False) -> Age
         provider=provider,
     )
 
-    tools = ALL_TOOLS if enable_web_search else []
-
     return Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
+        tools=ALL_TOOLS,
     )
 
 
@@ -80,7 +77,6 @@ def convert_chat_history(messages: List[ChatMessage]) -> tuple[str, List[ModelMe
 async def stream_chat_response(
     model_name: str,
     messages: List[ChatMessage],
-    web_search: bool = False,
 ) -> AsyncGenerator[str, None]:
     """通过 SSE 逐字向前端推送流式回复，支持思考过程 (thinking)、工具调用 (tool) 与最终内容 (content)"""
     try:
@@ -90,7 +86,7 @@ async def stream_chat_response(
         return
 
     try:
-        agent = get_agent_for_model(model_name, enable_web_search=web_search)
+        agent = get_agent_for_model(model_name)
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'message': f'模型初始化失败: {str(e)}'}, ensure_ascii=False)}\n\n"
         return

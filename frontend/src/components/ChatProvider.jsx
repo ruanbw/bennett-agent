@@ -123,7 +123,7 @@ function buildLiveMessage(run) {
   };
 }
 
-export function ChatProvider({ children, currentSessionId, currentModel, webSearch = false }) {
+export function ChatProvider({ children, currentSessionId, currentModel }) {
   const [dbMessages, setDbMessages] = useState([]);
   const messageSeqRef = useRef(0);
 
@@ -254,10 +254,9 @@ export function ChatProvider({ children, currentSessionId, currentModel, webSear
         sessionId: currentSessionId,
         assistantMsgId,
         model: currentModel,
-        webSearch,
       });
     },
-    [currentSessionId, currentModel, webSearch, nextTimestamp]
+    [currentSessionId, currentModel, nextTimestamp]
   );
 
   // 重新生成 (Reload)
@@ -290,9 +289,8 @@ export function ChatProvider({ children, currentSessionId, currentModel, webSear
       sessionId: currentSessionId,
       assistantMsgId: lastMsg.id,
       model: currentModel,
-      webSearch,
     });
-  }, [currentSessionId, currentModel, webSearch, messages]);
+  }, [currentSessionId, currentModel, messages]);
 
   const onCancel = useCallback(() => {
     if (currentSessionId) abortChatRun(currentSessionId);

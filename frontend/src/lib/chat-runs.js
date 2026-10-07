@@ -75,14 +75,13 @@ export function abortChatRun(sessionId) {
  * 启动一次生成。同一会话同时只允许一个运行中的任务。
  * 返回 run 对象（含 assistantMsgId 等），已在运行时返回 null。
  */
-export function startChatRun({ sessionId, assistantMsgId, model, webSearch = false }) {
+export function startChatRun({ sessionId, assistantMsgId, model }) {
   if (isRunActive(sessionId)) return null;
 
   const run = {
     sessionId,
     assistantMsgId,
     model,
-    webSearch,
     controller: new AbortController(),
     startedAt: Date.now(),
     thinking: '',
@@ -103,7 +102,7 @@ export function startChatRun({ sessionId, assistantMsgId, model, webSearch = fal
 }
 
 async function executeRun(run) {
-  const { sessionId, assistantMsgId, model, webSearch, controller } = run;
+  const { sessionId, assistantMsgId, model, controller } = run;
 
   let thinkingStartedAt = null;
   let lastFlushAt = 0;
@@ -147,7 +146,6 @@ async function executeRun(run) {
         model,
         messages: contextMessages,
         stream: true,
-        web_search: Boolean(webSearch),
       }),
       signal: controller.signal,
     });

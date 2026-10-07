@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatContainer } from './components/ChatContainer';
 import { ChatProvider } from './components/ChatProvider';
 import { abortChatRun, setSessionsChangedHandler } from './lib/chat-runs';
+import { ThemeProvider } from './context/ThemeContext';
 
 // 侧边栏在移动端是抽屉，在桌面端是常驻栏，收起逻辑需要区分
 const isMobileViewport = () =>
@@ -15,7 +16,6 @@ export function App() {
   const [models, setModels] = useState([]);
   const [modelsError, setModelsError] = useState(null);
   const [currentModel, setCurrentModel] = useState(null);
-  const [webSearch, setWebSearch] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isMobileViewport());
 
   const currentModelRef = useRef(null);
@@ -72,14 +72,12 @@ export function App() {
       id: 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
       title: '新对话',
       model: currentModelRef.current || null,
-      webSearch: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
     await db.sessions.add(newSession);
     setSessions((prev) => [newSession, ...prev]);
     setCurrentSessionId(newSession.id);
-    setWebSearch(false);
     if (isMobileViewport()) setIsSidebarOpen(false);
     return newSession.id;
   }, []);
@@ -97,7 +95,6 @@ export function App() {
         const first = list[0];
         setCurrentSessionId(first.id);
         applyModel(first.model || data?.default_model);
-        setWebSearch(Boolean(first.webSearch));
       } else {
         await handleCreateSession();
       }
@@ -110,7 +107,6 @@ export function App() {
       setCurrentSessionId(sessionId);
       const target = sessionsRef.current.find((s) => s.id === sessionId);
       if (target?.model) applyModel(target.model);
-      setWebSearch(Boolean(target?.webSearch));
       if (isMobileViewport()) setIsSidebarOpen(false);
     },
     [applyModel]
@@ -160,62 +156,47 @@ export function App() {
     [applyModel, currentSessionId]
   );
 
-  // 切换联网搜索
-  const handleToggleWebSearch = useCallback(
-    async (checked) => {
-      setWebSearch(checked);
-      if (currentSessionId) {
-        await db.sessions.update(currentSessionId, { webSearch: checked, updatedAt: Date.now() });
-        setSessions((prev) =>
-          prev.map((s) => (s.id === currentSessionId ? { ...s, webSearch: checked } : s))
-        );
-      }
-    },
-    [currentSessionId]
-  );
-
   return (
-    <div className="dark flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
-      {/* 侧边栏 */}
-      <Sidebar
-        sessions={sessions}
-        currentSessionId={currentSessionId}
-        onSelectSession={handleSelectSession}
-        onCreateSession={handleCreateSession}
-        onUpdateTitle={handleUpdateTitle}
-        onDeleteSession={handleDeleteSession}
-        isOpen={isSidebarOpen}
-      />
-
-      {/* 遮罩：仅移动端抽屉需要 */}
-      {isSidebarOpen && (
-        <div
-          onClick={() => setIsSidebarOpen(false)}
-          className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
-        />
-      )}
-
-      {/* 对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 组件位于 elements/thread.aui */}
-      {currentSessionId && (
-        <ChatProvider
-          key={currentSessionId}
+    <ThemeProvider>
+      <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
+        {/* 侧边栏 */}
+        <Sidebar
+          sessions={sessions}
           currentSessionId={currentSessionId}
-          currentModel={currentModel}
-          webSearch={webSearch}
-        >
-          <ChatContainer
-            models={models}
-            modelsError={modelsError}
-            currentModel={currentModel}
-            webSearch={webSearch}
-            onSelectModel={handleSelectModel}
-            onToggleWebSearch={handleToggleWebSearch}
-            onRefreshModels={refreshModels}
-            onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
+          onSelectSession={handleSelectSession}
+          onCreateSession={handleCreateSession}
+          onUpdateTitle={handleUpdateTitle}
+          onDeleteSession={handleDeleteSession}
+          isOpen={isSidebarOpen}
+        />
+
+        {/* 遮罩：仅移动端抽屉需要 */}
+        {isSidebarOpen && (
+          <div
+            onClick={() => setIsSidebarOpen(false)}
+            className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
           />
-        </ChatProvider>
-      )}
-    </div>
+        )}
+
+        {/* 对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 组件位于 elements/thread.aui */}
+        {currentSessionId && (
+          <ChatProvider
+            key={currentSessionId}
+            currentSessionId={currentSessionId}
+            currentModel={currentModel}
+          >
+            <ChatContainer
+              models={models}
+              modelsError={modelsError}
+              currentModel={currentModel}
+              onSelectModel={handleSelectModel}
+              onRefreshModels={refreshModels}
+              onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
+            />
+          </ChatProvider>
+        )}
+      </div>
+    </ThemeProvider>
   );
 }
 

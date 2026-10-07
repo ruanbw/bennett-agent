@@ -12,7 +12,6 @@ class ChatRequest(BaseModel):
     model: Optional[str] = Field(None, description="选用的模型标识符")
     messages: List[ChatMessage] = Field(..., description="历史与当前对话消息列表")
     stream: bool = Field(True, description="是否启用流式返回")
-    web_search: bool = Field(False, description="是否启用联网搜索工具")
 
 
 class ModelItem(BaseModel):
