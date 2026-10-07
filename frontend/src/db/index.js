@@ -39,6 +39,12 @@ export class ChatDatabase extends Dexie {
       sessions: 'id, title, model, webSearch, createdAt, updatedAt',
       messages: 'id, sessionId, role, createdAt',
     });
+
+    // v5：会话支持记录思考等级 reasoningEffort
+    this.version(5).stores({
+      sessions: 'id, title, model, reasoningEffort, webSearch, createdAt, updatedAt',
+      messages: 'id, sessionId, role, createdAt',
+    });
   }
 }
 

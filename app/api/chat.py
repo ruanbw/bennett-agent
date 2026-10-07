@@ -19,12 +19,13 @@ async def get_models():
 async def _collect_chat_response(
     model_name: str,
     messages: list[ChatMessage],
+    reasoning_effort: str | None = None,
 ) -> dict:
     """stream=false 时聚合流式增量，一次性返回完整结果。"""
     content_parts: list[str] = []
     thinking_parts: list[str] = []
 
-    async for chunk in stream_chat_response(model_name, messages):
+    async for chunk in stream_chat_response(model_name, messages, reasoning_effort=reasoning_effort):
         payload = chunk.strip()
         if payload.startswith("data:"):
             payload = payload[len("data:"):].strip()
@@ -57,12 +58,12 @@ async def chat_stream(request: ChatRequest):
 
     if not request.stream:
         return await _collect_chat_response(
-            model_to_use, request.messages
+            model_to_use, request.messages, reasoning_effort=request.reasoning_effort
         )
 
     return StreamingResponse(
         stream_chat_response(
-            model_to_use, request.messages
+            model_to_use, request.messages, reasoning_effort=request.reasoning_effort
         ),
         media_type="text/event-stream",
         headers={

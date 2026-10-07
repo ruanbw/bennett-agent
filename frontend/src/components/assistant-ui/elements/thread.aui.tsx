@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import type { FC } from "react";
 import { ModelSelector } from "@/components/ModelSelector";
+import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -36,7 +37,9 @@ interface ThreadProps {
   models?: any[];
   modelsError?: string | null;
   currentModel?: string | null;
+  currentReasoningEffort?: string;
   onSelectModel?: (modelId: string) => void;
+  onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void;
 }
 
@@ -44,7 +47,9 @@ export const Thread: FC<ThreadProps> = ({
   models = [],
   modelsError = null,
   currentModel = null,
+  currentReasoningEffort = "medium",
   onSelectModel = () => {},
+  onSelectReasoningEffort = () => {},
   onRefreshModels,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
@@ -99,7 +104,9 @@ export const Thread: FC<ThreadProps> = ({
               models={models}
               modelsError={modelsError}
               currentModel={currentModel}
+              currentReasoningEffort={currentReasoningEffort}
               onSelectModel={onSelectModel}
+              onSelectReasoningEffort={onSelectReasoningEffort}
               onRefreshModels={onRefreshModels}
             />
           </div>
@@ -133,15 +140,22 @@ const Composer: FC<{
   models: any[];
   modelsError?: string | null;
   currentModel: string | null;
+  currentReasoningEffort?: string;
   onSelectModel: (id: string) => void;
+  onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void;
 }> = ({
   models,
   modelsError = null,
   currentModel,
+  currentReasoningEffort = "medium",
   onSelectModel,
+  onSelectReasoningEffort = () => {},
   onRefreshModels,
 }) => {
+  const selectedModelObj = models.find((m) => m.id === currentModel);
+  const isReasoningSupported = selectedModelObj ? selectedModelObj.reasoning : true;
+  const supportedLevels = selectedModelObj?.supported_reasoning_levels || [];
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
@@ -154,7 +168,7 @@ const Composer: FC<{
           aria-label="输入消息"
         />
 
-        {/* 输入框底部工具条：模型选择器在左侧，发送/停止在右侧 */}
+        {/* 输入框底部工具条：模型选择器与思考等级在左侧，发送/停止在右侧 */}
         <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
           <div className="flex items-center gap-2">
             {(models.length > 0 || modelsError) && (
@@ -164,6 +178,13 @@ const Composer: FC<{
                 currentModel={currentModel}
                 onSelectModel={onSelectModel}
                 onRefreshModels={onRefreshModels}
+              />
+            )}
+            {isReasoningSupported && (
+              <ReasoningEffortSelector
+                supportedLevels={supportedLevels}
+                currentEffort={currentReasoningEffort}
+                onSelectEffort={onSelectReasoningEffort}
               />
             )}
           </div>

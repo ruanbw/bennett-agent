@@ -16,9 +16,11 @@ export function App() {
   const [models, setModels] = useState([]);
   const [modelsError, setModelsError] = useState(null);
   const [currentModel, setCurrentModel] = useState(null);
+  const [currentReasoningEffort, setCurrentReasoningEffort] = useState('medium');
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isMobileViewport());
 
   const currentModelRef = useRef(null);
+  const currentReasoningEffortRef = useRef('medium');
   const sessionsRef = useRef([]);
   const initializedRef = useRef(false);
 
@@ -31,6 +33,12 @@ export function App() {
     if (!modelId) return;
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
+  }, []);
+
+  const applyReasoningEffort = useCallback((effort) => {
+    if (!effort) return;
+    currentReasoningEffortRef.current = effort;
+    setCurrentReasoningEffort(effort);
   }, []);
 
   // 1. 加载所有本地会话
@@ -72,6 +80,7 @@ export function App() {
       id: 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
       title: '新对话',
       model: currentModelRef.current || null,
+      reasoningEffort: currentReasoningEffortRef.current || 'medium',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -95,11 +104,14 @@ export function App() {
         const first = list[0];
         setCurrentSessionId(first.id);
         applyModel(first.model || data?.default_model);
+        if (first.reasoningEffort) {
+          applyReasoningEffort(first.reasoningEffort);
+        }
       } else {
         await handleCreateSession();
       }
     })();
-  }, [refreshModels, loadSessions, handleCreateSession, applyModel]);
+  }, [refreshModels, loadSessions, handleCreateSession, applyModel, applyReasoningEffort]);
 
   // 会话切换
   const handleSelectSession = useCallback(
@@ -107,9 +119,12 @@ export function App() {
       setCurrentSessionId(sessionId);
       const target = sessionsRef.current.find((s) => s.id === sessionId);
       if (target?.model) applyModel(target.model);
+      if (target?.reasoningEffort) {
+        applyReasoningEffort(target.reasoningEffort);
+      }
       if (isMobileViewport()) setIsSidebarOpen(false);
     },
-    [applyModel]
+    [applyModel, applyReasoningEffort]
   );
 
   // 重命名会话
@@ -146,14 +161,46 @@ export function App() {
   const handleSelectModel = useCallback(
     async (modelId) => {
       applyModel(modelId);
+      // 切换模型时，检查新模型支持的思考等级
+      const targetModel = models.find((m) => m.id === modelId);
+      let nextEffort = currentReasoningEffortRef.current;
+      if (targetModel?.supported_reasoning_levels?.length > 0) {
+        const levels = targetModel.supported_reasoning_levels;
+        // 如果当前等级新模型不支持，且当前不是 off，则调整为新模型的推荐/第一个支持等级
+        if (nextEffort !== 'off' && nextEffort !== 'none' && !levels.includes(nextEffort)) {
+          nextEffort = levels.includes('medium') ? 'medium' : levels[0];
+          applyReasoningEffort(nextEffort);
+        }
+      }
+
       if (currentSessionId) {
-        await db.sessions.update(currentSessionId, { model: modelId, updatedAt: Date.now() });
+        await db.sessions.update(currentSessionId, {
+          model: modelId,
+          reasoningEffort: nextEffort,
+          updatedAt: Date.now(),
+        });
         setSessions((prev) =>
-          prev.map((s) => (s.id === currentSessionId ? { ...s, model: modelId } : s))
+          prev.map((s) =>
+            s.id === currentSessionId ? { ...s, model: modelId, reasoningEffort: nextEffort } : s
+          )
         );
       }
     },
-    [applyModel, currentSessionId]
+    [applyModel, applyReasoningEffort, models, currentSessionId]
+  );
+
+  // 切换思考等级
+  const handleSelectReasoningEffort = useCallback(
+    async (effort) => {
+      applyReasoningEffort(effort);
+      if (currentSessionId) {
+        await db.sessions.update(currentSessionId, { reasoningEffort: effort, updatedAt: Date.now() });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === currentSessionId ? { ...s, reasoningEffort: effort } : s))
+        );
+      }
+    },
+    [applyReasoningEffort, currentSessionId]
   );
 
   return (
@@ -184,12 +231,15 @@ export function App() {
             key={currentSessionId}
             currentSessionId={currentSessionId}
             currentModel={currentModel}
+            currentReasoningEffort={currentReasoningEffort}
           >
             <ChatContainer
               models={models}
               modelsError={modelsError}
               currentModel={currentModel}
+              currentReasoningEffort={currentReasoningEffort}
               onSelectModel={handleSelectModel}
+              onSelectReasoningEffort={handleSelectReasoningEffort}
               onRefreshModels={refreshModels}
               onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
             />

@@ -29,6 +29,16 @@ async def fetch_available_models() -> ModelListResponse:
                         is_def = (mid == default_model_id)
                         if is_def:
                             found_default = True
+                        # 解析模型支持的思考等级
+                        raw_levels = item.get("supported_reasoning_levels", [])
+                        supported_levels = []
+                        if isinstance(raw_levels, list):
+                            for lvl in raw_levels:
+                                if isinstance(lvl, dict) and "effort" in lvl:
+                                    supported_levels.append(str(lvl["effort"]))
+                                elif isinstance(lvl, str):
+                                    supported_levels.append(lvl)
+
                         models.append(
                             ModelItem(
                                 id=mid,
@@ -36,6 +46,7 @@ async def fetch_available_models() -> ModelListResponse:
                                 provider=owned_by,
                                 description=item.get("magpie_label") or f"{owned_by} {display_name}",
                                 reasoning=bool(item.get("reasoning", False)),
+                                supported_reasoning_levels=supported_levels,
                                 context_window=item.get("context_window"),
                                 max_output_tokens=item.get("max_output_tokens"),
                                 is_default=is_def,
@@ -57,6 +68,7 @@ async def fetch_available_models() -> ModelListResponse:
         provider=provider,
         description=f"{provider} {name}",
         reasoning=True,
+        supported_reasoning_levels=["low", "medium", "high"],
         is_default=True,
     )
     return ModelListResponse(models=[fallback_model], default_model=default_model_id)

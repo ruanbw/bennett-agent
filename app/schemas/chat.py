@@ -10,6 +10,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     model: Optional[str] = Field(None, description="选用的模型标识符")
+    reasoning_effort: Optional[str] = Field(None, description="思考等级，例如 off/none/low/medium/high/xhigh/max")
     messages: List[ChatMessage] = Field(..., description="历史与当前对话消息列表")
     stream: bool = Field(True, description="是否启用流式返回")
 
@@ -20,6 +21,7 @@ class ModelItem(BaseModel):
     provider: str
     description: Optional[str] = None
     reasoning: bool = False
+    supported_reasoning_levels: List[str] = Field(default_factory=list)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     is_default: bool = False

@@ -145,14 +145,6 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label =
-    statusType === "running"
-      ? "Running tool"
-      : statusType === "requires-action"
-        ? "Waiting on tool"
-        : statusType === "incomplete"
-          ? `${isCancelled ? "Cancelled" : "Failed"} tool`
-          : "Used tool";
 
   return (
     <CollapsibleTrigger
@@ -179,7 +171,7 @@ function ToolFallbackTrigger({
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
-        {label}: <b>{toolName}</b>
+        <b>{toolName}</b>
       </span>
       <ToolFallbackDuration />
       <ChevronDownIcon

@@ -18,7 +18,7 @@ from app.schemas.chat import ChatMessage
 from app.tools import ALL_TOOLS
 
 
-def get_agent_for_model(model_name: str) -> Agent:
+def get_agent_for_model(model_name: str, reasoning_effort: str | None = None) -> Agent:
     system_prompt = prompt_manager.render(
         "system_prompt.jinja",
         app_env=settings.app_env,
@@ -29,17 +29,19 @@ def get_agent_for_model(model_name: str) -> Agent:
         api_base=settings.litellm_api_base,
         api_key=settings.litellm_api_key,
     )
-    # 启用 reasoning / thinking 参数支持（针对 gemini、deepseek、qwen 等推理模型）
-    model_settings = {
-        "extra_body": {
-            "reasoning_effort": "medium",
+
+    model_settings = {}
+    if reasoning_effort:
+        # 如果明确设置为 off 或 none，则关闭思考
+        effort_val = "none" if reasoning_effort in ("off", "none", "false") else reasoning_effort
+        model_settings["extra_body"] = {
+            "reasoning_effort": effort_val,
         }
-    }
 
     model = OpenAIChatModel(
         model_name=model_name,
         provider=provider,
-        settings=model_settings,
+        settings=model_settings or None,
     )
 
     return Agent(
@@ -85,6 +87,7 @@ def convert_chat_history(messages: List[ChatMessage]) -> tuple[str, List[ModelMe
 async def stream_chat_response(
     model_name: str,
     messages: List[ChatMessage],
+    reasoning_effort: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """通过 SSE 逐字向前端推送流式回复，支持思考过程 (thinking)、工具调用 (tool) 与最终内容 (content)"""
     try:
@@ -94,7 +97,7 @@ async def stream_chat_response(
         return
 
     try:
-        agent = get_agent_for_model(model_name)
+        agent = get_agent_for_model(model_name, reasoning_effort=reasoning_effort)
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'message': f'模型初始化失败: {str(e)}'}, ensure_ascii=False)}\n\n"
         return

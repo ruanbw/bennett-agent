@@ -6,7 +6,9 @@ export function ChatContainer({
   models,
   modelsError,
   currentModel,
+  currentReasoningEffort,
   onSelectModel,
+  onSelectReasoningEffort,
   onRefreshModels,
   onToggleSidebar,
 }) {
@@ -24,13 +26,15 @@ export function ChatContainer({
         </button>
       </header>
 
-      {/* 对话区域：模型选择直接集成在输入框底部 */}
+      {/* 对话区域：模型选择与思考等级直接集成在输入框底部 */}
       <div className="flex-1 overflow-hidden">
         <Thread
           models={models}
           modelsError={modelsError}
           currentModel={currentModel}
+          currentReasoningEffort={currentReasoningEffort}
           onSelectModel={onSelectModel}
+          onSelectReasoningEffort={onSelectReasoningEffort}
           onRefreshModels={onRefreshModels}
         />
       </div>
