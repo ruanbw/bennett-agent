@@ -1,7 +1,5 @@
 """Tavily 网页搜索工具"""
-import json
 import os
-from pathlib import Path
 from typing import Any, Dict, Optional
 import httpx
 from pydantic_ai import RunContext
@@ -10,24 +8,11 @@ from app.config import settings
 
 
 def _resolve_tavily_api_key() -> Optional[str]:
-    """优先从 settings / 环境变量读取，若无则尝试从 ~/.pi/web-search.json 读取"""
+    """优先从 settings 读取，若无则尝试从环境变量读取"""
     if getattr(settings, "tavily_api_key", None):
         return settings.tavily_api_key
 
-    env_key = os.getenv("TAVILY_API_KEY")
-    if env_key:
-        return env_key
-
-    user_cfg_path = Path.home() / ".pi" / "web-search.json"
-    if user_cfg_path.is_file():
-        try:
-            with open(user_cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                return cfg.get("tavilyApiKey")
-        except Exception:
-            pass
-
-    return None
+    return os.getenv("TAVILY_API_KEY")
 
 
 async def tavily_search(
