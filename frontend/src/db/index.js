@@ -40,11 +40,20 @@ export class ChatDatabase extends Dexie {
       messages: 'id, sessionId, role, createdAt',
     });
 
-    // v5：会话支持记录思考等级 reasoningEffort
-    this.version(5).stores({
-      sessions: 'id, title, model, reasoningEffort, webSearch, createdAt, updatedAt',
+    // v6：会话支持置顶 isPinned (0 或 1，方便按 isPinned, updatedAt 排序)
+    this.version(6).stores({
+      sessions: 'id, title, model, reasoningEffort, webSearch, isPinned, createdAt, updatedAt',
       messages: 'id, sessionId, role, createdAt',
-    });
+    }).upgrade((tx) =>
+      tx
+        .table('sessions')
+        .toCollection()
+        .modify((session) => {
+          if (typeof session.isPinned !== 'number') {
+            session.isPinned = session.isPinned ? 1 : 0;
+          }
+        })
+    );
   }
 }
 

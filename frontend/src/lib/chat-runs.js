@@ -65,6 +65,15 @@ export function clearFinishedRun(sessionId) {
   }
 }
 
+/** 标记澄清请求已处理（例如用户已提交弹窗或关闭） */
+export function dismissClarification(sessionId) {
+  const run = runs.get(sessionId);
+  if (run && run.clarification) {
+    run.clarification.handled = true;
+    emit();
+  }
+}
+
 export function abortChatRun(sessionId) {
   const run = runs.get(sessionId);
   if (!run || run.finished) return;
@@ -201,6 +210,13 @@ async function executeRun(run) {
               status: 'running',
             });
           }
+          if (event.tool_name === 'ask_user_clarification') {
+            run.clarification = {
+              toolCallId: tcId,
+              argsText: event.args || '',
+              handled: false,
+            };
+          }
         } else if (event.type === 'tool_result') {
           // 工具调用完成
           const tcId = event.tool_call_id;
@@ -216,6 +232,9 @@ async function executeRun(run) {
               result: event.result,
               status: 'complete',
             });
+          }
+          if (run.clarification && run.clarification.toolCallId === tcId) {
+            // 保留 clarification 信息用于弹窗展示
           }
         } else if (event.type === 'error') {
           run.content += `\n\n> ⚠️ **错误**: ${event.message}`;

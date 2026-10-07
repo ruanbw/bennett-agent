@@ -3,8 +3,14 @@ import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from app.config import settings
-from app.schemas.chat import ChatMessage, ChatRequest, ModelListResponse
-from app.services.chat_service import stream_chat_response
+from app.schemas.chat import (
+    ChatMessage,
+    ChatRequest,
+    ModelListResponse,
+    TitleGenerateRequest,
+    TitleGenerateResponse,
+)
+from app.services.chat_service import generate_title_from_prompt, stream_chat_response
 from app.services.model_service import fetch_available_models
 
 router = APIRouter(prefix="/api")
@@ -49,6 +55,14 @@ async def _collect_chat_response(
         "content": "".join(content_parts),
         "thinking": "".join(thinking_parts) or None,
     }
+
+
+@router.post("/chat/title", response_model=TitleGenerateResponse, summary="根据提示词意向生成会话标题")
+async def generate_title(request: TitleGenerateRequest):
+    """提取首条用户提示词的意向，调用模型生成极简会话标题"""
+    model_to_use = request.model or settings.model_name
+    title = await generate_title_from_prompt(model_to_use, request.prompt)
+    return TitleGenerateResponse(title=title)
 
 
 @router.post("/chat", summary="对话接口（stream=true 时 SSE 流式输出）")

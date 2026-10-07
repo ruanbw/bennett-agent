@@ -13,6 +13,7 @@ import { db } from '../db';
 import {
   abortChatRun,
   clearFinishedRun,
+  dismissClarification,
   getRun,
   getRunsVersion,
   isRunActive,
@@ -20,6 +21,7 @@ import {
   startChatRun,
   subscribeRuns,
 } from '../lib/chat-runs';
+import { ClarificationModal } from './ClarificationModal';
 
 // 把 IndexedDB 记录转换成 runtime 消息
 function toRuntimeMessage(record) {
@@ -235,9 +237,36 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
       });
 
       if (priorCount === 0) {
-        const shortTitle = userText.slice(0, 20) + (userText.length > 20 ? '...' : '');
-        await db.sessions.update(currentSessionId, { title: shortTitle, updatedAt: Date.now() });
+        // 先用前20个字作为即时占位标题
+        const initialTitle = userText.slice(0, 20) + (userText.length > 20 ? '...' : '');
+        await db.sessions.update(currentSessionId, { title: initialTitle, updatedAt: Date.now() });
         notifySessionsChanged();
+
+        // 后台异步请求大模型提取提示词意向生成精简标题
+        void (async () => {
+          try {
+            const res = await fetch('/api/chat/title', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model: currentModel,
+                prompt: userText,
+              }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              if (data?.title) {
+                await db.sessions.update(currentSessionId, {
+                  title: data.title,
+                  updatedAt: Date.now(),
+                });
+                notifySessionsChanged();
+              }
+            }
+          } catch (err) {
+            console.warn('自动生成会话标题失败:', err);
+          }
+        })();
       }
 
       setDbMessages((prev) => [
@@ -298,6 +327,17 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     if (currentSessionId) abortChatRun(currentSessionId);
   }, [currentSessionId]);
 
+  // 直接提交澄清回答（来自模态弹窗或卡片）
+  const submitClarificationAnswer = useCallback(
+    (answerText) => {
+      dismissClarification(currentSessionId);
+      onNew({
+        content: [{ type: 'text', text: answerText }],
+      });
+    },
+    [currentSessionId, onNew]
+  );
+
   const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
@@ -315,9 +355,42 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     }),
   });
 
+  // 如果当前正在运行或刚结束的任务中有未处理的澄清提问，弹出 ClarificationModal
+  let clarificationModalData = null;
+  if (run?.clarification && !run.clarification.handled) {
+    try {
+      const parsed = JSON.parse(run.clarification.argsText || '{}');
+      if (parsed.question) {
+        clarificationModalData = {
+          question: parsed.question,
+          options: Array.isArray(parsed.options) ? parsed.options : [],
+          allowCustomInput: parsed.allow_custom_input !== false,
+        };
+      }
+    } catch {
+      // ignore JSON parse error
+    }
+  }
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      {children}
+      {/* 若子组件需要调用提问提交，通过克隆注入或上下文，直接通过 React.cloneElement 传给 ChatContainer */}
+      {React.isValidElement(children)
+        ? React.cloneElement(children, {
+            onSubmitClarificationAnswer: submitClarificationAnswer,
+          })
+        : children}
+
+      {/* 弹窗展示意图澄清 */}
+      {clarificationModalData && (
+        <ClarificationModal
+          question={clarificationModalData.question}
+          options={clarificationModalData.options}
+          allowCustomInput={clarificationModalData.allowCustomInput}
+          onSubmit={submitClarificationAnswer}
+          onClose={() => dismissClarification(currentSessionId)}
+        />
+      )}
     </AssistantRuntimeProvider>
   );
 }

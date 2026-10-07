@@ -159,3 +159,36 @@ async def stream_chat_response(
 
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'message': f'生成异常: {str(e)}'}, ensure_ascii=False)}\n\n"
+
+
+async def generate_title_from_prompt(model_name: str, prompt: str) -> str:
+    """根据用户输入的提示词意向，利用 LLM 快速生成简短概括的会话标题（10个字以内）"""
+    system_instruction = (
+        "你是一个会话标题生成助手。根据用户的问题或指令，概括出极简的会话标题。"
+        "要求：1. 紧扣核心意向；2. 不超过10个汉字或5个英文单词；3. 不要包含任何标点符号、引号或前缀解释；4. 纯文本直接返回标题。"
+    )
+
+    provider = LiteLLMProvider(
+        api_base=settings.litellm_api_base,
+        api_key=settings.litellm_api_key,
+    )
+
+    model = OpenAIChatModel(
+        model_name=model_name,
+        provider=provider,
+    )
+
+    agent = Agent(
+        model=model,
+        system_prompt=system_instruction,
+    )
+
+    try:
+        result = await agent.run(f"请为以下内容生成简短标题：\n{prompt}")
+        title = result.output.strip().strip('"\'“”‘’')
+        return title[:20] if title else "新对话"
+    except Exception:
+        # 回退逻辑
+        cleaned = prompt.strip().split("\n")[0][:15]
+        return cleaned or "新对话"
+

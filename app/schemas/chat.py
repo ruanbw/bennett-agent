@@ -30,3 +30,13 @@ class ModelItem(BaseModel):
 class ModelListResponse(BaseModel):
     models: List[ModelItem]
     default_model: str
+
+
+class TitleGenerateRequest(BaseModel):
+    model: Optional[str] = Field(None, description="使用的模型名称")
+    prompt: str = Field(..., description="首条提示词内容")
+
+
+class TitleGenerateResponse(BaseModel):
+    title: str
+

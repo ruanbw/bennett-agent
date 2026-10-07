@@ -41,9 +41,15 @@ export function App() {
     setCurrentReasoningEffort(effort);
   }, []);
 
-  // 1. 加载所有本地会话
+  // 1. 加载所有本地会话（置顶排在前面，再按 updatedAt 倒序）
   const loadSessions = useCallback(async () => {
-    const list = await db.sessions.orderBy('updatedAt').reverse().toArray();
+    const list = await db.sessions.toArray();
+    list.sort((a, b) => {
+      const pinA = a.isPinned ? 1 : 0;
+      const pinB = b.isPinned ? 1 : 0;
+      if (pinA !== pinB) return pinB - pinA;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
     setSessions(list);
     return list;
   }, []);
@@ -81,6 +87,7 @@ export function App() {
       title: '新对话',
       model: currentModelRef.current || null,
       reasoningEffort: currentReasoningEffortRef.current || 'medium',
+      isPinned: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -135,6 +142,70 @@ export function App() {
     },
     [loadSessions]
   );
+
+  // 置顶 / 取消置顶会话
+  const handleTogglePinSession = useCallback(
+    async (sessionId) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (!session) return;
+      const nextPinned = session.isPinned ? 0 : 1;
+      await db.sessions.update(sessionId, { isPinned: nextPinned, updatedAt: Date.now() });
+      await loadSessions();
+    },
+    [loadSessions]
+  );
+
+  // 批量置顶/取消置顶
+  const handleBatchTogglePin = useCallback(
+    async (sessionIds, pinState) => {
+      await db.transaction('rw', db.sessions, async () => {
+        for (const id of sessionIds) {
+          await db.sessions.update(id, { isPinned: pinState ? 1 : 0 });
+        }
+      });
+      await loadSessions();
+    },
+    [loadSessions]
+  );
+
+  // 批量删除
+  const handleBatchDelete = useCallback(
+    async (sessionIds) => {
+      for (const id of sessionIds) {
+        abortChatRun(id);
+      }
+      await db.transaction('rw', db.sessions, db.messages, async () => {
+        for (const id of sessionIds) {
+          await db.messages.where('sessionId').equals(id).delete();
+          await db.sessions.delete(id);
+        }
+      });
+      const updated = await loadSessions();
+      if (sessionIds.includes(currentSessionId)) {
+        if (updated.length > 0) {
+          setCurrentSessionId(updated[0].id);
+          applyModel(updated[0].model);
+        } else {
+          await handleCreateSession();
+        }
+      }
+    },
+    [currentSessionId, loadSessions, handleCreateSession, applyModel]
+  );
+
+  // 清除所有会话
+  const handleClearAllSessions = useCallback(async () => {
+    // 中止所有会话
+    for (const s of sessionsRef.current) {
+      abortChatRun(s.id);
+    }
+    await db.transaction('rw', db.sessions, db.messages, async () => {
+      await db.messages.clear();
+      await db.sessions.clear();
+    });
+    setSessions([]);
+    await handleCreateSession();
+  }, [handleCreateSession]);
 
   // 删除会话
   const handleDeleteSession = useCallback(
@@ -214,6 +285,10 @@ export function App() {
           onCreateSession={handleCreateSession}
           onUpdateTitle={handleUpdateTitle}
           onDeleteSession={handleDeleteSession}
+          onTogglePinSession={handleTogglePinSession}
+          onBatchDelete={handleBatchDelete}
+          onBatchTogglePin={handleBatchTogglePin}
+          onClearAllSessions={handleClearAllSessions}
           isOpen={isSidebarOpen}
         />
 
@@ -242,6 +317,7 @@ export function App() {
               onSelectReasoningEffort={handleSelectReasoningEffort}
               onRefreshModels={refreshModels}
               onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
+              onCreateSession={handleCreateSession}
             />
           </ChatProvider>
         )}

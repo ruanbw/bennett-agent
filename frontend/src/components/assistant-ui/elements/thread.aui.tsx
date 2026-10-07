@@ -41,6 +41,7 @@ interface ThreadProps {
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void;
+  onSubmitClarificationAnswer?: (answer: string) => void;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -51,6 +52,7 @@ export const Thread: FC<ThreadProps> = ({
   onSelectModel = () => {},
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  onSubmitClarificationAnswer,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -87,7 +89,7 @@ export const Thread: FC<ThreadProps> = ({
           {/* 消息流列表 */}
           <div className="mb-6 flex flex-col gap-y-6 empty:hidden">
             <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
+              {() => <ThreadMessage onSubmitClarificationAnswer={onSubmitClarificationAnswer} />}
             </ThreadPrimitive.Messages>
           </div>
 
@@ -116,10 +118,12 @@ export const Thread: FC<ThreadProps> = ({
   );
 };
 
-const ThreadMessage: FC = () => {
+const ThreadMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => void }> = ({
+  onSubmitClarificationAnswer,
+}) => {
   const role = useAuiState((s) => s.message.role);
   if (role === "user") return <UserMessage />;
-  return <AssistantMessage />;
+  return <AssistantMessage onSubmitClarificationAnswer={onSubmitClarificationAnswer} />;
 };
 
 const ThreadScrollToBottom: FC = () => {
@@ -254,7 +258,11 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
   );
 };
 
-const AssistantMessage: FC = () => {
+import { AskClarificationTool } from "@/components/assistant-ui/elements/ask-clarification-tool";
+
+const AssistantMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => void }> = ({
+  onSubmitClarificationAnswer,
+}) => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
 
   return (
@@ -269,6 +277,14 @@ const AssistantMessage: FC = () => {
             Reasoning: (props) => <ReasoningMessage {...props} />,
             Text: () => <MarkdownText />,
             tools: {
+              by_name: {
+                ask_user_clarification: (props) => (
+                  <AskClarificationTool
+                    {...props}
+                    onSubmitAnswer={onSubmitClarificationAnswer}
+                  />
+                ),
+              },
               Fallback: (props) => <ToolFallback {...props} />,
             },
           }}
