@@ -21,7 +21,6 @@ import {
   startChatRun,
   subscribeRuns,
 } from '../lib/chat-runs';
-import { ClarificationModal } from './ClarificationModal';
 
 // 把 IndexedDB 记录转换成 runtime 消息
 function toRuntimeMessage(record) {
@@ -141,7 +140,7 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     return messageSeqRef.current;
   }, []);
 
-  // 从 IndexedDB 读取当前会话消息（注意：不在这里中止任何请求）
+  // 从 IndexedDB 读取当前会话消息
   const loadMessages = useCallback(async () => {
     const records = await db.messages
       .where('sessionId')
@@ -164,7 +163,7 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     };
   }, [loadMessages]);
 
-  // 生成结束后：把最终内容从数据库读回来，再丢弃内存态（两者同批提交，不会闪）
+  // 生成结束后：把最终内容从数据库读回来，再丢弃内存态
   const finishedRunId = run?.finished ? run.assistantMsgId : null;
   useEffect(() => {
     if (!finishedRunId) return;
@@ -355,23 +354,6 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     }),
   });
 
-  // 如果当前正在运行或刚结束的任务中有未处理的澄清提问，弹出 ClarificationModal
-  let clarificationModalData = null;
-  if (run?.clarification && !run.clarification.handled) {
-    try {
-      const parsed = JSON.parse(run.clarification.argsText || '{}');
-      if (parsed.question) {
-        clarificationModalData = {
-          question: parsed.question,
-          options: Array.isArray(parsed.options) ? parsed.options : [],
-          allowCustomInput: parsed.allow_custom_input !== false,
-        };
-      }
-    } catch {
-      // ignore JSON parse error
-    }
-  }
-
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       {/* 若子组件需要调用提问提交，通过克隆注入或上下文，直接通过 React.cloneElement 传给 ChatContainer */}
@@ -380,17 +362,6 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
             onSubmitClarificationAnswer: submitClarificationAnswer,
           })
         : children}
-
-      {/* 弹窗展示意图澄清 */}
-      {clarificationModalData && (
-        <ClarificationModal
-          question={clarificationModalData.question}
-          options={clarificationModalData.options}
-          allowCustomInput={clarificationModalData.allowCustomInput}
-          onSubmit={submitClarificationAnswer}
-          onClose={() => dismissClarification(currentSessionId)}
-        />
-      )}
     </AssistantRuntimeProvider>
   );
 }

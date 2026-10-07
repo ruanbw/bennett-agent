@@ -11,10 +11,21 @@ const listeners = new Set();
 
 let version = 0;
 let sessionsChangedHandler = null;
+let emitScheduled = false;
 
 function emit() {
   version += 1;
   for (const listener of listeners) listener();
+}
+
+/** 节流触发 emit：针对密集的 token 增量，合并到下一个 requestAnimationFrame，彻底消除高频重绘闪烁 */
+function emitBatched() {
+  if (emitScheduled) return;
+  emitScheduled = true;
+  requestAnimationFrame(() => {
+    emitScheduled = false;
+    emit();
+  });
 }
 
 export function subscribeRuns(listener) {
@@ -192,11 +203,15 @@ async function executeRun(run) {
         if (event.type === 'thinking') {
           if (thinkingStartedAt === null) thinkingStartedAt = Date.now();
           run.thinking += event.delta;
+          emitBatched();
+          flushPartial();
         } else if (event.type === 'content') {
           if (thinkingStartedAt !== null && run.thinkingMs === 0) {
             run.thinkingMs = Date.now() - thinkingStartedAt;
           }
           run.content += event.delta;
+          emitBatched();
+          flushPartial();
         } else if (event.type === 'tool_call') {
           // 工具开始调用
           const tcId = event.tool_call_id;
@@ -217,6 +232,8 @@ async function executeRun(run) {
               handled: false,
             };
           }
+          emit();
+          flushPartial();
         } else if (event.type === 'tool_result') {
           // 工具调用完成
           const tcId = event.tool_call_id;
@@ -233,17 +250,15 @@ async function executeRun(run) {
               status: 'complete',
             });
           }
-          if (run.clarification && run.clarification.toolCallId === tcId) {
-            // 保留 clarification 信息用于弹窗展示
-          }
+          emit();
+          flushPartial();
         } else if (event.type === 'error') {
           run.content += `\n\n> ⚠️ **错误**: ${event.message}`;
+          emit();
+          flushPartial();
         } else {
           continue;
         }
-
-        emit();
-        flushPartial();
       }
     }
   } catch (err) {

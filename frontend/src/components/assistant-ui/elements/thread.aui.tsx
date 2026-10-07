@@ -258,7 +258,7 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
   );
 };
 
-import { AskClarificationTool } from "@/components/assistant-ui/elements/ask-clarification-tool";
+import { ClarificationInline } from "@/components/assistant-ui/elements/clarification-inline";
 
 const AssistantMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => void }> = ({
   onSubmitClarificationAnswer,
@@ -279,7 +279,7 @@ const AssistantMessage: FC<{ onSubmitClarificationAnswer?: (answer: string) => v
             tools: {
               by_name: {
                 ask_user_clarification: (props) => (
-                  <AskClarificationTool
+                  <ClarificationInline
                     {...props}
                     onSubmitAnswer={onSubmitClarificationAnswer}
                   />
