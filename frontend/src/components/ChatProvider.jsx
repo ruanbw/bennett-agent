@@ -68,6 +68,7 @@ function toRuntimeMessage(record) {
       custom: {
         stopped: Boolean(record.stopped),
         thinkingMs: record.thinkingMs ?? 0,
+        clarification: record.clarification ?? null,
       },
     },
   };
@@ -126,9 +127,28 @@ function buildLiveMessage(run) {
   };
 }
 
+// 解析模型通过 ask_user_clarification 工具传入的提问参数
+function parseClarificationArgs(argsText) {
+  try {
+    const parsed = JSON.parse(argsText || '{}');
+    if (!parsed?.question) return null;
+    return {
+      question: parsed.question,
+      options: Array.isArray(parsed.options) ? parsed.options : [],
+      allow_custom_input: parsed.allow_custom_input !== false,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function ChatProvider({ children, currentSessionId, currentModel, currentReasoningEffort }) {
   const [dbMessages, setDbMessages] = useState([]);
   const messageSeqRef = useRef(0);
+  // 当前待回答的意图提问所属的助手消息 id
+  const activeClarificationMsgIdRef = useRef(null);
+  // 本轮会话中已处理过的提问 id（避免内存态未及时刷新时重复弹出）
+  const [resolvedClarificationIds, setResolvedClarificationIds] = useState(() => new Set());
 
   // 订阅运行管理器：任何增量/状态变化都会让这里重渲染
   useSyncExternalStore(subscribeRuns, getRunsVersion);
@@ -166,6 +186,7 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
   }, [loadMessages]);
 
   // 生成结束后：把最终内容从数据库读回来，再丢弃内存态
+  // （若仍有未回答的意图提问，clearFinishedRun 会保留内存态，等用户处理后再释放）
   const finishedRunId = run?.finished ? run.assistantMsgId : null;
   useEffect(() => {
     if (!finishedRunId) return;
@@ -192,6 +213,50 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
         : dbMessages.map((m) => (m.id === run.assistantMsgId ? live : m));
   }
 
+  // 待用户回答的意图提问：必须等本轮 AI 完全响应结束（run.finished）后才拉起，
+  // 避免生成过程中就弹窗，也避免用户还没来得及选就被清理掉
+  let activeClarification = null;
+  let activeClarificationMsgId = null;
+
+  if (run?.finished && run.clarification && !run.clarification.handled) {
+    activeClarification = parseClarificationArgs(run.clarification.argsText);
+    activeClarificationMsgId = run.assistantMsgId;
+  }
+
+  if (!activeClarification && !isRunning) {
+    // 回退：刷新页面或切换会话后，从本地记录里恢复仍未回答的提问
+    for (let i = dbMessages.length - 1; i >= 0; i -= 1) {
+      const item = dbMessages[i];
+      if (item.role !== 'assistant') continue;
+      const pending = item.metadata?.custom?.clarification;
+      if (pending && !pending.handled && !resolvedClarificationIds.has(item.id)) {
+        activeClarification = parseClarificationArgs(pending.argsText);
+        activeClarificationMsgId = item.id;
+      }
+      break;
+    }
+  }
+
+  // 同步给回调读取（回调总是在渲染与 effect 之后触发）
+  useEffect(() => {
+    activeClarificationMsgIdRef.current = activeClarificationMsgId;
+  }, [activeClarificationMsgId]);
+
+  // 收尾当前提问：先同步更新内存态（保证紧接着就能发起下一轮），再异步落库
+  const clearPendingClarification = useCallback(() => {
+    const messageId = activeClarificationMsgIdRef.current;
+    if (!messageId) return false;
+    setResolvedClarificationIds((prev) => {
+      if (prev.has(messageId)) return prev;
+      const next = new Set(prev);
+      next.add(messageId);
+      return next;
+    });
+    activeClarificationMsgIdRef.current = null;
+    dismissClarification(currentSessionId);
+    return true;
+  }, [currentSessionId]);
+
   // 发送新消息：落库后把生成任务交给运行管理器
   const onNew = useCallback(
     async (message) => {
@@ -203,6 +268,9 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
         .join('\n');
 
       if (!userText.trim()) return;
+
+      // 用户自己输入新内容发送，说明放弃了本轮提问，先把它收尾
+      clearPendingClarification();
 
       const suffix = Math.random().toString(36).substring(2, 6);
       const userMsgId = `msg_${Date.now()}_${suffix}`;
@@ -287,12 +355,15 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
         reasoningEffort: currentReasoningEffort,
       });
     },
-    [currentSessionId, currentModel, currentReasoningEffort, nextTimestamp]
+    [currentSessionId, currentModel, currentReasoningEffort, nextTimestamp, clearPendingClarification]
   );
 
   // 重新生成 (Reload)
   const onReload = useCallback(async () => {
     if (!currentSessionId || isRunActive(currentSessionId) || messages.length === 0) return;
+
+    // 重新生成时，本轮提问自然作废
+    clearPendingClarification();
 
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg || lastMsg.role !== 'assistant') return;
@@ -322,21 +393,21 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
       model: currentModel,
       reasoningEffort: currentReasoningEffort,
     });
-  }, [currentSessionId, currentModel, currentReasoningEffort, messages]);
+  }, [currentSessionId, currentModel, currentReasoningEffort, messages, clearPendingClarification]);
 
   const onCancel = useCallback(() => {
     if (currentSessionId) abortChatRun(currentSessionId);
   }, [currentSessionId]);
 
-  // 直接提交澄清回答（来自模态弹窗或卡片）
+  // 用户在输入框上方选定/输入后提交：收尾提问，并把答案作为新一轮用户消息发给模型
   const submitClarificationAnswer = useCallback(
     (answerText) => {
-      dismissClarification(currentSessionId);
+      clearPendingClarification();
       onNew({
         content: [{ type: 'text', text: answerText }],
       });
     },
-    [currentSessionId, onNew]
+    [clearPendingClarification, onNew]
   );
 
   const runtime = useExternalStoreRuntime({
@@ -356,30 +427,13 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
     }),
   });
 
-  // 当前会话是否有未处理的意图澄清提问
-  let activeClarification = null;
-  if (run?.clarification && !run.clarification.handled) {
-    try {
-      const parsed = JSON.parse(run.clarification.argsText || '{}');
-      if (parsed.question) {
-        activeClarification = {
-          question: parsed.question,
-          options: Array.isArray(parsed.options) ? parsed.options : [],
-          allow_custom_input: parsed.allow_custom_input !== false,
-        };
-      }
-    } catch {
-      // ignore
-    }
-  }
-
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       {React.isValidElement(children)
         ? React.cloneElement(children, {
             activeClarification,
             onSubmitClarificationAnswer: submitClarificationAnswer,
-            onDismissClarification: () => dismissClarification(currentSessionId),
+            onDismissClarification: clearPendingClarification,
           })
         : children}
     </AssistantRuntimeProvider>

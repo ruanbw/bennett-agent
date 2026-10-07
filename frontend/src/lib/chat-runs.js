@@ -59,19 +59,49 @@ export function getRunningSessionIds() {
 /** UI 已经从数据库读到最终内容，可以安全丢弃内存态 */
 export function clearFinishedRun(sessionId) {
   const run = runs.get(sessionId);
-  if (run?.finished) {
-    runs.delete(sessionId);
-    emit();
-  }
+  if (!run?.finished) return;
+  // 还有没被用户回答的意图提问：保留内存态，等用户选择/输入或忽略后再清理
+  if (run.clarification && !run.clarification.handled) return;
+  runs.delete(sessionId);
+  emit();
 }
 
-/** 标记澄清请求已处理（例如用户已在输入框上方点选或输入提交） */
+/**
+ * 标记澄清提问已处理：用户点选选项、手动输入提交，或者直接忽略关闭时调用。
+ * - 内存态立即生效（同步），保证调用方紧接着就能发起下一轮对话；
+ * - 同时异步落库，避免刷新页面 / 切换会话后又一次弹出同一个提问。
+ */
 export function dismissClarification(sessionId) {
   const run = runs.get(sessionId);
-  if (run && run.clarification) {
+  if (run?.clarification) {
     run.clarification.handled = true;
-    emit();
   }
+  // 提问已经收尾，此时才真正释放已结束的内存态
+  if (run?.finished) {
+    runs.delete(sessionId);
+  }
+  emit();
+
+  void (async () => {
+    try {
+      const records = await db.messages
+        .where('sessionId')
+        .equals(sessionId)
+        .sortBy('createdAt');
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        const record = records[i];
+        if (record.role !== 'assistant') continue;
+        if (record.clarification && !record.clarification.handled) {
+          await db.messages.update(record.id, {
+            clarification: { ...record.clarification, handled: true },
+          });
+        }
+        break;
+      }
+    } catch (err) {
+      console.warn('标记意图提问已处理失败:', err);
+    }
+  })();
 }
 
 export function abortChatRun(sessionId) {
@@ -257,6 +287,16 @@ async function executeRun(run) {
     run.stopped = aborted;
     run.finished = true;
 
+    // 如果 AI 发起了澄清提问，且没有输出正文内容或正文为空，将提问内容填入 content，确保气泡与历史上下文连贯
+    if (run.clarification && (!run.content || !run.content.trim())) {
+      try {
+        const parsed = JSON.parse(run.clarification.argsText || '{}');
+        if (parsed.question) {
+          run.content = parsed.question;
+        }
+      } catch {}
+    }
+
     try {
       await db.messages.update(assistantMsgId, {
         content: run.content,
@@ -264,6 +304,13 @@ async function executeRun(run) {
         thinkingMs: run.thinkingMs,
         toolCalls: run.toolCalls,
         stopped: aborted,
+        // 持久化意图提问，页面刷新或切换会话后仍可恢复待回答的选项浮层
+        clarification: run.clarification
+          ? {
+              argsText: run.clarification.argsText,
+              handled: Boolean(run.clarification.handled),
+            }
+          : null,
       });
       await db.sessions.update(sessionId, { updatedAt: Date.now() });
       notifySessionsChanged();
