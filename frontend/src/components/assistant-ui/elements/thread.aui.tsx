@@ -1,3 +1,7 @@
+import {
+  ComposerAddAttachment,
+  ComposerAttachments,
+} from "@/components/assistant-ui/elements/attachment.aui";
 import { ReasoningView } from "@/components/assistant-ui/elements/reasoning-view";
 import { MarkdownText } from "@/components/assistant-ui/elements/markdown-text";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
@@ -166,9 +170,16 @@ const Composer: FC<{
   onRefreshModels,
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
+
+  // 附件暂不支持（后端只接受文本）。有附件时直接禁用发送，
+  // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
+  const attachmentCount = useAuiState((s) => s.composer.attachments.length);
+  const blockedByAttachments = attachmentCount > 0;
+
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
+        <ComposerAttachments />
         <ComposerPrimitive.Input
           placeholder="问点什么吧..."
           className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
@@ -177,9 +188,10 @@ const Composer: FC<{
           aria-label="输入消息"
         />
 
-        {/* 输入框底部工具条：模型选择器与思考等级在左侧，发送/停止在右侧 */}
+        {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧 */}
         <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
           <div className="flex items-center gap-2">
+            <ComposerAddAttachment />
             {(models.length > 0 || modelsError) && (
               <ModelSelector
                 models={models}
@@ -218,13 +230,14 @@ const Composer: FC<{
             <AuiIf condition={(s) => !s.thread.isRunning}>
               <ComposerPrimitive.Send asChild>
                 <TooltipIconButton
-                  tooltip="发送消息"
+                  tooltip={blockedByAttachments ? "附件暂不支持，请先移除" : "发送消息"}
                   side="top"
                   type="button"
                   variant="default"
                   size="icon"
+                  disabled={blockedByAttachments}
                   className="size-8 rounded-xl cursor-pointer"
-                  aria-label="发送消息"
+                  aria-label={blockedByAttachments ? "附件暂不支持，请先移除后再发送" : "发送消息"}
                 >
                   <ArrowUpIcon className="size-4" />
                 </TooltipIconButton>
