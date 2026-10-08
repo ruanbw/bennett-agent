@@ -1,11 +1,12 @@
 """统一工具注册中心与导出列表"""
-from typing import Any, Callable, List
+from collections.abc import Callable
+from typing import Any
 
-from app.tools.tavily_search import tavily_search
 from app.tools.ask_user_clarification import ask_user_clarification
+from app.tools.tavily_search import tavily_search
 
 # 集中导出提供给 Agent/Model 调用的工具函数列表
-ALL_TOOLS: List[Callable[..., Any]] = [
+ALL_TOOLS: list[Callable[..., Any]] = [
     tavily_search,
     ask_user_clarification,
 ]

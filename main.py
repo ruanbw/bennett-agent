@@ -1,50 +1,25 @@
+"""Bennett Agent 入口：CLI 交互模式与 FastAPI Web 模式。
+
+Agent 装配不在本文件——它属于 `app.services.agent_factory`。此前这里有一份
+`create_agent()`，与 `chat_service` 里的版本几乎相同但少传 `reasoning_effort`
+与 `model_settings`，导致 CLI 与 Web 用同一份配置跑出不同的 agent（R-3）。
+"""
+
+import argparse
 import asyncio
+import logging
 import sys
-from typing import List
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.litellm import LiteLLMProvider
 
 from app.config import settings
-from app.prompts import prompt_manager
-from app.tools import ALL_TOOLS
+from app.services.agent_factory import build_agent
+
+logger = logging.getLogger(__name__)
 
 
-# =====================================================================
-# 1. 工厂方法：装配 Agent (提示词、LiteLLM 模型与工具解耦组合)
-# =====================================================================
-def create_agent() -> Agent:
-    # 渲染动态系统提示词
-    system_prompt = prompt_manager.render(
-        "system_prompt.jinja",
-        app_env=settings.app_env,
-        assistant_name=settings.assistant_name,
-    )
-
-    # 基于 LiteLLM 构建模型适配层
-    provider = LiteLLMProvider(
-        api_base=settings.litellm_api_base,
-        api_key=settings.litellm_api_key or "sk-no-key",
-    )
-    model = OpenAIChatModel(
-        model_name=settings.model_name,
-        provider=provider,
-    )
-
-    # 统一传入解耦的工具列表
-    return Agent(
-        model=model,
-        system_prompt=system_prompt,
-        tools=ALL_TOOLS,
-    )
-
-
-# =====================================================================
-# 2. 交互式 Agent Loop（支持流式 Streaming 输出与多轮历史）
-# =====================================================================
-async def run_interactive_loop(agent: Agent):
+async def run_interactive_loop(agent: Agent) -> None:  # noqa: ANN401
     """运行终端交互式 Agent Loop，并以流式输出展示。"""
     print("=" * 60)
     print(" Bennett Agent 启动成功 (流式响应模式)")
@@ -54,7 +29,7 @@ async def run_interactive_loop(agent: Agent):
     print("=" * 60)
     print("提示: 输入你的问题（输入 'exit' 或 'quit' 退出，输入 'clear' 重置上下文）\n")
 
-    message_history: List[ModelMessage] = []
+    message_history: list[ModelMessage] = []
 
     while True:
         try:
@@ -79,7 +54,6 @@ async def run_interactive_loop(agent: Agent):
         print("\nAgent > ", end="", flush=True)
 
         try:
-            # 使用 run_stream 实现流式输出
             async with agent.run_stream(user_input, message_history=message_history) as response:
                 async for delta in response.stream_text(delta=True):
                     sys.stdout.write(delta)
@@ -90,31 +64,41 @@ async def run_interactive_loop(agent: Agent):
 
             print("\n")
 
-        except Exception as err:
-            print(f"\n[执行异常]: {err}\n")
+        except Exception:
+            # 打到日志而不是只 print：CLI 里的失败同样需要 traceback 才能定位
+            logger.exception("CLI 本轮执行失败")
+            print("\n[执行异常] 详见上方日志\n")
 
 
-# =====================================================================
-# 3. 启动模式
-# =====================================================================
-def main():
-    import argparse
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bennett Agent 运行入口")
     parser.add_argument("--web", action="store_true", help="启动 FastAPI Web 服务")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    # 默认只监听回环：/api/chat 无鉴权，默认绑到 0.0.0.0 等于把上游模型额度开放给同网段
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址（默认仅本机；需局域网访问请显式指定 0.0.0.0）",
+    )
     parser.add_argument("--port", type=int, default=8000, help="服务端口")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+    )
+    args = build_arg_parser().parse_args()
 
     if args.web:
         import uvicorn
+
         print("=" * 60)
         print(f" 启动 Bennett Web 服务: http://{args.host}:{args.port}")
         print("=" * 60)
         uvicorn.run("app.server:app", host=args.host, port=args.port, reload=False)
     else:
-        agent = create_agent()
-        asyncio.run(run_interactive_loop(agent))
-
+        asyncio.run(run_interactive_loop(build_agent(settings.model_name)))
 
 
 if __name__ == "__main__":

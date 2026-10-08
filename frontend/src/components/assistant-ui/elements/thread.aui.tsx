@@ -1,7 +1,3 @@
-import {
-  ComposerAttachments,
-  UserMessageAttachments,
-} from "@/components/assistant-ui/elements/attachment.aui";
 import { ReasoningView } from "@/components/assistant-ui/elements/reasoning-view";
 import { MarkdownText } from "@/components/assistant-ui/elements/markdown-text";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
@@ -30,25 +26,21 @@ import type { FC } from "react";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
+import { useClarification } from "@/context/clarification-context";
+import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
+import type { ModelItem } from "@/types";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
 
 interface ThreadProps {
-  models?: any[];
+  models?: ModelItem[];
   modelsError?: string | null;
   currentModel?: string | null;
   currentReasoningEffort?: string;
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void;
-  activeClarification?: {
-    question: string;
-    options: string[];
-    allow_custom_input?: boolean;
-  } | null;
-  onSubmitClarificationAnswer?: (answer: string) => void;
-  onDismissClarification?: () => void;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -59,11 +51,10 @@ export const Thread: FC<ThreadProps> = ({
   onSelectModel = () => {},
   onSelectReasoningEffort = () => {},
   onRefreshModels,
-  activeClarification = null,
-  onSubmitClarificationAnswer,
-  onDismissClarification,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
+  // 提问状态来自 context，不再由 ChatProvider 通过 cloneElement 注入
+  const clarification = useClarification();
 
   return (
     <ThreadPrimitive.Root
@@ -113,11 +104,11 @@ export const Thread: FC<ThreadProps> = ({
             <ThreadScrollToBottom />
 
             {/* 输入框正上方弹出的意图澄清浮层卡片：提交后即刻消失 */}
-            {activeClarification && onSubmitClarificationAnswer && (
+            {clarification.pending && (
               <ClarificationInputPopup
-                clarification={activeClarification}
-                onSubmitAnswer={onSubmitClarificationAnswer}
-                onDismiss={onDismissClarification}
+                clarification={clarification.pending}
+                onSubmitAnswer={clarification.answer}
+                onDismiss={clarification.dismiss}
               />
             )}
 
@@ -158,7 +149,7 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const Composer: FC<{
-  models: any[];
+  models: ModelItem[];
   modelsError?: string | null;
   currentModel: string | null;
   currentReasoningEffort?: string;
@@ -174,13 +165,10 @@ const Composer: FC<{
   onSelectReasoningEffort = () => {},
   onRefreshModels,
 }) => {
-  const selectedModelObj = models.find((m) => m.id === currentModel);
-  const isReasoningSupported = selectedModelObj ? selectedModelObj.reasoning : true;
-  const supportedLevels = selectedModelObj?.supported_reasoning_levels || [];
+  const selectedModel = models.find((m) => m.id === currentModel);
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
-        <ComposerAttachments />
         <ComposerPrimitive.Input
           placeholder="问点什么吧..."
           className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
@@ -201,9 +189,9 @@ const Composer: FC<{
                 onRefreshModels={onRefreshModels}
               />
             )}
-            {isReasoningSupported && (
+            {shouldShowEffortSelector(selectedModel) && (
               <ReasoningEffortSelector
-                supportedLevels={supportedLevels}
+                levels={levelsFor(selectedModel)}
                 currentEffort={currentReasoningEffort}
                 onSelectEffort={onSelectReasoningEffort}
               />
@@ -353,7 +341,6 @@ const UserMessage: FC = () => {
       className="flex flex-col justify-end w-full pt-8"
     >
       <div className="flex justify-end w-full">
-        <UserMessageAttachments />
         <div className="bg-muted text-foreground max-w-[85%] rounded-2xl rounded-tr-xs px-4 py-2.5 text-sm leading-relaxed wrap-break-word">
           <MessagePrimitive.Parts
             components={{

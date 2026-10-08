@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 一次推送只保留最新一轮：旧提交的检查结果没人看，浪费额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端（ruff + pytest）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: 测试
+        # 不需要真实网关：涉及上游的用例都替换掉了客户端或生成器
+        run: uv run pytest
+
+  frontend:
+    name: 前端（lint + 类型 + 测试 + 构建）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 测试
+        run: npm test
+
+      - name: 构建
+        # 构建脚本本身也会先跑 tsc --noEmit；这里保留独立步骤是为了让
+        # 「类型错误」和「打包失败」在 CI 里显示为两个不同的失败项
+        run: npm run build

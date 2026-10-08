@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# 工具产物
+.pytest_cache/
+.ruff_cache/
+
 # Virtual environments
 .venv
 
@@ -17,3 +21,8 @@ wheels/
 
 # agent
 .pi
+.agents
+skills-lock.json
+
+# 本地审查产物
+CODE_REVIEW.md

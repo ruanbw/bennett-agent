@@ -32,5 +32,11 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    // 纯逻辑测试：不挂 jsdom。需要 IndexedDB / DOM 的模块（chat-persistence、
+    // 各组件）不在这里测——它们要么靠 E2E，要么先把副作用抽到纯函数里。
+    environment: 'node',
+    include: ['src/**/*.test.{js,ts}'],
+  },
 })
 

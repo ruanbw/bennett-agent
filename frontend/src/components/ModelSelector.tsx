@@ -1,19 +1,38 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, ChevronDown, Cpu, RefreshCw } from 'lucide-react';
 
+import type { ModelItem } from '@/types';
+
+export interface ModelSelectorProps {
+  models?: ModelItem[];
+  modelsError?: string | null;
+  currentModel?: string | null;
+  onSelectModel: (modelId: string) => void;
+  onRefreshModels?: () => unknown;
+}
+
+/**
+ * 模型选择器。
+ *
+ * 模型列表与错误文案都由调用方持有：这里不自己拉取 `/api/models`，重试也只
+ * 「请求一次刷新」（返回 Promise 时按钮进入转圈态），刷新成败的呈现交给上游。
+ *
+ * `onRefreshModels` 返回 `unknown` 而非 `Promise<void>`：调用方传同步函数也合法，
+ * 这里只 await 一次。
+ */
 export function ModelSelector({
   models = [],
   modelsError = null,
   currentModel = null,
   onSelectModel,
   onRefreshModels,
-}) {
+}: ModelSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [isRetrying, setIsRetrying] = useState(false);
-  const containerRef = useRef(null);
-  const triggerRef = useRef(null);
-  const itemRefs = useRef([]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const isEmpty = models.length === 0;
 
@@ -33,12 +52,14 @@ export function ModelSelector({
   useEffect(() => {
     if (!isOpen) return undefined;
 
-    const handlePointerDown = (event) => {
-      if (containerRef.current && !containerRef.current.contains(event.target)) {
+    // event.target 的类型是 EventTarget | null，而 contains 只接受 Node：document 上的
+    // pointerdown 只会由已挂载的节点触发，断言成 Node 不会掩盖真实错误。
+    const handlePointerDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
         close(false);
       }
     };
-    const handleKeyDown = (event) => {
+    const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.stopPropagation();
         close(true);
@@ -59,7 +80,7 @@ export function ModelSelector({
     itemRefs.current[activeIndex]?.focus();
   }, [isOpen, activeIndex]);
 
-  const handleListKeyDown = (event) => {
+  const handleListKeyDown = (event: React.KeyboardEvent) => {
     if (isEmpty) return;
 
     if (event.key === 'ArrowDown') {
@@ -77,7 +98,7 @@ export function ModelSelector({
     }
   };
 
-  const handleSelect = (model) => {
+  const handleSelect = (model: ModelItem) => {
     onSelectModel(model.id);
     close(true);
   };

@@ -1,12 +1,11 @@
 """用户意图澄清/提问工具"""
-from typing import List, Optional
 from pydantic_ai import RunContext
 
 
 async def ask_user_clarification(
     ctx: RunContext[None],
     question: str,
-    options: List[str],
+    options: list[str],
     allow_custom_input: bool = True,
 ) -> str:
     """当用户意图模糊、缺少必要关键信息、存在多种理解路径或分支选择时，向用户发起澄清提问。

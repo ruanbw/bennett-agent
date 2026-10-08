@@ -6,7 +6,8 @@ interface ClarificationInputPopupProps {
   clarification: {
     question: string;
     options: string[];
-    allow_custom_input?: boolean;
+    /** 后端事件里的 allow_custom_input，经 chat-store 归一化为 camelCase */
+    allowCustomInput?: boolean;
   };
   onSubmitAnswer: (answer: string) => void;
   onDismiss?: () => void;
@@ -17,7 +18,7 @@ export function ClarificationInputPopup({
   onSubmitAnswer,
   onDismiss,
 }: ClarificationInputPopupProps) {
-  const { question, options = [], allow_custom_input = true } = clarification;
+  const { question, options = [], allowCustomInput = true } = clarification;
   const [customText, setCustomText] = useState('');
 
   const handleSelectOption = (opt: string) => {
@@ -55,7 +56,8 @@ export function ClarificationInputPopup({
             className="text-muted-foreground hover:text-foreground p-0.5 rounded transition cursor-pointer shrink-0"
             title="忽略并关闭"
           >
-            <X className="size-3.5" />
+            <X className="size-3.5" aria-hidden="true" />
+            <span className="sr-only">忽略并关闭提问</span>
           </button>
         )}
       </div>
@@ -63,9 +65,9 @@ export function ClarificationInputPopup({
       {/* 候选选项列表：药丸单选按钮，点击后立即提交并消失 */}
       {options.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-2">
-          {options.map((opt, idx) => (
+          {options.map((opt) => (
             <button
-              key={idx}
+              key={opt}
               type="button"
               onClick={() => handleSelectOption(opt)}
               className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium border border-border/80 bg-muted/40 hover:bg-primary hover:text-primary-foreground hover:border-primary text-foreground transition-all cursor-pointer shadow-2xs hover:shadow-xs active:scale-95"
@@ -77,7 +79,7 @@ export function ClarificationInputPopup({
       )}
 
       {/* 自定义手动输入行 */}
-      {allow_custom_input && (
+      {allowCustomInput && (
         <form onSubmit={handleSubmitCustom} className="flex items-center gap-1.5 pt-0.5">
           <input
             type="text"
