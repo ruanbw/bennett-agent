@@ -43,7 +43,12 @@ async def tavily_search(
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.post(url, json=payload)
             if response.status_code != 200:
-                return f"联网搜索请求失败 (HTTP {response.status_code}): {response.text}"
+                if response.status_code == 401:
+                    return "联网搜索认证失败 (HTTP 401): Tavily API Key 无效或未授权。"
+                if response.status_code == 429:
+                    return "联网搜索请求过于频繁或配额耗尽 (HTTP 429)，请稍后重试。"
+                err_text = response.text[:200] + ("..." if len(response.text) > 200 else "")
+                return f"联网搜索请求失败 (HTTP {response.status_code}): {err_text}"
 
             data = response.json()
             lines = []

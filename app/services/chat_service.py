@@ -5,6 +5,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     UserPromptPart,
     TextPart,
     ThinkingPart,
@@ -58,23 +59,34 @@ def convert_chat_history(messages: List[ChatMessage]) -> tuple[str, List[ModelMe
 
     # 取最后一条消息作为当前轮 prompt
     last_msg = messages[-1]
+    if last_msg.role != "user" or not last_msg.content or not last_msg.content.strip():
+        raise ValueError("最后一条消息必须是内容非空的 user 消息")
+
     current_prompt = last_msg.content
     history_msgs = messages[:-1]
 
     converted_history: List[ModelMessage] = []
     for msg in history_msgs:
         if msg.role == "user":
-            converted_history.append(
-                ModelRequest(parts=[UserPromptPart(content=msg.content)])
-            )
+            if msg.content:
+                converted_history.append(
+                    ModelRequest(parts=[UserPromptPart(content=msg.content)])
+                )
         elif msg.role == "assistant":
             parts = []
             if msg.thinking:
                 parts.append(ThinkingPart(content=msg.thinking))
-            parts.append(TextPart(content=msg.content))
-            converted_history.append(
-                ModelResponse(parts=parts)
-            )
+            if msg.content:
+                parts.append(TextPart(content=msg.content))
+            if parts:
+                converted_history.append(
+                    ModelResponse(parts=parts)
+                )
+        elif msg.role == "system":
+            if msg.content:
+                converted_history.append(
+                    ModelRequest(parts=[SystemPromptPart(content=msg.content)])
+                )
 
     return current_prompt, converted_history
 
@@ -141,7 +153,7 @@ async def stream_chat_response(
                     if part:
                         content = part.content
                         if not isinstance(content, str):
-                            content = json.dumps(content, ensure_ascii=False)
+                            content = json.dumps(content, ensure_ascii=False, default=str)
                         data = {
                             "type": "tool_result",
                             "tool_call_id": getattr(part, "tool_call_id", ""),
@@ -179,7 +191,8 @@ async def generate_title_from_prompt(model_name: str, prompt: str) -> str:
     )
 
     try:
-        result = await agent.run(f"请为以下内容生成简短标题：\n{prompt}")
+        truncated_prompt = prompt[:500]
+        result = await agent.run(f"请为以下内容生成简短标题：\n{truncated_prompt}")
         title = result.output.strip().strip('"\'“”‘’')
         return title[:20] if title else "新对话"
     except Exception:

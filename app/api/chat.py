@@ -75,13 +75,11 @@ async def chat_stream(request: ChatRequest, req: Request):
             model_to_use, request.messages, reasoning_effort=request.reasoning_effort
         )
 
-    # 包装为适配 EventSourceResponse 的生成器，并在检测到客户端主动断连时中断生成
+    # 包装为适配 EventSourceResponse 的生成器
     async def event_generator():
         async for chunk in stream_chat_response(
             model_to_use, request.messages, reasoning_effort=request.reasoning_effort
         ):
-            if await req.is_disconnected():
-                break
             # chunk 格式为 'data: {...}\n\n'，EventSourceResponse 会自动添加 data: 前缀与结尾空行
             raw = chunk.strip()
             if raw.startswith("data:"):

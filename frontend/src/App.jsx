@@ -43,15 +43,21 @@ export function App() {
 
   // 1. 加载所有本地会话（置顶排在前面，再按 updatedAt 倒序）
   const loadSessions = useCallback(async () => {
-    const list = await db.sessions.toArray();
-    list.sort((a, b) => {
-      const pinA = a.isPinned ? 1 : 0;
-      const pinB = b.isPinned ? 1 : 0;
-      if (pinA !== pinB) return pinB - pinA;
-      return (b.updatedAt || 0) - (a.updatedAt || 0);
-    });
-    setSessions(list);
-    return list;
+    try {
+      const list = await db.sessions.toArray();
+      list.sort((a, b) => {
+        const pinA = a.isPinned ? 1 : 0;
+        const pinB = b.isPinned ? 1 : 0;
+        if (pinA !== pinB) return pinB - pinA;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+      setSessions(list);
+      return list;
+    } catch (err) {
+      console.error('加载本地会话失败:', err);
+      setSessions([]);
+      return [];
+    }
   }, []);
 
   // 后台生成完成时需要刷新会话列表（即使当前视图在别的会话）
@@ -215,8 +221,10 @@ export function App() {
       // 先中止该会话可能正在进行的生成并从内存清除
       abortChatRun(sessionId);
       removeSessionRun(sessionId);
-      await db.messages.where('sessionId').equals(sessionId).delete();
-      await db.sessions.delete(sessionId);
+      await db.transaction('rw', db.messages, db.sessions, async () => {
+        await db.messages.where('sessionId').equals(sessionId).delete();
+        await db.sessions.delete(sessionId);
+      });
       const updated = await loadSessions();
 
       if (currentSessionId === sessionId) {

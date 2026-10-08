@@ -11,7 +11,8 @@ async def fetch_available_models() -> ModelListResponse:
     default_model_id = settings.model_name
 
     try:
-        url = f"{settings.litellm_api_base.rstrip('/')}/v1/models"
+        base = settings.litellm_api_base.rstrip("/")
+        url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
         headers = {}
         if settings.litellm_api_key:
             headers["Authorization"] = f"Bearer {settings.litellm_api_key}"

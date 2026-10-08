@@ -18,8 +18,16 @@ async def ask_user_clarification(
         options: 供用户快速点选的候选项列表（例如：["React 组件", "Vue 组件", "原生 JS"]）
         allow_custom_input: 是否允许用户输入自定义文字补充说明（默认为 True）
     """
-    opts_text = ", ".join(f'"{opt}"' for opt in options)
+    if not question or not question.strip():
+        return "错误: 提问内容 (question) 不能为空。"
+
+    cleaned_options = [opt.strip() for opt in options if opt and opt.strip()]
+    unique_options = list(dict.fromkeys(cleaned_options))
+    if len(unique_options) < 2:
+        return "错误: 候选项列表 (options) 必须至少包含 2 个不同的非空选项。"
+
+    opts_text = ", ".join(f'"{opt}"' for opt in unique_options)
     return (
-        f"已向用户发起意图确认提问：{question}。候选选项包括：[{opts_text}]。"
+        f"已向用户发起意图确认提问：{question.strip()}。候选选项包括：[{opts_text}]。"
         "前端已唤起弹窗供用户选择或输入，等待用户在下一轮对话中确认。"
     )

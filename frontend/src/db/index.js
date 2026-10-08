@@ -60,6 +60,14 @@ export class ChatDatabase extends Dexie {
           }
         })
     );
+
+    this.on('versionchange', () => {
+      this.close();
+    });
+
+    this.on('blocked', () => {
+      console.warn('数据库升级被阻挡，请关闭其他标签页');
+    });
   }
 }
 

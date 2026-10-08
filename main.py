@@ -26,7 +26,7 @@ def create_agent() -> Agent:
     # 基于 LiteLLM 构建模型适配层
     provider = LiteLLMProvider(
         api_base=settings.litellm_api_base,
-        api_key=settings.litellm_api_key,
+        api_key=settings.litellm_api_key or "sk-no-key",
     )
     model = OpenAIChatModel(
         model_name=settings.model_name,
@@ -58,7 +58,8 @@ async def run_interactive_loop(agent: Agent):
 
     while True:
         try:
-            user_input = input("User > ").strip()
+            raw_input = await asyncio.to_thread(input, "User > ")
+            user_input = raw_input.strip()
         except (KeyboardInterrupt, EOFError):
             print("\n退出 Agent。")
             break

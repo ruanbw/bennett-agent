@@ -79,7 +79,7 @@ export function clearFinishedRun(sessionId) {
  * - 内存态立即生效（同步），保证调用方紧接着就能发起下一轮对话；
  * - 同时异步落库，避免刷新页面 / 切换会话后又一次弹出同一个提问。
  */
-export function dismissClarification(sessionId) {
+export function dismissClarification(sessionId, messageId) {
   const run = runs.get(sessionId);
   if (run?.clarification) {
     run.clarification.handled = true;
@@ -92,19 +92,28 @@ export function dismissClarification(sessionId) {
 
   void (async () => {
     try {
-      const records = await db.messages
-        .where('sessionId')
-        .equals(sessionId)
-        .sortBy('createdAt');
-      for (let i = records.length - 1; i >= 0; i -= 1) {
-        const record = records[i];
-        if (record.role !== 'assistant') continue;
-        if (record.clarification && !record.clarification.handled) {
-          await db.messages.update(record.id, {
+      if (messageId) {
+        const record = await db.messages.get(messageId);
+        if (record && record.clarification && !record.clarification.handled) {
+          await db.messages.update(messageId, {
             clarification: { ...record.clarification, handled: true },
           });
         }
-        break;
+      } else {
+        const records = await db.messages
+          .where('sessionId')
+          .equals(sessionId)
+          .sortBy('createdAt');
+        for (let i = records.length - 1; i >= 0; i -= 1) {
+          const record = records[i];
+          if (record.role !== 'assistant') continue;
+          if (record.clarification && !record.clarification.handled) {
+            await db.messages.update(record.id, {
+              clarification: { ...record.clarification, handled: true },
+            });
+          }
+          break;
+        }
       }
     } catch (err) {
       console.warn('标记意图提问已处理失败:', err);
@@ -188,6 +197,7 @@ async function executeRun(run) {
     const contextMessages = allHistory
       .filter((m) => m.id !== assistantMsgId)
       .filter((m) => m.role !== 'assistant' || (m.content && m.content.trim()))
+      .slice(-30)
       .map((m) => ({
         role: m.role,
         content: m.content,

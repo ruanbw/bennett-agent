@@ -121,6 +121,7 @@ function buildLiveMessage(run) {
     role: 'assistant',
     content,
     createdAt: new Date(run.startedAt),
+    status: run.finished ? { type: 'complete' } : undefined,
     metadata: {
       custom: { stopped: run.stopped, thinkingMs: run.thinkingMs },
     },
@@ -253,7 +254,7 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
       return next;
     });
     activeClarificationMsgIdRef.current = null;
-    dismissClarification(currentSessionId);
+    dismissClarification(currentSessionId, messageId);
     return true;
   }, [currentSessionId]);
 
@@ -284,25 +285,27 @@ export function ChatProvider({ children, currentSessionId, currentModel, current
         .equals(currentSessionId)
         .count();
 
-      await db.messages.add({
-        id: userMsgId,
-        sessionId: currentSessionId,
-        role: 'user',
-        content: userText,
-        thinking: null,
-        createdAt: userCreatedAt,
-      });
+      await db.transaction('rw', db.messages, async () => {
+        await db.messages.add({
+          id: userMsgId,
+          sessionId: currentSessionId,
+          role: 'user',
+          content: userText,
+          thinking: null,
+          createdAt: userCreatedAt,
+        });
 
-      await db.messages.add({
-        id: assistantMsgId,
-        sessionId: currentSessionId,
-        role: 'assistant',
-        content: '',
-        thinking: '',
-        thinkingMs: 0,
-        toolCalls: [],
-        stopped: false,
-        createdAt: assistantCreatedAt,
+        await db.messages.add({
+          id: assistantMsgId,
+          sessionId: currentSessionId,
+          role: 'assistant',
+          content: '',
+          thinking: '',
+          thinkingMs: 0,
+          toolCalls: [],
+          stopped: false,
+          createdAt: assistantCreatedAt,
+        });
       });
 
       if (priorCount === 0) {

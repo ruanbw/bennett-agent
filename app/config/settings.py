@@ -36,10 +36,10 @@ class Settings(BaseSettings):
     )
 
     def get_cors_origins(self) -> List[str]:
-        if not self.cors_allowed_origins:
-            return ["*"]
+        if not self.cors_allowed_origins or not self.cors_allowed_origins.strip():
+            return ["http://localhost:5173", "http://127.0.0.1:5173"]
         origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
-        return origins or ["*"]
+        return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
