@@ -38,9 +38,6 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-# E501 交给 formatter 负责。接入 `ruff format --check` 后再开启这一条，
-# 否则会先要求手工折断大量既有长行，把一次「建立门禁」的改动变成全仓重排。
-ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]

@@ -27,6 +27,11 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: 格式检查
+        # ruff format 负责行长，因此 lint 里 E501 是开启的（没有 ignore）。
+        # 这条检查保证「行长合规」不是靠人手维护。
+        run: uv run ruff format --check .
+
       - name: 测试
         # 不需要真实网关：涉及上游的用例都替换掉了客户端或生成器
         run: uv run pytest

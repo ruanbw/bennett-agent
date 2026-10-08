@@ -1,4 +1,5 @@
 """用户意图澄清/提问工具"""
+
 from pydantic_ai import RunContext
 
 
@@ -9,9 +10,9 @@ async def ask_user_clarification(
     allow_custom_input: bool = True,
 ) -> str:
     """当用户意图模糊、缺少必要关键信息、存在多种理解路径或分支选择时，向用户发起澄清提问。
-    
+
     前端将以交互弹窗/选项卡片的形式展示给用户，供用户快速点击选择答案或手动输入自定义内容。
-    
+
     Args:
         question: 针对用户意图不明确之处提出的具体问题（例如：“您是指生成 React 组件还是 Vue 组件？”）
         options: 供用户快速点选的候选项列表（例如：["React 组件", "Vue 组件", "原生 JS"]）

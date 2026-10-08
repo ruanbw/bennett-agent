@@ -80,9 +80,7 @@ def _parse_models(
                 provider=owned_by,
                 description=item.get(description_field) or f"{owned_by} {display_name}",
                 reasoning=bool(item.get("reasoning", False)),
-                supported_reasoning_levels=_parse_reasoning_levels(
-                    item.get("supported_reasoning_levels", [])
-                ),
+                supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
                 context_window=item.get("context_window"),
                 max_output_tokens=item.get("max_output_tokens"),
                 is_default=is_default,

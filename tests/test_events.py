@@ -89,9 +89,7 @@ def test_empty_deltas_are_ignored():
 def test_tool_call_delta_is_intentionally_ignored(caplog):
     """工具入参增量有意忽略：入参在 FunctionToolCallEvent 到达时一次性给出。"""
     with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
-        events = translate(
-            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='{"q":'))
-        )
+        events = translate(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='{"q":')))
 
     assert events == []
     assert "ToolCallPartDelta" in caplog.text
@@ -101,9 +99,7 @@ def test_tool_call_delta_is_intentionally_ignored(caplog):
 # 工具事件
 # ---------------------------------------------------------------------
 def tool_call_event(tool_name, args, tool_call_id="call-1"):
-    return FunctionToolCallEvent(
-        part=ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id)
-    )
+    return FunctionToolCallEvent(part=ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id))
 
 
 def test_function_tool_call_becomes_tool_call():
@@ -187,9 +183,7 @@ def test_clarification_becomes_typed_event_not_tool_call():
 
 def test_clarification_accepts_json_string_args():
     """部分网关把入参作为 JSON 字符串给出。"""
-    events = translate(
-        tool_call_event(CLARIFICATION_TOOL_NAME, '{"question":"选哪个？","options":["A","B"]}')
-    )
+    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, '{"question":"选哪个？","options":["A","B"]}'))
 
     assert isinstance(events[0], ClarificationRequest)
     assert events[0].options == ["A", "B"]
@@ -203,17 +197,13 @@ def test_clarification_defaults_allow_custom_input_to_true():
 
 
 def test_clarification_honours_explicit_false():
-    events = translate(
-        tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？", "allow_custom_input": False})
-    )
+    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？", "allow_custom_input": False}))
 
     assert events[0].allow_custom_input is False
 
 
 def test_clarification_filters_non_string_options():
-    events = translate(
-        tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选？", "options": ["A", 1, None, "B"]})
-    )
+    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选？", "options": ["A", 1, None, "B"]}))
 
     assert events[0].options == ["A", "B"]
 

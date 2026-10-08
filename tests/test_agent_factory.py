@@ -86,12 +86,8 @@ def test_build_agent_sends_none_when_explicitly_disabled():
 
 
 def test_build_agent_normalises_effort():
-    assert build_agent("openai/gpt-4o", "HIGH").model.settings["extra_body"] == {
-        "reasoning_effort": "high"
-    }
-    assert build_agent("openai/gpt-4o", " off ").model.settings["extra_body"] == {
-        "reasoning_effort": "none"
-    }
+    assert build_agent("openai/gpt-4o", "HIGH").model.settings["extra_body"] == {"reasoning_effort": "high"}
+    assert build_agent("openai/gpt-4o", " off ").model.settings["extra_body"] == {"reasoning_effort": "none"}
 
 
 def test_build_agent_registers_all_tools():

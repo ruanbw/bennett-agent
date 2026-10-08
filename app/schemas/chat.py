@@ -54,10 +54,7 @@ class ChatRequest(BaseModel):
         """
         total = sum(len(m.content) + len(m.thinking or "") for m in self.messages)
         if total > MAX_HISTORY_CHARS:
-            raise ValueError(
-                f"对话历史总长度 {total} 字符超出上限 {MAX_HISTORY_CHARS} 字符，"
-                "请精简输入或开始新会话"
-            )
+            raise ValueError(f"对话历史总长度 {total} 字符超出上限 {MAX_HISTORY_CHARS} 字符，请精简输入或开始新会话")
         return self
 
 
