@@ -24,9 +24,9 @@ from app.services.model_service import fetch_available_models
 router = APIRouter(prefix="/api")
 
 #: 关闭中间层缓冲，否则流式输出会被反向代理攒成一整块。
+#: 遵循 RFC 7540 HTTP/2 规范，避免向 HTTP/2 响应设置特定于连接的标头 Connection: keep-alive。
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
 

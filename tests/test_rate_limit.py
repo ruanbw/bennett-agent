@@ -196,6 +196,11 @@ def test_title_endpoint_is_limited_too(monkeypatch, fake_upstream):
         assert client.post("/api/chat/title", json={"prompt": "你好"}).status_code == 429
 
 
+def test_chat_stream_headers_omit_connection_keep_alive():
+    """遵循 RFC 7540 HTTP/2，SSE_HEADERS 中已显式移除 Connection: keep-alive。"""
+    assert "Connection" not in chat_api.SSE_HEADERS
+
+
 def test_invalid_body_still_consumes_quota(monkeypatch):
     """非法请求体也要计数，否则可以拿无效请求绕过限流。
 
