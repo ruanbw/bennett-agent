@@ -7,7 +7,7 @@
  */
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';
-import { API_BASE_URL } from './constants';
+import { apiFetch, readErrorDetail } from './api';
 
 const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
@@ -21,34 +21,6 @@ export interface StreamChatParams {
 }
 
 type ParseErrorHandler = (error: unknown, payload: string) => void;
-
-/**
- * 从错误响应里提取可读说明。
- *
- * 后端对超长请求体返回 422，detail 里写明是哪一项超限。不把它带出来的话，
- * 用户只看到「HTTP 错误: 422」，无从知道该改什么。
- */
-async function readErrorDetail(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: unknown };
-    const detail = body?.detail;
-
-    if (typeof detail === 'string') return detail;
-
-    if (Array.isArray(detail) && detail.length > 0) {
-      const first = detail[0] as { loc?: unknown; msg?: unknown } | undefined;
-      // loc 形如 ['body', 'messages', 0, 'content']，去掉 'body' 后就是用户能认的路径
-      const where = Array.isArray(first?.loc) ? first.loc.slice(1).join('.') : '';
-      const message = typeof first?.msg === 'string' ? first.msg : '';
-      return where ? `${where}: ${message}` : message;
-    }
-
-    return '';
-  } catch {
-    // 响应体不是 JSON（例如反向代理返回 HTML 错误页）：退回状态码
-    return '';
-  }
-}
 
 /**
  * 解析一个 SSE 帧。
@@ -120,7 +92,8 @@ export async function* streamChat({
   messages,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
-  const response = await fetch(`${API_BASE_URL}/api/chat`, {
+  // 走 apiFetch：带上 cookie，并在会话过期（401）时通知全局退回登录页
+  const response = await apiFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

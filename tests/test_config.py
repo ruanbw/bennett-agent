@@ -12,8 +12,15 @@ pydantic-settings 尚未加载任何 dotenv 文件。后果有两层——
 """
 
 import pytest
+from pydantic import ValidationError
 
-from app.config.settings import DEFAULT_APP_ENV, get_env_files, resolve_app_env
+from app.config.settings import (
+    DEFAULT_APP_ENV,
+    DEFAULT_AUTH_SECRET,
+    Settings,
+    get_env_files,
+    resolve_app_env,
+)
 
 
 @pytest.fixture
@@ -114,3 +121,28 @@ def test_missing_files_are_skipped(project_dir):
 
 def test_empty_directory_yields_no_files(project_dir):
     assert get_env_files(project_dir) == ()
+
+
+# ---------------------------------------------------------------------
+# 认证密钥守卫
+# ---------------------------------------------------------------------
+def test_production_rejects_placeholder_auth_secret():
+    """生产环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
+
+    这里选择启动即报错而不是打日志警告——警告会被忽略，而后果是任意账号可被接管。
+    """
+    with pytest.raises(ValidationError):
+        Settings(app_env="production", auth_secret=DEFAULT_AUTH_SECRET, _env_file=None)
+
+
+def test_production_accepts_a_real_secret():
+    config = Settings(app_env="production", auth_secret="a-real-secret", _env_file=None)
+
+    assert config.app_env == "production"
+
+
+def test_development_allows_placeholder_secret():
+    """守卫只针对生产：否则本地起服务都要先配密钥，开发体验没必要这么重。"""
+    config = Settings(app_env="development", auth_secret=DEFAULT_AUTH_SECRET, _env_file=None)
+
+    assert config.auth_secret == DEFAULT_AUTH_SECRET

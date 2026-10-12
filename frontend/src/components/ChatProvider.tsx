@@ -16,8 +16,9 @@ import {
   subscribeRun,
   toRuntimeMessage,
 } from '../lib/chat-runs';
+import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
-import { API_BASE_URL, FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
+import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
 import { ClarificationProvider } from '../context/clarification-context';
 import type { RuntimeMessage } from '../types';
 
@@ -322,7 +323,7 @@ async function nameSessionFromFirstMessage(
   notifySessionsChanged();
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/chat/title`, {
+    const res = await apiFetch('/api/chat/title', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt: userText }),

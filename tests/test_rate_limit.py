@@ -7,6 +7,7 @@ HTTP 层用例**不能真的打模型**：本机 `.env` 里配着真实网关，
 真发一次请求（慢、花钱、结果不确定）。所以生成器与标题生成都被替换掉了。
 """
 
+import uuid
 from contextlib import contextmanager
 
 import pytest
@@ -16,14 +17,6 @@ from app.api import chat as chat_api
 from app.api.rate_limit import SlidingWindowLimiter, client_key, resolve_client_ip
 from app.config import settings
 from app.schemas.events import Done
-
-
-@pytest.fixture(autouse=True)
-def fresh_limiter():
-    """限流器是模块级状态，用例之间必须隔离。"""
-    chat_api._limiter = None
-    yield
-    chat_api._limiter = None
 
 
 @pytest.fixture
@@ -40,14 +33,63 @@ def fake_upstream(monkeypatch):
     monkeypatch.setattr(chat_api, "generate_title_from_prompt", fake_title)
 
 
+#: 固定的用户 id。
+#:
+#: 对话限流按账号计数，若依赖覆盖每次返回**新的** uuid，每个请求都会落到不同的
+#: 限流键上，配额永远攒不满——用例会静默地测不出任何东西。
+FIXED_USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+
+def fake_user():
+    """未落库的临时用户对象，仅用于依赖覆盖。
+
+    这些用例只关心限流；认证本身由 `tests/test_auth.py` 覆盖。
+    """
+    from app.db import User
+
+    return User(
+        id=FIXED_USER_ID,
+        email="rate-limit@example.com",
+        hashed_password="not-a-real-hash",
+        is_active=True,
+        is_superuser=False,
+        is_verified=False,
+    )
+
+
 @contextmanager
 def app_client(monkeypatch, rate_limit):
     """构造 TestClient。
 
     必须以上下文管理器使用：sse-starlette 依赖 ASGI lifespan 初始化 `AppStatus`，
     否则 `EventSourceResponse` 的 ping 任务不会结束。
+
+    `/api/*` 现已要求登录，这里把 `current_active_user` 替换成固定用户。被替换的只是
+    **登录态判断**，路由与限流依赖仍会真实执行——这样限流用例挂掉时，原因只可能是限流。
     """
     monkeypatch.setattr(settings, "chat_rate_limit_per_minute", rate_limit)
+
+    from app.server import create_app
+    from app.services.auth import current_active_user
+
+    app = create_app()
+    app.dependency_overrides[current_active_user] = fake_user
+
+    with TestClient(app) as client:
+        yield client
+
+
+def valid_body():
+    return {"messages": [{"role": "user", "content": "你好"}]}
+
+
+@contextmanager
+def auth_client(monkeypatch, auth_rate_limit):
+    """**未登录**的 client，用于认证端点的 IP 限流。
+
+    不做依赖覆盖：认证限流本身就是被测对象，必须在真实（未登录）状态下测。
+    """
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", auth_rate_limit)
 
     from app.server import create_app
 
@@ -55,8 +97,12 @@ def app_client(monkeypatch, rate_limit):
         yield client
 
 
-def valid_body():
-    return {"messages": [{"role": "user", "content": "你好"}]}
+def login_body():
+    return {"username": "nobody@example.com", "password": "hunter2hunter2"}
+
+
+def register_body():
+    return {"email": f"rl-{uuid.uuid4().hex[:10]}@example.com", "password": "hunter2hunter2"}
 
 
 # ---------------------------------------------------------------------
@@ -218,35 +264,85 @@ def test_models_endpoint_is_not_limited(monkeypatch):
         assert client.get("/api/models").status_code == 200
 
 
-def test_trusted_proxy_header_applied_in_chat(monkeypatch, fake_upstream):
-    """配置 trusted_proxy_headers 时，Chat 限流应识别反向代理转发的真实 IP。"""
+def test_chat_quota_is_per_account_not_per_ip(monkeypatch, fake_upstream):
+    """对话配额按**账号**计，换 IP 换不来新配额。
+
+    改动前按 IP 计数，而前端同源代理（开发期 Vite、生产 Nginx）下后端看到的
+    `client.host` 永远是代理地址，配额会从「每 IP」退化成「全站」——一个人打满就
+    挡住所有人。本用例直接钉住新语义。
+    """
     monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
     with app_client(monkeypatch, rate_limit=1) as client:
-        # 不同客户端 IP 独立限流
-        res1 = client.post(
-            "/api/chat",
-            json=valid_body(),
-            headers={"X-Forwarded-For": "192.0.2.1"},
-        )
-        assert res1.status_code == 200
+        first = client.post("/api/chat", json=valid_body(), headers={"X-Forwarded-For": "192.0.2.1"})
+        assert first.status_code == 200
 
-        res2 = client.post(
-            "/api/chat",
-            json=valid_body(),
-            headers={"X-Forwarded-For": "192.0.2.2"},
-        )
-        assert res2.status_code == 200
-
-        # 同一客户端 IP 超限
-        res3 = client.post(
-            "/api/chat",
-            json=valid_body(),
-            headers={"X-Forwarded-For": "192.0.2.1"},
-        )
-        assert res3.status_code == 429
+        # 同一账号、不同 IP：仍应被拦
+        second = client.post("/api/chat", json=valid_body(), headers={"X-Forwarded-For": "192.0.2.2"})
+        assert second.status_code == 429
 
 
 def test_zero_disables_limiting(monkeypatch, fake_upstream):
     with app_client(monkeypatch, rate_limit=0) as client:
         for _ in range(5):
             assert client.post("/api/chat", json=valid_body()).status_code == 200
+
+
+# ---------------------------------------------------------------------
+# 认证端点限流（按 IP）
+# ---------------------------------------------------------------------
+def test_login_brute_force_is_blocked(monkeypatch):
+    """密码暴力破解必须被挡住。
+
+    加上限流之前，认证端点**完全没有**限流——密码可以被无限次尝试。
+    """
+    with auth_client(monkeypatch, auth_rate_limit=3) as client:
+        for _ in range(3):
+            assert client.post("/api/auth/login", data=login_body()).status_code == 400
+
+        response = client.post("/api/auth/login", data=login_body())
+
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) >= 1
+
+
+def test_register_is_rate_limited(monkeypatch):
+    """批量注册同样按 IP 挡。"""
+    with auth_client(monkeypatch, auth_rate_limit=1) as client:
+        assert client.post("/api/auth/register", json=register_body()).status_code == 201
+        assert client.post("/api/auth/register", json=register_body()).status_code == 429
+
+
+def test_auth_quota_is_per_ip(monkeypatch):
+    """认证配额按 IP 计：这里攻击者换的是来源，目标是常量。"""
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
+    with auth_client(monkeypatch, auth_rate_limit=1) as client:
+        first = client.post("/api/auth/login", data=login_body(), headers={"X-Forwarded-For": "192.0.2.1"})
+        assert first.status_code == 400
+
+        # 另一个来源有独立配额
+        other = client.post("/api/auth/login", data=login_body(), headers={"X-Forwarded-For": "192.0.2.2"})
+        assert other.status_code == 400
+
+        # 同一来源超限
+        repeat = client.post("/api/auth/login", data=login_body(), headers={"X-Forwarded-For": "192.0.2.1"})
+        assert repeat.status_code == 429
+
+
+def test_logout_is_not_rate_limited(monkeypatch):
+    """登出不能被限流卡住。
+
+    给登出也加限流会造出一个糟糕的失败模式：用户被限流后连登出都做不了。
+    """
+    with auth_client(monkeypatch, auth_rate_limit=1) as client:
+        # 先耗尽登录配额
+        client.post("/api/auth/login", data=login_body())
+        assert client.post("/api/auth/login", data=login_body()).status_code == 429
+
+        # 登出不受影响：未登录时是 401（缺登录态），不是 429（被限流）
+        assert client.post("/api/auth/logout").status_code == 401
+
+
+def test_auth_limiting_can_be_disabled(monkeypatch):
+    with auth_client(monkeypatch, auth_rate_limit=0) as client:
+        for _ in range(5):
+            assert client.post("/api/auth/login", data=login_body()).status_code == 400

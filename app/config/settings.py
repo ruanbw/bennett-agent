@@ -2,12 +2,15 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 DEFAULT_APP_ENV = "development"
+
+#: 认证密钥的占位默认值。生产环境若仍是这个值，启动时直接报错而不是静默放行。
+DEFAULT_AUTH_SECRET = "dev-insecure-secret-change-me"
 
 # 只有「文件名不依赖 APP_ENV」的文件能参与判定环境名本身：
 # .env.{env} 的文件名由 APP_ENV 决定，读它来选它会形成循环依赖。
@@ -87,7 +90,14 @@ class Settings(BaseSettings):
     )
     chat_rate_limit_per_minute: int = Field(
         default=30,
-        description="单个来源 IP 每分钟可发起的对话/标题请求数；0 表示不限流",
+        description="单个**账号**每分钟可发起的对话/标题请求数；0 表示不限流。",
+    )
+    auth_rate_limit_per_minute: int = Field(
+        default=10,
+        description=(
+            "单个**来源 IP** 每分钟可发起的登录/注册请求数；0 表示不限流。"
+            "挡的是密码暴力破解与批量注册。"
+        ),
     )
     trusted_proxy_headers: str = Field(
         default="",
@@ -104,6 +114,48 @@ class Settings(BaseSettings):
             "因此不会提前掉长长的流式输出。0 表示不限制。"
         ),
     )
+
+    # ------------------------------------------------------------------
+    # 数据库与认证
+    # ------------------------------------------------------------------
+    database_url: str = Field(
+        default="sqlite+aiosqlite:///./bennett.db",
+        description=(
+            "SQLAlchemy 异步连接串。默认 SQLite 落在工作目录，单机部署够用；"
+            "注意 SQLite 文件不能放在 NFS 等网络文件系统上，会损坏。"
+        ),
+    )
+    auth_secret: str = Field(
+        default=DEFAULT_AUTH_SECRET,
+        description="重置密码/邮箱验证令牌的签名密钥。生产必须替换为强随机串。",
+    )
+    auth_cookie_name: str = Field(default="bennett_session", description="会话 cookie 名。")
+    auth_cookie_secure: bool = Field(
+        default=False,
+        description=(
+            "cookie 是否只走 HTTPS。**本地 http 调试必须保持 false**，否则浏览器"
+            "不会回传 cookie，表现为「登录成功了但下一个请求又是未登录」；"
+            "生产（HTTPS）必须设为 true。"
+        ),
+    )
+    session_lifetime_seconds: int = Field(
+        default=30 * 24 * 60 * 60,
+        description="登录态有效期（秒），默认 30 天。改小会让所有会话提前失效。",
+    )
+
+    @model_validator(mode="after")
+    def _reject_placeholder_secret_in_production(self) -> "Settings":
+        """生产环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
+
+        选择启动即报错而不是打日志警告——警告会被忽略，而这个问题的影响是"
+        "任何人都能接管任意账号。
+        """
+        if self.app_env == "production" and self.auth_secret == DEFAULT_AUTH_SECRET:
+            raise ValueError(
+                "生产环境必须设置 AUTH_SECRET（当前仍是默认占位值）。"
+                "生成方式：python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        return self
 
     def get_cors_origins(self) -> list[str]:
         default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]

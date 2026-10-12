@@ -9,13 +9,27 @@ C-3：`/api/chat` 允许匿名调用，没有限流时任何能访问该端口�
 
 **不信任 `X-Forwarded-For`**：盲目采信会让客户端自选限流键，等于没有限流。反向
 代理后部署时应改为信任代理写入的、由代理剥掉外部同名头的那个字段。
+
+## 两种限流键
+
+本模块提供基元（`SlidingWindowLimiter` / `resolve_client_ip` / `client_key`）与
+**认证端点**的限流依赖。对话端点的限流在 `app/api/chat.py`，因为它需要
+`current_active_user`（按账号计数），而本模块刻意不依赖任何业务服务。
 """
 
 import logging
 import time
 from collections import deque
+from math import ceil
+
+from fastapi import HTTPException, Request, status
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+#: 限流窗口长度（秒）。
+RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
 class SlidingWindowLimiter:
@@ -96,3 +110,64 @@ def resolve_client_ip(
 def client_key(host: str | None) -> str:
     """限流键：来源 IP。缺失时归入同一个桶，宁可保守也不要放过。"""
     return host or "unknown"
+
+
+# ---------------------------------------------------------------------
+# 认证端点限流
+# ---------------------------------------------------------------------
+#: 认证限流桶。与对话限流分开：键的语义（IP vs 账号）与配额都不同。
+_auth_limiter: SlidingWindowLimiter | None = None
+
+
+def limiter_with(current: SlidingWindowLimiter | None, limit: int) -> SlidingWindowLimiter:
+    """取限流器；配额变化时重建。
+
+    惰性创建而非模块级常量，是为了让测试能改 `settings` 后立即生效。
+    """
+    if current is None or current.limit != limit:
+        return SlidingWindowLimiter(limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+    return current
+
+
+def too_many(retry_after: float) -> HTTPException:
+    """429 响应。`Retry-After` 让客户端知道该等多久，而不是盲目重试。"""
+    seconds = max(1, ceil(retry_after))
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"请求过于频繁，请在 {seconds} 秒后重试",
+        headers={"Retry-After": str(seconds)},
+    )
+
+
+def get_auth_limiter() -> SlidingWindowLimiter:
+    global _auth_limiter
+    _auth_limiter = limiter_with(_auth_limiter, max(settings.auth_rate_limit_per_minute, 1))
+    return _auth_limiter
+
+
+def get_trusted_proxy_headers() -> list[str]:
+    """获取配置中受信的代理标头列表。"""
+    raw = settings.trusted_proxy_headers
+    if not raw or not raw.strip():
+        return []
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
+async def enforce_auth_rate_limit(request: Request) -> None:
+    """认证端点限流：按 **IP** 计数。
+
+    挡的是两件事：对某个账号的密码暴力破解，以及批量注册。这两个场景里攻击者
+    换的是账号（或来源）、目标是常量，所以必须按 IP 而不是按账号计数。
+
+    在这之前认证端点**完全没有限流**，密码可以被无限次尝试。
+    """
+    if settings.auth_rate_limit_per_minute <= 0:
+        return
+
+    direct_host = request.client.host if request.client else None
+    trusted_headers = get_trusted_proxy_headers()
+    ip = resolve_client_ip(direct_host, headers=dict(request.headers), trusted_headers=trusted_headers)
+
+    allowed, retry_after = get_auth_limiter().check(client_key(ip))
+    if not allowed:
+        raise too_many(retry_after)

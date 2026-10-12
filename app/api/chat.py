@@ -2,15 +2,17 @@
 
 本层是**唯一的序列化点**：`ChatEvent` 对象在这里变成 SSE 帧。服务层不再产出
 `"data: ..."` 字符串（R-1），因此也不存在「剥掉前缀再让框架加回去」的往返。
+
+**本模块所有端点都要求登录**（依赖 `current_active_user`）。它们要么消耗上游模型
+额度，要么暴露网关可用模型清单，都不应该匿名可访。认证接口本身在 `app/api/auth.py`。
 """
 
-from math import ceil
-
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
-from app.api.rate_limit import SlidingWindowLimiter, client_key, resolve_client_ip
+from app.api.rate_limit import SlidingWindowLimiter, limiter_with, too_many
 from app.config import settings
+from app.db import User
 from app.schemas.chat import (
     ChatRequest,
     ModelListResponse,
@@ -18,6 +20,7 @@ from app.schemas.chat import (
     TitleGenerateResponse,
 )
 from app.schemas.events import ChatEvent
+from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
 from app.services.model_service import fetch_available_models
 
@@ -30,55 +33,38 @@ SSE_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
-#: 限流窗口长度（秒）。
-RATE_LIMIT_WINDOW_SECONDS = 60.0
-
+#: 对话限流桶。按**账号**计数，与认证端点的 IP 桶分开。
 _limiter: SlidingWindowLimiter | None = None
 
 
 def get_chat_limiter() -> SlidingWindowLimiter:
-    """取进程内限流器；配置变化时重建。
-
-    惰性创建而非模块级常量，是为了让测试能改 `settings` 后立即生效。
-    """
+    """取对话限流器；配额变化时重建（让测试改 `settings` 后立即生效）。"""
     global _limiter
-    limit = max(settings.chat_rate_limit_per_minute, 1)
-    if _limiter is None or _limiter.limit != limit:
-        _limiter = SlidingWindowLimiter(limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+    _limiter = limiter_with(_limiter, max(settings.chat_rate_limit_per_minute, 1))
     return _limiter
 
 
-def get_trusted_proxy_headers() -> list[str]:
-    """获取配置中受信的代理标头列表。"""
-    raw = settings.trusted_proxy_headers
-    if not raw or not raw.strip():
-        return []
-    return [h.strip() for h in raw.split(",") if h.strip()]
+async def enforce_chat_rate_limit(user: User = Depends(current_active_user)) -> None:  # noqa: B008
+    """对话接口的限流依赖（C-3）：按**账号**计数。
 
+    改动前按 IP，但两件事让它失效：
 
-async def enforce_chat_rate_limit(request: Request) -> None:
-    """对话接口的限流依赖（C-3）。
+    1. 同源代理（开发期 Vite、生产 Nginx）下，后端看到的 `client.host` 永远是
+       代理地址，配额从「每 IP」退化成「全站」——一个人打满就挡住所有人；
+    2. IP 是共享的（NAT、公司出口），无关用户会互相挤占配额。
 
-    进程内实现，挡的是「单个来源猛打」；精确配额需要共享存储，见 `rate_limit.py`。
-    支持反向代理 IP 识别（需在 settings 中配置 trusted_proxy_headers）。
+    端点已经要求登录，账号就是天然且稳定的限流键。IP 维度的限流留给认证端点
+    （`app/api/rate_limit.py:enforce_auth_rate_limit`）——那里才是它真正有用的地方。
+
+    本函数**声明了** `current_active_user` 依赖，所以只要它被使用，认证就一定会先生效：
+    即使配额配成 0 而提前 return，登录要求依然成立。
     """
     if settings.chat_rate_limit_per_minute <= 0:
         return
 
-    direct_host = request.client.host if request.client else None
-    trusted_headers = get_trusted_proxy_headers()
-    ip = resolve_client_ip(direct_host, headers=dict(request.headers), trusted_headers=trusted_headers)
-
-    allowed, retry_after = get_chat_limiter().check(client_key(ip))
-    if allowed:
-        return
-
-    seconds = max(1, ceil(retry_after))
-    raise HTTPException(
-        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        detail=f"请求过于频繁，请在 {seconds} 秒后重试",
-        headers={"Retry-After": str(seconds)},
-    )
+    allowed, retry_after = get_chat_limiter().check(f"user:{user.id}")
+    if not allowed:
+        raise too_many(retry_after)
 
 
 def to_sse_frame(event: ChatEvent) -> ServerSentEvent:
@@ -90,7 +76,12 @@ def to_sse_frame(event: ChatEvent) -> ServerSentEvent:
     return ServerSentEvent(data=event.model_dump_json())
 
 
-@router.get("/models", response_model=ModelListResponse, summary="获取可用大模型列表")
+@router.get(
+    "/models",
+    response_model=ModelListResponse,
+    summary="获取可用大模型列表",
+    dependencies=[Depends(current_active_user)],
+)
 async def get_models():
     """获取系统支持的所有大模型列表，包含是否支持思考链、上下文窗口等元数据。"""
     return await fetch_available_models()
@@ -100,7 +91,7 @@ async def get_models():
     "/chat/title",
     response_model=TitleGenerateResponse,
     summary="根据提示词意向生成会话标题",
-    dependencies=[Depends(enforce_chat_rate_limit)],
+    dependencies=[Depends(current_active_user), Depends(enforce_chat_rate_limit)],
 )
 async def generate_title(request: TitleGenerateRequest):
     """提取首条用户提示词的意向，调用模型生成极简会话标题"""
@@ -112,7 +103,7 @@ async def generate_title(request: TitleGenerateRequest):
 @router.post(
     "/chat",
     summary="对话接口（SSE 流式输出）",
-    dependencies=[Depends(enforce_chat_rate_limit)],
+    dependencies=[Depends(current_active_user), Depends(enforce_chat_rate_limit)],
 )
 async def chat_stream(request: ChatRequest):
     """逐字返回思考过程、工具调用与生成内容。

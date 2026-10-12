@@ -10,6 +10,12 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
+# SQLite 数据库（认证用）
+# -wal / -shm 是 WAL 模式的副产物，必须一起忽略：只忽略主库会留下一堆孤儿文件
+*.db
+*.db-wal
+*.db-shm
+
 # Virtual environments
 .venv
 

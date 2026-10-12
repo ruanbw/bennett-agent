@@ -3,6 +3,7 @@ import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
+import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
 import { SidebarSessionItem } from './SidebarSessionItem';
@@ -30,6 +31,9 @@ export interface SidebarProps {
   onBatchTogglePin: (ids: string[], pinned: boolean) => void;
   onClearAllSessions: () => void;
   isOpen: boolean;
+  /** 当前登录用户邮箱，展示在底部账号区。 */
+  userEmail: string | null;
+  onLogout: () => void | Promise<unknown>;
 }
 
 /**
@@ -54,6 +58,8 @@ export function Sidebar({
   onBatchTogglePin,
   onClearAllSessions,
   isOpen,
+  userEmail,
+  onLogout,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -286,6 +292,8 @@ export function Sidebar({
       <div className="p-3">
         <ThemeSwitcher />
       </div>
+
+      <AccountBar email={userEmail} onLogout={onLogout} />
 
       <ConfirmDialog
         open={Boolean(confirmRequest)}
