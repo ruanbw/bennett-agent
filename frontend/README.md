@@ -21,12 +21,21 @@ npm run preview    # 预览构建产物（:4173）
 
 ## 后端地址
 
-接口地址来自 `.env` 的 `VITE_API_BASE_URL`（默认 `http://127.0.0.1:8000`）。前端不再由后端
-托管，也不走 Vite 代理——后端纯 API，两者不同源。改后端端口、或从别的机器访问时改
-`.env`（本地覆盖写 `.env.local`，已忽略）。
+接口地址来自 `.env` 的 `VITE_API_BASE_URL`，**默认留空 = 请求相对路径 `/api`**，由
+`vite.config.js` 的 `server.proxy` 转发到 `http://127.0.0.1:8000`。开发期前后端同源，
+HttpOnly 会话 cookie 开箱即用，不需要任何 CORS 配置（`src/lib/api.ts` 里的
+`credentials: 'include'` 在同源下与默认行为一致）。
 
-跨域由后端负责：前端来源必须在后端的 `CORS_ALLOWED_ORIGINS` 里（默认已包含
-`http://localhost:5173` 与 `http://127.0.0.1:5173`），否则浏览器会拦掉请求。
+直连后端（改端口、或从别的机器访问）时，把 `VITE_API_BASE_URL` 填成完整地址，并让后端
+把前端来源加进 `CORS_ALLOWED_ORIGINS`（默认已包含 `http://localhost:5173` 与
+`http://127.0.0.1:5173`）、把 `CORS_ALLOW_CREDENTIALS` 设为 true（默认 false，不开浏览器
+会拦掉带 cookie 的跨域响应）；此时 `CORS_ALLOWED_ORIGINS` 不能含 `*`，否则后端拒绝启动。
+本地覆盖写 `.env.local`（已忽略）。
+
+事实边界：会话 cookie 的 `SameSite` 目前固定为 `Lax`（`app/services/auth.py`），因此只支持
+跨 origin 但**同 site** 的直连（如 `localhost:5173` 调 `localhost:8000`，端口不同不影响
+same-site）；真正**跨站**（不同注册域）浏览器不会带上 cookie，需要自行改成
+`SameSite=None + Secure`，当前代码不支持。
 
 `npm run build` / `npm run preview` 属于可选路径（产物交给任意静态服务器即可）；运行界面
 本身**不需要打包**。

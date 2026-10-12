@@ -2,7 +2,7 @@
 
 ## 为什么是 SQLite
 
-本项目的写入压力很低：流式对话按 800ms 节流落库，限流上限 30 请求/分/IP，
+本项目的写入压力很低：流式对话按 800ms 节流落库，限流上限 30 请求/分/账号，
 单进程部署。即使 100 路对话同时进行也只有约 125 次单行写/秒，SQLite（WAL 模式）
 的余量在两三个数量级。存储量同理，远未接近其上限。
 
@@ -17,7 +17,9 @@
 """
 
 import logging
+import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends
@@ -26,7 +28,7 @@ from fastapi_users_db_sqlalchemy.access_token import (
     SQLAlchemyAccessTokenDatabase,
     SQLAlchemyBaseAccessTokenTableUUID,
 )
-from sqlalchemy import event
+from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -110,6 +112,46 @@ async def create_db_and_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("数据库就绪: %s", DATABASE_URL)
+
+
+# ---------------------------------------------------------------------
+# 会话维护
+# ---------------------------------------------------------------------
+async def cleanup_expired_access_tokens(lifetime_seconds: int) -> int:
+    """删除已过期的会话行，返回删除条数。
+
+    为什么需要显式清理：`DatabaseStrategy.read_token` 只把 `created_at` 当**过滤条件**
+    （`get_by_token(token, max_age)` 是 `WHERE created_at >= max_age` 的 SELECT），
+    **从不删除过期行**。没有这个维护动作，`access_token` 表会随登录次数无限增长，
+    已过期的会话 token 也长期留在库里。
+
+    用独立会话（`async_session_maker`）而不是请求级 session：调用方（登录钩子、
+    将来的启动清理）通常正处于自己的事务里，清理是与该请求无关的维护动作。
+    """
+    if lifetime_seconds <= 0:
+        # 与 services/auth.py 里 get_database_strategy 的防御同源：lifetime<=0 时
+        # cutoff 会落在现在甚至未来，把**全部有效会话**当成过期删掉，比不清理危险得多。
+        raise ValueError(
+            f"cleanup_expired_access_tokens 的 lifetime_seconds 必须 > 0，当前为 {lifetime_seconds}："
+            "0/负值会让服务端会话永不过期，按此清理会误删全部有效会话。"
+        )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=lifetime_seconds)
+    async with async_session_maker() as session:
+        result = await session.execute(delete(AccessToken).where(AccessToken.created_at < cutoff))
+        await session.commit()
+        return result.rowcount
+
+
+async def delete_user_access_tokens(user_id: uuid.UUID) -> int:
+    """删除某个用户的**全部**会话行，返回删除条数（改密 / 踢人 / 停用账号用）。
+
+    只按 `user_id` 过滤：同一部署下改 A 的密码不能把 B 踢下线。
+    """
+    async with async_session_maker() as session:
+        result = await session.execute(delete(AccessToken).where(AccessToken.user_id == user_id))
+        await session.commit()
+        return result.rowcount
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:

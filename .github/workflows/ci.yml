@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# 只读权限：CI 不需要写仓库内容，显式收窄默认的 GITHUB_TOKEN 权限
+permissions:
+  contents: read
+
 # 一次推送只保留最新一轮：旧提交的检查结果没人看，浪费额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +18,7 @@ jobs:
   backend:
     name: 后端（ruff + pytest）
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +27,8 @@ jobs:
           enable-cache: true
 
       - name: 安装依赖
-        run: uv sync
+        # --locked：uv.lock 与 pyproject.toml 不一致时直接失败，而不是就地重解
+        run: uv sync --locked
 
       - name: Lint
         run: uv run ruff check .
@@ -39,6 +45,7 @@ jobs:
   frontend:
     name: 前端（lint + 类型 + 测试 + 构建）
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend

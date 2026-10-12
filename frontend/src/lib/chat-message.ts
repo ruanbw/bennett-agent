@@ -13,11 +13,15 @@ import { newId } from './constants';
 import type {
   ClarificationState,
   MessageRecord,
+  PartKind,
   Run,
   RuntimeMessage,
   RuntimePart,
   ToolCallRecord,
 } from '../types';
+
+// 契约本体在 types.ts（store 侧的写入方也要用），这里保留再导出，避免既有 import 路径失效
+export type { PartKind };
 
 /**
  * 旧版本把意图确认工具的调用与结果写进了 `toolCalls`；新数据不会——
@@ -49,28 +53,89 @@ interface BuildPartsParams {
   toolCalls?: ToolCallRecord[];
   thinking?: string | null;
   content?: string | null;
+  /**
+   * 事件到达顺序（见 `PartKind`）。缺失/损坏时退回默认顺序，绝不因此丢内容。
+   *
+   * 生产这份顺序的是 `chat-store.applyEvent`：某类内容首次出现时追加自己的种类。
+   */
+  order?: readonly PartKind[] | null;
   reasoningStatus: 'running' | 'complete';
   textStatus: 'running' | 'complete';
 }
 
+function isPartKind(value: unknown): value is PartKind {
+  return value === 'tool-call' || value === 'reasoning' || value === 'text';
+}
+
+/**
+ * 读取记录 / run 上的到达顺序字段（`partOrder`）。
+ *
+ * 这里刻意用鸭子类型而不是断言 `record.partOrder`：字段由 store 侧写入，老记录没有
+ * 它、IndexedDB 里也可能存着被改坏的数组。校验不过就当没有——渲染的兜底是默认顺序。
+ */
+function readPartOrder(source: object | null | undefined): PartKind[] | undefined {
+  const raw = (source as { partOrder?: unknown } | null | undefined)?.partOrder;
+  if (!Array.isArray(raw)) return undefined;
+
+  const kinds = raw.filter(isPartKind);
+  return kinds.length > 0 ? kinds : undefined;
+}
+
 /**
  * 构造消息内容数组。已完成的消息与生成中的消息共用，差异只在 status。
+ *
+ * 顺序：有 `order` 时严格按事件到达顺序排布——按类型分组（工具→思考→正文）会把
+ * 交替出现的思考与工具调用画成另一番顺序。没有 order 时退回「思考 → 工具 → 正文」：
+ * 思考先于工具调用、正文在工具之后，是这套后端事件流的常态，比把工具顶到最前面
+ * 更接近事实（老记录没有顺序字段，只能近似）。
  */
 export function buildParts({
   toolCalls,
   thinking,
   content,
+  order,
   reasoningStatus,
   textStatus,
 }: BuildPartsParams): RuntimePart[] {
-  const parts = buildToolParts(toolCalls);
+  const tools = buildToolParts(toolCalls);
+  const reasoning: RuntimePart | null = thinking
+    ? { type: 'reasoning', text: thinking, status: { type: reasoningStatus } }
+    : null;
+  const text: RuntimePart | null = content
+    ? { type: 'text', text: content, status: { type: textStatus } }
+    : null;
 
-  if (thinking) {
-    parts.push({ type: 'reasoning', text: thinking, status: { type: reasoningStatus } });
+  const parts: RuntimePart[] = [];
+
+  if (!order || order.length === 0) {
+    if (reasoning) parts.push(reasoning);
+    parts.push(...tools);
+    if (text) parts.push(text);
+    return parts;
   }
-  if (content) {
-    parts.push({ type: 'text', text: content, status: { type: textStatus } });
+
+  let toolIndex = 0;
+  let reasoningPlaced = false;
+  let textPlaced = false;
+
+  for (const kind of order) {
+    if (kind === 'tool-call') {
+      const tool = tools[toolIndex];
+      toolIndex += 1;
+      if (tool) parts.push(tool);
+    } else if (kind === 'reasoning' && !reasoningPlaced) {
+      reasoningPlaced = true;
+      if (reasoning) parts.push(reasoning);
+    } else if (kind === 'text' && !textPlaced) {
+      textPlaced = true;
+      if (text) parts.push(text);
+    }
   }
+
+  // 顺序表没覆盖到的块补在末尾：字段写坏或写一半也不能吞掉用户的内容
+  if (!reasoningPlaced && reasoning) parts.push(reasoning);
+  for (; toolIndex < tools.length; toolIndex += 1) parts.push(tools[toolIndex]);
+  if (!textPlaced && text) parts.push(text);
 
   return parts;
 }
@@ -86,6 +151,7 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
       toolCalls: record.toolCalls,
       thinking: record.thinking,
       content: record.content,
+      order: readPartOrder(record),
       reasoningStatus: 'complete',
       textStatus: 'complete',
     }),
@@ -98,6 +164,9 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         stopped: Boolean(record.stopped),
         thinkingMs: record.thinkingMs ?? 0,
         clarification: record.clarification ?? null,
+        // F6 结算出的「半截回复」语义：thread 据此渲染「不完整」标记。
+        // 老记录没有这个字段 → false，与修复前的呈现一致。
+        incomplete: Boolean(record.incomplete),
       },
     },
   };
@@ -116,6 +185,7 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
       toolCalls: run.toolCalls,
       thinking: run.thinking,
       content: run.content,
+      order: readPartOrder(run),
       // 思考结束的标志是「正文开始出现」，与主流平台一致
       reasoningStatus: run.content || run.finished ? 'complete' : 'running',
       textStatus: run.finished ? 'complete' : 'running',
@@ -126,6 +196,9 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
       custom: {
         stopped: run.stopped,
         thinkingMs: run.thinkingMs,
+        // 与 toRuntimeMessage 同一条契约：同一轮的覆盖层与落库记录必须给出一致的
+        // 「不完整」标记，否则页面刷新前后表现会不一样。
+        incomplete: Boolean(run.incomplete),
         // 生成中不呈现提问：等本轮完全结束再拉起浮层，
         // 否则用户还没看清选项就可能被下一段增量挤走
         clarification: run.finished ? (run.clarification ?? null) : null,

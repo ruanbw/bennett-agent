@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { ChatContainer } from './components/ChatContainer';
@@ -25,6 +25,10 @@ interface ModelsState {
  *
  * 单独成 hook：与会话状态无关，失败时只要能让用户重试即可。
  * `reloadToken` 让重试复用同一条 effect，而不是把请求逻辑塞进回调再由 effect 调用。
+ *
+ * `refreshModels` 返回的 Promise 在**这次拉取真正结束**时才结算：ModelSelector 的重试
+ * 按钮靠它维持转圈态，只 bump token 立刻返回会让转圈只闪一帧（见 ModelSelector 的
+ * `onRefreshModels` 契约）。
  */
 function useModels() {
   const [state, setState] = useState<ModelsState>({
@@ -33,6 +37,14 @@ function useModels() {
     defaultModel: null,
   });
   const [reloadToken, setReloadToken] = useState(0);
+  /** 等待「本次拉取结束」的调用方。同一个 token 只跑一次请求，因此用队列而不是 Map。 */
+  const pendingReloads = useRef<Array<() => void>>([]);
+
+  const settleReloads = useCallback(() => {
+    const waiters = pendingReloads.current;
+    pendingReloads.current = [];
+    for (const resolve of waiters) resolve();
+  }, []);
 
   useEffect(() => {
     // 忽略过期响应：连点重试时，先发的请求可能后到
@@ -61,15 +73,27 @@ function useModels() {
           ...prev,
           modelsError: (err as { message?: string } | null)?.message || '模型列表加载失败',
         }));
+      } finally {
+        // 只有最新一次拉取才结算：旧请求已被 cleanup 标成过期，它的完成不代表
+        // 「最新数据已回来」，提前结算会让转圈在该转时停下
+        if (active) settleReloads();
       }
     })();
 
     return () => {
       active = false;
     };
-  }, [reloadToken]);
+  }, [reloadToken, settleReloads]);
 
-  const refreshModels = useCallback(() => setReloadToken((token) => token + 1), []);
+  const refreshModels = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        // 先登记再 bump：effect 在本次提交之后才跑，不存在「请求结束早于登记」的窗口
+        pendingReloads.current.push(resolve);
+        setReloadToken((token) => token + 1);
+      }),
+    [],
+  );
 
   return { ...state, refreshModels };
 }
@@ -82,8 +106,13 @@ function useModels() {
  */
 function AuthLoadingScreen() {
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
-      <Loader2 className="size-5 animate-spin text-muted-foreground" aria-label="加载中" />
+    <div
+      role="status"
+      className="app-shell flex w-screen items-center justify-center bg-background text-foreground"
+    >
+      {/* 转圈图标是装饰，读屏要听的是下面这句状态文本 */}
+      <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden="true" />
+      <span className="sr-only">正在检查登录状态…</span>
     </div>
   );
 }
@@ -91,6 +120,38 @@ function AuthLoadingScreen() {
 export interface AuthenticatedShellProps {
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
+}
+
+/** 抽屉根节点与首个可聚焦控件的选择器。Sidebar 的实现由其他 wave 负责，这里只按语义标签定位。 */
+const SIDEBAR_DRAWER_SELECTOR = 'aside[aria-label="历史对话侧边栏"]';
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * 移动端抽屉的键盘/读屏可达性：打开时把焦点移进抽屉、Esc 关闭。
+ *
+ * 遮罩只挡住了鼠标，`inert` 也只解决背景不可达；焦点若不跟着进抽屉，键盘用户仍会
+ * 停在看不见的背景控件上（Tab 一圈都在 inert 之外），读屏也不会知道抽屉出现了。
+ */
+function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => void): void {
+  useEffect(() => {
+    if (!isMobile || !isOpen) return undefined;
+
+    const drawer = document.querySelector<HTMLElement>(SIDEBAR_DRAWER_SELECTOR);
+    // preventScroll：抽屉是 fixed 定位，聚焦不该带着页面滚一下
+    (drawer?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? drawer)?.focus({ preventScroll: true });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // 抽屉里弹出的确认框是 portal 到 body 的独立弹层：焦点在弹层里时 Esc 只该关它
+      const target = event.target;
+      if (target instanceof Element && target.closest('[role="dialog"], [role="alertdialog"]')) return;
+      onClose();
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isMobile, isOpen, onClose]);
 }
 
 /**
@@ -154,15 +215,24 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
     if (isMobile) setSidebarOverride(false);
   }, [createSession, isMobile]);
 
+  // 收敛为稳定引用：内联箭头会在 App 重渲染时换身份，令 SidebarSessionItem 的 memo 失效。
+  const handleDeleteSession = useCallback(
+    (sessionId: string) => removeSessions([sessionId]),
+    [removeSessions]
+  );
+
+  const closeSidebar = useCallback(() => setSidebarOverride(false), []);
+  useMobileDrawerA11y(isMobile, isSidebarOpen, closeSidebar);
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
+    <div className="app-shell flex w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
       <Sidebar
         sessions={sessions}
         currentSessionId={currentSessionId}
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         onUpdateTitle={updateTitle}
-        onDeleteSession={(sessionId: string) => removeSessions([sessionId])}
+        onDeleteSession={handleDeleteSession}
         onTogglePinSession={togglePin}
         onBatchDelete={removeSessions}
         onBatchTogglePin={setPinned}
@@ -181,29 +251,35 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
         />
       )}
 
-      {/* 对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui */}
-      {currentSessionId && (
-        <ErrorBoundary key={currentSessionId} fallbackTitle="对话区域加载异常">
-          <ChatProvider
-            key={currentSessionId}
-            currentSessionId={currentSessionId}
-            currentModel={currentModel}
-            currentReasoningEffort={currentReasoningEffort}
-          >
-            <ChatContainer
-              models={models}
-              modelsError={modelsError}
+      {/*
+        对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui。
+        `inert` 在移动端抽屉打开时封住背景（遮挡层只挡指针事件），min-h-0 保证内部
+        滚动容器拿得到确定高度。桌面端与抽屉关闭时都不受影响。
+      */}
+      <main inert={isMobile && isSidebarOpen} className="flex min-h-0 min-w-0 flex-1">
+        {currentSessionId && (
+          <ErrorBoundary key={currentSessionId} fallbackTitle="对话区域加载异常">
+            <ChatProvider
+              key={currentSessionId}
+              currentSessionId={currentSessionId}
               currentModel={currentModel}
               currentReasoningEffort={currentReasoningEffort}
-              onSelectModel={selectModel}
-              onSelectReasoningEffort={selectReasoningEffort}
-              onRefreshModels={refreshModels}
-              onToggleSidebar={handleToggleSidebar}
-              onCreateSession={handleCreateSession}
-            />
-          </ChatProvider>
-        </ErrorBoundary>
-      )}
+            >
+              <ChatContainer
+                models={models}
+                modelsError={modelsError}
+                currentModel={currentModel}
+                currentReasoningEffort={currentReasoningEffort}
+                onSelectModel={selectModel}
+                onSelectReasoningEffort={selectReasoningEffort}
+                onRefreshModels={refreshModels}
+                onToggleSidebar={handleToggleSidebar}
+                onCreateSession={handleCreateSession}
+              />
+            </ChatProvider>
+          </ErrorBoundary>
+        )}
+      </main>
     </div>
   );
 }
@@ -214,28 +290,29 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
  * 三态分流：探测中显示占位、未登录显示登录页、已登录才挂载主界面。
  * 会话过期的处理不在这里——`apiFetch` 收到 401 会通知 `useAuth`，状态自然回到
  * 未登录，于是本组件重新渲染出登录页。这条链路覆盖所有请求，无需逐处处理。
+ *
+ * 全局 ErrorBoundary 不在这里：它挂在 main.tsx 里包住 App 本身，否则捕不到 App
+ * 自身渲染期抛出的错误。这里只保留「对话区域」那层按会话重建的边界。
  */
 export function App() {
   const { status, user, pending, error, login, register, logout, clearError } = useAuth();
 
   return (
-    <ErrorBoundary fallbackTitle="应用出现异常">
-      <ThemeProvider>
-        {status === 'loading' ? (
-          <AuthLoadingScreen />
-        ) : status === 'anonymous' ? (
-          <LoginPage
-            onLogin={login}
-            onRegister={register}
-            pending={pending}
-            error={error}
-            onClearError={clearError}
-          />
-        ) : (
-          <AuthenticatedShell userEmail={user?.email ?? null} onLogout={logout} />
-        )}
-      </ThemeProvider>
-    </ErrorBoundary>
+    <ThemeProvider>
+      {status === 'loading' ? (
+        <AuthLoadingScreen />
+      ) : status === 'anonymous' ? (
+        <LoginPage
+          onLogin={login}
+          onRegister={register}
+          pending={pending}
+          error={error}
+          onClearError={clearError}
+        />
+      ) : (
+        <AuthenticatedShell userEmail={user?.email ?? null} onLogout={logout} />
+      )}
+    </ThemeProvider>
   );
 }
 

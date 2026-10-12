@@ -4,12 +4,14 @@
 序列化与 SSE 分帧是传输层的职责，见 `app/api/chat.py`。
 """
 
+import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any
 from uuid import uuid4
 
+import httpx
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -22,6 +24,8 @@ from pydantic_ai.messages import (
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
+    ToolCallPart,
+    ToolCallPartDelta,
     UserPromptPart,
 )
 
@@ -51,6 +55,33 @@ DEFAULT_TITLE = "新对话"
 
 _TITLE_QUOTE_CHARS = "\"'“”‘’"
 
+#: 单轮对话的**总**时长预算（秒）。上游超时是「空闲」语义（多久没收到数据），
+#: 只约束单次等待；叠加 SDK 默认的 2 次重试与网关侧重试后，单轮仍可能被拖到十几分钟。
+#: 这一道是总体上界：超预算即中止并给出可重试的提示。
+TOTAL_STREAM_BUDGET_SECONDS = 600
+
+#: 上游 HTTP 状态码 → 可外泄的中文文案。只映射「能指导用户下一步动作」的状态码，
+#: 其余一律走通用文案：把上游细节猜错后写进用户可见消息，比笼统更糟。
+_STATUS_ERROR_MESSAGES: dict[int, str] = {
+    400: "模型不可用，请更换模型",
+    401: "上游认证配置问题，请联系管理员",
+    403: "上游认证配置问题，请联系管理员",
+    404: "模型不可用，请更换模型",
+    429: "上游限流，请稍后重试",
+}
+
+SERVICE_UNAVAILABLE_MESSAGE = "服务暂时不可用，请重试"
+GENERIC_STREAM_ERROR_MESSAGE = "生成异常，请重试"
+STREAM_TIMEOUT_MESSAGE = "生成超时，请重试"
+
+#: `allow_custom_input` 的「假值」写法。`bool("false")` 是 True——网关把 JSON 布尔
+#: 值当字符串回传时，用户明明选了「不允许自定义」却会看到输入框。
+_FALSY_TEXT_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+#: 已告警过的未识别事件类型。未识别类型一旦出现就是**高频**的（每个流事件一条），
+#: 不去重会把日志刷爆，反而掩盖真正的问题。
+_WARNED_UNKNOWN_EVENT_KEYS: set[str] = set()
+
 
 class InvalidChatHistory(ValueError):
     """`convert_chat_history` 的校验失败。
@@ -71,6 +102,62 @@ def _new_error_id() -> str:
     return uuid4().hex[:12]
 
 
+def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """沿 `__cause__` / `__context__` 遍历异常链（并防御环状链）。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """异常链里是否出现过超时。
+
+    pydantic-ai 会把 SDK 的连接类异常统一包装成 `ModelAPIError`（该类型**没有**
+    `status_code`），超时信息只留在 `__cause__` 链上（openai.APITimeoutError →
+    httpx.TimeoutException），所以这里按链找，而不是只看最外层类型。
+    """
+    return any(
+        isinstance(item, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException))
+        for item in _iter_exception_chain(exc)
+    )
+
+
+def upstream_error_message(exc: BaseException) -> str:
+    """把上游异常映射成可以推给用户的中文文案。
+
+    只依据两个信号：HTTP 状态码（`ModelHTTPError.status_code`）与「是否超时」。
+    状态码用安全取值：拿不到、类型不对、或不在映射表里都归入通用文案——上游原文
+    可能带 URL、provider 上下文甚至密钥，永不外泄。
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        if status in _STATUS_ERROR_MESSAGES:
+            return _STATUS_ERROR_MESSAGES[status]
+        if 500 <= status < 600:
+            return SERVICE_UNAVAILABLE_MESSAGE
+
+    if _is_timeout_error(exc):
+        return SERVICE_UNAVAILABLE_MESSAGE
+
+    return GENERIC_STREAM_ERROR_MESSAGE
+
+
+def _warn_unknown_once(key: str, message: str, *args: Any) -> None:  # noqa: ANN401
+    """对未识别的 pydantic-ai 事件/part 类型告警一次（每种 key 只告一次）。
+
+    这类未识别分支的后果是**正文/思考增量被静默丢弃**：前端只看到回答卡住不动，
+    生产日志级别是 INFO，DEBUG 级别的记录根本不会出现。按类型去重是为了让它可被
+    发现，又不至于每个事件刷一行。
+    """
+    if key in _WARNED_UNKNOWN_EVENT_KEYS:
+        return
+    _WARNED_UNKNOWN_EVENT_KEYS.add(key)
+    logger.warning(message, *args)
+
+
 # =====================================================================
 # 历史转换
 # =====================================================================
@@ -84,6 +171,12 @@ def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMe
     """
     if not messages:
         raise InvalidChatHistory("消息列表不能为空")
+
+    # 首条必须是 user：pydantic-ai 的消息序列以 ModelRequest 开头、request/response
+    # 交替，从 assistant 开始会装配出非法序列（模型侧报错或上下文错位）。schema 层
+    # 也会拦一道，这里是服务层自己的兜底——`convert_chat_history` 是公开函数。
+    if messages[0].role != "user":
+        raise InvalidChatHistory("首条消息必须是 user 消息")
 
     # 取最后一条消息作为当前轮 prompt
     last_msg = messages[-1]
@@ -140,50 +233,100 @@ def _serialize_tool_args(args: Any) -> str:  # noqa: ANN401
         return str(args)
 
 
+def _parse_allow_custom_input(value: Any) -> bool:  # noqa: ANN401
+    """解析 `allow_custom_input`；缺失时默认允许自定义输入。
+
+    字符串要显式解析：`bool("false")` 是 True，会把「不允许自定义」翻成允许。
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSY_TEXT_VALUES
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
+def _clean_options(raw_options: Any) -> list[str]:  # noqa: ANN401
+    """清洗候选项：strip、去重、过滤空串（顺序保持原样）。"""
+    if not isinstance(raw_options, list):
+        return []
+    cleaned = [option.strip() for option in raw_options if isinstance(option, str)]
+    return [option for option in dict.fromkeys(cleaned) if option]
+
+
 def _clarification_from(args: Any, tool_call_id: str) -> ClarificationRequest | None:  # noqa: ANN401
-    """从 `ask_user_clarification` 的原始入参解出提问；入参不合法时返回 None。"""
+    """从 `ask_user_clarification` 的原始入参解出提问。
+
+    返回 `None` 表示本轮不该展示提问（原因已记日志）：入参坏掉，或清洗后不足 2 个
+    有效选项。后者与 `ask_user_clarification` 工具自身的规则一致——工具按「至少 2 个
+    不同的非空选项」拒绝，两边不一致时用户会先看到一个只有 0/1 个选项的弹窗。
+    """
     if isinstance(args, str):
         try:
             parsed = json.loads(args)
         except json.JSONDecodeError:
-            return None
+            parsed = None
     else:
         parsed = args
 
-    if not isinstance(parsed, dict):
-        return None
-
-    question = parsed.get("question")
+    question = parsed.get("question") if isinstance(parsed, dict) else None
     if not isinstance(question, str) or not question.strip():
+        logger.warning("意图确认工具入参无法解析，本轮不会展示提问 (tool_call_id=%s, args=%r)", tool_call_id, args)
         return None
 
-    raw_options = parsed.get("options")
-    options = [opt for opt in raw_options if isinstance(opt, str)] if isinstance(raw_options, list) else []
+    options = _clean_options(parsed.get("options"))
+    if len(options) < 2:
+        logger.warning(
+            "意图确认选项不足 2 个有效值，本轮不会展示提问 (tool_call_id=%s, options=%r)",
+            tool_call_id,
+            parsed.get("options"),
+        )
+        return None
 
-    raw_allow = parsed.get("allow_custom_input")
     return ClarificationRequest(
         tool_call_id=tool_call_id,
         question=question.strip(),
         options=options,
-        allow_custom_input=True if raw_allow is None else bool(raw_allow),
+        allow_custom_input=_parse_allow_custom_input(parsed.get("allow_custom_input")),
     )
 
 
-def translate_event(event: Any) -> Iterator[ChatEvent]:  # noqa: ANN401
+def translate_event(
+    event: Any,  # noqa: ANN401
+    seen_clarification_ids: set[str] | None = None,
+) -> Iterator[ChatEvent]:
     """把一个 pydantic-ai 流事件翻译成 0..n 个聊天事件。
 
-    不认识的事件只记 DEBUG 日志——这是 pydantic-ai 升级后唯一能发现「渲染悄悄
-    停摆」的地方。`ToolCallPartDelta`（工具入参增量）属于有意忽略：入参在
-    `FunctionToolCallEvent` 到达时一次性给出即可。
+    不认识的事件会记 WARNING（每种类型只记一次，见 `_warn_unknown_once`）——这是
+    pydantic-ai 升级后唯一能发现「渲染悄悄停摆」的地方，而这些事件的正文/思考增量
+    会被静默丢弃。`ToolCallPartDelta`（工具入参增量）属于**有意**忽略：入参在
+    `FunctionToolCallEvent` 到达时一次性给出即可，所以它仍然只记 DEBUG。
+
+    `seen_clarification_ids` 是**单轮**的去重集合：同一轮里模型可能对同一次提问重复
+    发出工具调用事件，后到的应被忽略，否则前端会弹出两个一样的提问框。传 `None`
+    表示不做去重（直接单测 `translate_event` 时就是这个语义）。
     """
     if isinstance(event, PartStartEvent):
         part = event.part
-        if isinstance(part, TextPart) and part.content:
-            yield ContentDelta(delta=part.content)
-        elif isinstance(part, ThinkingPart) and part.content:
-            yield ThinkingDelta(delta=part.content)
-        else:
+        if isinstance(part, TextPart):
+            if part.content:
+                yield ContentDelta(delta=part.content)
+            return
+        if isinstance(part, ThinkingPart):
+            if part.content:
+                yield ThinkingDelta(delta=part.content)
+            return
+        if isinstance(part, ToolCallPart):
+            # 有意忽略：工具调用在 FunctionToolCallEvent 里一次性给出（含完整入参），
+            # 起始 part 只是它的空壳，转发会让前端先收到一个没有入参的调用。
             logger.debug("忽略的起始 part: %s", type(part).__name__)
+            return
+        _warn_unknown_once(
+            f"part-start:{type(part).__name__}",
+            "未处理的 pydantic-ai 起始 part: %s（其正文/思考增量会被静默丢弃）",
+            type(part).__name__,
+        )
         return
 
     if isinstance(event, PartDeltaEvent):
@@ -191,11 +334,20 @@ def translate_event(event: Any) -> Iterator[ChatEvent]:  # noqa: ANN401
         if isinstance(delta, TextPartDelta):
             if delta.content_delta:
                 yield ContentDelta(delta=delta.content_delta)
-        elif isinstance(delta, ThinkingPartDelta):
+            return
+        if isinstance(delta, ThinkingPartDelta):
             if delta.content_delta:
                 yield ThinkingDelta(delta=delta.content_delta)
-        elif not isinstance(delta, type(None)):
+            return
+        if isinstance(delta, ToolCallPartDelta):
             logger.debug("忽略的 part 增量: %s", type(delta).__name__)
+            return
+        if delta is not None:
+            _warn_unknown_once(
+                f"part-delta:{type(delta).__name__}",
+                "未处理的 pydantic-ai part 增量: %s（其正文/思考增量会被静默丢弃）",
+                type(delta).__name__,
+            )
         return
 
     if isinstance(event, FunctionToolCallEvent):
@@ -204,15 +356,17 @@ def translate_event(event: Any) -> Iterator[ChatEvent]:  # noqa: ANN401
         tool_name = part.tool_name or ""
 
         if tool_name == CLARIFICATION_TOOL_NAME:
+            if tool_call_id and seen_clarification_ids is not None and tool_call_id in seen_clarification_ids:
+                logger.debug("同一轮的重复意图确认，已忽略后到者 (tool_call_id=%s)", tool_call_id)
+                return
+
             request = _clarification_from(part.args, tool_call_id)
-            if request is not None:
-                yield request
-            else:
-                logger.warning(
-                    "意图确认工具入参无法解析，本轮不会展示提问 (tool_call_id=%s, args=%r)",
-                    tool_call_id,
-                    part.args,
-                )
+            if request is None:
+                return
+
+            if tool_call_id and seen_clarification_ids is not None:
+                seen_clarification_ids.add(tool_call_id)
+            yield request
             return
 
         yield ToolCall(
@@ -241,12 +395,50 @@ def translate_event(event: Any) -> Iterator[ChatEvent]:  # noqa: ANN401
         )
         return
 
-    logger.debug("未处理的 pydantic-ai 流事件: %s", type(event).__name__)
+    _warn_unknown_once(
+        f"event:{type(event).__name__}",
+        "未处理的 pydantic-ai 流事件: %s（其正文/思考增量会被静默丢弃）",
+        type(event).__name__,
+    )
 
 
 # =====================================================================
 # 流式生成
 # =====================================================================
+class StreamTimeoutError(TimeoutError):
+    """整轮对话超出 `TOTAL_STREAM_BUDGET_SECONDS`。"""
+
+
+async def _iterate_with_total_budget(
+    stream: AsyncIterator[Any],
+    budget_seconds: float,
+) -> AsyncIterator[Any]:
+    """按**总时长**预算消费上游事件流；超预算抛 `StreamTimeoutError`。
+
+    本环境是 Python 3.10，没有 `asyncio.timeout`（3.11 才有），这里用
+    「deadline + wait_for 剩余预算」等价实现：每轮等待只允许到 deadline 为止，
+    累加起来就是整轮的总预算。
+
+    取消语义必须保持原样：外层（客户端断开）取消时 `CancelledError` 直接上抛，
+    不能被翻译成超时或错误事件。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_seconds
+    iterator = stream.__aiter__()
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise StreamTimeoutError(f"超出总时长预算 {budget_seconds}s")
+        try:
+            event = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as exc:
+            raise StreamTimeoutError(f"超出总时长预算 {budget_seconds}s") from exc
+        yield event
+
+
 async def stream_chat_events(
     model_name: str,
     messages: list[ChatMessage],
@@ -255,7 +447,10 @@ async def stream_chat_events(
     """产出本轮对话的聊天事件流。
 
     以 `Done` 或 `StreamError` 收尾；调用方不需要自己判断「流断了没有」。
+    整轮受 `TOTAL_STREAM_BUDGET_SECONDS` 约束，超预算同样以 `StreamError` 收尾。
     """
+    seen_clarification_ids: set[str] = set()
+
     try:
         current_prompt, history = convert_chat_history(messages)
     except InvalidChatHistory as exc:
@@ -278,13 +473,27 @@ async def stream_chat_events(
 
     try:
         async with agent.run_stream_events(current_prompt, message_history=history) as stream:
-            async for event in stream:
-                for chat_event in translate_event(event):
+            async for event in _iterate_with_total_budget(stream, TOTAL_STREAM_BUDGET_SECONDS):
+                for chat_event in translate_event(event, seen_clarification_ids):
                     yield chat_event
-    except Exception:
+    except asyncio.CancelledError:
+        # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
+        # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
+        raise
+    except StreamTimeoutError:
+        error_id = _new_error_id()
+        logger.warning(
+            "流式生成超出总时长预算 %ss，已中止 (error_id=%s, model=%s)",
+            TOTAL_STREAM_BUDGET_SECONDS,
+            error_id,
+            model_name,
+        )
+        yield StreamError(message=STREAM_TIMEOUT_MESSAGE)
+        return
+    except Exception as exc:
         error_id = _new_error_id()
         logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
-        yield StreamError(message=f"生成异常，请重试（错误编号 {error_id}）")
+        yield StreamError(message=f"{upstream_error_message(exc)}（错误编号 {error_id}）")
         return
 
     yield Done()

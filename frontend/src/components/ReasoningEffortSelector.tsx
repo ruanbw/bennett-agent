@@ -101,8 +101,15 @@ export function ReasoningEffortSelector({
     close(true);
   };
 
+  // Tab 把焦点移出容器（含移出到浏览器 UI：relatedTarget 为 null）时关闭。只监听
+  // pointerdown 与 Esc 会漏掉键盘用户：弹层留在原地挡住页面，还得再点一次才消失。
+  const handleBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget;
+    if (isOpen && !(next instanceof Node && containerRef.current?.contains(next))) close(false);
+  };
+
   return (
-    <div className="relative inline-block" ref={containerRef}>
+    <div className="relative inline-block" ref={containerRef} onBlur={handleBlur}>
       <button
         ref={triggerRef}
         type="button"

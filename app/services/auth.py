@@ -18,12 +18,20 @@ JWT 把状态放在令牌内部，服务端无法单方面作废——登出只�
 
 `cookie_secure` 来自 `settings.auth_cookie_secure`：**本地 http 下必须为 false**，
 否则浏览器不会回传 cookie（框架该参数默认是 true，是个常见的坑）。
+
+## AUTH_SECRET 的真实作用范围
+
+`settings.auth_secret` **不参与会话**：cookie 里放的是不透明服务端 token，既不签名，
+轮换它也不会让任何登录态失效（要让会话失效请删 `access_token` 行）。它目前只喂给
+`UserManager.reset_password_token_secret` / `verification_token_secret`，等将来接入
+邮件流程（重置密码、邮箱验证）时才真正生效。
 """
 
 import logging
 import uuid
+from typing import Any
 
-from fastapi import Depends, Request
+from fastapi import Depends, Request, Response
 from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin, schemas
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
@@ -31,7 +39,14 @@ from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.exceptions import InvalidPasswordException
 
 from app.config import settings
-from app.db import AccessToken, User, get_access_token_db, get_user_db
+from app.db import (
+    AccessToken,
+    User,
+    cleanup_expired_access_tokens,
+    delete_user_access_tokens,
+    get_access_token_db,
+    get_user_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +76,15 @@ def get_database_strategy(
     必须写成函数而不是模块级常量：`DatabaseStrategy` 需要注入数据库适配器，而适配器
     持有每个请求独立的 SQLAlchemy session，不能跨请求复用。
     """
-    return DatabaseStrategy(access_token_db, lifetime_seconds=settings.session_lifetime_seconds)
+    lifetime = settings.session_lifetime_seconds
+    if lifetime <= 0:
+        # 防御纵深：fastapi-users 的 read_token 用 `if self.lifetime_seconds:` 判断是否
+        # 检查过期（0 是假值 → 永不过期），而 settings 目前没有拒绝 0/负值的校验。
+        # 这里补一道，任何绕过 settings 校验的调用路径都拿不到永不过期的策略。
+        raise ValueError(
+            f"session_lifetime_seconds 必须 >=60，当前为 {lifetime}：0/负值会让服务端会话永不过期，请设 >=60。"
+        )
+    return DatabaseStrategy(access_token_db, lifetime_seconds=lifetime)
 
 
 auth_backend = AuthenticationBackend(
@@ -96,6 +119,33 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
 
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
         logger.info("新用户注册: id=%s", user.id)
+
+    async def on_after_login(
+        self, user: User, request: Request | None = None, response: Response | None = None
+    ) -> None:
+        """登录成功后顺手清理过期会话行（best-effort，失败不影响登录）。
+
+        登录是天然低频、幂等的维护时刻，不需要为清理单独引入定时任务。
+        清理失败（例如库被锁）只记警告：过期行的堆积不该升级成「登录不可用」。
+        """
+        try:
+            removed = await cleanup_expired_access_tokens(settings.session_lifetime_seconds)
+        except Exception:  # noqa: BLE001 - 见 docstring：任何清理故障都必须被隔离
+            logger.warning("清理过期会话失败（不影响本次登录）", exc_info=True)
+            return
+
+        if removed:
+            logger.info("清理过期会话: 删除=%d", removed)
+
+    async def on_after_update(self, user: User, update_dict: dict[str, Any], request: Request | None = None) -> None:
+        """用户更新后让该用户的全部旧会话立即失效。
+
+        重置密码/改密路由未来挂载时自动生效（只要它们经 `user_manager.update()` 落库）：
+        框架更新成功后回调这里，所以「改密 = 删该用户所有行」不必在路由里重复实现。
+        这里**不吞异常**——删失败却静默通过，等于泄露的旧会话继续可用。
+        """
+        removed = await delete_user_access_tokens(user.id)
+        logger.info("用户更新，已失效其全部会话: id=%s 删除=%d", user.id, removed)
 
 
 async def get_user_manager(user_db: SQLAlchemyUserDatabase = Depends(get_user_db)):  # noqa: B008

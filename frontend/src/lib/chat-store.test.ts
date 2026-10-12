@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent } from '../types'
+import { buildLiveMessage } from './chat-message'
 import {
   activeSessionIds,
   appendNotice,
@@ -12,9 +13,10 @@ import {
   flushNow,
   getRun,
   getRunVersion,
-  getRunningSessionIds,
   getRunningSessionsKey,
   isRunActive,
+  isRunPersistFailed,
+  markRunPersistFailed,
   removeRun,
   subscribeRun,
   subscribeRunningSessions,
@@ -92,6 +94,34 @@ describe('run 生命周期', () => {
     start('a')
     applyEvent('a', { type: 'done' })
     finishRun('a', {})
+
+    expect(getRun('a')!.incomplete).toBe(false)
+  })
+
+  it('error 是合法终止，不算 incomplete', () => {
+    start('a')
+    applyEvent('a', { type: 'error', message: '上游炸了' })
+    finishRun('a', {})
+
+    // 只认 done 会把正常报错判成「连接中断」：用户先看到错误，又看到一句内容不完整
+    expect(getRun('a')!.sawError).toBe(true)
+    expect(getRun('a')!.incomplete).toBe(false)
+  })
+
+  it('丢过帧（damaged）时即使随后收到 done 也算 incomplete', () => {
+    start('a')
+    applyEvent('a', { type: TRANSPORT_INCOMPLETE, damaged: true })
+    applyEvent('a', { type: 'done' })
+    finishRun('a', {})
+
+    expect(getRun('a')!.damaged).toBe(true)
+    expect(getRun('a')!.incomplete).toBe(true)
+  })
+
+  it('用户主动停止不算 incomplete', () => {
+    start('a')
+    applyEvent('a', { type: 'error', message: '上游炸了' })
+    finishRun('a', { stopped: true })
 
     expect(getRun('a')!.incomplete).toBe(false)
   })
@@ -215,6 +245,64 @@ describe('事件折叠', () => {
   })
 })
 
+describe('partOrder（内容块到达顺序）', () => {
+  it('按事件到达顺序记录：思考 → 工具 → 正文', () => {
+    start('a')
+    applyEvent('a', { type: 'thinking', delta: '想了' })
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 'tavily_search', args: '{}' })
+    applyEvent('a', { type: 'content', delta: '答' })
+
+    expect(getRun('a')!.partOrder).toEqual(['reasoning', 'tool-call', 'text'])
+  })
+
+  it('同一类块的后续增量不重复占位', () => {
+    start('a')
+    applyEvent('a', { type: 'thinking', delta: '想' })
+    applyEvent('a', { type: 'thinking', delta: '了' })
+    applyEvent('a', { type: 'content', delta: '答' })
+    applyEvent('a', { type: 'content', delta: '案' })
+
+    expect(getRun('a')!.partOrder).toEqual(['reasoning', 'text'])
+  })
+
+  it('每个新工具调用各占一位：同名不同 id 不合并', () => {
+    start('a')
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 'tavily_search', args: '{}' })
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c2', tool_name: 'tavily_search', args: '{}' })
+
+    // 两个块：只占一位会让第二个调用被补到末尾，画错与正文的先后关系
+    expect(getRun('a')!.partOrder).toEqual(['tool-call', 'tool-call'])
+  })
+
+  it('同一 id 的 tool_call 重发不重复占位', () => {
+    start('a')
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 't', args: '{}' })
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 't', args: '{}' })
+
+    expect(getRun('a')!.partOrder).toEqual(['tool-call'])
+  })
+
+  it('空增量不占位（没有内容的块不该出现在顺序表里）', () => {
+    start('a')
+    applyEvent('a', { type: 'thinking', delta: '' })
+    applyEvent('a', { type: 'content', delta: '' })
+
+    expect(getRun('a')!.partOrder).toEqual([])
+  })
+
+  it('与 chat-message 对接：渲染出的部件顺序等于事件到达顺序', () => {
+    start('a')
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 't', args: '{}' })
+    applyEvent('a', { type: 'content', delta: '中间的话' })
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c2', tool_name: 't', args: '{}' })
+
+    const parts = buildLiveMessage(getRun('a')!).content as unknown as Array<{ type: string }>
+
+    // 按类型分组会把工具全顶到最前面，这里锁住「工具夹在正文两侧」的还原能力
+    expect(parts.map((part) => part.type)).toEqual(['tool-call', 'text', 'tool-call'])
+  })
+})
+
 describe('appendNotice', () => {
   it('带 detail 时格式为 label: detail', () => {
     start('a')
@@ -298,8 +386,27 @@ describe('订阅粒度（O-1）', () => {
     applyEvent('a', { type: 'content', delta: 'x' })
     flushNow()
 
-    expect(getRunVersion('a')).toBe(beforeA + 1)
+    // 版本号来自全局单调计数器（不回退），因此只断言「自己变大、别人不动」
+    expect(getRunVersion('a')).toBeGreaterThan(beforeA)
     expect(getRunVersion('b')).toBe(beforeB)
+  })
+
+  it('run 被移除后版本号继续递增（同值不会触发重渲染）', () => {
+    start('a')
+    flushNow()
+    const before = getRunVersion('a')
+    expect(before).toBeGreaterThan(0)
+
+    removeRun('a')
+    flushNow()
+    const afterRemove = getRunVersion('a')
+    // 旧实现删掉版本记录后从 1 重新开始：快照没变 → useSyncExternalStore 不重渲染，
+    // 界面会停在已经被删除的 run 上
+    expect(afterRemove).toBeGreaterThan(before)
+
+    start('a')
+    flushNow()
+    expect(getRunVersion('a')).toBeGreaterThan(afterRemove)
   })
 
   it('未订阅的通知不会打扰 running-sessions 订阅者（流式增量不算集合变化）', () => {
@@ -341,7 +448,11 @@ describe('订阅粒度（O-1）', () => {
     flushNow()
 
     expect(getRunningSessionsKey()).toBe('a,b')
-    expect(getRunningSessionIds()).toEqual(['a', 'b'])
+
+    finishRun('a', {})
+    flushNow()
+
+    expect(getRunningSessionsKey()).toBe('b')
   })
 })
 
@@ -385,5 +496,34 @@ describe('清理', () => {
     flushNow()
 
     expect(isRunActive('a')).toBe(true)
+  })
+})
+
+describe('落库失败（persistFailed）', () => {
+  it('标记后 clearFinishedRun 不再丢弃内存态', () => {
+    start('a')
+    applyEvent('a', { type: 'content', delta: '刚流出的回复' })
+    applyEvent('a', { type: 'done' })
+    markRunPersistFailed('a')
+    finishRun('a', {})
+
+    clearFinishedRun('a')
+    flushNow()
+
+    // DB 里还是旧内容：丢掉内存态等于用旧内容替换刚流出的回复
+    expect(getRun('a')!.content).toBe('刚流出的回复')
+    expect(isRunPersistFailed('a')).toBe(true)
+  })
+
+  it('重复标记只返回一次 true（调用方据此只报错一次）', () => {
+    start('a')
+
+    expect(markRunPersistFailed('a')).toBe(true)
+    expect(markRunPersistFailed('a')).toBe(false)
+  })
+
+  it('没有 run 时标记与查询都是空操作', () => {
+    expect(markRunPersistFailed('nope')).toBe(false)
+    expect(isRunPersistFailed('nope')).toBe(false)
   })
 })

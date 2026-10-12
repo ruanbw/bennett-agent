@@ -14,19 +14,45 @@ import asyncio
 import logging
 import re
 
+import httpx
 import pydantic
 import pytest
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
+    FunctionToolCallEvent,
     ModelRequest,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
+    TextPart,
+    ToolCallPart,
+    ToolCallPartDelta,
 )
 
 from app.schemas.chat import ChatMessage
 from app.services import chat_service
-from app.services.chat_service import InvalidChatHistory, convert_chat_history
+from app.services.chat_service import CLARIFICATION_TOOL_NAME, InvalidChatHistory, convert_chat_history
+
+
+@pytest.fixture(autouse=True)
+def _reset_unknown_event_warnings():
+    """未识别事件的告警按类型**全局**去重，不隔离就会跨用例互相吞掉日志。"""
+    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
+    yield
+    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
 
 
 def msg(role, content="", thinking=None):
     return ChatMessage(role=role, content=content, thinking=thinking)
+
+
+def blank_user_message():
+    """绕过 schema 构造一条空白 user 消息。
+
+    schema 层（F4）已经拒绝空白 user 内容，但 `convert_chat_history` 是公开函数，
+    服务层必须自己也能拦住——这里用 `model_construct` 模拟绕过校验的调用方。
+    """
+    return ChatMessage.model_construct(role="user", content="   ", thinking=None)
 
 
 def describe(history):
@@ -58,7 +84,22 @@ def test_last_message_must_be_user():
 
 def test_last_message_must_not_be_blank():
     with pytest.raises(InvalidChatHistory, match="最后一条消息必须是内容非空的 user 消息"):
-        convert_chat_history([msg("user", "   \n  ")])
+        convert_chat_history([blank_user_message()])
+
+
+def test_history_must_start_with_user():
+    """以 assistant 开头会装配出非法的 request/response 序列。
+
+    schema 层也会拦一道，但 `convert_chat_history` 是公开函数，服务层自己必须有
+    显式检查——否则别的调用方（脚本、未来的接口）会直接撞到模型侧的报错。
+    """
+    with pytest.raises(InvalidChatHistory, match="首条消息必须是 user 消息"):
+        convert_chat_history([msg("assistant", "答"), msg("user", "问")])
+
+
+def test_history_must_start_with_user_even_when_shorter():
+    with pytest.raises(InvalidChatHistory, match="首条消息必须是 user 消息"):
+        convert_chat_history([msg("assistant", "只有一条")])
 
 
 def test_invalid_chat_history_is_a_value_error():
@@ -177,8 +218,50 @@ def collect_events(messages):
     return asyncio.run(run())
 
 
+def fake_stream(events=(), error=None, hang=False):
+    """把一串 pydantic-ai 事件包成 `run_stream_events` 需要的异步上下文。"""
+
+    class FakeStream:
+        def __init__(self):
+            self._events = list(events)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._events:
+                return self._events.pop(0)
+            if error is not None:
+                raise error
+            if hang:
+                await asyncio.sleep(3600)
+            raise StopAsyncIteration
+
+    return FakeStream()
+
+
+def fake_agent(events=(), error=None, hang=False):
+    class FakeAgent:
+        def run_stream_events(self, *_args, **_kwargs):
+            return fake_stream(events, error=error, hang=hang)
+
+    return FakeAgent()
+
+
+def clarification_call(args, tool_call_id="ask-1"):
+    return FunctionToolCallEvent(
+        part=ToolCallPart(tool_name=CLARIFICATION_TOOL_NAME, args=args, tool_call_id=tool_call_id)
+    )
+
+
 def test_invalid_history_message_reaches_the_client():
-    events = collect_events([msg("user", "   ")])
+    events = collect_events([blank_user_message()])
 
     assert events[-1].type == "error"
     assert "最后一条消息必须是内容非空的 user 消息" in events[-1].message
@@ -187,7 +270,7 @@ def test_invalid_history_message_reaches_the_client():
 def test_invalid_history_does_not_log_a_traceback(caplog):
     """校验失败是预期路径，不该污染错误日志。"""
     with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
-        collect_events([msg("user", "   ")])
+        collect_events([blank_user_message()])
 
     assert [record for record in caplog.records if record.exc_info] == []
 
@@ -282,3 +365,284 @@ def test_stream_error_is_terminal_and_exclusive(monkeypatch):
     types = [event.type for event in collect_events([msg("user", "你好")])]
 
     assert types == ["error"]
+
+
+# ---------------------------------------------------------------------
+# 上游错误分类（P1）
+#
+# 此前整段流只有一个 `except Exception`，401/404/429 全都回「生成异常，请重试」——
+# 用户无从判断是该换模型、等一会儿，还是找管理员。分类只依据状态码/超时两个信号，
+# 上游原文（响应体、URL、密钥上下文）仍然只进日志。
+# ---------------------------------------------------------------------
+def http_error(status, body=None):
+    return ModelHTTPError(status_code=status, model_name="openai/gpt-4o", body=body)
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (401, "上游认证配置问题"),
+        (403, "上游认证配置问题"),
+        (400, "模型不可用"),
+        (404, "模型不可用"),
+        (429, "上游限流"),
+        (500, "服务暂时不可用"),
+        (502, "服务暂时不可用"),
+        (503, "服务暂时不可用"),
+    ],
+)
+def test_http_status_is_classified(status, expected):
+    assert expected in chat_service.upstream_error_message(http_error(status))
+
+
+def test_timeout_is_classified_as_service_unavailable():
+    """pydantic-ai 把超时包成没有 status_code 的 ModelAPIError，原因只在 __cause__ 链上。"""
+    error = ModelAPIError(model_name="openai/gpt-4o", message="Request timed out.")
+    error.__cause__ = httpx.ReadTimeout("timed out")
+
+    assert chat_service.upstream_error_message(error) == "服务暂时不可用，请重试"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("no status_code at all"),
+        http_error(418),
+        ModelAPIError(model_name="openai/gpt-4o", message="connection reset"),
+    ],
+)
+def test_unclassifiable_errors_fall_back_to_the_generic_message(error):
+    """取不到属性、类型不对、或状态码不在表里，都必须走通用分支而不是猜。"""
+    assert chat_service.upstream_error_message(error) == "生成异常，请重试"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http_error(401, body={"error": "sk-live-secret-should-not-leak"}),
+        http_error(429, body={"error": "rate limited by upstream-key-abcd"}),
+        RuntimeError("raw upstream detail"),
+    ],
+)
+def test_upstream_details_never_reach_the_client(monkeypatch, error):
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(error=error))
+
+    events = collect_events([msg("user", "你好")])
+
+    assert events[-1].type == "error"
+    assert "secret" not in events[-1].message
+    assert "raw upstream detail" not in events[-1].message
+    assert re.search(r"错误编号 [0-9a-f]{12}", events[-1].message)
+
+
+def test_classified_error_is_logged_with_its_correlation_id(monkeypatch, caplog):
+    secret = "upstream-body-detail"
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(error=http_error(429, secret)))
+
+    with caplog.at_level(logging.ERROR, logger="app.services.chat_service"):
+        events = collect_events([msg("user", "你好")])
+
+    assert "上游限流" in events[-1].message
+    # 服务端仍然要看得到原文与关联 ID
+    assert secret in caplog.text
+    error_id = re.search(r"错误编号 ([0-9a-f]{12})", events[-1].message).group(1)
+    assert error_id in caplog.text
+
+
+# ---------------------------------------------------------------------
+# 总时长预算（P1）
+#
+# 上游超时是「空闲」语义，SDK 又在下面叠了重试，单轮对话此前可以无限拖长。
+# 超预算必须以 StreamError 收尾；而**任务取消**（客户端断开）必须原样上抛。
+# ---------------------------------------------------------------------
+def test_total_budget_timeout_produces_a_terminal_error(monkeypatch):
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(hang=True))
+    monkeypatch.setattr(chat_service, "TOTAL_STREAM_BUDGET_SECONDS", 0.05)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["error"]
+    assert events[0].message == "生成超时，请重试"
+
+
+def test_events_already_streamed_are_kept_when_the_budget_runs_out(monkeypatch):
+    """超时不是「什么都没发」：已经产出的增量必须留给客户端。"""
+    stream_events = [PartStartEvent(index=0, part=TextPart(content="开头"))]
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(stream_events, hang=True))
+    monkeypatch.setattr(chat_service, "TOTAL_STREAM_BUDGET_SECONDS", 0.05)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["content", "error"]
+    assert events[0].delta == "开头"
+
+
+async def test_cancellation_propagates_instead_of_becoming_a_stream_error(monkeypatch):
+    """客户端断开走的是 CancelledError（BaseException），不能被翻译成错误事件。
+
+    否则会往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
+    """
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(hang=True))
+
+    stream = chat_service.stream_chat_events("openai/gpt-4o", [msg("user", "你好")])
+    pending = asyncio.ensure_future(stream.__anext__())
+    await asyncio.sleep(0.05)  # 让生成器真正卡在等待上游事件上
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    await stream.aclose()
+
+
+# ---------------------------------------------------------------------
+# 意图确认事件（P1）
+# ---------------------------------------------------------------------
+def test_clarification_options_are_stripped_and_deduped():
+    events = list(
+        chat_service.translate_event(
+            clarification_call(
+                {
+                    "question": "选哪个？",
+                    "options": ["  React  ", "React", "Vue", "   ", "", "Vue"],
+                }
+            )
+        )
+    )
+
+    assert events[0].options == ["React", "Vue"]
+
+
+@pytest.mark.parametrize(
+    "raw_options",
+    [
+        None,
+        [],
+        ["只有一个"],
+        ["A", "  ", ""],
+        ["A", "  A  "],  # strip + 去重后只剩一个
+        "A,B",  # 不是列表
+    ],
+)
+def test_clarification_needs_two_effective_options(caplog, raw_options):
+    """与 `ask_user_clarification` 的「≥ 2 个不同非空选项」保持一致。
+
+    否则模型传错参数时，用户会先看到一个只有 0/1 个选项、点不出结果的弹窗，
+    而工具其实已经把「参数不合法」返回给了模型。
+    """
+    args = {"question": "选哪个？"}
+    if raw_options is not None:
+        args["options"] = raw_options
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        events = list(chat_service.translate_event(clarification_call(args)))
+
+    assert events == []
+    assert "意图确认选项不足 2 个有效值" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, True),
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("1", True),
+        ("false", False),
+        ("FALSE", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+        (" off ", False),
+        ("", False),
+    ],
+)
+def test_allow_custom_input_is_parsed_explicitly(raw, expected):
+    """回归 `bool("false") is True`：网关把布尔值当字符串回传时输入框会错误地打开。"""
+    args = {"question": "选哪个？", "options": ["A", "B"]}
+    if raw is not None:
+        args["allow_custom_input"] = raw
+
+    events = list(chat_service.translate_event(clarification_call(args)))
+
+    assert events[0].allow_custom_input is expected
+
+
+def test_duplicate_clarification_in_one_round_is_ignored_after_the_first(monkeypatch):
+    """同一轮里模型可能对同一次提问重复发工具调用，前端弹窗只该出现一次。"""
+    args = {"question": "选哪个？", "options": ["A", "B"]}
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([clarification_call(args, "ask-1"), clarification_call(args, "ask-1")]),
+    )
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["clarification", "done"]
+
+
+def test_distinct_clarification_ids_are_both_emitted(monkeypatch):
+    """去重只针对相同的 tool_call_id，不能连合法的第二次提问一起吞掉。"""
+    first = {"question": "第一步？", "options": ["A", "B"]}
+    second = {"question": "第二步？", "options": ["C", "D"]}
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([clarification_call(first, "ask-1"), clarification_call(second, "ask-2")]),
+    )
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["clarification", "clarification", "done"]
+
+
+def test_failed_clarification_does_not_block_a_later_valid_one(monkeypatch):
+    """第一次入参坏掉（不发事件）不该把同 id 的合法重发也一起废掉。"""
+    bad = {"question": "选哪个？", "options": ["只有一个"]}
+    good = {"question": "选哪个？", "options": ["A", "B"]}
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([clarification_call(bad, "ask-1"), clarification_call(good, "ask-1")]),
+    )
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["clarification", "done"]
+    assert events[0].options == ["A", "B"]
+
+
+# ---------------------------------------------------------------------
+# 未识别事件的告警降级（P2）
+# ---------------------------------------------------------------------
+def test_unknown_event_warns_at_warning_level_once_per_type(caplog):
+    """生产日志级别是 INFO：原来的 DEBUG 等于没记，正文会静默丢光。"""
+    unknown = PartEndEvent(index=0, part=TextPart(content="x"))
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        assert list(chat_service.translate_event(unknown)) == []
+        assert list(chat_service.translate_event(unknown)) == []
+        assert list(chat_service.translate_event(PartEndEvent(index=1, part=TextPart(content="y")))) == []
+
+    warnings = [record for record in caplog.records if "未处理的 pydantic-ai 流事件" in record.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+
+
+def test_unknown_event_message_explains_the_consequence(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        list(chat_service.translate_event(PartEndEvent(index=0, part=TextPart(content="x"))))
+
+    assert "静默丢弃" in caplog.text
+
+
+def test_tool_call_delta_stays_a_deliberate_debug_ignore(caplog):
+    """工具入参增量是有意忽略的常见事件，不该被当成「未识别」发 WARNING。"""
+    with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
+        events = list(chat_service.translate_event(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta="{"))))
+
+    assert events == []
+    assert "ToolCallPartDelta" in caplog.text
+    assert [record.levelno for record in caplog.records if record.levelno >= logging.WARNING] == []

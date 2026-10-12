@@ -65,16 +65,21 @@ function normalizeLevelList(raw: unknown): string[] {
  * 1. 模型明确声明「不支持思考」（`reasoning === false`）→ 返回空数组。
  *    `app/services/model_service.py` 的兜底模型正是 `reasoning: false` + 空等级，
  *    它的注释写明这是为了「避免用户选择后请求失败」——这里必须尊重它。
- * 2. 模型支持思考且枚举了等级 → 用后端给的，加上 `'off'`。
+ * 2. 网关**枚举过**等级（原始数组非空）→ 只认它给的。全部被过滤时（例如只声明关闭
+ *    别名 `["none"]`/`["off"]`）只剩「关闭」，不回退默认集：那会让用户选到网关没
+ *    声明的等级，正是上一条要避免的失败。
  * 3. 模型支持思考但没枚举等级（很多 OpenAI 兼容网关不返回该字段），或模型信息
  *    尚不可用 → 用 `DEFAULT_LEVELS`。
  */
 export function levelsFor(model?: ModelItem | null): string[] {
   if (model && model.reasoning === false) return [];
 
-  const declared = normalizeLevelList(model?.supported_reasoning_levels);
-  const levels = declared.length > 0 ? declared : [...DEFAULT_LEVELS];
-  return [OFF, ...levels];
+  const raw = model?.supported_reasoning_levels;
+  // 判断「有没有枚举过」看**原始**列表，不看归一化结果：["none"] 归一化后为空，
+  // 但它明确表达了「这个模型只能关闭思考」。
+  if (Array.isArray(raw) && raw.length > 0) return [OFF, ...normalizeLevelList(raw)];
+
+  return [OFF, ...DEFAULT_LEVELS];
 }
 
 /** 是否应展示思考等级选择器。模型明确不支持思考时不展示。 */

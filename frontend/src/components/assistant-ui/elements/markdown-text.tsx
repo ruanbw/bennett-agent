@@ -30,7 +30,7 @@ const MarkdownTextImpl = () => {
 export const MarkdownText = memo(MarkdownTextImpl);
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
-  const { isCopied, copyToClipboard } = useCopyToClipboard();
+  const { isCopied, error, copyToClipboard } = useCopyToClipboard();
   const onCopy = () => {
     if (!code || isCopied) return;
     copyToClipboard(code);
@@ -41,14 +41,25 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {language}
       </span>
-      <TooltipIconButton tooltip="Copy" onClick={onCopy}>
-        {!isCopied && (
-          <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+      <span className="flex items-center gap-1.5">
+        {/* 剪贴板不可用时不再静默失败：明示失败，按钮保留用于重试 */}
+        {error && (
+          <span role="alert" className="aui-code-header-copy-error text-destructive">
+            复制失败
+          </span>
         )}
-        {isCopied && (
-          <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-        )}
-      </TooltipIconButton>
+        <TooltipIconButton
+          tooltip={error ? "复制失败，请重试" : "Copy"}
+          onClick={onCopy}
+        >
+          {!isCopied && (
+            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+          )}
+          {isCopied && (
+            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+          )}
+        </TooltipIconButton>
+      </span>
     </div>
   );
 };
@@ -124,6 +135,20 @@ const defaultComponents = memoizeMarkdownComponents({
         className,
       )}
       {...props}
+      // 外链在后台标签页打开：同页跳转会卸载应用、掐断正在流式的回答。
+      target="_blank"
+      rel="noopener noreferrer"
+    />
+  ),
+  img: ({ className, alt, ...props }) => (
+    <img
+      alt={alt ?? ""}
+      className={cn("aui-md-img h-auto max-w-full", className)}
+      {...props}
+      // 模型输出的图片是第三方外链：不带 Referer 过去（避免泄露本地会话地址），
+      // 且懒加载，不做可被当作追踪像素的即时请求。
+      loading="lazy"
+      referrerPolicy="no-referrer"
     />
   ),
   blockquote: ({ className, ...props }) => (

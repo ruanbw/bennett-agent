@@ -13,6 +13,15 @@ const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
 const DATA_PREFIX = 'data:';
 
+/**
+ * 空闲看门狗阈值：连续这么久没收到**任何字节**就认定连接已半开。
+ *
+ * 依据：sse-starlette 默认每 15s 发一条 `: ping` 注释帧，活着的连接不会真的静默
+ * 这么久（注释帧同样是字节，同样喂狗）；反过来，断网无 FIN 或上游卡死时，用户
+ * 不该对着「生成中」干等——到点中止请求并按不完整收尾。
+ */
+export const IDLE_TIMEOUT_MS = 60_000;
+
 export interface StreamChatParams {
   model: string | null;
   reasoningEffort: string | null;
@@ -21,6 +30,20 @@ export interface StreamChatParams {
 }
 
 type ParseErrorHandler = (error: unknown, payload: string) => void;
+
+/**
+ * 载荷形状校验。
+ *
+ * `JSON.parse(...) as ChatEvent` 是零运行时保证的断言：`data: null` 满足
+ * `!== undefined` 被原样 yield，紧接着 `event.type` 抛 TypeError，整条流断在用户
+ * 眼前的「请求失败: Cannot read properties of null」。这里只要求「对象 + type 是
+ * 字符串」，不枚举具体类型：服务端将来新增事件类型时按未知事件忽略（chat-store
+ * 的 default 分支），不因为版本错位就把连接判死。
+ */
+function isChatEventShape(value: unknown): value is ChatEvent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return typeof (value as { type?: unknown }).type === 'string';
+}
 
 /**
  * 解析一个 SSE 帧。
@@ -39,15 +62,32 @@ function parseFrame(frame: string, onParseError: ParseErrorHandler): ChatEvent |
   const payload = dataLines.join('\n');
   if (!payload) return undefined;
 
+  let parsed: unknown;
   try {
-    return JSON.parse(payload) as ChatEvent;
+    parsed = JSON.parse(payload);
   } catch (error) {
     // 丢掉一帧意味着用户会看到一段内容缺口，必须让调用方知道
     onParseError(error, payload);
     return undefined;
   }
+
+  if (!isChatEventShape(parsed)) {
+    // 与解析失败同等对待：内容已经缺了一块，而且下一行 `event.type` 会直接抛错
+    onParseError(new Error('SSE 载荷不是事件对象'), payload);
+    return undefined;
+  }
+  return parsed;
 }
 
+/**
+ * 读事件流：分帧 → 产出事件。
+ *
+ * 三件事保证「读不完也不会挂着」：
+ *   - 每次 read 之前重新计时，因此收到任何字节（含心跳注释帧）都重置空闲看门狗；
+ *   - 流结束时 flush 一次 decoder：截断在多字节序列中间的半个字不会被静默吞掉；
+ *   - 提前退出（调用方 break / 循环体抛错 / 空闲超时）时 cancel 响应体——只
+ *     releaseLock 不会关闭底层连接，浏览器会继续收，后端也会继续生成并计费。
+ */
 async function* parseEventStream(
   body: ReadableStream<Uint8Array>,
   onParseError: ParseErrorHandler,
@@ -55,11 +95,42 @@ async function* parseEventStream(
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let reachedEnd = false;
+  let idleTimedOut = false;
+
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearIdleTimer = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+  };
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      // 看门狗与 read 竞速：signal 触发 abort 时 read 自己会 reject，但「半开连接」
+      // 什么都不会发生——必须由我们把这次等待切开。计时器只在等 read 的这段时间
+      // 里走：数据一到就停表，消费者处理（yield 之后）不该被算成空闲。
+      let fireIdle: (() => void) | null = null;
+      const idleSignal = new Promise<void>((resolve) => {
+        fireIdle = resolve;
+      });
+      idleTimer = setTimeout(() => fireIdle?.(), IDLE_TIMEOUT_MS);
+
+      const read = await Promise.race([
+        reader.read().then((result) => ({ idle: false as const, result })),
+        idleSignal.then(() => ({ idle: true as const })),
+      ]);
+      clearIdleTimer();
+
+      if (read.idle) {
+        idleTimedOut = true;
+        break;
+      }
+
+      const { done, value } = read.result;
+      if (done) {
+        reachedEnd = true;
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
 
@@ -73,12 +144,54 @@ async function* parseEventStream(
       }
     }
 
-    // 流结束时缓冲区可能还剩最后一帧（服务端没有以空行收尾）
-    const tail = parseFrame(buffer, onParseError);
-    if (tail !== undefined) yield tail;
+    if (!idleTimedOut) {
+      // 流结束：flush 掉 decoder 里可能残留的半个多字节序列，它变成 U+FFFD 交给
+      // 解析器诊断，而不是无声消失（缓冲区也可能还剩没以空行收尾的最后一帧）。
+      buffer += decoder.decode();
+      const tail = parseFrame(buffer, onParseError);
+      if (tail !== undefined) yield tail;
+    }
   } finally {
+    clearIdleTimer();
+    if (!reachedEnd) {
+      // cancel 会取消响应体，浏览器据此关闭连接、服务端停止生成。读完整条流时不必
+      // 再 cancel；已被 abort 的流上 cancel 会以 AbortError reject，吞掉是刻意的：
+      // 该上抛的异常已经在栈上，清理动作不能把它盖住。
+      try {
+        await reader.cancel();
+      } catch {
+        /* 清理期的报错没有信息量 */
+      }
+    }
     reader.releaseLock();
   }
+}
+
+/**
+ * 把失败响应翻译成给用户看的错误。
+ *
+ * 429 单独处理：限流是**有恢复时间**的失败，用户需要知道等多久（后端在
+ * `Retry-After` 里给了秒数），而不是一句「HTTP 错误: 429」。
+ */
+async function requestError(response: Response): Promise<Error> {
+  if (response.status === 429) {
+    const seconds = parseRetryAfterSeconds(response.headers.get('Retry-After'));
+    return new Error(
+      seconds === null
+        ? 'HTTP 429: 请求过于频繁，请稍后重试'
+        : `HTTP 429: 请求过于频繁，请 ${seconds} 秒后重试`,
+    );
+  }
+
+  const detail = await readErrorDetail(response);
+  return new Error(detail ? `HTTP ${response.status}: ${detail}` : `HTTP 错误: ${response.status}`);
+}
+
+/** `Retry-After` 的秒数形式（HTTP-date 形式网关不用，解析不出就退回「稍后」）。 */
+function parseRetryAfterSeconds(header: string | null): number | null {
+  if (header === null) return null;
+  const seconds = Number.parseInt(header.trim(), 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 /**
@@ -105,8 +218,7 @@ export async function* streamChat({
   });
 
   if (!response.ok) {
-    const detail = await readErrorDetail(response);
-    throw new Error(detail ? `HTTP ${response.status}: ${detail}` : `HTTP 错误: ${response.status}`);
+    throw await requestError(response);
   }
   if (!response.body) {
     throw new Error('响应没有可读的流式主体');

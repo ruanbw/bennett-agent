@@ -6,12 +6,16 @@
  *
  * 注册成功后由 `useAuth` 自动登录——后端注册接口只返回用户信息、不下发 cookie，
  * 让用户注册完再手填一遍密码是纯粹的摩擦。
+ *
+ * 但自动登录**可能**失败（cookie 没被接受、探测超时）。那时账号其实已经建好了，
+ * 留在注册模式再点一次只会拿到「该邮箱已注册」，所以这里切回登录模式，让用户直接
+ * 登录（提示文案由 `useAuth` 的错误状态给出）。
  */
 
 import { useCallback, useState, type FormEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 
-import { MIN_PASSWORD_LENGTH } from '../lib/auth';
+import { MIN_PASSWORD_LENGTH, modeAfterRegister, type RegisterOutcome } from '../lib/auth';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -20,7 +24,8 @@ type Mode = 'login' | 'register';
 
 export interface LoginPageProps {
   onLogin: (email: string, password: string) => Promise<boolean>;
-  onRegister: (email: string, password: string) => Promise<boolean>;
+  /** 返回值区分「注册失败」与「账号已创建但自动登录失败」（见 `RegisterOutcome`）。 */
+  onRegister: (email: string, password: string) => Promise<RegisterOutcome>;
   /** 请求进行中：禁用提交，避免重复提交。 */
   pending: boolean;
   error: string | null;
@@ -44,7 +49,15 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
       event.preventDefault();
       if (!canSubmit) return;
 
-      await (isRegister ? onRegister : onLogin)(email.trim(), password);
+      if (!isRegister) {
+        await onLogin(email.trim(), password);
+        return;
+      }
+
+      const outcome = await onRegister(email.trim(), password);
+      // 账号已创建时切回登录模式，让用户直接点登录；保留 useAuth 刚设好的提示，
+      // 所以不能走 switchMode（它会清错误）。判定本身在 lib 层（可测）。
+      setMode(modeAfterRegister(outcome));
     },
     [canSubmit, email, isRegister, onLogin, onRegister, password],
   );
@@ -57,8 +70,9 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
 
   const invalid = tooShort || Boolean(error);
 
+  // 高度交给 .app-shell（100dvh）：iOS Safari 的 100vh 是含地址栏的大视口，会把底部内容顶出可视区
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-background px-4 font-sans text-foreground antialiased">
+    <div className="app-shell flex w-screen items-center justify-center bg-background px-4 font-sans text-foreground antialiased">
       <div className="absolute top-4 right-4">
         <ThemeSwitcher />
       </div>

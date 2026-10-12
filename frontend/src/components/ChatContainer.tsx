@@ -1,6 +1,7 @@
 import { PanelLeft, Plus } from 'lucide-react';
 
 import { Thread } from './assistant-ui/elements/thread.aui';
+import { ChatSessionNotices } from './ChatProvider';
 import type { ModelItem } from '../types';
 
 export interface ChatContainerProps {
@@ -10,7 +11,7 @@ export interface ChatContainerProps {
   currentReasoningEffort?: string;
   onSelectModel: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
-  onRefreshModels?: () => void;
+  onRefreshModels?: () => void | Promise<unknown>;
   onToggleSidebar: () => void;
   // 既当 onClick 用，也（在 App 层）传给 Sidebar；两处都接受同步或异步实现
   onCreateSession?: () => void | Promise<unknown>;
@@ -61,6 +62,12 @@ export function ChatContainer({
           </button>
         )}
       </header>
+
+      {/*
+        会话级提示条（发送未成功 / 本轮回复未能落库）。放在对话区顶部而不是塞进消息流：
+        它描述的是「这一轮的状态」，不是某条消息的内容，也绝不能挡住后续发送。
+      */}
+      <ChatSessionNotices />
 
       <div className="flex-1 overflow-hidden">
         <Thread

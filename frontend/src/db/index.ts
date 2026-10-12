@@ -94,9 +94,13 @@ export class ChatDatabase extends Dexie {
       messages: 'id, sessionId, role, createdAt',
     });
 
-    this.on('versionchange', () => {
-      this.close();
-    });
+    // 这里**刻意不**自己监听 versionchange。
+    //
+    // Dexie 构造时会注册内建处理器，用 `close({ disableAutoOpen: false })` 关连接：
+    // 下次读写会自动按新版本重开。此前这里额外挂了一个 `this.close()`，而 close 默认
+    // `disableAutoOpen: true`——它在内建处理器之后执行，等于把自动重开永久关死。于是
+    // 其他标签页升级 schema 后，本标签页的读写全部 reject（会话列表显示为空）。
+    // 需要提示用户时用 `blocked` 事件即可，不要碰 versionchange 的默认语义。
 
     this.on('blocked', () => {
       console.warn('数据库升级被阻挡，请关闭其他标签页');
@@ -105,3 +109,26 @@ export class ChatDatabase extends Dexie {
 }
 
 export const db = new ChatDatabase();
+
+/**
+ * 清空全部本地会话与消息（登出、换账号时用）。
+ *
+ * 必须放在一个事务里：分开 clear 的话，中途失败会留下「会话没了消息还在」的
+ * 半清空状态，下一次加载要么显示孤立的空会话，要么读到不属于当前账号的残留。
+ */
+export async function clearAllLocalData(): Promise<void> {
+  await db.transaction('rw', db.sessions, db.messages, async () => {
+    await db.messages.clear();
+    await db.sessions.clear();
+  });
+}
+
+/**
+ * 按 id 批量删除消息（发送失败时回滚刚写入的用户/助手占位消息）。
+ *
+ * 用 bulkDelete 一次成批删除：逐条 delete 会在失败中留下只回滚了一半的消息。
+ */
+export async function deleteMessages(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db.messages.bulkDelete(ids);
+}

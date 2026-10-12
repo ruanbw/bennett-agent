@@ -83,7 +83,8 @@ class StreamError(BaseModel):
     """本轮失败。
 
     `message` 只允许放可以外泄的文案：校验类错误可以给原文，内部异常只能给关联 ID。
-    见 `chat_service.StreamFailure` 与 CODE_REVIEW.md C-4。
+    这条边界由 `app/services/chat_service.py::stream_chat_events` 的三条兜底分支
+    实现（`_new_error_id` 只把 ID 回给客户端），背景见 CODE_REVIEW.md C-4。
     """
 
     type: Literal["error"] = "error"

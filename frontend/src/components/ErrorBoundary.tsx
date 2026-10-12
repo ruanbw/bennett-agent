@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, RefreshCw, RotateCw } from 'lucide-react';
 import { Button } from './ui/button';
 
 export interface ErrorBoundaryProps {
@@ -32,6 +32,13 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     this.setState({ hasError: false, error: null });
   };
 
+  handleReload = () => {
+    // 先重置 state：reload 在某些嵌入环境（iframe / 预览沙箱）里会被拦下，
+    // 那时至少要让界面回到可尝试的状态，而不是停在错误页
+    this.setState({ hasError: false, error: null });
+    window.location.reload();
+  };
+
   override render() {
     if (this.state.hasError) {
       return (
@@ -45,16 +52,29 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           <p className="text-xs text-muted-foreground max-w-md mb-4 break-words">
             {this.state.error?.message || '组件渲染发生未预期的错误，请重试或刷新页面。'}
           </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={this.handleRetry}
-            className="cursor-pointer gap-1.5"
-          >
-            <RefreshCw className="size-3.5" />
-            重试
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={this.handleRetry}
+              className="cursor-pointer gap-1.5"
+            >
+              <RefreshCw className="size-3.5" />
+              重试
+            </Button>
+            {/* 重试只重置边界本身；异常若来自环境/模块级问题，重试必然再炸一次，需要整页重载 */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={this.handleReload}
+              className="cursor-pointer gap-1.5"
+            >
+              <RotateCw className="size-3.5" />
+              重新加载
+            </Button>
+          </div>
         </div>
       );
     }

@@ -9,19 +9,23 @@ R-3：改动前有两个工厂——`main.create_agent()` 与 `chat_service.get_
 
 O-2：装配结果按参数缓存。pydantic-ai 的 `Agent` 设计上就是可复用的（常见用法是模块级
 建一个），而此前每条消息都要重建 provider + model + agent。
+
+缓存的键是「归一化后的参数 + settings 派生值」：不这么做时，客户端换个大小写就能各占
+一个缓存槽（把真实条目挤出去），运维改了 .env 也只能重启进程才生效。
 """
 
 import logging
 from functools import lru_cache
 
 import httpx
+from openai import AsyncOpenAI
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
 
 from app.config import settings
 from app.prompts import prompt_manager
-from app.tools import ALL_TOOLS
+from app.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,9 @@ UPSTREAM_WRITE_TIMEOUT_SECONDS = 30.0
 UPSTREAM_POOL_TIMEOUT_SECONDS = 10.0
 
 #: 明确要求关闭思考时各网关接受的写法不同，统一归一化成 "none"。
-_DISABLED_EFFORT_ALIASES = frozenset({"off", "none", "false"})
+#: 取值与前端 `frontend/src/lib/reasoning-effort.ts:OFF_ALIASES` 对齐：两边不一致
+#: 会出现「界面显示已关闭、实际仍开着思考」这种不报错的错位。
+_DISABLED_EFFORT_ALIASES = frozenset({"off", "none", "false", "disabled"})
 
 
 def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
@@ -50,6 +56,9 @@ def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
 
     返回 `None` 表示不向上游传该参数（让网关用默认值）。这是思考等级归一化的
     唯一权威实现；前端侧的对应收敛见 CODE_REVIEW.md R-7。
+
+    不在别名表里的取值（例如 `xhigh` / `max` / `minimal` 这类网关自定义等级）原样
+    透传：等级词表由各网关决定，这里只做大小写与空白的收敛。
     """
     if not reasoning_effort:
         return None
@@ -59,15 +68,39 @@ def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
     return "none" if effort in _DISABLED_EFFORT_ALIASES else effort
 
 
+def _settings_cache_key() -> tuple[object, ...]:
+    """settings 中会影响装配结果的派生值，参与装配缓存键。
+
+    没有它时缓存只认 `(model_name, effort)`：运维改了 `.env`（base_url / 助手名 /
+    超时 / tavily key）后，只要进程没重启就仍在用旧 agent，表现为「配置明明改了却
+    没生效」。代价是每改一次配置就多占一个缓存槽，旧条目要等 LRU 淘汰——缓存上限
+    32，相对收益可以忽略。tavily 只取布尔值，避免把密钥原文放进键里。
+    """
+    return (
+        settings.litellm_api_base,
+        settings.app_env,
+        settings.assistant_name,
+        settings.model_upstream_timeout,
+        bool(settings.tavily_api_key),
+    )
+
+
 def build_provider() -> LiteLLMProvider:
     """构造 LiteLLM provider。
 
     所有模型接入点共用，避免 base_url 与密钥兜底逻辑第三次分叉。
+
+    这里显式关闭 SDK 的自动重试（openai 默认 `max_retries=2`）：网关（LiteLLM）
+    自己就会重试上游，两层重试叠加空闲超时会把单轮对话的最坏耗时乘上去。pydantic-ai
+    2.31.1 的 `LiteLLMProvider` 没有 `max_retries` 参数，只能自己构造 `AsyncOpenAI`
+    再通过官方支持的 `openai_client=` 传入（见其 `__init__` 重载）。
     """
-    return LiteLLMProvider(
-        api_base=settings.litellm_api_base,
+    client = AsyncOpenAI(
+        base_url=settings.litellm_api_base,
         api_key=settings.litellm_api_key or "sk-no-key",
+        max_retries=0,
     )
+    return LiteLLMProvider(openai_client=client)
 
 
 def build_upstream_timeout() -> httpx.Timeout | None:
@@ -93,15 +126,19 @@ def build_upstream_timeout() -> httpx.Timeout | None:
 
 
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
-def build_agent(model_name: str, reasoning_effort: str | None = None) -> Agent:  # noqa: ANN401
-    """装配主对话 Agent。CLI 与 Web 都必须走这里，否则两者会再次漂移。"""
+def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
+    """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
+
+    `effort` 必须已经归一化、`cache_key` 必须来自 `_settings_cache_key()`：
+    两者都只在缓存键里起作用，用来保证「等价的输入命中同一个槽位」与
+    「配置变了就换槽位」。
+    """
     system_prompt = prompt_manager.render(
         SYSTEM_PROMPT_TEMPLATE,
         app_env=settings.app_env,
         assistant_name=settings.assistant_name,
     )
 
-    effort = normalize_reasoning_effort(reasoning_effort)
     model_settings: dict[str, object] = {}
     if effort:
         model_settings["extra_body"] = {"reasoning_effort": effort}
@@ -119,13 +156,26 @@ def build_agent(model_name: str, reasoning_effort: str | None = None) -> Agent: 
     return Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=ALL_TOOLS,
+        tools=build_tools(),
     )
 
 
+def build_agent(model_name: str, reasoning_effort: str | None = None) -> Agent:  # noqa: ANN401
+    """装配主对话 Agent。CLI 与 Web 都必须走这里，否则两者会再次漂移。
+
+    归一化必须在进入缓存**之前**完成：否则 `"HIGH"` / `"high"` / `" high "` 会各占
+    一个缓存槽，客户端换个大小写或空格就能把 32 个槽位挤满，把真实条目淘汰掉。
+    """
+    return _build_agent_cached(model_name, normalize_reasoning_effort(reasoning_effort), _settings_cache_key())
+
+
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
-def build_title_agent(model_name: str) -> Agent:  # noqa: ANN401
-    """装配会话标题生成 Agent：另一个 system prompt，且不挂工具。"""
+def _build_title_agent_cached(model_name: str, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
+    """装配会话标题生成 Agent 的缓存实现，只应由 `build_title_agent` 调用。
+
+    `cache_key` 只用于缓存失效；标题 agent 只用得到其中的 base_url 与超时，
+    但共用同一个键更简单，多失效一次没有代价。
+    """
     timeout = build_upstream_timeout()
     model = OpenAIChatModel(
         model_name=model_name,
@@ -138,7 +188,12 @@ def build_title_agent(model_name: str) -> Agent:  # noqa: ANN401
     )
 
 
+def build_title_agent(model_name: str) -> Agent:  # noqa: ANN401
+    """装配会话标题生成 Agent：另一个 system prompt，且不挂工具。"""
+    return _build_title_agent_cached(model_name, _settings_cache_key())
+
+
 def reset_agent_cache() -> None:
     """清空装配缓存。供测试与「改了配置想立刻生效」的场景使用。"""
-    build_agent.cache_clear()
-    build_title_agent.cache_clear()
+    _build_agent_cached.cache_clear()
+    _build_title_agent_cached.cache_clear()

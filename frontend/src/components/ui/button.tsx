@@ -55,4 +55,5 @@ function Button({
   );
 }
 
-export { Button, buttonVariants };
+// buttonVariants 只在本文件的 Button 里用；没有外部消费者，故不再导出
+export { Button };

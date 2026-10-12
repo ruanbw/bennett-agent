@@ -33,8 +33,10 @@ export default defineConfig({
     },
   },
   test: {
-    // 纯逻辑测试：不挂 jsdom。需要 IndexedDB / DOM 的模块（chat-persistence、
-    // 各组件）不在这里测——它们要么靠 E2E，要么先把副作用抽到纯函数里。
+    // 纯逻辑测试：environment 是 node，仓库既没装 jsdom 也没有 E2E 配置。
+    // 依赖 IndexedDB 的模块在用例里 mock db（如 chat-persistence.test.ts），
+    // 不依赖运行时上下文的组件用 react-dom/server 出静态 HTML；include 只有
+    // .js/.ts，因此 .tsx 测试不会被收集。
     environment: 'node',
     include: ['src/**/*.test.{js,ts}'],
   },

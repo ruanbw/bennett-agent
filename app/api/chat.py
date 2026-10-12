@@ -7,7 +7,9 @@
 额度，要么暴露网关可用模型清单，都不应该匿名可访。认证接口本身在 `app/api/auth.py`。
 """
 
-from fastapi import APIRouter, Depends
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from app.api.rate_limit import SlidingWindowLimiter, limiter_with, too_many
@@ -22,19 +24,47 @@ from app.schemas.chat import (
 from app.schemas.events import ChatEvent
 from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
-from app.services.model_service import fetch_available_models
+from app.services.model_service import fetch_available_models, get_known_model_ids
 
 router = APIRouter(prefix="/api")
 
 #: 关闭中间层缓冲，否则流式输出会被反向代理攒成一整块。
-#: 遵循 RFC 7540 HTTP/2 规范，避免向 HTTP/2 响应设置特定于连接的标头 Connection: keep-alive。
+#: `Cache-Control` 用 `no-store`（与库默认一致）：SSE 是即时的、不可复用的一次性
+#: 响应，此前写的 `no-cache` 会覆盖库默认值，允许缓存先存下来再校验复用。
+#: `Connection: keep-alive` 由 sse-starlette 在合并 headers 之后强制写入，
+#: 在这里删是删不掉的，见 `ChatEventSourceResponse`。
 SSE_HEADERS = {
-    "Cache-Control": "no-cache",
+    "Cache-Control": "no-store",
     "X-Accel-Buffering": "no",
 }
 
+#: 单次 ASGI send 的超时。半开连接（客户端掉线但 TCP 未断）下 `await send` 会无限
+#: 阻塞，库默认 `send_timeout=None` 即不设超时，这条连接会一直占着上游额度。
+SSE_SEND_TIMEOUT_SECONDS = 30.0
+
 #: 对话限流桶。按**账号**计数，与认证端点的 IP 桶分开。
 _limiter: SlidingWindowLimiter | None = None
+
+
+class ChatEventSourceResponse(EventSourceResponse):
+    """剥掉 sse-starlette 强制写入的 `Connection: keep-alive`。
+
+    库在合并调用方 headers **之后**仍无条件 `_headers["Connection"] = "keep-alive"`
+    （sse_starlette 3.5.0 sse.py:317），没有开关可关。该标头只属于 HTTP/1.1，
+    RFC 7540 §8.1.2.2 明确禁止 HTTP/2 响应携带它——网关可能因此重置流。
+    ASGI 实际发送的是 `raw_headers`，所以必须在 `__init__` 之后从那里删；
+    只改 `SSE_HEADERS` 或 `self.headers` 都拦不住（库早已把它写进 raw_headers）。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        # 所有 SSE 响应都拿到半开连接兜底，避免调用点漏传。
+        kwargs.setdefault("send_timeout", SSE_SEND_TIMEOUT_SECONDS)
+        super().__init__(*args, **kwargs)
+
+        self.raw_headers = [(name, value) for name, value in self.raw_headers if name.lower() != b"connection"]
+        # `Response.headers` 会缓存一个持有旧列表的 MutableHeaders；丢掉缓存让它按
+        # 新的 raw_headers 重建，否则外部从这里还能读到已删除的标头。
+        self.__dict__.pop("_headers", None)
 
 
 def get_chat_limiter() -> SlidingWindowLimiter:
@@ -64,7 +94,9 @@ async def enforce_chat_rate_limit(user: User = Depends(current_active_user)) -> 
 
     allowed, retry_after = get_chat_limiter().check(f"user:{user.id}")
     if not allowed:
-        raise too_many(retry_after)
+        # limit 显式传入：限流器不是全局单例，too_many 自己拿不到配额，
+        # 不传就不会发 X-RateLimit-Limit（认证端点已有，这里此前漏了）
+        raise too_many(retry_after, limit=get_chat_limiter().limit)
 
 
 def to_sse_frame(event: ChatEvent) -> ServerSentEvent:
@@ -74,6 +106,21 @@ def to_sse_frame(event: ChatEvent) -> ServerSentEvent:
     结尾空行，并用 CRLF 分隔；前端按 `\\r?\\n\\r?\\n` 分帧即可。
     """
     return ServerSentEvent(data=event.model_dump_json())
+
+
+async def _ensure_model_is_known(model: str | None) -> None:
+    """模型白名单：显式传入的 model 必须是网关真实暴露的 id。
+
+    没有这一道，登录用户能拿服务端的 key 去调网关没暴露（或更贵）的模型——`model`
+    只是转发给上游的字符串，此前不校验。`get_known_model_ids()` 返回 None 表示拿不到
+    网关列表（上游故障/兜底），此时**放行**：校验服务不可用不该让对话功能跟着不可用。
+    """
+    if not model:
+        return
+
+    known_ids = await get_known_model_ids()
+    if known_ids is not None and model not in known_ids:
+        raise HTTPException(status_code=400, detail=f"模型 {model} 不在可用模型列表中，请从模型列表中选择。")
 
 
 @router.get(
@@ -95,6 +142,7 @@ async def get_models():
 )
 async def generate_title(request: TitleGenerateRequest):
     """提取首条用户提示词的意向，调用模型生成极简会话标题"""
+    await _ensure_model_is_known(request.model)
     model_to_use = (request.model.strip() if request.model else "") or settings.model_name
     title = await generate_title_from_prompt(model_to_use, request.prompt)
     return TitleGenerateResponse(title=title)
@@ -111,6 +159,7 @@ async def chat_stream(request: ChatRequest):
     客户端无状态上传完整会话历史；服务端不保存任何会话状态。
     事件以 `done` 或 `error` 收尾。
     """
+    await _ensure_model_is_known(request.model)
     model_to_use = (request.model.strip() if request.model else "") or settings.model_name
 
     async def event_generator():
@@ -121,7 +170,7 @@ async def chat_stream(request: ChatRequest):
         ):
             yield to_sse_frame(event)
 
-    return EventSourceResponse(
+    return ChatEventSourceResponse(
         event_generator(),
         media_type="text/event-stream",
         headers=SSE_HEADERS,

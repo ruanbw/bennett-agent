@@ -87,13 +87,24 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
-    height: 100vh;
+    /* 不用 height：iOS Safari 的 100vh 是「含地址栏/工具栏的大视口」，body 会被撑到
+       可视区之外，底部输入区被顶出屏幕又滚不到。min-height 双声明——dvh 跟随当前
+       可视高度，不支持 dvh 的浏览器回退到 vh。 */
+    min-height: 100vh;
+    min-height: 100dvh;
     width: 100vw;
   }
 }
 
+/* 应用外壳高度：放在 CSS 而不是 h-screen + h-dvh 两个工具类上——
+   同属性的两个工具类谁生效取决于 Tailwind 的生成顺序，这里的覆盖关系必须确定。 */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
 #root {
-  height: 100%;
+  min-height: 100%;
   width: 100%;
 }
 

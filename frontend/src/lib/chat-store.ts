@@ -13,14 +13,37 @@
  *     真正变化时通知——流式增量不会让侧边栏重渲染。
  *
  * 通知按宏任务合并（`NOTIFY_COALESCE_MS`）：一次网络分片里的多个增量只渲染一次。
+ *
+ * 已知限制：多标签页打开同一个会话时没有跨页互斥，两边各自持有内存 run、各自落库，
+ * 后写的覆盖先写的（IndexedDB 没有跨页事务协调）。本轮不做跨页互斥；真要做，
+ * 最小方案是 BroadcastChannel 广播 run 失效通知，让非活跃标签页放弃内存态。
  */
 
 import { NOTIFY_COALESCE_MS } from './constants';
-import { TRANSPORT_INCOMPLETE, type ChatEvent, type Run, type ToolCallRecord } from '../types';
+import {
+  TRANSPORT_INCOMPLETE,
+  type ChatEvent,
+  type PartKind,
+  type Run,
+  type ToolCallRecord,
+} from '../types';
 
 type Listener = () => void;
 
-const runs = new Map<string, Run>();
+/**
+ * store 内部的 run 形状：比共享契约里的 `Run` 多几个只在本模块推导/消费的终止标记。
+ *
+ *   sawError     收到过 `error`——它是契约里的合法终止，不代表内容不完整
+ *   damaged      收到过 `transport_incomplete` 且 damaged=true（丢过无法解析的帧）
+ *   persistFailed 终态落库失败：DB 里的内容已不可信，内存态必须留着
+ */
+export interface RunState extends Run {
+  sawError: boolean;
+  damaged: boolean;
+  persistFailed: boolean;
+}
+
+const runs = new Map<string, RunState>();
 const runListeners = new Map<string, Set<Listener>>();
 const runningListeners = new Set<Listener>();
 const runVersions = new Map<string, number>();
@@ -28,6 +51,16 @@ const runVersions = new Map<string, number>();
 let runningKey = '';
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const dirtySessions = new Set<string>();
+
+/**
+ * 版本号的唯一来源，只增不减。
+ *
+ * 此前是「按会话自增」：删除会话条目时连版本记录一起删，重建后从 1 重新开始，
+ * 于是可能出现「删除 run 后 flush 又把版本写回同一个值」——`useSyncExternalStore`
+ * 发现快照没变就不会重渲染，界面停留在已被删除的 run 上。换成全局计数器后，
+ * 同一个会话拿到的新版本永远大于它见过的任何旧版本（即使中途删过条目）。
+ */
+let versionSeed = 0;
 
 // ---------------------------------------------------------------------
 // 订阅
@@ -63,7 +96,8 @@ export function getRunningSessionsKey(): string {
   return getRunningSessionIds().join(',');
 }
 
-export function getRunningSessionIds(): string[] {
+/** 仍在生成中的会话 id（按插入顺序）。只服务于 key 快照，不对外导出。 */
+function getRunningSessionIds(): string[] {
   const ids: string[] = [];
   for (const run of runs.values()) {
     if (!run.finished) ids.push(run.sessionId);
@@ -86,7 +120,8 @@ function flush(): void {
   dirtySessions.clear();
 
   for (const sessionId of sessions) {
-    runVersions.set(sessionId, (runVersions.get(sessionId) ?? 0) + 1);
+    versionSeed += 1;
+    runVersions.set(sessionId, versionSeed);
     for (const listener of runListeners.get(sessionId) ?? []) listener();
   }
 
@@ -115,7 +150,7 @@ export function flushNow(): void {
 // ---------------------------------------------------------------------
 // 读取
 // ---------------------------------------------------------------------
-export function getRun(sessionId: string): Run | null {
+export function getRun(sessionId: string): RunState | null {
   return runs.get(sessionId) ?? null;
 }
 
@@ -142,19 +177,22 @@ export interface CreateRunParams {
  * 建立一次运行。同一会话同时只允许一个运行中的任务，已在运行时返回 null。
  *
  * 顺带清掉同会话里已结束的旧 run——否则新轮次会读到上一轮的残留内容。
+ *
+ * 注意：若上一轮是 persistFailed（落库失败），这里同样会被新 run 顶掉——内存里
+ * 只保留最近一轮。跨轮次抢救失败内容不在本轮范围内（需要 ChatProvider/编排层配合）。
  */
 export function createRun({
   sessionId,
   assistantMsgId,
   model,
   reasoningEffort = null,
-}: CreateRunParams): Run | null {
+}: CreateRunParams): RunState | null {
   if (isRunActive(sessionId)) return null;
 
   const previous = runs.get(sessionId);
   if (previous?.finished) runs.delete(sessionId);
 
-  const run: Run = {
+  const run: RunState = {
     sessionId,
     assistantMsgId,
     model,
@@ -166,8 +204,12 @@ export function createRun({
     thinkingStartedAt: null,
     thinkingMs: 0,
     toolCalls: [],
+    partOrder: [],
     clarification: null,
     sawDone: false,
+    sawError: false,
+    damaged: false,
+    persistFailed: false,
     stopped: false,
     incomplete: false,
     finished: false,
@@ -184,7 +226,18 @@ export function abortRun(sessionId: string): void {
   run.controller.abort();
 }
 
-export function finishRun(sessionId: string, { stopped = false } = {}): Run | null {
+/**
+ * 终止语义的唯一推导处。
+ *
+ * `done` 与 `error` 都是契约里的合法终止，只有「既没有 done、也没有 error、也不是
+ * 用户主动停止、且没丢过帧」才算不完整。此前只看 done，正常报错的轮次也会被标成
+ * 不完整并落库。
+ */
+export function isRunIncomplete(run: RunState): boolean {
+  return run.damaged || (!run.sawDone && !run.stopped && !run.sawError);
+}
+
+export function finishRun(sessionId: string, { stopped = false } = {}): RunState | null {
   const run = runs.get(sessionId);
   if (!run) return null;
 
@@ -194,16 +247,36 @@ export function finishRun(sessionId: string, { stopped = false } = {}): Run | nu
   }
 
   run.stopped = stopped;
-  run.incomplete = !run.sawDone && !stopped;
+  run.incomplete = isRunIncomplete(run);
   run.finished = true;
 
   touch(sessionId);
   return run;
 }
 
+/**
+ * 标记该会话的内存态没能落库。
+ *
+ * 返回是否是首次标记——调用方据此只 console.error 一次，避免每次 flush 都刷屏。
+ * 刻意不 touch()：调用方紧接着会 finishRun，由它统一触发渲染。
+ */
+export function markRunPersistFailed(sessionId: string): boolean {
+  const run = runs.get(sessionId);
+  if (!run || run.persistFailed) return false;
+
+  run.persistFailed = true;
+  return true;
+}
+
+/** 该会话最近一轮的内存态是否落库失败（后续 wave 可据此提示用户重试）。 */
+export function isRunPersistFailed(sessionId: string): boolean {
+  return Boolean(runs.get(sessionId)?.persistFailed);
+}
+
 /** 显式移除某个会话的 run（会话删除 / 清空）。 */
 export function removeRun(sessionId: string): void {
   if (runs.delete(sessionId)) {
+    // 版本记录可以删：版本号来自全局递增的 versionSeed，重建后不会退回旧值
     runVersions.delete(sessionId);
     touch(sessionId);
   }
@@ -218,6 +291,9 @@ export function clearFinishedRun(sessionId: string): void {
   const run = runs.get(sessionId);
   if (!run?.finished) return;
   if (run.clarification) return;
+  // 落库失败时 DB 里存的是旧内容（或什么都没有）：丢掉内存态等于用旧内容替换
+  // 刚流出的回复，用户会看到回复消失。必须留着，等 UI 决定怎么处理。
+  if (run.persistFailed) return;
 
   runs.delete(sessionId);
   touch(sessionId);
@@ -278,9 +354,14 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
   const run = runs.get(sessionId);
   if (!run) return false;
 
+  // 顺序表按需补建：老内存态或测试里手搓的 run 可能没有这个字段
+  const order: PartKind[] = (run.partOrder ??= []);
+
   switch (event.type) {
     case 'thinking':
       if (run.thinkingStartedAt === null) run.thinkingStartedAt = Date.now();
+      // 同一类块只会渲染一个：重复占位会让后面的工具调用错位；空增量不产生块，也不占位
+      if (event.delta && !order.includes('reasoning')) order.push('reasoning');
       run.thinking += event.delta;
       break;
 
@@ -288,10 +369,15 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       if (run.thinkingStartedAt !== null && run.thinkingMs === 0) {
         run.thinkingMs = Date.now() - run.thinkingStartedAt;
       }
+      if (event.delta && !order.includes('text')) order.push('text');
       run.content += event.delta;
       break;
 
     case 'tool_call':
+      // 每个新调用占一个位置（同名不同 id 是两个块）；同一 id 重发不重复占位
+      if (!run.toolCalls.some((call) => call.toolCallId === event.tool_call_id)) {
+        order.push('tool-call');
+      }
       upsertToolCall(run, event, 'running');
       break;
 
@@ -309,6 +395,7 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       break;
 
     case 'error':
+      run.sawError = true;
       run.content += `\n\n> ⚠️ **错误**: ${event.message}`;
       break;
 
@@ -317,6 +404,8 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       return false;
 
     case TRANSPORT_INCOMPLETE:
+      // damaged 一经置位不再复位：丢过帧就是丢过帧，后文补上 done 也改变不了内容缺口
+      run.damaged = run.damaged || event.damaged;
       run.incomplete = true;
       run.content += event.damaged
         ? '\n\n> ⚠️ **连接已中断**: 收到无法解析的流数据，回复可能不完整'

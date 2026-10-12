@@ -8,7 +8,14 @@ export interface ModelSelectorProps {
   modelsError?: string | null;
   currentModel?: string | null;
   onSelectModel: (modelId: string) => void;
-  onRefreshModels?: () => unknown;
+  /**
+   * 重试刷新模型列表。
+   *
+   * 返回 Promise 时按钮会一直禁用（转圈）到它结束。父层（App.tsx 的
+   * `refreshModels`）目前只 bump 一个 token 就返回 void，`await` 立刻通过、转圈只
+   * 闪一帧——把「真正重新拉取」的 Promise 返回上来才给得出真实反馈。
+   */
+  onRefreshModels?: () => void | Promise<unknown>;
 }
 
 /**
@@ -16,9 +23,6 @@ export interface ModelSelectorProps {
  *
  * 模型列表与错误文案都由调用方持有：这里不自己拉取 `/api/models`，重试也只
  * 「请求一次刷新」（返回 Promise 时按钮进入转圈态），刷新成败的呈现交给上游。
- *
- * `onRefreshModels` 返回 `unknown` 而非 `Promise<void>`：调用方传同步函数也合法，
- * 这里只 await 一次。
  */
 export function ModelSelector({
   models = [],
@@ -33,6 +37,7 @@ export function ModelSelector({
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const retryInFlight = useRef(false);
 
   const isEmpty = models.length === 0;
 
@@ -104,11 +109,15 @@ export function ModelSelector({
   };
 
   const handleRetry = async () => {
-    if (!onRefreshModels || isRetrying) return;
+    // 用 ref 而不是 isRetrying 挡连点：setState 是异步的，同一帧里连点两下都会看到
+    // isRetrying === false（父层返回 void 时尤其明显，整个重试只持续一帧）。
+    if (!onRefreshModels || retryInFlight.current) return;
+    retryInFlight.current = true;
     setIsRetrying(true);
     try {
       await onRefreshModels();
     } finally {
+      retryInFlight.current = false;
       setIsRetrying(false);
     }
   };
@@ -116,8 +125,15 @@ export function ModelSelector({
   const selected = models.find((m) => m.id === currentModel);
   const label = selected?.name || (currentModel ? currentModel.split('/').pop() : '选择模型');
 
+  // Tab 把焦点移出容器（含移出到浏览器 UI：relatedTarget 为 null）时关闭。只监听
+  // pointerdown 与 Esc 会漏掉键盘用户：弹层留在原地挡住页面，还得再点一次才消失。
+  const handleBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget;
+    if (isOpen && !(next instanceof Node && containerRef.current?.contains(next))) close(false);
+  };
+
   return (
-    <div className="relative inline-block" ref={containerRef}>
+    <div className="relative inline-block" ref={containerRef} onBlur={handleBlur}>
       <button
         ref={triggerRef}
         type="button"

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ModelItem } from '../types'
+import { DEFAULT_REASONING_EFFORT } from './constants'
 import {
   DEFAULT_LEVELS,
   OFF,
+  PREFERRED_LEVEL,
   isOff,
   levelsFor,
   normalizeEffort,
@@ -70,6 +72,10 @@ describe('levelsFor', () => {
     expect(levelsFor(model({ supported_reasoning_levels: [] }))).toEqual([OFF, ...DEFAULT_LEVELS])
   })
 
+  it('字段缺失（很多网关不返回）时同样用保守默认集', () => {
+    expect(levelsFor(model({ supported_reasoning_levels: undefined }))).toEqual([OFF, ...DEFAULT_LEVELS])
+  })
+
   it('模型信息未知时也不给空集合（否则用户无法关闭思考）', () => {
     expect(levelsFor(undefined)).toEqual([OFF, ...DEFAULT_LEVELS])
     expect(levelsFor(null)).toEqual([OFF, ...DEFAULT_LEVELS])
@@ -84,6 +90,14 @@ describe('levelsFor', () => {
 
   it('非数组的等级字段不会炸', () => {
     expect(levelsFor(model({ supported_reasoning_levels: 'high' }))).toEqual([OFF, ...DEFAULT_LEVELS])
+  })
+
+  it('只说「只能关闭」时只给关闭，不回退默认集', () => {
+    // 网关用关闭别名表达「这个模型没有可选等级」。若归一化后当成「没枚举」而回退
+    // DEFAULT_LEVELS，用户就能选到网关没声明的等级——正是为避免「选了却请求失败」
+    // 而写这套规则的初衷。
+    expect(levelsFor(model({ supported_reasoning_levels: ['off'] }))).toEqual([OFF])
+    expect(levelsFor(model({ supported_reasoning_levels: ['none', 'off'] }))).toEqual([OFF])
   })
 })
 
@@ -133,5 +147,20 @@ describe('reconcileEffort', () => {
   it('空值也能解析出一个合法等级', () => {
     expect(reconcileEffort(null, model())).toBe('medium')
     expect(reconcileEffort('', model())).toBe('medium')
+  })
+
+  it('只能关闭的模型上，任何输入都收敛到关闭', () => {
+    const onlyOff = model({ supported_reasoning_levels: ['none'] })
+
+    expect(reconcileEffort('high', onlyOff)).toBe(OFF)
+    expect(reconcileEffort(undefined, onlyOff)).toBe(OFF)
+  })
+})
+
+describe('默认等级只定义一处', () => {
+  it('会话默认等级与回退等级是同一个值', () => {
+    // 两处各写一遍 'medium' 时改一处不会有任何报错，只能靠这条用例兜住
+    expect(DEFAULT_REASONING_EFFORT).toBe(PREFERRED_LEVEL)
+    expect(reconcileEffort(null, null)).toBe(DEFAULT_REASONING_EFFORT)
   })
 })

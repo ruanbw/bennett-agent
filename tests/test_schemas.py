@@ -1,8 +1,8 @@
-"""C-3 的回归锁：请求体长度上限与历史总预算。
+"""C-3 的回归锁：请求体长度上限、历史形状与总预算。
 
-`/api/chat` 允许匿名调用且无鉴权，请求体没有上限时单个请求就能把任意长的历史
-塞给上游模型。这些用例逐条锁住每个上限，并特意断言**具体的 pydantic 错误类型**，
-这样「把 max_length 换成别的校验」这类回归会被抓到，而不只是「没抛错」。
+所有 /api 端点都要求登录，但登录用户同样能把任意长的历史塞给上游模型。这些用例
+逐条锁住每个上限与历史形状约束，并特意断言**具体的 pydantic 错误类型**，这样
+「把 max_length 换成别的校验」这类回归会被抓到，而不只是「没抛错」。
 """
 
 import pytest
@@ -69,6 +69,35 @@ def test_only_user_and_assistant_roles_are_accepted():
 
 
 # ---------------------------------------------------------------------
+# 内容规则：user 不得空白，assistant 允许空
+# ---------------------------------------------------------------------
+def test_blank_user_message_is_rejected():
+    """空白 user 消息没有语义，此前要走到服务层才被拒（客户端拿到 200 + SSE error）。"""
+    assert reject(ChatRequest, messages=[user("")]) == "value_error"
+    assert reject(ChatRequest, messages=[user("   \n  ")]) == "value_error"
+
+
+def test_empty_assistant_message_is_allowed():
+    """assistant 空正文是合法历史：流式占位、只产出 thinking 的回复都会存成空串。"""
+    assert ChatMessage(role="assistant", content="").content == ""
+
+    request = ChatRequest(messages=[user("你好"), {"role": "assistant", "content": ""}, user("继续")])
+    assert request.messages[1].content == ""
+
+
+# ---------------------------------------------------------------------
+# 历史形状：首条与末条都必须是 user
+# ---------------------------------------------------------------------
+def test_history_must_start_with_user():
+    """Anthropic 类上游要求首条为 user；`[assistant, user]` 此前会直通上游再 400。"""
+    assert reject(ChatRequest, messages=[{"role": "assistant", "content": "你好"}, user("在吗")]) == "value_error"
+
+
+def test_history_must_end_with_user():
+    assert reject(ChatRequest, messages=[user("你好"), {"role": "assistant", "content": "你好呀"}]) == "value_error"
+
+
+# ---------------------------------------------------------------------
 # ChatRequest 列表长度
 # ---------------------------------------------------------------------
 def test_history_at_message_limit_is_accepted():
@@ -124,9 +153,26 @@ def test_reasoning_effort_over_limit_is_rejected():
     assert reject(ChatRequest, messages=[user()], reasoning_effort=over) == "string_too_long"
 
 
+@pytest.mark.parametrize("bad", ["hi gh", "high\n", "高级", "off;drop", " ", ""])
+def test_reasoning_effort_rejects_non_token_characters(bad):
+    """只放行 token 字符。枚举取值会误杀网关声明的 xhigh/max 等自定义等级。"""
+    assert reject(ChatRequest, messages=[user()], reasoning_effort=bad) == "string_pattern_mismatch"
+
+
+@pytest.mark.parametrize("good", ["off", "none", "low", "high", "xhigh", "max", "custom-level-1.5"])
+def test_reasoning_effort_accepts_gateway_levels(good):
+    assert ChatRequest(messages=[user()], reasoning_effort=good).reasoning_effort == good
+
+
 def test_title_prompt_over_limit_is_rejected():
     over = "p" * (MAX_TITLE_PROMPT_CHARS + 1)
     assert reject(TitleGenerateRequest, prompt=over) == "string_too_long"
+
+
+def test_empty_title_prompt_is_rejected():
+    """空 prompt 此前照样打一次上游模型；纯空白与空串等价。"""
+    assert reject(TitleGenerateRequest, prompt="") == "string_too_short"
+    assert reject(TitleGenerateRequest, prompt="   ") == "value_error"
 
 
 # ---------------------------------------------------------------------
@@ -142,10 +188,8 @@ def test_typical_frontend_payload_is_accepted():
         ],
         model="openai/gpt-4o",
         reasoning_effort="high",
-        stream=True,
     )
     assert [m.role for m in request.messages] == ["user", "assistant", "user"]
-    assert request.stream is True
 
 
 def test_model_id_whitespace_stripped_or_none():
@@ -162,8 +206,20 @@ def test_model_id_whitespace_stripped_or_none():
     assert title_req2.model == "custom/model"
 
 
+# ---------------------------------------------------------------------
+# 死字段：stream
+# ---------------------------------------------------------------------
+def test_stream_field_is_gone():
+    """`stream` 只收不读：API 层从不读它，前端也已不发送（chat-transport.test.ts）。
+
+    pydantic 默认忽略多余键，所以旧客户端多传一个 `stream` 不会 422，但请求对象上
+    不再有这个属性，接口也不再对「stream=false 能得到非流式响应」做任何承诺。
+    """
+    assert "stream" not in ChatRequest.model_fields
+    assert not hasattr(ChatRequest(messages=[user()], stream=False), "stream")
+
+
 def test_defaults_are_unchanged():
     request = ChatRequest(messages=[user()])
     assert request.model is None
     assert request.reasoning_effort is None
-    assert request.stream is True

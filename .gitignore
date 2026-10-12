@@ -20,12 +20,12 @@ wheels/
 .venv
 
 # Environments
-.env
-.env*.local
-.env.production
-.env.development
-# 例外：前端 .env 里只有接口地址，没有密钥，必须进版本库，
-# 否则新克隆的仓库前端没有后端地址可用（本地覆盖仍走 frontend/.env.local）
+# .env* 一次性覆盖所有环境文件（.env、.env.staging、.env.test、.env.*.local…）。
+# 逐个枚举会在新增环境时漏掉，导致真实密钥被提交。
+.env*
+# 例外：模板与前端 .env 不含密钥，必须进版本库——否则新克隆的仓库既没有配置样例，
+# 前端也没有后端地址可用（本地覆盖仍走 frontend/.env.local，它由 .env* 继续忽略）。
+!.env.example
 !frontend/.env
 
 # agent

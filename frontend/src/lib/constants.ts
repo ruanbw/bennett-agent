@@ -6,6 +6,8 @@
  * 且「历史保留多少条」这类知识在前端单方面决定、后端无从知晓。
  */
 
+import { PREFERRED_LEVEL } from './reasoning-effort'
+
 // ---------------------------------------------------------------------
 // 后端地址
 // ---------------------------------------------------------------------
@@ -48,7 +50,15 @@ export const NOTIFY_COALESCE_MS = 0
 // 会话列表
 // ---------------------------------------------------------------------
 export const DEFAULT_SESSION_TITLE = '新对话'
-export const DEFAULT_REASONING_EFFORT = 'medium'
+
+/**
+ * 新会话的默认思考等级。
+ *
+ * 与 `reasoning-effort.ts` 的 `PREFERRED_LEVEL` 是同一个值，且只能有一个定义：
+ * 两处各写一遍 'medium' 时，改了其中一处就会变成「新会话默认等级」与「切换模型后
+ * 的回退等级」不一致，而不会有人报错。
+ */
+export const DEFAULT_REASONING_EFFORT = PREFERRED_LEVEL
 
 /** 生成标题失败时用首条消息内容兜底截断的长度。 */
 export const FALLBACK_TITLE_CHARS = 20

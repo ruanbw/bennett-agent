@@ -3,12 +3,19 @@ import { describe, expect, it } from 'vitest'
 import type {
   ClarificationState,
   MessageCustomMetadata,
+  MessageRecord,
   Run,
   RuntimeMessage,
   RuntimePart,
   ToolCallRecord,
 } from '../types'
-import { buildLiveMessage, buildParts, pendingClarification, toRuntimeMessage } from './chat-message'
+import {
+  buildLiveMessage,
+  buildParts,
+  pendingClarification,
+  toRuntimeMessage,
+  type PartKind,
+} from './chat-message'
 
 /**
  * 断言用：content 部件是判别联合（status / toolCallId 只属于部分分支），
@@ -40,9 +47,10 @@ const assertMessage = (message: RuntimeMessage): AssertedMessage => message as u
  */
 type RunOverrides = Partial<Omit<Run, 'clarification'>> & {
   clarification?: Partial<ClarificationState> | null
+  partOrder?: PartKind[]
 }
 
-const run = (overrides: RunOverrides = {}): Run =>
+const run = (overrides: RunOverrides = {}): Run & { partOrder?: PartKind[] } =>
   ({
     sessionId: 's1',
     assistantMsgId: 'm1',
@@ -58,7 +66,7 @@ const run = (overrides: RunOverrides = {}): Run =>
   }) as Run
 
 describe('buildParts', () => {
-  it('按工具 → 思考 → 正文的顺序组装', () => {
+  it('没有到达顺序记录时按「思考 → 工具 → 正文」组装', () => {
     const parts = assertParts(
       buildParts({
         toolCalls: [{ toolCallId: 'c1', toolName: 'tavily_search', argsText: '{}', status: 'complete' }],
@@ -69,7 +77,42 @@ describe('buildParts', () => {
       }),
     )
 
-    expect(parts.map((p) => p.type)).toEqual(['tool-call', 'reasoning', 'text'])
+    // 本后端的事件流是「先思考、再工具、最后正文」，把工具顶到最前是对顺序的臆造
+    expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'text'])
+  })
+
+  it('有到达顺序时严格照办：工具调用可以夹在正文之间', () => {
+    const parts = assertParts(
+      buildParts({
+        toolCalls: [
+          { toolCallId: 'c1', toolName: 'tavily_search', argsText: '{}' },
+          { toolCallId: 'c2', toolName: 'tavily_search', argsText: '{}' },
+        ] as ToolCallRecord[],
+        thinking: '想了想',
+        content: '答案',
+        order: ['reasoning', 'tool-call', 'text', 'tool-call'],
+        reasoningStatus: 'complete',
+        textStatus: 'complete',
+      }),
+    )
+
+    expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'text', 'tool-call'])
+    expect(parts.filter((p) => p.type === 'tool-call').map((p) => p.toolCallId)).toEqual(['c1', 'c2'])
+  })
+
+  it('顺序表被写坏（未知项、遗漏）也不吞内容', () => {
+    const parts = assertParts(
+      buildParts({
+        toolCalls: [{ toolCallId: 'c1', toolName: 'tavily_search', argsText: '{}' }] as ToolCallRecord[],
+        thinking: '想',
+        content: '答',
+        order: ['unknown' as PartKind, 'text'],
+        reasoningStatus: 'complete',
+        textStatus: 'complete',
+      }),
+    )
+
+    expect(parts.map((p) => p.type)).toEqual(['text', 'reasoning', 'tool-call'])
   })
 
   it('空内容不产出空 part', () => {
@@ -146,13 +189,26 @@ describe('toRuntimeMessage', () => {
     )
 
     expect(message.content).toEqual([])
-    expect(message.metadata.custom).toEqual({ stopped: false, thinkingMs: 0, clarification: null })
+    expect(message.metadata.custom).toEqual({
+      stopped: false,
+      thinkingMs: 0,
+      clarification: null,
+      incomplete: false,
+    })
   })
 
   it('用户消息不带 status', () => {
     expect(
       toRuntimeMessage({ id: 'm1', sessionId: 's1', role: 'user', content: 'hi', createdAt: 1 }).status,
     ).toBeUndefined()
+  })
+
+  it('把记录上的 incomplete 映射进 metadata.custom（供 thread 渲染「不完整」）', () => {
+    const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '半截', createdAt: 1 }
+
+    expect(assertMessage(toRuntimeMessage({ ...base, incomplete: true })).metadata.custom.incomplete).toBe(true)
+    // 字段缺失（老记录）时行为不变：没有标记
+    expect(assertMessage(toRuntimeMessage(base)).metadata.custom.incomplete).toBe(false)
   })
 })
 
@@ -190,6 +246,47 @@ describe('buildLiveMessage', () => {
     const message = assertMessage(buildLiveMessage(run({ clarification, finished: true })))
 
     expect(message.metadata.custom.clarification).toEqual(clarification)
+  })
+
+  it('live 覆盖层与落库记录给出同一条 incomplete 语义', () => {
+    expect(assertMessage(buildLiveMessage(run())).metadata.custom.incomplete).toBe(false)
+    expect(assertMessage(buildLiveMessage(run({ incomplete: true }))).metadata.custom.incomplete).toBe(true)
+  })
+})
+
+describe('事件到达顺序（buildLiveMessage / toRuntimeMessage 一致）', () => {
+  const toolCalls: ToolCallRecord[] = [
+    { toolCallId: 'c1', toolName: 'tavily_search', argsText: '{}', status: 'complete' },
+  ]
+  // 工具先于思考到达：按类型分组会把它画成「思考 → 工具」，与事件流不符
+  const partOrder: PartKind[] = ['tool-call', 'reasoning', 'text']
+  const record: MessageRecord & { partOrder?: PartKind[] } = {
+    id: 'm1',
+    sessionId: 's1',
+    role: 'assistant',
+    content: '答案',
+    thinking: '想了想',
+    toolCalls,
+    createdAt: 1,
+    partOrder,
+  }
+
+  it('toRuntimeMessage 照记录的顺序排布', () => {
+    const message = assertMessage(toRuntimeMessage(record))
+
+    expect(message.content.map((p) => p.type)).toEqual(['tool-call', 'reasoning', 'text'])
+  })
+
+  it('buildLiveMessage 与 toRuntimeMessage 顺序一致', () => {
+    const live = assertMessage(
+      buildLiveMessage(
+        run({ thinking: '想了想', content: '答案', toolCalls, partOrder, finished: true }),
+      ),
+    )
+
+    expect(live.content.map((p) => p.type)).toEqual(
+      assertMessage(toRuntimeMessage(record)).content.map((p) => p.type),
+    )
   })
 })
 

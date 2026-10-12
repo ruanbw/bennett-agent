@@ -9,8 +9,10 @@
 
 import json
 import logging
+import uuid
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic_ai.messages import (
     FinalResultEvent,
     FunctionToolCallEvent,
@@ -32,6 +34,7 @@ from app.api.chat import to_sse_frame
 from app.schemas.events import (
     ClarificationRequest,
     ContentDelta,
+    Done,
     StreamError,
     ThinkingDelta,
     ToolCall,
@@ -190,14 +193,19 @@ def test_clarification_accepts_json_string_args():
 
 
 def test_clarification_defaults_allow_custom_input_to_true():
-    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？"}))
+    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？", "options": ["A", "B"]}))
 
     assert events[0].allow_custom_input is True
-    assert events[0].options == []
+    assert events[0].options == ["A", "B"]
 
 
 def test_clarification_honours_explicit_false():
-    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？", "allow_custom_input": False}))
+    events = translate(
+        tool_call_event(
+            CLARIFICATION_TOOL_NAME,
+            {"question": "选哪个？", "options": ["A", "B"], "allow_custom_input": False},
+        )
+    )
 
     assert events[0].allow_custom_input is False
 
@@ -301,3 +309,56 @@ def test_sse_frame_keeps_non_ascii_readable():
 
     assert "中文" in raw
     assert "\\u4e2d" not in raw
+
+
+# ---------------------------------------------------------------------
+# SSE 响应头：库强制写入的 Connection 必须被剥掉
+# ---------------------------------------------------------------------
+def fake_user():
+    """未落库的临时用户，仅用于覆盖登录依赖（认证本身由 test_auth.py 覆盖）。"""
+    from app.db import User
+
+    return User(
+        id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
+        email="sse-headers@example.com",
+        hashed_password="not-a-real-hash",
+        is_active=True,
+        is_superuser=False,
+        is_verified=False,
+    )
+
+
+def test_chat_sse_response_headers(monkeypatch):
+    """真实响应上剥掉 `Connection`，并锁住不会被库默认值覆盖的缓存/缓冲标头。
+
+    sse-starlette 3.5.0 在合并调用方 headers **之后**仍无条件写
+    `Connection: keep-alive`，所以只断言 `SSE_HEADERS` 字典是伪保证；而 HTTP/2
+    明确禁止该标头（RFC 7540 §8.1.2.2），网关可能因此重置流。
+    """
+    from app.api import chat as chat_api
+    from app.config import settings
+    from app.server import create_app
+    from app.services.auth import current_active_user
+
+    async def fake_stream(*_args, **_kwargs):
+        yield Done()
+
+    # 不打真实上游：本机 .env 配着网关，走到生成路径会真发一次请求
+    monkeypatch.setattr(chat_api, "stream_chat_events", fake_stream)
+    monkeypatch.setattr(settings, "chat_rate_limit_per_minute", 30)
+
+    app = create_app()
+    # 只替换登录态判断，路由、限流与响应构造都照真实路径执行
+    app.dependency_overrides[current_active_user] = fake_user
+
+    with TestClient(app) as client:
+        response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
+
+    assert response.status_code == 200
+    assert "connection" not in response.headers
+    assert response.headers["content-type"].startswith("text/event-stream")
+    # SSE 不可复用：`no-cache` 会覆盖库默认的 `no-store`
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-accel-buffering"] == "no"
+    # 半开连接兜底：库默认 send_timeout=None，等于不设超时
+    assert chat_api.ChatEventSourceResponse(fake_stream()).send_timeout == chat_api.SSE_SEND_TIMEOUT_SECONDS

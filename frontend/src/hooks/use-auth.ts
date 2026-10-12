@@ -11,18 +11,28 @@
  * `apiFetch` 发现 401 就通知本 hook 把状态切回未登录，于是**任何**请求触发的会话
  * 过期（过期、被踢、改密后失效）都会自动退回登录页，不需要每个调用点各写一遍。
  * 这也正是当初选服务端会话而非 JWT 换来的能力。
+ *
+ * ## 具体的流程都在 lib 层
+ *
+ * 登录（POST + `/me` 探测）、注册（注册 + 自动登录）、登出（中止生成 + 服务端失效 +
+ * 清本地库）的时序都放在 `lib/auth.ts`：本仓库的 vitest 跑在 node 环境，没有 DOM 与
+ * 渲染器，hook 的分支与时序在那里是测不了的。本 hook 只负责把结果落到 React 状态。
  */
 
 import { useCallback, useEffect, useState } from 'react';
 
-import { setUnauthorizedListener } from '../lib/api';
+import { addUnauthorizedListener, getAuthEpoch, removeUnauthorizedListener } from '../lib/api';
 import {
+  LOGOUT_UNCONFIRMED_MESSAGE,
+  describeConnectionError,
   fetchCurrentUser,
-  login as loginRequest,
-  logout as logoutRequest,
-  register as registerRequest,
-  type AuthResult,
+  loginWithSession,
+  logoutAndClearLocalData,
+  registerWithSession,
+  withPending,
   type AuthUser,
+  type LogoutResult,
+  type RegisterOutcome,
 } from '../lib/auth';
 
 export type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
@@ -34,7 +44,11 @@ export interface UseAuthResult {
   pending: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<boolean>;
-  register: (email: string, password: string) => Promise<boolean>;
+  /**
+   * 注册并自动登录。返回值可区分「注册失败」与「账号已创建但自动登录失败」，
+   * 后者要由表单切回登录模式（见 `LoginPage`）。
+   */
+  register: (email: string, password: string) => Promise<RegisterOutcome>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -58,8 +72,9 @@ export function useAuth(): UseAuthResult {
       } catch (err) {
         if (!active) return;
         console.error('探测登录态失败:', err);
-        // 网络故障也当作未登录：让用户看到登录页并有机会重试，
-        // 比停在一个转不出去的加载态要好
+        // 网络故障也当作未登录：让用户看到登录页并有机会重试，比停在一个转不出去的
+        // 加载态要好。但必须说明原因——静默当作「未登录」会让用户以为自己的会话丢了。
+        setError(describeConnectionError(err));
         setStatus('anonymous');
       }
     })();
@@ -71,84 +86,81 @@ export function useAuth(): UseAuthResult {
 
   // 任何请求拿到 401 都退回登录页
   useEffect(() => {
-    setUnauthorizedListener(() => {
+    const handleUnauthorized = (epoch: number): void => {
+      // apiFetch 已按世代过滤过；这里再确认一次，防止那层过滤将来被放宽/挪走后，
+      // 登录前发出的过期 401 把刚建立的登录态又打回登录页
+      if (epoch !== getAuthEpoch()) return;
       setUser(null);
       setStatus('anonymous');
-    });
+    };
 
-    return () => setUnauthorizedListener(null);
+    addUnauthorizedListener(handleUnauthorized);
+    // 注销必须传同一个函数引用；此前是「设回 null」的单槽写法，多挂载场景下会连别人的监听一起清掉
+    return () => removeUnauthorizedListener(handleUnauthorized);
   }, []);
 
-  /** 统一处理 pending / 错误，避免每个动作各写一遍 try-catch-finally。 */
-  const run = useCallback(async (action: () => Promise<AuthResult>): Promise<boolean> => {
-    setPending(true);
-    setError(null);
-
-    try {
-      const result = await action();
-      if (result.ok) return true;
-      setError(result.message);
-      return false;
-    } catch (err) {
-      console.error('认证请求失败:', err);
-      setError('网络异常，请稍后重试');
-      return false;
-    } finally {
-      setPending(false);
-    }
-  }, []);
-
+  /**
+   * 登录。
+   *
+   * pending 必须覆盖整个流程（POST + `/me` 探测）：只包 POST 的话，探测期间提交
+   * 按钮会复活，用户连点就会发出第二次登录——后端每次登录都新建一条会话记录。
+   */
   const login = useCallback(
     async (email: string, password: string): Promise<boolean> => {
-      const ok = await run(() => loginRequest(email, password));
-      if (!ok) return false;
+      return withPending(setPending, async () => {
+        setError(null);
 
-      // 登录接口只回 204（凭据就是 cookie），用户信息要再取一次
-      try {
-        const current = await fetchCurrentUser();
-        if (!current) {
-          // 登录接口说成功、但探测说未登录：cookie 没被浏览器接受（例如
-          // AUTH_COOKIE_SECURE=true 却在 http 下访问）。宁可让用户重试，
-          // 也不要进到「已登录但不知道是谁」的半残状态。
-          setError('登录未生效，请检查浏览器是否接受 cookie');
-          setStatus('anonymous');
-          return false;
+        const attempt = await loginWithSession(email, password);
+        if (attempt.ok) {
+          setUser(attempt.user);
+          setStatus('authenticated');
+          return true;
         }
-        setUser(current);
-        setStatus('authenticated');
-        return true;
-      } catch (err) {
-        console.error('登录成功但获取用户信息失败:', err);
-        setError('登录成功，但获取用户信息失败，请重试');
-        setStatus('anonymous');
+
+        setError(attempt.message);
+        // 凭据错误时用户本来就在登录页，不必动状态；但「POST 成功、会话没建立」时
+        // 必须明确回到未登录，不能停在「已登录但不知道是谁」的半残状态
+        if (attempt.stage === 'session') setStatus('anonymous');
         return false;
-      }
+      });
     },
-    [run]
+    []
   );
 
   const register = useCallback(
-    async (email: string, password: string): Promise<boolean> => {
-      const ok = await run(() => registerRequest(email, password));
-      if (!ok) return false;
+    async (email: string, password: string): Promise<RegisterOutcome> => {
+      return withPending(setPending, async () => {
+        setError(null);
 
-      // 后端注册接口不下发 cookie，紧接着登一次，省掉用户再手填一遍密码
-      return login(email, password);
+        const attempt = await registerWithSession(email, password);
+        if (attempt.ok) {
+          setUser(attempt.user);
+          setStatus('authenticated');
+          return 'ok';
+        }
+
+        setError(attempt.message);
+        if (attempt.outcome === 'login-failed') setStatus('anonymous');
+        return attempt.outcome;
+      });
     },
-    [run, login]
+    []
   );
 
   const logout = useCallback(async () => {
+    let result: LogoutResult;
     try {
-      await logoutRequest();
+      result = await logoutAndClearLocalData();
     } catch (err) {
-      // 服务端会话可能已经失效，但本地仍要退出——卡在「登出失败」比直接退出更糟
-      console.warn('登出请求失败，仍然清掉本地登录态:', err);
+      // 编排内部已逐个吞掉异常，这里是兜底：无论如何都要把 React 状态退回未登录
+      console.error('登出流程异常:', err);
+      result = { serverConfirmed: false, error: LOGOUT_UNCONFIRMED_MESSAGE };
     }
 
     setUser(null);
     setStatus('anonymous');
-    setError(null);
+    // 服务端没确认登出时必须让用户看见（cookie 还在，刷新就会恢复登录）
+    setError(result.error);
   }, []);
 
   const clearError = useCallback(() => setError(null), []);

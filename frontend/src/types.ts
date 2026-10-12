@@ -24,7 +24,8 @@ export interface ModelItem {
   name: string;
   provider: string;
   description?: string | null;
-  reasoning: boolean;
+  /** 三态：true=支持、false=明确不支持、null=网关未声明（前端按“未知”回退默认等级）。 */
+  reasoning: boolean | null;
   supported_reasoning_levels: string[];
   context_window?: number | null;
   max_output_tokens?: number | null;
@@ -116,6 +117,15 @@ export type ChatEvent =
 // =====================================================================
 export type ChatRole = 'user' | 'assistant';
 
+/**
+ * 一轮回复里内容块的种类，用来描述**事件到达顺序**（见各处的 `partOrder`）。
+ *
+ * 定义放在这里而不是 `chat-message.ts`：写入方是 `chat-store.applyEvent`（某类内容
+ * 首次出现时追加自己的种类），读取方是 `chat-message.buildParts`（按它排布部件）。
+ * 两边都依赖 types.ts，放在其中一边会把依赖方向弄反。
+ */
+export type PartKind = 'tool-call' | 'reasoning' | 'text';
+
 export interface ToolCallRecord {
   toolCallId: string;
   toolName: string;
@@ -149,6 +159,11 @@ export interface MessageRecord {
   stopped?: boolean;
   incomplete?: boolean;
   clarification?: ClarificationState | null;
+  /**
+   * 内容块到达顺序。老记录没有这个字段，`buildParts` 会退回默认顺序，
+   * 所以它必须是可选的（IndexedDB 里已存在的记录不会因加字段而失效）。
+   */
+  partOrder?: PartKind[];
   createdAt: number;
 }
 
@@ -178,6 +193,11 @@ export interface Run {
   thinkingStartedAt: number | null;
   thinkingMs: number;
   toolCalls: ToolCallRecord[];
+  /**
+   * 内容块到达顺序。`applyEvent` 追加，`chat-persistence.runFields` 原样落库；
+   * 缺席时渲染退回默认顺序（老内存态 / 测试里手搓的 run）。
+   */
+  partOrder?: PartKind[];
   clarification: ClarificationState | null;
   sawDone: boolean;
   stopped: boolean;
@@ -198,5 +218,12 @@ export interface MessageCustomMetadata {
   stopped: boolean;
   thinkingMs: number;
   clarification: ClarificationState | null;
+  /**
+   * 本轮渲染不完整（丢过帧、或流没有干净收尾）。落库形状 `MessageRecord.incomplete`
+   * 的运行时镜像：写入由 chat-message.ts 负责，展示由 thread.aui.tsx 负责。
+   */
+  incomplete?: boolean;
+  /** 本轮终态落库失败：数据库里的内容已不可信，刷新后可能丢失。 */
+  persistFailed?: boolean;
   [key: string]: unknown;
 }

@@ -8,6 +8,7 @@ O-2：改动前每个调用点各自 `async with httpx.AsyncClient(...)`（`mode
 差一个数量级：模型列表 3 秒就该放弃，网页搜索 20 秒仍属正常。
 """
 
+import asyncio
 import logging
 
 import httpx
@@ -18,22 +19,47 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 
 _client: httpx.AsyncClient | None = None
+#: 创建 `_client` 时的 running loop。httpx 的内部原语绑定 loop，跨 loop 复用会
+#: RuntimeError（测试里每个用例一个 loop，应用里也可能是「先建后换主循环」）。
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        # 同步上下文里拿不到 loop，此时只能按「无 loop」处理
+        return None
 
 
 def get_http_client() -> httpx.AsyncClient:
-    """返回进程级共享客户端（惰性创建）。"""
-    global _client
-    if _client is None or _client.is_closed:
+    """返回进程级共享客户端（惰性创建）。
+
+    当前事件循环与创建时不同则重建：旧客户端已经绑死在另一个 loop 上，复用它会在
+    第一次请求时 RuntimeError，比多建一个连接池更糟。
+    """
+    global _client, _client_loop
+
+    loop = _running_loop()
+    if _client is None or _client.is_closed or _client_loop is not loop:
         _client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
+        _client_loop = loop
     return _client
 
 
 async def close_http_client() -> None:
-    """关闭共享客户端。由 FastAPI lifespan 在进程退出时调用。"""
-    global _client
-    if _client is not None:
-        try:
-            if not _client.is_closed:
-                await _client.aclose()
-        finally:
-            _client = None
+    """关闭共享客户端。由 FastAPI lifespan 在进程退出时调用。
+
+    关闭失败只记警告、不上抛：`app/server.py` 的 lifespan 紧接着还要
+    `engine.dispose()`，让这里的一个异常把数据库清理一起跳过不值得。
+    """
+    global _client, _client_loop
+
+    client, _client, _client_loop = _client, None, None
+    if client is None or client.is_closed:
+        return
+
+    try:
+        await client.aclose()
+    except Exception:  # noqa: BLE001 - 关闭是 best-effort，异常只进日志
+        logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)

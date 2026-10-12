@@ -5,10 +5,15 @@
  * 账号与登出属于另一个变更理由（主题切换当初也是这么拆出去的）。
  *
  * 登出带确认：误点会中断当前正在进行的对话，而登出后要重新输入邮箱和密码才能回来。
+ * 确认文案同时说明会清空本机会话记录——登出要清本地库（防跨账号泄漏），不说清就是
+ * 悄悄删掉用户的数据。
+ *
+ * 登出期间按钮显示转圈并禁用：登出请求失败时会重试一次，最长可能要等两个超时周期，
+ * 期间没有任何反馈的话用户只会反复点，发出多个登出请求。
  */
 
-import { useState } from 'react';
-import { LogOut } from 'lucide-react';
+import { useCallback, useState } from 'react';
+import { Loader2, LogOut } from 'lucide-react';
 
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { Button } from './ui/button';
@@ -20,6 +25,19 @@ export interface AccountBarProps {
 
 export function AccountBar({ email, onLogout }: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  const handleLogout = useCallback(async () => {
+    setLoggingOut(true);
+    try {
+      await onLogout();
+    } catch (err) {
+      // 登出本身已经尽力而为（useAuth 内部兜底），这里只保证转圈状态一定会结束
+      console.error('登出失败:', err);
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [onLogout]);
 
   return (
     <div className="flex items-center gap-1 border-t border-border px-3 py-2">
@@ -32,22 +50,23 @@ export function AccountBar({ email, onLogout }: AccountBarProps) {
         variant="ghost"
         size="icon-sm"
         onClick={() => setConfirming(true)}
-        aria-label="登出"
-        title="登出"
+        disabled={loggingOut}
+        aria-label={loggingOut ? '正在登出' : '登出'}
+        title={loggingOut ? '正在登出' : '登出'}
       >
-        <LogOut />
+        {loggingOut ? <Loader2 className="animate-spin" /> : <LogOut />}
       </Button>
 
       <ConfirmDialog
         open={confirming}
         onOpenChange={setConfirming}
         title="登出？"
-        description="登出后需要重新输入邮箱和密码才能继续对话。"
+        description="登出会清空本机保存的会话记录，之后需要重新输入邮箱和密码才能继续对话。"
         confirmLabel="登出"
         destructive
         onConfirm={() => {
           setConfirming(false);
-          void onLogout();
+          void handleLogout();
         }}
       />
     </div>

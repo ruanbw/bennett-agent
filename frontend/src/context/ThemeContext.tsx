@@ -3,25 +3,13 @@ import type { PropsWithChildren } from 'react';
 
 import { useMediaQuery } from '../hooks/use-media-query';
 import { ThemeContext } from './theme-context';
+import { readThemePreference, themePreferenceFromStorageEvent, writeThemePreference } from './theme-context';
 import type { ThemePreference } from './theme-context';
 
-const THEME_STORAGE_KEY = 'theme_preference';
-
-/**
- * localStorage 只能给出 `string | null`，而主题状态只能是三个字面量之一。用类型守卫
- * 而不是 `as ThemePreference`：键里可能是旧版本/手改的值，断言会把脏数据当成合法主题
- * 一路带到 `resolvedTheme` 里。
- */
-function isThemePreference(value: unknown): value is ThemePreference {
-  return value === 'light' || value === 'dark' || value === 'system';
-}
-
 export function ThemeProvider({ children }: PropsWithChildren) {
-  const [theme, setThemeState] = useState<ThemePreference>(() => {
-    if (typeof window === 'undefined') return 'system';
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    return isThemePreference(stored) ? stored : 'system';
-  });
+  // 读取自带 try/catch：存储不可用（Safari 阻止 Cookie、sandbox iframe）时回落 'system'，
+  // 而不是让 SecurityError 从 useState 初始化里抛出去打挂整个应用
+  const [theme, setThemeState] = useState<ThemePreference>(() => readThemePreference());
 
   // 与 index.html 里的首屏内联脚本同源：都读 prefers-color-scheme
   const systemIsDark = useMediaQuery('(prefers-color-scheme: dark)');
@@ -33,22 +21,26 @@ export function ThemeProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     const root = document.documentElement;
-    if (resolvedTheme === 'dark') {
-      root.classList.add('dark');
-      root.style.colorScheme = 'dark';
-    } else {
-      root.classList.remove('dark');
-      root.style.colorScheme = 'light';
-    }
+    const isDark = resolvedTheme === 'dark';
+    root.classList.toggle('dark', isDark);
+    // colorScheme 必须跟着切：滚动条、表单控件等浏览器原生 UI 由它决定，只切 class 不够
+    root.style.colorScheme = isDark ? 'dark' : 'light';
   }, [resolvedTheme]);
 
   const setTheme = useCallback((newTheme: ThemePreference) => {
     setThemeState(newTheme);
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, newTheme);
-    } catch (err) {
-      console.error('保存主题失败:', err);
-    }
+    writeThemePreference(newTheme);
+  }, []);
+
+  // 多标签同步：storage 事件只在「其他标签页写同名键」时触发，正好用来跟随别人的切换
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      const nextTheme = themePreferenceFromStorageEvent(event);
+      if (nextTheme !== null) setThemeState(nextTheme);
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
   }, []);
 
   // memo 化 value：否则每次 provider 重渲染都会让所有消费者跟着重渲染

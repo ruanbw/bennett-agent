@@ -17,6 +17,10 @@ class PromptManager:
             #: （包括正常的引号、尖括号）改写成 HTML 实体，污染提示词。
             #: 若将来用同一实例渲染 HTML，必须换成 autoescape=True 的新实例。
             autoescape=False,
+            #: 漏传变量时**报错**，而不是渲染成空串。静默空串会让系统提示词悄悄
+            #: 少掉一整段（例如「当前环境: 」），模型行为随之变化却没有任何痕迹；
+            #: 显式写了 `| default(...)` 的变量不受影响——那是刻意的兜底。
+            undefined=jinja2.StrictUndefined,
             trim_blocks=True,
             lstrip_blocks=True,
         )

@@ -34,6 +34,21 @@ def test_disabled_aliases_collapse_to_none(raw):
     assert normalize_reasoning_effort(raw) == "none"
 
 
+@pytest.mark.parametrize("raw", ["disabled", "DISABLED", " disabled "])
+def test_disabled_alias_matches_the_frontend(raw):
+    """前端 OFF_ALIASES 含 `disabled`，后端漏掉它就会出现「界面显示已关闭、其实还开着」。
+
+    两边词表的对应关系见 `frontend/src/lib/reasoning-effort.ts:OFF_ALIASES`。
+    """
+    assert normalize_reasoning_effort(raw) == "none"
+
+
+@pytest.mark.parametrize("raw", ["xhigh", "max", "minimal", " XHIGH "])
+def test_unknown_but_well_shaped_levels_pass_through(raw):
+    """等级词表由各网关决定，后端只收敛大小写/空白，不擅自丢弃。"""
+    assert normalize_reasoning_effort(raw) == raw.strip().lower()
+
+
 @pytest.mark.parametrize("raw,expected", [("high", "high"), ("HIGH", "high"), (" xhigh ", "xhigh")])
 def test_supported_levels_are_lowercased_and_trimmed(raw, expected):
     assert normalize_reasoning_effort(raw) == expected
@@ -90,12 +105,45 @@ def test_build_agent_normalises_effort():
     assert build_agent("openai/gpt-4o", " off ").model.settings["extra_body"] == {"reasoning_effort": "none"}
 
 
-def test_build_agent_registers_all_tools():
-    from app.tools import ALL_TOOLS
+def test_build_agent_registers_configured_tools():
+    """生产装配用 `build_tools()`；`ALL_TOOLS` 只是「有哪些工具」的静态全量列表。"""
+    from app.tools import build_tools
 
     agent = build_agent("openai/gpt-4o")
 
-    assert set(agent._function_toolset.tools) == {tool.__name__ for tool in ALL_TOOLS}
+    assert set(agent._function_toolset.tools) == {tool.__name__ for tool in build_tools()}
+
+
+def test_build_tools_always_contains_clarification(monkeypatch):
+    """意图确认不依赖任何外部服务，是交互协议的一部分，必须始终可用。"""
+    from app.tools import build_tools
+
+    for key in (None, "tvly-test-key"):
+        monkeypatch.setattr(settings, "tavily_api_key", key)
+        assert "ask_user_clarification" in {tool.__name__ for tool in build_tools()}
+
+
+def test_build_tools_adds_tavily_only_with_a_key(monkeypatch):
+    """没有 key 时挂 tavily 只是给模型一个必然失败的工具，白烧一轮 token。"""
+    from app.tools import build_tools
+
+    monkeypatch.setattr(settings, "tavily_api_key", None)
+    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification"]
+
+    monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
+    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification", "tavily_search"]
+
+
+def test_tavily_tool_follows_config_without_restart(monkeypatch):
+    """缓存键含 tavily 配置，改配置后无需重启进程就能换掉工具装配。"""
+    monkeypatch.setattr(settings, "tavily_api_key", None)
+    assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {"ask_user_clarification"}
+
+    monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
+    assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {
+        "ask_user_clarification",
+        "tavily_search",
+    }
 
 
 def test_build_agent_renders_system_prompt():
@@ -116,6 +164,15 @@ def test_same_args_return_cached_agent():
     assert build_agent("openai/gpt-4o") is build_agent("openai/gpt-4o")
 
 
+def test_effort_variants_share_one_cache_entry():
+    """归一化必须在进缓存之前：否则客户端换个大小写就能把 32 个槽位挤满。"""
+    first = build_agent("openai/gpt-4o", "HIGH")
+
+    assert build_agent("openai/gpt-4o", " high ") is first
+    assert build_agent("openai/gpt-4o", "high") is first
+    assert agent_factory._build_agent_cached.cache_info().currsize == 1
+
+
 def test_different_args_are_distinct():
     assert build_agent("openai/gpt-4o") is not build_agent("openai/gpt-4o", "high")
     assert build_agent("openai/gpt-4o") is not build_agent("openai/gpt-4o-mini")
@@ -123,7 +180,33 @@ def test_different_args_are_distinct():
 
 def test_cache_is_bounded():
     """客户端能传任意 model 名，缓存必须有上限。"""
-    assert agent_factory.build_agent.cache_info().maxsize == agent_factory.AGENT_CACHE_SIZE
+    assert agent_factory._build_agent_cached.cache_info().maxsize == agent_factory.AGENT_CACHE_SIZE
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("litellm_api_base", "http://example.invalid:4000"),
+        ("app_env", "staging"),
+        ("assistant_name", "小贝"),
+        ("model_upstream_timeout", 5.0),
+    ],
+)
+def test_settings_derived_values_are_part_of_the_cache_key(monkeypatch, field, value):
+    """改了配置就该换 agent，而不是继续用进程启动时装配的那一个。"""
+    first = build_agent("openai/gpt-4o")
+
+    monkeypatch.setattr(settings, field, value)
+
+    assert build_agent("openai/gpt-4o") is not first
+
+
+def test_assistant_name_change_reaches_the_system_prompt(monkeypatch):
+    monkeypatch.setattr(settings, "assistant_name", "小贝")
+
+    instructions = "\n".join(build_agent("openai/gpt-4o")._system_prompts)
+
+    assert "小贝" in instructions
 
 
 def test_title_agent_is_cached_separately():
@@ -201,3 +284,24 @@ def test_timeout_coexists_with_reasoning_effort(monkeypatch):
 
     assert settings_map["extra_body"] == {"reasoning_effort": "high"}
     assert settings_map["timeout"].read == 42.0
+
+
+# ---------------------------------------------------------------------
+# SDK 重试层
+#
+# openai SDK 默认 `max_retries=2`，与 120s 空闲超时叠加后单轮最坏可拖 6 分钟。
+# 重试交给网关（LiteLLM）统一做，SDK 这一层必须显式关掉。
+# ---------------------------------------------------------------------
+def test_provider_disables_sdk_level_retries():
+    """pydantic-ai 2.31.1 的 LiteLLMProvider 没有 max_retries 参数，只能传现成的客户端。"""
+    provider = agent_factory.build_provider()
+
+    assert provider.client.max_retries == 0
+
+
+def test_title_agent_also_uses_the_no_retry_provider(monkeypatch):
+    monkeypatch.setattr(settings, "litellm_api_base", "http://127.0.0.1:9999")
+    reset_agent_cache()
+
+    assert build_agent("openai/gpt-4o").model.client.max_retries == 0
+    assert build_title_agent("openai/gpt-4o").model.client.max_retries == 0

@@ -1,5 +1,6 @@
 """模型列表服务：从上游网关拉取可用模型，失败时兜底。"""
 
+import asyncio
 import logging
 import time
 
@@ -18,7 +19,16 @@ MODELS_CACHE_TTL_SECONDS = 300.0
 #: 兜底结果缓存有效期（负缓存）。避免上游瞬时抖动造成过长时间锁定，同时防止频繁超时。
 FALLBACK_CACHE_TTL_SECONDS = 10.0
 
-_cache: tuple[float, ModelListResponse, bool] | None = None
+#: 成功结果的缓存：(写入时刻, 响应)。只有成功结果会写进这一格。
+_success_cache: tuple[float, ModelListResponse] | None = None
+#: 负缓存：最近一次「上游不可用」产生的兜底响应。刻意与成功缓存分开存——失败永远
+#: 顶不掉已有的成功结果（共用一格时，慢失败的兜底会覆盖刚拿到的成功列表）。
+_fallback_cache: tuple[float, ModelListResponse] | None = None
+
+#: single-flight 锁，以及它绑定的 loop。锁按事件循环惰性重建：asyncio.Lock 会绑定
+#: 首次使用它的 loop，模块级常量锁在「每个用例一个 loop」的测试环境里会 RuntimeError。
+_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _build_url() -> str:
@@ -26,21 +36,54 @@ def _build_url() -> str:
     return f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
 
 
+def _parse_int_field(value: object) -> int | None:
+    """宽松解析 int 型字段：int 或数字串；其它（None、'128k'、浮点……）一律 None。
+
+    刻意不做单位换算：把 '128k' 猜成 128000 是伪造数据，前端会拿着编出来的上下文
+    窗口做判断。
+    """
+    if isinstance(value, bool):
+        # bool 是 int 的子类，但 True/False 在这两个字段上没有语义
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_reasoning_flag(item: dict[str, object]) -> bool | None:
+    """reasoning 三态：只有网关给出的 bool 才算表态，其余（缺字段、类型不符）为 None。
+
+    None 与 False 必须分开：False 是「网关明确说不支持」，前端据此隐藏思考等级选择器；
+    None 是「网关没说」，按未知处理。此前 `bool(item.get("reasoning", False))` 把两者
+    压成了同一个 False。
+    """
+    value = item.get("reasoning")
+    return value if isinstance(value, bool) else None
+
+
 def _parse_reasoning_levels(raw: object) -> list[str]:
     """解析模型支持的思考等级。
 
-    网关的返回有两种形状：`[{"effort": "high"}]` 或 `["high"]`。两种都接受，
-    其它形状忽略——伪造等级会让用户选了之后请求失败。
+    网关的返回有两种形状：`[{"effort": "high"}]` 或 `["high"]`。两种都接受，其它
+    形状忽略——伪造等级会让用户选了之后请求失败（`{"effort": null}` 经 `str()` 会
+    变成等级 "None"）。空白串不是等级，照样丢掉。
     """
     if not isinstance(raw, list):
         return []
 
     levels: list[str] = []
     for item in raw:
-        if isinstance(item, dict) and "effort" in item:
-            levels.append(str(item["effort"]))
-        elif isinstance(item, str):
-            levels.append(item)
+        value = item.get("effort") if isinstance(item, dict) else item
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if cleaned and cleaned not in levels:
+            levels.append(cleaned)
     return levels
 
 
@@ -53,6 +96,10 @@ def _parse_models(
 
     `description_field` 由配置传入：上游网关可以提供一个比 'provider name' 更友好
     的展示标签，但字段名属于网关细节，不该硬编码在这里。
+
+    容错做在**条目级**：某个模型的字段类型不符（`id` 是数字、`display_name` 是数字……）
+    只跳过那一条。此前任何一条抛 ValidationError 都会被外层 except 捕获、整份作废，
+    列表于是只剩兜底的那一个模型。
     """
     if not isinstance(payload, dict):
         return None
@@ -64,37 +111,46 @@ def _parse_models(
     models: list[ModelItem] = []
     found_default = False
 
-    for item in data:
+    for index, item in enumerate(data):
         if not isinstance(item, dict):
             continue
-        model_id = item.get("id")
-        if not model_id:
-            continue
 
-        display_name = item.get("display_name") or model_id
-        owned_by = item.get("owned_by") or (model_id.split("/")[0] if "/" in model_id else "Custom")
-        is_default = model_id == default_model_id
-        found_default = found_default or is_default
+        try:
+            model_id = item.get("id")
+            if not model_id:
+                continue
 
-        models.append(
-            ModelItem(
-                id=model_id,
-                name=display_name,
-                provider=owned_by,
-                description=item.get(description_field) or f"{owned_by} {display_name}",
-                reasoning=bool(item.get("reasoning", False)),
-                supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
-                context_window=item.get("context_window"),
-                max_output_tokens=item.get("max_output_tokens"),
-                is_default=is_default,
+            display_name = item.get("display_name") or model_id
+            owned_by = item.get("owned_by") or (model_id.split("/")[0] if "/" in model_id else "Custom")
+            is_default = model_id == default_model_id
+            found_default = found_default or is_default
+
+            models.append(
+                ModelItem(
+                    id=model_id,
+                    name=display_name,
+                    provider=owned_by,
+                    description=item.get(description_field) or f"{owned_by} {display_name}",
+                    reasoning=_parse_reasoning_flag(item),
+                    supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
+                    context_window=_parse_int_field(item.get("context_window")),
+                    max_output_tokens=_parse_int_field(item.get("max_output_tokens")),
+                    is_default=is_default,
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001 - 单条坏数据不能作废整份列表
+            logger.warning("跳过无法解析的模型条目 (index=%d, id=%r): %s", index, item.get("id"), exc)
 
     if not models:
         return None
 
     if not found_default:
         # 没有匹配到配置的默认模型时，把第一个标为默认，避免前端没有可选项
+        logger.info(
+            "配置的默认模型 %s 不在网关返回的列表中，回退为列表首个模型 %s",
+            default_model_id,
+            models[0].id,
+        )
         models[0].is_default = True
         default_model_id = models[0].id
 
@@ -129,25 +185,75 @@ def _fallback(default_model_id: str) -> ModelListResponse:
 
 def reset_models_cache() -> None:
     """清空缓存。供测试与「改了配置想立刻生效」的场景使用。"""
-    global _cache
-    _cache = None
+    global _success_cache, _fallback_cache
+    _success_cache = None
+    _fallback_cache = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """取当前事件循环的 single-flight 锁；loop 变了就换一把新的。"""
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock = asyncio.Lock()
+        _lock_loop = loop
+    return _lock
+
+
+def _read_fresh_cache() -> tuple[ModelListResponse, bool] | None:
+    """命中未过期的缓存时返回 (响应, 是否兜底)。"""
+    now = time.monotonic()
+    if _success_cache is not None and now - _success_cache[0] < MODELS_CACHE_TTL_SECONDS:
+        return _success_cache[1], False
+    if _fallback_cache is not None and now - _fallback_cache[0] < FALLBACK_CACHE_TTL_SECONDS:
+        return _fallback_cache[1], True
+    return None
+
+
+async def _load_models(*, use_cache: bool) -> tuple[ModelListResponse, bool]:
+    """取模型列表（含 single-flight 与缓存写入）。"""
+    global _success_cache, _fallback_cache
+
+    if use_cache:
+        cached = _read_fresh_cache()
+        if cached is not None:
+            return cached
+
+    async with _get_lock():
+        # 双检：等锁期间先到的请求可能已经把结果写进缓存了，此时不该再打一次上游
+        if use_cache:
+            cached = _read_fresh_cache()
+            if cached is not None:
+                return cached
+
+        result, is_fallback = await _fetch_from_gateway(settings.model_name)
+        if is_fallback:
+            # 失败只进负缓存，绝不覆盖成功缓存：否则上游刚恢复又抖了一下，
+            # 用户会在一分钟内看到兜底模型
+            _fallback_cache = (time.monotonic(), result)
+        else:
+            _success_cache = (time.monotonic(), result)
+            _fallback_cache = None
+        return result, is_fallback
 
 
 async def fetch_available_models(*, use_cache: bool = True) -> ModelListResponse:
     """获取可用模型列表；上游不可达时退回兜底配置。"""
-    global _cache
-
-    default_model_id = settings.model_name
-
-    if use_cache and _cache is not None:
-        cached_at, cached, is_fallback = _cache
-        ttl = FALLBACK_CACHE_TTL_SECONDS if is_fallback else MODELS_CACHE_TTL_SECONDS
-        if time.monotonic() - cached_at < ttl:
-            return cached
-
-    result, is_fallback = await _fetch_from_gateway(default_model_id)
-    _cache = (time.monotonic(), result, is_fallback)
+    result, _ = await _load_models(use_cache=use_cache)
     return result
+
+
+async def get_known_model_ids() -> set[str] | None:
+    """网关真实返回的模型 id 集合；网关不可用、结果来自兜底时返回 None。
+
+    调用方（`app/api/chat.py` 的模型白名单）据此拦下「网关没暴露的模型」——登录用户
+    不该拿服务端的 key 去调更贵或未开放的模型。None 表示**无法校验**：必须放行，
+    校验服务不可用不该把整个对话功能一起拦掉。
+    """
+    result, is_fallback = await _load_models(use_cache=True)
+    if is_fallback:
+        return None
+    return {model.id for model in result.models}
 
 
 async def _fetch_from_gateway(default_model_id: str) -> tuple[ModelListResponse, bool]:

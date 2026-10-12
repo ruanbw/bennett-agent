@@ -15,10 +15,14 @@ import {
   ComposerPrimitive,
   ErrorPrimitive,
   MessagePrimitive,
+  type ReasoningMessagePartComponent,
+  type TextMessagePartComponent,
   ThreadPrimitive,
+  useAuiEvent,
   useAuiState,
 } from "@assistant-ui/react";
 import {
+  AlertTriangleIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
@@ -26,7 +30,7 @@ import {
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
-import type { FC } from "react";
+import { type FC, type RefObject, useCallback, useRef } from "react";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
@@ -37,6 +41,49 @@ import type { ModelItem } from "@/types";
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
 
+const isThreadRunning = (s: AssistantState) => s.thread.isRunning;
+
+/**
+ * 「重新生成」只出现在最后一条助手消息上。
+ *
+ * assistant-ui 的 Reload 把被重生成消息的 parentId 交给适配层，但历史回答上摆这个按钮
+ * 本身就是误导（用户会以为重跑的是那一条）。限制在最后一条之后，按钮语义与
+ * ChatProvider 的落点判断就一致了。
+ */
+const isLastAssistantMessage = (s: AssistantState) => {
+  const messages = s.thread.messages;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "assistant") return messages[i].id === s.message.id;
+  }
+  return false;
+};
+
+/** 本轮渲染不完整（丢过帧 / 流被中断）。字段缺席时行为不变：历史记录里本就没有它。 */
+const isMessageIncomplete = (s: AssistantState) =>
+  s.message.metadata.custom?.incomplete === true;
+
+/**
+ * 部件组件必须是模块级常量。
+ *
+ * `MessagePrimitive.Parts` 用**引用相等**判断 components 是否变化（见 @assistant-ui/core
+ * 的比较器：`prev.components.Text === next.components.Text`），内联对象与箭头函数每次渲染
+ * 都是新引用，于是任何一次重渲染都会整棵重挂 Markdown 子树——划走的选区被清掉、DOM 抖动。
+ */
+const AssistantTextPart: TextMessagePartComponent = () => <MarkdownText />;
+const AssistantReasoningPart: ReasoningMessagePartComponent = ({ text, status }) => (
+  <ReasoningMessage text={text} status={status} />
+);
+const ASSISTANT_PART_COMPONENTS = {
+  Reasoning: AssistantReasoningPart,
+  Text: AssistantTextPart,
+  tools: { Fallback: ToolFallback },
+};
+
+const UserTextPart: TextMessagePartComponent = ({ text }) => <span>{text}</span>;
+const USER_PART_COMPONENTS = {
+  Text: UserTextPart,
+};
+
 interface ThreadProps {
   models?: ModelItem[];
   modelsError?: string | null;
@@ -44,7 +91,7 @@ interface ThreadProps {
   currentReasoningEffort?: string;
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
-  onRefreshModels?: () => void;
+  onRefreshModels?: () => void | Promise<unknown>;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -57,8 +104,27 @@ export const Thread: FC<ThreadProps> = ({
   onRefreshModels,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
+  const isRunning = useAuiState(isThreadRunning);
   // 提问状态来自 context，不再由 ChatProvider 通过 cloneElement 注入
   const clarification = useClarification();
+
+  /**
+   * 发送后的焦点回到输入框。
+   *
+   * 不能在输入框上写 `autoFocus`：ChatProvider 以 `key={currentSessionId}` 重挂载，
+   * 挂载即聚焦会让「切到历史会话」平白弹出软键盘、抢走焦点。而 run 启动只可能来自用户
+   * 主动发送（新会话的首条消息也算），挂在 `thread.runStart` 上就同时保住了「发送完可以
+   * 接着打字」的手感。
+   */
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  useAuiEvent("thread.runStart", () => {
+    composerInputRef.current?.focus({ preventScroll: true });
+  });
+
+  /** 滚到底部按钮顺带把焦点交回输入框：去掉 autoFocus 后，这里是「点按钮接着打字」的唯一入口。 */
+  const focusComposer = useCallback(() => {
+    composerInputRef.current?.focus({ preventScroll: true });
+  }, []);
 
   return (
     <ThreadPrimitive.Root
@@ -70,6 +136,7 @@ export const Thread: FC<ThreadProps> = ({
       <ThreadPrimitive.Viewport
         turnAnchor="top"
         data-slot="aui_thread-viewport"
+        aria-busy={isRunning}
         className="relative flex flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth"
       >
         <div
@@ -90,8 +157,13 @@ export const Thread: FC<ThreadProps> = ({
             </div>
           </AuiIf>
 
-          {/* 消息流列表 */}
-          <div className="mb-6 flex flex-col gap-y-6 empty:hidden">
+          {/* 消息流列表：role="log" 让读屏把它当对话日志（多轮追加，不是一条新页面） */}
+          <div
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions text"
+            className="mb-6 flex flex-col gap-y-6 empty:hidden"
+          >
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
@@ -105,7 +177,7 @@ export const Thread: FC<ThreadProps> = ({
                 className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-gradient-to-t from-background to-transparent"
               />
             )}
-            <ThreadScrollToBottom />
+            <ThreadScrollToBottom onClick={focusComposer} />
 
             {/* 输入框正上方弹出的意图澄清浮层卡片：提交后即刻消失 */}
             {clarification.pending && (
@@ -117,6 +189,7 @@ export const Thread: FC<ThreadProps> = ({
             )}
 
             <Composer
+              inputRef={composerInputRef}
               models={models}
               modelsError={modelsError}
               currentModel={currentModel}
@@ -138,12 +211,13 @@ const ThreadMessage: FC = () => {
   return <AssistantMessage />;
 };
 
-const ThreadScrollToBottom: FC = () => {
+const ThreadScrollToBottom: FC<{ onClick?: () => void }> = ({ onClick }) => {
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
       <TooltipIconButton
         tooltip="滚动到底部"
         variant="outline"
+        onClick={onClick}
         className="absolute -top-12 z-10 self-center rounded-full p-2.5 bg-background shadow-md border hover:bg-muted disabled:invisible"
       >
         <ArrowDownIcon size={14} />
@@ -159,7 +233,8 @@ const Composer: FC<{
   currentReasoningEffort?: string;
   onSelectModel: (id: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
-  onRefreshModels?: () => void;
+  onRefreshModels?: () => void | Promise<unknown>;
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
 }> = ({
   models,
   modelsError = null,
@@ -168,6 +243,7 @@ const Composer: FC<{
   onSelectModel,
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  inputRef,
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
 
@@ -187,11 +263,15 @@ const Composer: FC<{
     >
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
         <ComposerAttachments />
+        {/*
+          刻意不写 autoFocus：挂载时的自动聚焦会在切历史会话（ChatProvider 按会话 id 重挂载）
+          时弹出软键盘抢焦点。发送后的聚焦由 Thread 订阅 `thread.runStart` 完成。
+        */}
         <ComposerPrimitive.Input
+          ref={inputRef}
           placeholder="问点什么吧..."
           className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
           rows={1}
-          autoFocus
           aria-label="输入消息"
           onKeyDown={(e) => {
             if (blockedByAttachments && e.key === "Enter" && !e.shiftKey) {
@@ -290,6 +370,7 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
 
 const AssistantMessage: FC = () => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
+  const incomplete = useAuiState(isMessageIncomplete);
 
   return (
     <MessagePrimitive.Root
@@ -298,17 +379,16 @@ const AssistantMessage: FC = () => {
       className="group flex flex-col gap-1 w-full"
     >
       <div className="text-foreground text-sm leading-relaxed wrap-break-word">
-        <MessagePrimitive.Parts
-          components={{
-            Reasoning: (props) => <ReasoningMessage {...props} />,
-            Text: () => <MarkdownText />,
-            tools: {
-              Fallback: (props) => <ToolFallback {...props} />,
-            },
-          }}
-        />
+        <MessagePrimitive.Parts components={ASSISTANT_PART_COMPONENTS} />
         <MessageError />
       </div>
+
+      {incomplete && (
+        <div className="text-destructive/80 mt-1 flex items-center gap-1.5 text-[11px]">
+          <AlertTriangleIcon className="size-3" />
+          回复不完整（已中断）
+        </div>
+      )}
 
       {stopped && (
         <div className="text-muted-foreground/70 mt-1 flex items-center gap-1.5 text-[11px]">
@@ -327,6 +407,8 @@ const AssistantMessage: FC = () => {
 
 const AssistantActionBar: FC = () => {
   const isLast = useAuiState((s) => s.message.isLast);
+  // 重新生成只对最后一条助手消息开放：历史回答上的 Reload 会重跑别的那条
+  const canReload = useAuiState(isLastAssistantMessage);
 
   return (
     <ActionBarPrimitive.Root
@@ -349,11 +431,13 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="重新生成" className="size-7 p-0">
-          <RefreshCwIcon className="size-3.5" />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
+      {canReload && (
+        <ActionBarPrimitive.Reload asChild>
+          <TooltipIconButton tooltip="重新生成" className="size-7 p-0">
+            <RefreshCwIcon className="size-3.5" />
+          </TooltipIconButton>
+        </ActionBarPrimitive.Reload>
+      )}
     </ActionBarPrimitive.Root>
   );
 };
@@ -367,11 +451,7 @@ const UserMessage: FC = () => {
     >
       <div className="flex justify-end w-full">
         <div className="bg-muted text-foreground max-w-[85%] rounded-2xl rounded-tr-xs px-4 py-2.5 text-sm leading-relaxed wrap-break-word">
-          <MessagePrimitive.Parts
-            components={{
-              Text: ({ text }) => <span>{text}</span>,
-            }}
-          />
+          <MessagePrimitive.Parts components={USER_PART_COMPONENTS} />
         </div>
       </div>
     </MessagePrimitive.Root>

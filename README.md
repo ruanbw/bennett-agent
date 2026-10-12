@@ -67,7 +67,7 @@ APP_ENV=production uv run python main.py
 
 前端不再由后端托管，**不需要 `npm run build`**，两个进程各自启动：
 
-1. **启动后端 API**（默认 `http://127.0.0.1:8000`，接口文档在 `/docs`）：
+1. **启动后端 API**（默认 `http://127.0.0.1:8000`，开发环境接口文档在 `/docs`）：
    ```bash
    uv run python main.py --web
    ```
@@ -81,17 +81,24 @@ APP_ENV=production uv run python main.py
 
    打开 `http://127.0.0.1:5173`，首次使用点「去注册」创建账号（邮箱 + 至少 8 位密码）。
 
+接口文档（`/docs`、`/redoc`、`/openapi.json`）默认只在非 production 环境暴露；
+production 下需要时用 `ENABLE_API_DOCS=true` 显式打开。
+
 ### 4. 认证与会话
 
-所有 `/api/*` 端点都要求登录。首次启动会在仓库根目录自动创建 `bennett.db`（SQLite，
-已被 `.gitignore` 忽略）。
+除注册与登录外，所有 `/api/*` 端点都要求登录；**注册与登录豁免登录态，但按来源 IP
+限流**（`AUTH_RATE_LIMIT_PER_MINUTE`，默认 10 次/分）。首次启动会在仓库根目录自动
+创建 `bennett.db`（SQLite，已被 `.gitignore` 忽略）。
 
-| 端点 | 说明 |
-|---|---|
-| `POST /api/auth/register` | 注册（JSON：`email` / `password`） |
-| `POST /api/auth/login` | 登录（**表单编码**：`username`=邮箱 / `password`），成功返回 204 |
-| `POST /api/auth/logout` | 登出（服务端删会话，即时失效） |
-| `GET /api/auth/me` | 当前登录用户，未登录返回 401 |
+| 端点 | 登录要求 | 说明 |
+|---|---|---|
+| `POST /api/auth/register` | 匿名（按 IP 限流） | 注册（JSON：`email` / `password`） |
+| `POST /api/auth/login` | 匿名（按 IP 限流） | 登录（**表单编码**：`username`=邮箱 / `password`），成功返回 204 |
+| `POST /api/auth/logout` | 需要 | 登出（服务端删会话，即时失效） |
+| `GET /api/auth/me` | 需要 | 当前登录用户，未登录返回 401 |
+| `GET /api/models` | 需要 | 网关可用模型列表（含思考链、上下文窗口等元数据） |
+| `POST /api/chat/title` | 需要（按账号限流） | 根据首条提示词生成会话标题 |
+| `POST /api/chat` | 需要（按账号限流） | 对话（SSE 流式输出） |
 
 两个容易踩的约定：
 
@@ -107,12 +114,24 @@ APP_ENV=production uv run python main.py
 `vite.config.js` 的 `server.proxy` 转发到后端。这样开发期前后端**同源**，cookie 天然
 可用，不需要 CORS credentials 配置。
 
-需要从别的机器访问、或直连远端后端时，把 `VITE_API_BASE_URL` 填成完整地址，并把前端
-来源加进后端白名单：
+需要从别的机器访问、或直连远端后端时，把 `VITE_API_BASE_URL` 填成完整地址，并同时
+配置后端：
 
 ```bash
-CORS_ALLOWED_ORIGINS=http://192.168.1.5:5173 uv run python main.py --web
+CORS_ALLOWED_ORIGINS=http://192.168.1.5:5173 \
+CORS_ALLOW_CREDENTIALS=true \
+uv run python main.py --web
 ```
 
-注意跨域下 cookie 需要后端 `allow_credentials=True`，而 `allow_origins` **不能是 `*`**
-（浏览器会直接拒绝该组合）。生产环境建议同样用反代把 `/api` 与静态资源收到同一域名。
+`CORS_ALLOW_CREDENTIALS` 默认 `false`，不开浏览器会拦掉带 cookie 的跨域响应；而一旦
+开启，`CORS_ALLOWED_ORIGINS` 就**不能包含 `*`**（浏览器会拒绝该组合），应用会在启动
+时直接报错。另有一条事实边界：当前会话 cookie 的 `SameSite` 固定为 `Lax`
+（`app/services/auth.py`），所以只支持跨 origin 但**同 site**（如同一注册域、不同端口）
+的部署；真正**跨站**（不同注册域）需要自行把 auth cookie 改成 `SameSite=None + Secure`，
+当前代码不支持。生产环境建议仍用反代把 `/api` 与静态资源收到同一域名，从根上避开这些问题。
+
+部署在反向代理之后时，把代理标头写进 `TRUSTED_PROXY_HEADERS`（如 `X-Forwarded-For`），
+认证限流才会按真实来源 IP 计数；实现取标头里**最右**非空地址，因此要求代理**覆盖或
+追加**该标头，而不是透传客户端传入的值。其余配置见 `.env.example`，其中
+`MODEL_UPSTREAM_TIMEOUT` 是上游调用的**空闲**超时（多久没收到数据才放弃，不是总时长，
+默认 120 秒）。

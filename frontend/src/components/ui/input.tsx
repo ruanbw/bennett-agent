@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 /**
  * 单行输入框基元。
  *
- * 样式与 `textarea.tsx` 对齐（同一套令牌、同一套 focus/aria-invalid 处理），
+ * 样式沿用同一套令牌与 focus/aria-invalid 处理，
  * 这样表单里两种控件不会出现视觉差异。
  */
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {

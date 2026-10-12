@@ -5,11 +5,17 @@ export interface SidebarBatchBarProps {
   isAllSelected: boolean;
   onToggleSelectAll: () => void;
   onExitSelectMode: () => void;
-  onPinSelected: () => void;
-  onUnpinSelected: () => void;
-  onRequestBatchDelete: () => void;
-  onRequestClearAll: () => void;
+  // 批量操作允许 async 实现；面向用户的失败提示由调用方（Sidebar）负责
+  onPinSelected: () => void | Promise<unknown>;
+  onUnpinSelected: () => void | Promise<unknown>;
+  onRequestBatchDelete: () => void | Promise<unknown>;
+  onRequestClearAll: () => void | Promise<unknown>;
   canClearAll: boolean;
+}
+
+/** 触发可能返回 Promise 的回调并接住 rejection：不产生 unhandled rejection。 */
+function trigger(action: () => void | Promise<unknown>, label: string): void {
+  void Promise.resolve(action()).catch((err: unknown) => console.error(`${label}:`, err));
 }
 
 /**
@@ -58,7 +64,7 @@ export function SidebarBatchBar({
       <div className="flex items-center gap-1.5 pt-1">
         <button
           type="button"
-          onClick={onPinSelected}
+          onClick={() => trigger(onPinSelected, '置顶选中会话失败')}
           disabled={isEmpty}
           className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-background hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer"
           title="置顶选中会话"
@@ -68,17 +74,17 @@ export function SidebarBatchBar({
         </button>
         <button
           type="button"
-          onClick={onUnpinSelected}
+          onClick={() => trigger(onUnpinSelected, '取消置顶失败')}
           disabled={isEmpty}
           className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-background hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer"
-          title="取消置顶"
+          title="取消选中会话的置顶"
         >
           <PinOff size={11} aria-hidden="true" />
-          <span>取消</span>
+          <span>取消置顶</span>
         </button>
         <button
           type="button"
-          onClick={onRequestBatchDelete}
+          onClick={() => trigger(onRequestBatchDelete, '批量删除失败')}
           disabled={isEmpty}
           className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer"
           title="删除选中"
@@ -91,7 +97,7 @@ export function SidebarBatchBar({
       {canClearAll && (
         <button
           type="button"
-          onClick={onRequestClearAll}
+          onClick={() => trigger(onRequestClearAll, '清空会话失败')}
           className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 mt-0.5 text-[11px] text-destructive hover:bg-destructive/10 rounded-md transition cursor-pointer"
           title="清空所有会话记录"
         >

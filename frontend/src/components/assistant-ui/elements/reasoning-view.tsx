@@ -5,9 +5,8 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { ChevronDown, Loader2 } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
-
-const toSeconds = (ms: number) => (ms > 0 ? Math.max(1, Math.round(ms / 1000)) : 0);
+import { useDeferredValue, useState, useEffect, useRef } from "react";
+import { thinkingSeconds } from "@/lib/reasoning-time";
 
 interface ReasoningViewProps {
   text?: string;
@@ -21,6 +20,8 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 思考文本每个增量都会整串重渲染：推后一帧渲染，让输入与滚动先跟上
+  const deferredText = useDeferredValue(text);
 
   // 新一轮思考开始时：重置计时，流式中默认展开
   if (prevStreaming !== isStreaming) {
@@ -33,7 +34,8 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
 
   // 流式中默认展开，思考结束后默认收起（与主流平台一致，也可以点开看完整思考过程）
   const isOpen = userToggled !== null ? userToggled : isStreaming;
-  const elapsed = isStreaming ? liveElapsed : elapsedMs > 0 ? toSeconds(elapsedMs) : liveElapsed;
+  const settledElapsed = thinkingSeconds(elapsedMs);
+  const elapsed = isStreaming ? liveElapsed : settledElapsed > 0 ? settledElapsed : liveElapsed;
 
   // 思考计时器
   useEffect(() => {
@@ -41,7 +43,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
 
     const start = Date.now() - elapsedMs;
     const timer = setInterval(() => {
-      setLiveElapsed(Math.max(1, Math.floor((Date.now() - start) / 1000)));
+      setLiveElapsed(thinkingSeconds(Date.now() - start));
     }, 500);
     return () => clearInterval(timer);
   }, [isStreaming, elapsedMs]);
@@ -51,7 +53,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
     if (isStreaming && isOpen && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [text, isStreaming, isOpen]);
+  }, [deferredText, isStreaming, isOpen]);
 
   if (!text && !isStreaming) return null;
 
@@ -99,13 +101,18 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
         )}
       </CollapsibleTrigger>
 
-      <CollapsibleContent className="transition-all data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+      {/* data-[state=*] 是 Radix 的写法，base-ui 的 CollapsiblePanel 只挂 data-open/data-closed
+          （见 @base-ui/react/collapsible/panel/CollapsiblePanelDataAttributes），原类名永远不匹配 */}
+      <CollapsibleContent className="transition-all data-closed:animate-collapsible-up data-open:animate-collapsible-down">
         <div className="mt-1.5 ml-1 pl-3 border-l-2 border-border/70">
           <div
             ref={scrollRef}
+            role="group"
+            aria-label="思考过程"
+            tabIndex={0}
             className="max-h-64 overflow-y-auto pr-2 text-xs leading-relaxed text-muted-foreground/85 whitespace-pre-wrap select-text font-sans"
           >
-            {text || "思考中..."}
+            {deferredText || "思考中..."}
           </div>
         </div>
       </CollapsibleContent>
