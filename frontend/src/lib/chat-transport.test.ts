@@ -224,6 +224,33 @@ describe('损坏与中断', () => {
     }
   })
 
+  it('正常流读取结束后释放 reader 锁', async () => {
+    const stream = bodyFrom([frame({ type: 'content', delta: 'ok' }), frame({ type: 'done' })])
+    stubFetch({ body: stream })
+
+    for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+      // 消费掉
+    }
+
+    // 若 releaseLock 没有被调用，locked 会为 true，并且再次 getReader 会抛出 TypeError
+    expect(stream.locked).toBe(false)
+  })
+
+  it('流解析发生中断/异常时仍释放 reader 锁', async () => {
+    const stream = bodyFrom([frame({ type: 'content', delta: 'ok' }), frame({ type: 'done' })])
+    stubFetch({ body: stream })
+
+    await expect(
+      (async () => {
+        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+          throw new Error('中途打断')
+        }
+      })(),
+    ).rejects.toThrow('中途打断')
+
+    expect(stream.locked).toBe(false)
+  })
+
   it('响应没有可读流时报错而不是静默产出空流', async () => {
     stubFetch({ body: null })
 

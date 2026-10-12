@@ -83,25 +83,29 @@ async function* parseEventStream(
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, { stream: true });
 
-    const frames = buffer.split(FRAME_SEPARATOR);
-    // 最后一段可能是不完整的帧，留到下一轮
-    buffer = frames.pop() ?? '';
+      const frames = buffer.split(FRAME_SEPARATOR);
+      // 最后一段可能是不完整的帧，留到下一轮
+      buffer = frames.pop() ?? '';
 
-    for (const frame of frames) {
-      const event = parseFrame(frame, onParseError);
-      if (event !== undefined) yield event;
+      for (const frame of frames) {
+        const event = parseFrame(frame, onParseError);
+        if (event !== undefined) yield event;
+      }
     }
-  }
 
-  // 流结束时缓冲区可能还剩最后一帧（服务端没有以空行收尾）
-  const tail = parseFrame(buffer, onParseError);
-  if (tail !== undefined) yield tail;
+    // 流结束时缓冲区可能还剩最后一帧（服务端没有以空行收尾）
+    const tail = parseFrame(buffer, onParseError);
+    if (tail !== undefined) yield tail;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**

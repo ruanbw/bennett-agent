@@ -124,9 +124,6 @@ async function executeRun(run: Run): Promise<void> {
       appendNotice(sessionId, '请求失败', err instanceof Error ? err.message : String(err));
     }
   } finally {
-    // 无论成功、失败还是中止，都必须收尾，否则 UI 会永远停在「生成中」
-    finishRun(sessionId, { stopped });
-
     try {
       await saveFinal(assistantMsgId, run);
       await touchSession(sessionId);
@@ -134,6 +131,10 @@ async function executeRun(run: Run): Promise<void> {
     } catch (err) {
       console.warn('持久化消息记录失败:', err);
     }
+
+    // 无论成功、失败还是中止，都必须在落库完成后再 finishRun，
+    // 避免 ChatProvider loadMessages 读到未落盘状态并删掉 overlay 导致界面闪烁空白
+    finishRun(sessionId, { stopped });
   }
 }
 
