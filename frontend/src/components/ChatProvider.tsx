@@ -276,14 +276,7 @@ export function ChatProvider({
     onNew,
     onReload,
     onCancel,
-    convertMessage: (m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      createdAt: m.createdAt,
-      status: m.status,
-      metadata: m.metadata,
-    }),
+    convertMessage,
   });
 
   return (
@@ -299,6 +292,18 @@ export function ChatProvider({
       </ClarificationProvider>
     </AssistantRuntimeProvider>
   );
+}
+
+/** 提取到组件外部的稳定转换器，避免重渲染破坏 @assistant-ui 的转换器内部缓存。 */
+function convertMessage(m: RuntimeMessage) {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    createdAt: m.createdAt,
+    status: m.status,
+    metadata: m.metadata,
+  };
 }
 
 /**

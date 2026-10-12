@@ -14,10 +14,12 @@ import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-ic
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { cn } from "@/lib/utils";
 
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+
 const MarkdownTextImpl = () => {
   return (
     <MarkdownTextPrimitive
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
       className="aui-md"
       components={defaultComponents}
       defer
