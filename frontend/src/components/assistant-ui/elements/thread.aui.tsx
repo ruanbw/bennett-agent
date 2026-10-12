@@ -177,7 +177,14 @@ const Composer: FC<{
   const blockedByAttachments = attachmentCount > 0;
 
   return (
-    <ComposerPrimitive.Root className="relative flex w-full flex-col">
+    <ComposerPrimitive.Root
+      className="relative flex w-full flex-col"
+      onSubmit={(e) => {
+        if (blockedByAttachments) {
+          e.preventDefault();
+        }
+      }}
+    >
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
         <ComposerAttachments />
         <ComposerPrimitive.Input
@@ -186,6 +193,11 @@ const Composer: FC<{
           rows={1}
           autoFocus
           aria-label="输入消息"
+          onKeyDown={(e) => {
+            if (blockedByAttachments && e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+            }
+          }}
         />
 
         {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧 */}
