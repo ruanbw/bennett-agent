@@ -148,6 +148,20 @@ def test_typical_frontend_payload_is_accepted():
     assert request.stream is True
 
 
+def test_model_id_whitespace_stripped_or_none():
+    req1 = ChatRequest(messages=[user()], model="   ")
+    assert req1.model is None
+
+    req2 = ChatRequest(messages=[user()], model="  openai/gpt-4o  ")
+    assert req2.model == "openai/gpt-4o"
+
+    title_req1 = TitleGenerateRequest(prompt="hi", model="   ")
+    assert title_req1.model is None
+
+    title_req2 = TitleGenerateRequest(prompt="hi", model="  custom/model  ")
+    assert title_req2.model == "custom/model"
+
+
 def test_defaults_are_unchanged():
     request = ChatRequest(messages=[user()])
     assert request.model is None

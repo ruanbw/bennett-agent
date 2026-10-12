@@ -104,7 +104,7 @@ async def get_models():
 )
 async def generate_title(request: TitleGenerateRequest):
     """提取首条用户提示词的意向，调用模型生成极简会话标题"""
-    model_to_use = request.model or settings.model_name
+    model_to_use = (request.model.strip() if request.model else "") or settings.model_name
     title = await generate_title_from_prompt(model_to_use, request.prompt)
     return TitleGenerateResponse(title=title)
 
@@ -120,7 +120,7 @@ async def chat_stream(request: ChatRequest):
     客户端无状态上传完整会话历史；服务端不保存任何会话状态。
     事件以 `done` 或 `error` 收尾。
     """
-    model_to_use = request.model or settings.model_name
+    model_to_use = (request.model.strip() if request.model else "") or settings.model_name
 
     async def event_generator():
         async for event in stream_chat_events(

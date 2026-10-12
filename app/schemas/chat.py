@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # =====================================================================
 # 输入边界
@@ -45,6 +45,14 @@ class ChatRequest(BaseModel):
     )
     stream: bool = Field(True, description="是否启用流式返回")
 
+    @field_validator("model", mode="before")
+    @classmethod
+    def _strip_model(cls, v: object) -> object:
+        if isinstance(v, str):
+            cleaned = v.strip()
+            return cleaned or None
+        return v
+
     @model_validator(mode="after")
     def _check_history_budget(self) -> "ChatRequest":
         """约束历史总长度。
@@ -78,6 +86,14 @@ class ModelListResponse(BaseModel):
 class TitleGenerateRequest(BaseModel):
     model: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS, description="使用的模型名称")
     prompt: str = Field(..., max_length=MAX_TITLE_PROMPT_CHARS, description="首条提示词内容")
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _strip_model(cls, v: object) -> object:
+        if isinstance(v, str):
+            cleaned = v.strip()
+            return cleaned or None
+        return v
 
 
 class TitleGenerateResponse(BaseModel):
