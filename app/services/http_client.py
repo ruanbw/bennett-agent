@@ -31,6 +31,9 @@ def get_http_client() -> httpx.AsyncClient:
 async def close_http_client() -> None:
     """关闭共享客户端。由 FastAPI lifespan 在进程退出时调用。"""
     global _client
-    if _client is not None and not _client.is_closed:
-        await _client.aclose()
-    _client = None
+    if _client is not None:
+        try:
+            if not _client.is_closed:
+                await _client.aclose()
+        finally:
+            _client = None
