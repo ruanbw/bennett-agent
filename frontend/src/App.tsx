@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { ChatContainer } from './components/ChatContainer';
 import { ChatProvider } from './components/ChatProvider';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { ThemeProvider } from './context/ThemeContext';
 import { useChatSessions } from './hooks/use-chat-sessions';
@@ -126,54 +127,58 @@ export function App() {
   }, [createSession, isMobile]);
 
   return (
-    <ThemeProvider>
-      <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
-        <Sidebar
-          sessions={sessions}
-          currentSessionId={currentSessionId}
-          onSelectSession={handleSelectSession}
-          onCreateSession={handleCreateSession}
-          onUpdateTitle={updateTitle}
-          onDeleteSession={(sessionId: string) => removeSessions([sessionId])}
-          onTogglePinSession={togglePin}
-          onBatchDelete={removeSessions}
-          onBatchTogglePin={setPinned}
-          onClearAllSessions={clearAllSessions}
-          isOpen={isSidebarOpen}
-        />
-
-        {/* 遮罩：仅移动端抽屉需要 */}
-        {isSidebarOpen && (
-          <div
-            onClick={() => setIsSidebarOpen(false)}
-            aria-hidden="true"
-            className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
-          />
-        )}
-
-        {/* 对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui */}
-        {currentSessionId && (
-          <ChatProvider
-            key={currentSessionId}
+    <ErrorBoundary fallbackTitle="应用出现异常">
+      <ThemeProvider>
+        <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
+          <Sidebar
+            sessions={sessions}
             currentSessionId={currentSessionId}
-            currentModel={currentModel}
-            currentReasoningEffort={currentReasoningEffort}
-          >
-            <ChatContainer
-              models={models}
-              modelsError={modelsError}
-              currentModel={currentModel}
-              currentReasoningEffort={currentReasoningEffort}
-              onSelectModel={selectModel}
-              onSelectReasoningEffort={selectReasoningEffort}
-              onRefreshModels={refreshModels}
-              onToggleSidebar={handleToggleSidebar}
-              onCreateSession={handleCreateSession}
+            onSelectSession={handleSelectSession}
+            onCreateSession={handleCreateSession}
+            onUpdateTitle={updateTitle}
+            onDeleteSession={(sessionId: string) => removeSessions([sessionId])}
+            onTogglePinSession={togglePin}
+            onBatchDelete={removeSessions}
+            onBatchTogglePin={setPinned}
+            onClearAllSessions={clearAllSessions}
+            isOpen={isSidebarOpen}
+          />
+
+          {/* 遮罩：仅移动端抽屉需要 */}
+          {isSidebarOpen && (
+            <div
+              onClick={() => setIsSidebarOpen(false)}
+              aria-hidden="true"
+              className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
             />
-          </ChatProvider>
-        )}
-      </div>
-    </ThemeProvider>
+          )}
+
+          {/* 对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui */}
+          {currentSessionId && (
+            <ErrorBoundary key={currentSessionId} fallbackTitle="对话区域加载异常">
+              <ChatProvider
+                key={currentSessionId}
+                currentSessionId={currentSessionId}
+                currentModel={currentModel}
+                currentReasoningEffort={currentReasoningEffort}
+              >
+                <ChatContainer
+                  models={models}
+                  modelsError={modelsError}
+                  currentModel={currentModel}
+                  currentReasoningEffort={currentReasoningEffort}
+                  onSelectModel={selectModel}
+                  onSelectReasoningEffort={selectReasoningEffort}
+                  onRefreshModels={refreshModels}
+                  onToggleSidebar={handleToggleSidebar}
+                  onCreateSession={handleCreateSession}
+                />
+              </ChatProvider>
+            </ErrorBoundary>
+          )}
+        </div>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }
 
