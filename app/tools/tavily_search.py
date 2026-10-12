@@ -40,10 +40,18 @@ async def tavily_search(
     if not api_key:
         return "错误: 未配置 Tavily API Key，无法执行联网搜索。"
 
+    # 防御 max_results 为 None、非整数或超出范围
+    safe_max_results = 5
+    if max_results is not None:
+        try:
+            safe_max_results = int(max_results)
+        except (ValueError, TypeError):
+            safe_max_results = 5
+
     payload: dict[str, Any] = {
         "api_key": api_key,
         "query": query,
-        "max_results": max(MAX_RESULTS_FLOOR, min(max_results, MAX_RESULTS_CEILING)),
+        "max_results": max(MAX_RESULTS_FLOOR, min(safe_max_results, MAX_RESULTS_CEILING)),
         "search_depth": "basic",
         "include_answer": True,
     }
@@ -73,7 +81,14 @@ async def tavily_search(
         body = response.text[:ERROR_BODY_CHARS]
         return f"联网搜索请求失败 (HTTP {response.status_code}): {body}"
 
-    return _format_results(response.json(), query)
+    try:
+        json_data = response.json()
+    except Exception:
+        logger.warning("Tavily 返回非 JSON 格式响应 (query=%r)", query, exc_info=True)
+        body = response.text[:ERROR_BODY_CHARS]
+        return f"联网搜索响应解析失败 (HTTP {response.status_code}): {body}"
+
+    return _format_results(json_data, query)
 
 
 def _format_results(data: dict[str, Any], query: str) -> str:

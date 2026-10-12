@@ -186,10 +186,10 @@ def test_whitespace_in_content_is_stripped():
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize(
     "asked,expected",
-    [(0, 1), (-5, 1), (3, 3), (10, 10), (999, 10)],
+    [(0, 1), (-5, 1), (3, 3), (10, 10), (999, 10), (None, 5), ("invalid", 5)],
 )
 async def test_max_results_is_clamped(fake_http, asked, expected):
-    """上限既防「要一万条」，也防负数把上游打回 400。"""
+    """上限既防「要一万条」，也防负数把上游打回 400，并防 None/非整数导致 TypeError。"""
     client = fake_http(FakeResponse(payload={"results": []}))
 
     await tavily_search(None, "q", asked)
@@ -249,3 +249,17 @@ async def test_unexpected_failure_does_not_leak_details(fake_http, caplog):
     assert "发生异常" in result
     # 细节进日志而不是进上下文
     assert secret in caplog.text
+
+
+async def test_html_response_on_200_handled_gracefully(fake_http):
+    """上游返回 200 却不是合法 JSON（如某些网关返回的 HTML 页面）时应友好兜底。"""
+
+    class BadJsonResponse(FakeResponse):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    fake_http(BadJsonResponse(status_code=200, text="<html>502 Bad Gateway</html>"))
+
+    result = await tavily_search(None, "q")
+    assert "响应解析失败" in result
+    assert "502 Bad Gateway" in result
