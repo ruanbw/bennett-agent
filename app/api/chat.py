@@ -9,7 +9,7 @@ from math import ceil
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
-from app.api.rate_limit import SlidingWindowLimiter, client_key
+from app.api.rate_limit import SlidingWindowLimiter, client_key, resolve_client_ip
 from app.config import settings
 from app.schemas.chat import (
     ChatRequest,
@@ -48,16 +48,28 @@ def get_chat_limiter() -> SlidingWindowLimiter:
     return _limiter
 
 
+def get_trusted_proxy_headers() -> list[str]:
+    """获取配置中受信的代理标头列表。"""
+    raw = settings.trusted_proxy_headers
+    if not raw or not raw.strip():
+        return []
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
 async def enforce_chat_rate_limit(request: Request) -> None:
     """对话接口的限流依赖（C-3）。
 
     进程内实现，挡的是「单个来源猛打」；精确配额需要共享存储，见 `rate_limit.py`。
+    支持反向代理 IP 识别（需在 settings 中配置 trusted_proxy_headers）。
     """
     if settings.chat_rate_limit_per_minute <= 0:
         return
 
-    host = request.client.host if request.client else None
-    allowed, retry_after = get_chat_limiter().check(client_key(host))
+    direct_host = request.client.host if request.client else None
+    trusted_headers = get_trusted_proxy_headers()
+    ip = resolve_client_ip(direct_host, headers=dict(request.headers), trusted_headers=trusted_headers)
+
+    allowed, retry_after = get_chat_limiter().check(client_key(ip))
     if allowed:
         return
 

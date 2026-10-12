@@ -89,6 +89,14 @@ class Settings(BaseSettings):
         default=30,
         description="单个来源 IP 每分钟可发起的对话/标题请求数；0 表示不限流",
     )
+    trusted_proxy_headers: str = Field(
+        default="",
+        description=(
+            "逗号分隔的受信任反向代理 IP 标头列表（如 'X-Forwarded-For,X-Real-IP'）。"
+            "仅当部署在受信反向代理之后时配置，按顺序提取第一个非空客户端 IP；"
+            "为空时直接使用直连 client.host，防止客户端伪造标头绕过限流。"
+        ),
+    )
     model_upstream_timeout: float = Field(
         default=120.0,
         description=(

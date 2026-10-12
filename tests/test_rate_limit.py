@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import chat as chat_api
-from app.api.rate_limit import SlidingWindowLimiter, client_key
+from app.api.rate_limit import SlidingWindowLimiter, client_key, resolve_client_ip
 from app.config import settings
 from app.schemas.events import Done
 
@@ -110,6 +110,55 @@ def test_tracked_keys_are_capped():
     assert len(limiter._hits) <= 5
 
 
+def test_tracked_keys_evict_expired_and_lru():
+    """超限时不应清空全表，而是清理过期项或淘汰最旧项。"""
+    limiter = SlidingWindowLimiter(limit=5, window_seconds=10, max_keys=3)
+
+    limiter.check("ip-1")
+    limiter.check("ip-2")
+    limiter.check("ip-3")
+
+    # 4th key 触发淘汰，由于未过期，最久未访问的 ip-1 应被淘汰，ip-2 和 ip-3 保留
+    limiter.check("ip-4")
+    assert len(limiter._hits) <= 3
+    assert "ip-1" not in limiter._hits
+    assert "ip-2" in limiter._hits
+    assert "ip-3" in limiter._hits
+    assert "ip-4" in limiter._hits
+
+
+def test_zero_or_negative_limit_safe():
+    """limit <= 0 增加安全性防御，不触发 IndexError。"""
+    limiter = SlidingWindowLimiter(limit=0, window_seconds=60)
+    allowed, retry_after = limiter.check("ip")
+    assert allowed is False
+    assert retry_after == 60.0
+
+    limiter_neg = SlidingWindowLimiter(limit=-5, window_seconds=30)
+    allowed, retry_after = limiter_neg.check("ip")
+    assert allowed is False
+    assert retry_after == 30.0
+
+
+def test_resolve_client_ip():
+    """验证反向代理 IP 识别逻辑。"""
+    # 无受信任标头时返回直连 IP
+    assert resolve_client_ip("127.0.0.1", headers={"x-forwarded-for": "10.0.0.1"}) == "127.0.0.1"
+
+    # 有受信任标头时优先提取真实 IP（取第一个）
+    trusted = ["X-Forwarded-For", "X-Real-IP"]
+    headers = {"X-Forwarded-For": "203.0.113.195, 70.41.3.18, 150.172.238.178"}
+    assert resolve_client_ip("127.0.0.1", headers=headers, trusted_headers=trusted) == "203.0.113.195"
+
+    headers_real_ip = {"X-Real-IP": "198.51.100.1"}
+    assert resolve_client_ip("127.0.0.1", headers=headers_real_ip, trusted_headers=trusted) == "198.51.100.1"
+
+    # headers 为空或标头值全为空时回退直连 IP
+    assert resolve_client_ip("127.0.0.1", headers={}, trusted_headers=trusted) == "127.0.0.1"
+    assert resolve_client_ip("127.0.0.1", headers={"X-Forwarded-For": "  "}, trusted_headers=trusted) == "127.0.0.1"
+    assert resolve_client_ip(None, headers={}, trusted_headers=trusted) == "unknown"
+
+
 def test_reset_clears_state():
     limiter = SlidingWindowLimiter(limit=1, window_seconds=60)
     limiter.check("ip")
@@ -162,6 +211,34 @@ def test_models_endpoint_is_not_limited(monkeypatch):
     with app_client(monkeypatch, rate_limit=1) as client:
         assert client.get("/api/models").status_code == 200
         assert client.get("/api/models").status_code == 200
+
+
+def test_trusted_proxy_header_applied_in_chat(monkeypatch, fake_upstream):
+    """配置 trusted_proxy_headers 时，Chat 限流应识别反向代理转发的真实 IP。"""
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
+    with app_client(monkeypatch, rate_limit=1) as client:
+        # 不同客户端 IP 独立限流
+        res1 = client.post(
+            "/api/chat",
+            json=valid_body(),
+            headers={"X-Forwarded-For": "192.0.2.1"},
+        )
+        assert res1.status_code == 200
+
+        res2 = client.post(
+            "/api/chat",
+            json=valid_body(),
+            headers={"X-Forwarded-For": "192.0.2.2"},
+        )
+        assert res2.status_code == 200
+
+        # 同一客户端 IP 超限
+        res3 = client.post(
+            "/api/chat",
+            json=valid_body(),
+            headers={"X-Forwarded-For": "192.0.2.1"},
+        )
+        assert res3.status_code == 429
 
 
 def test_zero_disables_limiting(monkeypatch, fake_upstream):
