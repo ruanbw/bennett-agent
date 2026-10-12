@@ -256,3 +256,37 @@ async def test_failures_are_also_cached(fake_http):
     await fetch_available_models()
 
     assert client.calls == 1
+
+
+async def test_failures_use_short_negative_cache_ttl(fake_http, monkeypatch):
+    """兜底响应采用短 TTL (10s)，避免上游抖动锁死 5 分钟。"""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(model_service.time, "monotonic", lambda: clock["now"])
+
+    client = fake_http(FakeResponse(status_code=503))
+    await fetch_available_models()
+    assert client.calls == 1
+
+    # 5 秒内在短 TTL 内，不重试
+    clock["now"] += 5.0
+    await fetch_available_models()
+    assert client.calls == 1
+
+    # 11 秒超过 10s 短 TTL，应该重新打上游
+    clock["now"] += 6.0
+    await fetch_available_models()
+    assert client.calls == 2
+
+
+async def test_parse_exception_falls_back_and_caches_short(fake_http, monkeypatch):
+    """_parse_models 抛出异常时捕获、打印 warning 并走短 TTL 兜底。"""
+
+    def broken_parse(*_args, **_kwargs):
+        raise TypeError("unexpected structure")
+
+    monkeypatch.setattr(model_service, "_parse_models", broken_parse)
+    client = fake_http(FakeResponse(payload={"data": [{"id": "a/one"}]}))
+
+    result = await fetch_available_models()
+    assert result == _fallback(settings.model_name)
+    assert client.calls == 1

@@ -15,7 +15,10 @@ MODELS_TIMEOUT_SECONDS = 3.0
 #: 缓存有效期。网关的模型列表变化很慢，而每次页面加载都打上游既慢又浪费。
 MODELS_CACHE_TTL_SECONDS = 300.0
 
-_cache: tuple[float, ModelListResponse] | None = None
+#: 兜底结果缓存有效期（负缓存）。避免上游瞬时抖动造成过长时间锁定，同时防止频繁超时。
+FALLBACK_CACHE_TTL_SECONDS = 10.0
+
+_cache: tuple[float, ModelListResponse, bool] | None = None
 
 
 def _build_url() -> str:
@@ -137,16 +140,17 @@ async def fetch_available_models(*, use_cache: bool = True) -> ModelListResponse
     default_model_id = settings.model_name
 
     if use_cache and _cache is not None:
-        cached_at, cached = _cache
-        if time.monotonic() - cached_at < MODELS_CACHE_TTL_SECONDS:
+        cached_at, cached, is_fallback = _cache
+        ttl = FALLBACK_CACHE_TTL_SECONDS if is_fallback else MODELS_CACHE_TTL_SECONDS
+        if time.monotonic() - cached_at < ttl:
             return cached
 
-    result = await _fetch_from_gateway(default_model_id)
-    _cache = (time.monotonic(), result)
+    result, is_fallback = await _fetch_from_gateway(default_model_id)
+    _cache = (time.monotonic(), result, is_fallback)
     return result
 
 
-async def _fetch_from_gateway(default_model_id: str) -> ModelListResponse:
+async def _fetch_from_gateway(default_model_id: str) -> tuple[ModelListResponse, bool]:
     headers = {}
     if settings.litellm_api_key:
         headers["Authorization"] = f"Bearer {settings.litellm_api_key}"
@@ -159,21 +163,26 @@ async def _fetch_from_gateway(default_model_id: str) -> ModelListResponse:
         )
     except Exception as exc:
         logger.warning("从上游网关拉取模型列表失败，将使用默认兜底配置: %s", exc)
-        return _fallback(default_model_id)
+        return _fallback(default_model_id), True
 
     if response.status_code != 200:
         logger.warning("上游 /v1/models 响应非 200: %s", response.status_code)
-        return _fallback(default_model_id)
+        return _fallback(default_model_id), True
 
     try:
         payload = response.json()
     except ValueError:
         logger.warning("上游 /v1/models 返回的不是 JSON")
-        return _fallback(default_model_id)
+        return _fallback(default_model_id), True
 
-    parsed = _parse_models(payload, default_model_id, settings.model_description_field)
+    try:
+        parsed = _parse_models(payload, default_model_id, settings.model_description_field)
+    except Exception as exc:
+        logger.warning("解析上游 /v1/models 响应失败，将使用默认兜底配置: %s", exc)
+        return _fallback(default_model_id), True
+
     if parsed is None:
         logger.warning("上游 /v1/models 未返回可用模型，将使用默认兜底配置")
-        return _fallback(default_model_id)
+        return _fallback(default_model_id), True
 
-    return parsed
+    return parsed, False
