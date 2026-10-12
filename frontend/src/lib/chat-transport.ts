@@ -7,6 +7,7 @@
  */
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';
+import { API_BASE_URL } from './constants';
 
 const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
@@ -119,7 +120,7 @@ export async function* streamChat({
   messages,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
-  const response = await fetch('/api/chat', {
+  const response = await fetch(`${API_BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

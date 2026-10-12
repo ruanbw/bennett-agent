@@ -94,7 +94,8 @@ def main() -> None:
         import uvicorn
 
         print("=" * 60)
-        print(f" 启动 Bennett Web 服务: http://{args.host}:{args.port}")
+        print(f" Bennett Agent API: http://{args.host}:{args.port}（文档 /docs）")
+        print(" Web 界面由前端独立提供：cd frontend && npm run dev")
         print("=" * 60)
         uvicorn.run("app.server:app", host=args.host, port=args.port, reload=False)
     else:

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent } from '../types'
+import { API_BASE_URL } from './constants'
 import { streamChat } from './chat-transport'
 
 const encoder = new TextEncoder()
@@ -84,7 +85,7 @@ describe('请求体', () => {
     }
 
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/chat')
+    expect(url).toBe(`${API_BASE_URL}/api/chat`)
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body)).toEqual({
       model: 'openai/gpt-4o',

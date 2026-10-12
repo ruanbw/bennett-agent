@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { ThemeProvider } from './context/ThemeContext';
 import { useChatSessions } from './hooks/use-chat-sessions';
 import { useIsMobileViewport } from './hooks/use-media-query';
+import { API_BASE_URL } from './lib/constants';
 import type { ModelItem } from './types';
 
 /** `useModels` 的 state 形状。必须显式声明：否则 `[]`/`null` 会被推成 `never[]` 与字面量 `null`，写入真实数据时报错。 */
@@ -36,7 +37,7 @@ function useModels() {
 
     void (async () => {
       try {
-        const res = await fetch('/api/models');
+        const res = await fetch(`${API_BASE_URL}/api/models`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const data = await res.json();

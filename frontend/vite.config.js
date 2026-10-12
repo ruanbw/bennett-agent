@@ -15,22 +15,8 @@ export default defineConfig({
     },
   },
   server: {
+    // 不再代理 /api：前端通过 .env 的 VITE_API_BASE_URL 直连后端，代理会掩盖配置错误
     port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
-      },
-    },
-  },
-  preview: {
-    port: 4173,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
-      },
-    },
   },
   test: {
     // 纯逻辑测试：不挂 jsdom。需要 IndexedDB / DOM 的模块（chat-persistence、

@@ -18,6 +18,9 @@ wheels/
 .env*.local
 .env.production
 .env.development
+# 例外：前端 .env 里只有接口地址，没有密钥，必须进版本库，
+# 否则新克隆的仓库前端没有后端地址可用（本地覆盖仍走 frontend/.env.local）
+!frontend/.env
 
 # agent
 .pi

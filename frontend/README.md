@@ -8,7 +8,7 @@ React 19 + Vite + Tailwind 4 + [assistant-ui](https://www.assistant-ui.com/) 的
 ```bash
 npm install
 
-npm run dev        # 开发服务器（:5173，/api 代理到 :8000）
+npm run dev        # 运行前端（:5173，接口地址取自 .env）
 npm run build      # tsc --noEmit && vite build  ← 构建前先类型检查
 npm run typecheck  # 只做类型检查
 npm run lint       # oxlint
@@ -18,6 +18,18 @@ npm run preview    # 预览构建产物（:4173）
 
 `npm run build` 会先跑 `tsc --noEmit`。Vite 用 esbuild 转译、**不做类型检查**，所以
 类型门禁必须单独挂在这一步上，否则 `tsc` 永远跑不到。
+
+## 后端地址
+
+接口地址来自 `.env` 的 `VITE_API_BASE_URL`（默认 `http://127.0.0.1:8000`）。前端不再由后端
+托管，也不走 Vite 代理——后端纯 API，两者不同源。改后端端口、或从别的机器访问时改
+`.env`（本地覆盖写 `.env.local`，已忽略）。
+
+跨域由后端负责：前端来源必须在后端的 `CORS_ALLOWED_ORIGINS` 里（默认已包含
+`http://localhost:5173` 与 `http://127.0.0.1:5173`），否则浏览器会拦掉请求。
+
+`npm run build` / `npm run preview` 属于可选路径（产物交给任意静态服务器即可）；运行界面
+本身**不需要打包**。
 
 ## 目录结构
 
