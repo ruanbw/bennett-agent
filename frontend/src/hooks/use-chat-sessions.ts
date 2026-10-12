@@ -39,7 +39,7 @@ export interface UseChatSessionsResult {
   currentModel: string | null;
   currentReasoningEffort: string;
   createSession: () => Promise<string>;
-  selectSession: (sessionId: string) => void;
+  selectSession: (sessionId: string, sessionList?: SessionRecord[]) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   togglePin: (sessionId: string) => Promise<void>;
   setPinned: (sessionIds: string[], pinned: boolean) => Promise<void>;
@@ -88,10 +88,12 @@ export function useChatSessions({
         if (pinA !== pinB) return pinB - pinA;
         return (b.updatedAt || 0) - (a.updatedAt || 0);
       });
+      sessionsRef.current = list;
       setSessions(list);
       return list;
     } catch (err) {
       console.error('加载本地会话失败:', err);
+      sessionsRef.current = [];
       setSessions([]);
       return [];
     }
@@ -118,6 +120,7 @@ export function useChatSessions({
     };
 
     await db.sessions.add(session);
+    sessionsRef.current = [session, ...sessionsRef.current];
     setSessions((prev) => [session, ...prev]);
     setCurrentSessionId(session.id);
     return session.id;
@@ -125,8 +128,9 @@ export function useChatSessions({
 
   /** 切换当前会话，并把工具栏对齐到该会话记录的模型/等级。 */
   const selectSession = useCallback(
-    (sessionId: string): void => {
-      const session = sessionsRef.current.find((s) => s.id === sessionId);
+    (sessionId: string, sessionList?: SessionRecord[]): void => {
+      const source = sessionList ?? sessionsRef.current;
+      const session = source.find((s) => s.id === sessionId);
       setCurrentSessionId(sessionId);
       // 会话没存模型时置 null，交给 `currentModel` 派生时回退到默认模型
       setSelectedModel(session?.model ?? null);
@@ -198,7 +202,7 @@ export function useChatSessions({
       // 删掉的不是当前会话时，当前视图不需要动
       if (!sessionIds.includes(currentSessionId ?? '')) return;
 
-      if (remaining.length > 0) selectSession(remaining[0].id);
+      if (remaining.length > 0) selectSession(remaining[0].id, remaining);
       else await createSession();
     },
     [currentSessionId, reloadSessions, selectSession, createSession],
@@ -279,7 +283,7 @@ export function useChatSessions({
     void (async () => {
       const list = await reloadSessions();
       if (list.length === 0) await createSession();
-      else selectSession(list[0].id);
+      else selectSession(list[0].id, list);
     })();
   }, [reloadSessions, createSession, selectSession]);
 
