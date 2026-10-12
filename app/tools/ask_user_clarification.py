@@ -21,7 +21,10 @@ async def ask_user_clarification(
     if not question or not question.strip():
         return "错误: 提问内容 (question) 不能为空。"
 
-    cleaned_options = [opt.strip() for opt in options if opt and opt.strip()]
+    if not isinstance(options, (list, tuple)):
+        return "错误: 候选项列表 (options) 必须为列表或元组。"
+
+    cleaned_options = [opt.strip() for opt in options if isinstance(opt, str) and opt.strip()]
     unique_options = list(dict.fromkeys(cleaned_options))
     if len(unique_options) < 2:
         return "错误: 候选项列表 (options) 必须至少包含 2 个不同的非空选项。"
