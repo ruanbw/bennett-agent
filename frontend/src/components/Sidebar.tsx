@@ -253,7 +253,9 @@ export function Sidebar({
       aria-label="历史对话侧边栏"
       // React 19 的 inert 是布尔属性；此前传的是 `''`，语义上等值但不符合类型约定
       inert={!isOpen}
-      className={`w-64 border-r flex flex-col h-full select-none transition-transform duration-200 z-30 shrink-0 bg-muted/20 absolute md:relative inset-y-0 left-0 ${
+      // 底色用不透明的 bg-sidebar 而非 bg-muted/20：抽屉在移动端浮在遮罩之上，
+      // 半透明底色会让背后内容透出来（桌面端两者视觉完全一致，见 index.css 的 --sidebar）
+      className={`w-64 border-r flex flex-col h-full select-none transition-transform duration-200 z-30 shrink-0 bg-sidebar absolute md:relative inset-y-0 left-0 ${
         isOpen ? 'translate-x-0' : '-translate-x-full md:hidden pointer-events-none'
       }`}
     >

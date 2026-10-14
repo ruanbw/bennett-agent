@@ -26,6 +26,7 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  --color-sidebar: var(--sidebar);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -53,6 +54,18 @@
   --border: #e4e4e7;
   --input: #e4e4e7;
   --ring: #18181b;
+  /*
+     侧边栏底色 = 原先 `bg-muted/20` 叠在 `bg-background` 上的最终色，但**不透明**。
+
+     半透明的写法只在桌面端成立：那时侧边栏与 main 并排，背后是 .app-shell 的
+     bg-background，20% 的 muted 叠上去看着仍是实色。移动端抽屉是 absolute + z-30，
+     浮在遮罩和 main 之上，背后没有不透明层，于是整个抽屉是透的、内容会透出来。
+     这里直接把「叠加后的结果」固化成 token，两端共用同一个值。
+
+     只在 :root 声明即可：color-mix 里的 var() 在计算 --sidebar 时按 html 上的
+     --muted/--background 求值，深色模式下 .dark 已把这两个 token 换掉，结果自然跟着变。
+  */
+  --sidebar: color-mix(in srgb, var(--muted) 20%, var(--background));
 }
 
 .dark {
