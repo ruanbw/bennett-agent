@@ -105,7 +105,12 @@ def login_body():
 
 
 def register_body():
-    return {"email": f"rl-{uuid.uuid4().hex[:10]}@example.com", "password": "hunter2hunter2"}
+    # 注册已改为邀请码制：邀请码取当前配置（conftest 给整个会话设了一个）
+    return {
+        "email": f"rl-{uuid.uuid4().hex[:10]}@example.com",
+        "password": "hunter2hunter2",
+        "invite_code": settings.registration_invite_code,
+    }
 
 
 # ---------------------------------------------------------------------

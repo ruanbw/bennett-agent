@@ -301,19 +301,29 @@ describe('register', () => {
   it('发 JSON', async () => {
     const { calls } = stubFetch({ ok: true, status: 201 })
 
-    await register('a@example.com', 'hunter2hunter2')
+    await register('a@example.com', 'hunter2hunter2', 'invite-123')
 
     expect(calls[0].url).toBe(`${API_BASE_URL}/api/auth/register`)
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
       email: 'a@example.com',
       password: 'hunter2hunter2',
+      invite_code: 'invite-123',
+    })
+  })
+
+  it('邀请码错误时透出后端中文文案，不自己改写', async () => {
+    stubFetch({ ok: false, status: 403, json: async () => ({ detail: '邀请码不正确' }) })
+
+    await expect(register('a@example.com', 'hunter2hunter2', 'wrong')).resolves.toEqual({
+      ok: false,
+      message: '邀请码不正确',
     })
   })
 
   it('邮箱已注册给出中文提示', async () => {
     stubFetch({ ok: false, status: 400, json: async () => ({ detail: 'REGISTER_USER_ALREADY_EXISTS' }) })
 
-    await expect(register('a@example.com', 'hunter2hunter2')).resolves.toEqual({
+    await expect(register('a@example.com', 'hunter2hunter2', 'invite-123')).resolves.toEqual({
       ok: false,
       message: '该邮箱已注册',
     })
@@ -328,7 +338,7 @@ describe('register', () => {
       }),
     })
 
-    await expect(register('a@example.com', 'x')).resolves.toEqual({
+    await expect(register('a@example.com', 'x', 'invite-123')).resolves.toEqual({
       ok: false,
       message: '密码至少需要 8 个字符',
     })
@@ -345,7 +355,7 @@ describe('register', () => {
       }),
     })
 
-    await expect(register('bad', 'hunter2hunter2')).resolves.toEqual({
+    await expect(register('bad', 'hunter2hunter2', 'invite-123')).resolves.toEqual({
       ok: false,
       message: '邮箱格式不正确',
     })
@@ -472,7 +482,7 @@ describe('registerWithSession', () => {
       { ok: true, status: 200, json: async () => user }
     )
 
-    await expect(registerWithSession('a@example.com', 'hunter2hunter2')).resolves.toEqual({
+    await expect(registerWithSession('a@example.com', 'hunter2hunter2', 'invite-123')).resolves.toEqual({
       ok: true,
       outcome: 'ok',
       user,
@@ -485,7 +495,7 @@ describe('registerWithSession', () => {
       { ok: false, status: 400, json: async () => ({ detail: 'LOGIN_BAD_CREDENTIALS' }) }
     )
 
-    await expect(registerWithSession('a@example.com', 'hunter2hunter2')).resolves.toEqual({
+    await expect(registerWithSession('a@example.com', 'hunter2hunter2', 'invite-123')).resolves.toEqual({
       ok: false,
       outcome: 'login-failed',
       message: '账号已创建，请直接登录',
@@ -497,7 +507,7 @@ describe('registerWithSession', () => {
   it('注册本身失败 → outcome=failed，透出后端提示', async () => {
     stubFetch({ ok: false, status: 400, json: async () => ({ detail: 'REGISTER_USER_ALREADY_EXISTS' }) })
 
-    await expect(registerWithSession('a@example.com', 'hunter2hunter2')).resolves.toEqual({
+    await expect(registerWithSession('a@example.com', 'hunter2hunter2', 'invite-123')).resolves.toEqual({
       ok: false,
       outcome: 'failed',
       message: '该邮箱已注册',

@@ -225,12 +225,19 @@ class Settings(BaseSettings):
             "（服务端永不过期），而 cookie Max-Age=0 又会立即删除 cookie，语义互相矛盾。"
         ),
     )
+    registration_invite_code: str = Field(
+        default="",
+        description=(
+            "注册邀请码。为空 = 关闭公开注册（注册接口一律 403「注册已关闭」）；"
+            "非空时注册必须携带完全一致的邀请码。它只用于注册校验，任何日志都不输出该值。"
+        ),
+    )
     superuser_emails: str = Field(
         default="",
         description=(
-            "逗号分隔的超级管理员邮箱。启动时与注册时自动把匹配账号提升为 superuser，"
-            "这是管理后台的唯一引导方式（没有可自助点击的「成为管理员」）。"
-            "匹配大小写不敏感；生产环境应只包含受信邮箱。"
+            "逗号分隔的超级管理员邮箱。启动时自动把已存在的匹配账号提升为 superuser；"
+            "注册时则必须邀请码校验通过才会提升——这是管理后台的唯一引导方式"
+            "（没有可自助点击的「成为管理员」）。匹配大小写不敏感；生产环境应只包含受信邮箱。"
         ),
     )
     bootstrap_provider_from_env: bool = Field(

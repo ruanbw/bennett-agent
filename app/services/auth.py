@@ -152,16 +152,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             raise InvalidPasswordException(reason=f"密码至少需要 {MIN_PASSWORD_LENGTH} 个字符")
 
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
-        """新用户注册后：白名单邮箱立即提升为管理员。
+        """新用户注册后只记一条日志。
 
-        只靠启动提升不够：管理员账号往往是在服务启动之后才注册的。`security` 保证
-        注册接口不能自封管理员（`safe=True` 排除了该字段），这里的提升只认部署者
-        写在环境变量里的邮箱，不认请求体。
+        **提权不在这里**：项目没有邮箱验证，邮箱字符串本身不能证明归属，谁能抢到
+        那个地址谁就能拿到超管。因此提权改由注册路由在邀请码校验通过后显式完成
+        （见 `app/api/auth.py`），本钩子不再看白名单。
         """
         logger.info("新用户注册: id=%s", user.id)
-        if is_configured_superuser(user.email):
-            await self.user_db.update(user, {"is_superuser": True, "is_verified": True})
-            logger.info("白名单账号注册，已提升为超级管理员: id=%s", user.id)
 
     async def on_after_login(
         self, user: User, request: Request | None = None, response: Response | None = None

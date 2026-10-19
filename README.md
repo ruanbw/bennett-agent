@@ -82,7 +82,9 @@ APP_ENV=production uv run python main.py
    npm run dev
    ```
 
-   打开 `http://127.0.0.1:5173`，首次使用点「去注册」创建账号（邮箱 + 至少 8 位密码）。
+   打开 `http://127.0.0.1:5173`，首次使用点「去注册」创建账号（邮箱 + 至少 8 位密码
+   + 邀请码）。**注册默认关闭**：部署者先在 `.env` 里设 `REGISTRATION_INVITE_CODE`，
+   注册时填同一个值才能建号；未配置时注册接口一律 403（见第 4 节）。
 
 接口文档（`/docs`、`/redoc`、`/openapi.json`）默认只在非 production 环境暴露；
 production 下需要时用 `ENABLE_API_DOCS=true` 显式打开。
@@ -93,9 +95,13 @@ production 下需要时用 `ENABLE_API_DOCS=true` 显式打开。
 限流**（`AUTH_RATE_LIMIT_PER_MINUTE`，默认 10 次/分）。首次启动会在仓库根目录自动
 创建 `bennett.db`（SQLite，已被 `.gitignore` 忽略）。
 
+注册采用**邀请码制**：`REGISTRATION_INVITE_CODE` 为空时注册接口一律 403（关闭公开
+注册），非空时请求必须携带完全一致的邀请码，否则 403。邀请码不参与登录，只决定
+「谁被允许建号」。
+
 | 端点 | 登录要求 | 说明 |
 |---|---|---|
-| `POST /api/auth/register` | 匿名（按 IP 限流） | 注册（JSON：`email` / `password`） |
+| `POST /api/auth/register` | 匿名（按 IP 限流） | 注册（JSON：`email` / `password` / `invite_code`；未配邀请码或码不对返回 403） |
 | `POST /api/auth/login` | 匿名（按 IP 限流） | 登录（**表单编码**：`username`=邮箱 / `password`），成功返回 204 |
 | `POST /api/auth/logout` | 需要 | 登出（服务端删会话，即时失效） |
 | `GET /api/auth/me` | 需要 | 当前登录用户，未登录返回 401 |
@@ -117,9 +123,14 @@ production 下需要时用 `ENABLE_API_DOCS=true` 显式打开。
 LiteLLM 网关、官方 API、自建 vLLM……），每个端点有自己的 Base URL / API Key，并可
 逐个启用或停用模型。
 
-**进入方式**：部署者在环境变量里写 `SUPERUSER_EMAILS`（逗号分隔），重启服务（或让
-该邮箱新注册）后，该账号的侧边栏头像菜单里会出现「管理后台」。没有任何接口能把
-自己或别人提升为管理员。
+**进入方式**：部署者在环境变量里同时写 `SUPERUSER_EMAILS`（逗号分隔）与
+`REGISTRATION_INVITE_CODE`。启动时会把白名单里已存在的账号提升为超管；服务运行期间
+新注册的账号若邮箱在白名单里，会在**邀请码校验通过之后**才被提升。侧边栏头像菜单里
+会出现「管理后台」。
+
+「注册即超管」只在「邀请码正确 **且** 邮箱在白名单」时成立：邮箱字符串证明不了归属
+（项目没有邮箱验证，任何人都能填白名单里的地址），所以注册改为邀请码制、并默认关闭。
+没有任何可自助的接口能让用户把自己提升为管理员。
 
 ```bash
 SUPERUSER_EMAILS=ops@example.com uv run python main.py --web

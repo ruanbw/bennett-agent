@@ -109,12 +109,16 @@ export async function login(email: string, password: string): Promise<AuthResult
   return { ok: false, message: describeAuthError(await readErrorDetail(response), response.status) };
 }
 
-/** 注册。成功返回 201，但**不会自动登录**——调用方需要再走一次 `login`。 */
-export async function register(email: string, password: string): Promise<AuthResult> {
+/** 注册。成功返回 201，但**不会自动登录**——调用方需要再走一次 `login`。
+ *
+ * 必须带邀请码：后端未配置 `REGISTRATION_INVITE_CODE` 时注册是关闭的（403），
+ * 配置了也要码对才建号。邀请码错误/注册关闭的 403 文案由后端给中文，直接展示。
+ */
+export async function register(email: string, password: string, inviteCode: string): Promise<AuthResult> {
   const response = await apiFetch('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, invite_code: inviteCode }),
     notifyUnauthorized: false,
     timeoutMs: AUTH_TIMEOUT_MS,
   });
@@ -239,11 +243,12 @@ export type RegisterAttempt =
  */
 export async function registerWithSession(
   email: string,
-  password: string
+  password: string,
+  inviteCode: string
 ): Promise<RegisterAttempt> {
   let result: AuthResult;
   try {
-    result = await register(email, password);
+    result = await register(email, password, inviteCode);
   } catch (err) {
     console.error('注册请求失败:', err);
     return { ok: false, outcome: 'failed', message: describeConnectionError(err) };

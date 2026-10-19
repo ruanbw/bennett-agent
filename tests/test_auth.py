@@ -62,8 +62,17 @@ def client():
         yield test_client
 
 
+def register_body(email, password=PASSWORD):
+    """注册请求体。
+
+    注册已改为邀请码制：邀请码从配置读（conftest 给整个会话设了一个），避免在各个
+    用例里硬编码一个和服务端配置可能漂移的字面值。
+    """
+    return {"email": email, "password": password, "invite_code": settings.registration_invite_code}
+
+
 def register(client, email, password=PASSWORD):
-    return client.post("/api/auth/register", json={"email": email, "password": password})
+    return client.post("/api/auth/register", json=register_body(email, password))
 
 
 def login(client, email, password=PASSWORD):
@@ -196,8 +205,7 @@ def test_register_cannot_self_promote_to_superuser(client):
     response = client.post(
         "/api/auth/register",
         json={
-            "email": unique_email(),
-            "password": PASSWORD,
+            **register_body(unique_email()),
             "is_superuser": True,
             "is_active": True,
             "is_verified": True,
@@ -257,7 +265,7 @@ def test_register_rejects_short_password(client):
     """
     response = client.post(
         "/api/auth/register",
-        json={"email": unique_email(), "password": "x" * (MIN_PASSWORD_LENGTH - 1)},
+        json=register_body(unique_email(), "x" * (MIN_PASSWORD_LENGTH - 1)),
     )
 
     assert response.status_code == 400
@@ -269,7 +277,7 @@ def test_register_rejects_short_password(client):
 def test_register_accepts_password_at_the_limit(client):
     response = client.post(
         "/api/auth/register",
-        json={"email": unique_email(), "password": "x" * MIN_PASSWORD_LENGTH},
+        json=register_body(unique_email(), "x" * MIN_PASSWORD_LENGTH),
     )
 
     assert response.status_code == 201

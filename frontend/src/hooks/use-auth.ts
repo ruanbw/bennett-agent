@@ -48,7 +48,7 @@ export interface UseAuthResult {
    * 注册并自动登录。返回值可区分「注册失败」与「账号已创建但自动登录失败」，
    * 后者要由表单切回登录模式（见 `LoginPage`）。
    */
-  register: (email: string, password: string) => Promise<RegisterOutcome>;
+  register: (email: string, password: string, inviteCode: string) => Promise<RegisterOutcome>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -128,11 +128,11 @@ export function useAuth(): UseAuthResult {
   );
 
   const register = useCallback(
-    async (email: string, password: string): Promise<RegisterOutcome> => {
+    async (email: string, password: string, inviteCode: string): Promise<RegisterOutcome> => {
       return withPending(setPending, async () => {
         setError(null);
 
-        const attempt = await registerWithSession(email, password);
+        const attempt = await registerWithSession(email, password, inviteCode);
         if (attempt.ok) {
           setUser(attempt.user);
           setStatus('authenticated');

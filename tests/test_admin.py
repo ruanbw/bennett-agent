@@ -36,7 +36,11 @@ def client():
 
 
 def register(client: TestClient, email: str) -> str:
-    response = client.post("/api/auth/register", json={"email": email, "password": PASSWORD})
+    # 注册已改为邀请码制：邀请码取当前配置（conftest 给整个会话设了一个）
+    response = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": PASSWORD, "invite_code": settings.registration_invite_code},
+    )
     assert response.status_code == 201, response.text
     return response.json()["id"]
 

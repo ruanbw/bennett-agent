@@ -1,8 +1,11 @@
 /**
  * 登录 / 注册页。
  *
- * 同一个表单承担两种模式：字段完全相同（邮箱 + 密码），差别只在提交动作与文案，
- * 拆成两个组件会带来两份重复的输入处理与错误展示。
+ * 同一个表单承担两种模式：登录只需要邮箱 + 密码，注册多一个邀请码。
+ *
+ * 注册现在要邀请码：后端未配置 `REGISTRATION_INVITE_CODE` 时注册是关闭的，带了码也
+ * 会被拒（403）；配置了则必须码对。因此注册模式下邀请码是必填项——前端先拦一道，
+ * 避免用户白跑一次往返（真正的校验仍在服务端）。
  *
  * 注册成功后由 `useAuth` 自动登录——后端注册接口只返回用户信息、不下发 cookie，
  * 让用户注册完再手填一遍密码是纯粹的摩擦。
@@ -25,7 +28,7 @@ type Mode = 'login' | 'register';
 export interface LoginPageProps {
   onLogin: (email: string, password: string) => Promise<boolean>;
   /** 返回值区分「注册失败」与「账号已创建但自动登录失败」（见 `RegisterOutcome`）。 */
-  onRegister: (email: string, password: string) => Promise<RegisterOutcome>;
+  onRegister: (email: string, password: string, inviteCode: string) => Promise<RegisterOutcome>;
   /** 请求进行中：禁用提交，避免重复提交。 */
   pending: boolean;
   error: string | null;
@@ -36,13 +39,19 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
 
   const isRegister = mode === 'register';
 
   // 密码长度在本地先拦一道：否则用户要等一次往返才知道太短。
   // 这只是体验优化，真正的校验在服务端（见 lib/auth.ts 的说明）。
   const tooShort = isRegister && password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
-  const canSubmit = email.trim().length > 0 && password.length > 0 && !tooShort && !pending;
+  const canSubmit =
+    email.trim().length > 0 &&
+    password.length > 0 &&
+    !tooShort &&
+    (!isRegister || inviteCode.trim().length > 0) &&
+    !pending;
 
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -54,12 +63,12 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
         return;
       }
 
-      const outcome = await onRegister(email.trim(), password);
+      const outcome = await onRegister(email.trim(), password, inviteCode.trim());
       // 账号已创建时切回登录模式，让用户直接点登录；保留 useAuth 刚设好的提示，
       // 所以不能走 switchMode（它会清错误）。判定本身在 lib 层（可测）。
       setMode(modeAfterRegister(outcome));
     },
-    [canSubmit, email, isRegister, onLogin, onRegister, password],
+    [canSubmit, email, inviteCode, isRegister, onLogin, onRegister, password],
   );
 
   const switchMode = useCallback(() => {
@@ -123,6 +132,25 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
               </p>
             ) : null}
           </div>
+
+          {isRegister ? (
+            <div className="space-y-1.5">
+              <label htmlFor="auth-invite-code" className="text-sm font-medium">
+                邀请码
+              </label>
+              <Input
+                id="auth-invite-code"
+                type="text"
+                name="invite-code"
+                autoComplete="off"
+                required
+                value={inviteCode}
+                onChange={(event) => setInviteCode(event.target.value)}
+                aria-invalid={invalid || undefined}
+              />
+              <p className="text-xs text-muted-foreground">向管理员索取；未开放注册时无法创建账号</p>
+            </div>
+          ) : null}
 
           {/* role=alert：错误是异步出现的，屏幕阅读器需要被主动告知 */}
           {error ? (
