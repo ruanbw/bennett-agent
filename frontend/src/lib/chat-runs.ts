@@ -61,6 +61,7 @@ export {
   buildLiveMessage,
   toRuntimeMessage,
   pendingClarification,
+  contextExhausted,
   type PendingClarification,
 } from './chat-message';
 

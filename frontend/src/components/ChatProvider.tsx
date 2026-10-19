@@ -27,6 +27,7 @@ import {
   isRunPersistFailed,
   notifySessionsChanged,
   pendingClarification,
+  contextExhausted,
   startChatRun,
   subscribeRun,
   toRuntimeMessage,
@@ -184,6 +185,10 @@ export function ChatProvider({
 
   // 待答提问：从消息列表推导，不看任何可变标记
   const activeClarification = pendingClarification(messages, isRunning);
+
+  // 上下文锁：同样是推导出来的。服务端每轮都会拒绝（它才是闸门），这里只是不让
+  // 用户白点一次发送，并给出去处——见 lib/chat-message.ts:contextExhausted。
+  const contextLocked = contextExhausted(messages, currentModel);
 
   const dismissPendingClarification = useCallback(() => {
     if (!activeClarification) return;
@@ -412,7 +417,8 @@ export function ChatProvider({
   const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
-    isSendDisabled: isRunning,
+    // 上下文已满时连发送按钮一起禁掉：同一模型下重发必然同样失败，历史只会更长
+    isSendDisabled: isRunning || contextLocked,
     onNew,
     onReload,
     onCancel,

@@ -12,6 +12,7 @@
 import { newId } from './constants';
 import type {
   ClarificationState,
+  MessageCustomMetadata,
   MessageRecord,
   PartKind,
   Run,
@@ -168,6 +169,8 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         fallback: record.fallback ?? null,
         // 失败信息：刷新后「重试」按钮仍按服务端当初的判定显示
         error: record.error ?? null,
+        // 本轮用的模型：刷新后「上下文已满」的锁仍然只对那个模型成立
+        model: record.model ?? null,
         // F6 结算出的「半截回复」语义：thread 据此渲染「不完整」标记。
         // 老记录没有这个字段 → false，与修复前的呈现一致。
         incomplete: Boolean(record.incomplete),
@@ -207,6 +210,8 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
         fallback: run.fallback ?? null,
         // 失败信息：错误到达后立即映射，生成结束时按钮已可点
         error: run.error ?? null,
+        // 与落库记录同一条契约：锁在哪个模型上，覆盖层与刷新后必须给出同一个答案
+        model: run.model,
         // 生成中不呈现提问：等本轮完全结束再拉起浮层，
         // 否则用户还没看清选项就可能被下一段增量挤走
         clarification: run.finished ? (run.clarification ?? null) : null,
@@ -240,4 +245,36 @@ export function pendingClarification(
 
   const pending = last.metadata?.custom?.clarification as ClarificationState | null | undefined;
   return pending?.question ? { messageId: last.id ?? '', ...pending } : null;
+}
+
+/**
+ * 本会话是否已被上下文上限锁住——即「禁止继续提问」的推导来源。
+ *
+ * 只需要看最后一条助手消息，理由与 `pendingClarification` 完全相同：
+ *
+ *   - 换到新会话 → 消息列表里没有这条记录 → 自然解锁；
+ *   - 换了模型 → 下面按模型比对的规则让它自然解锁（提示文案也说了可以换更大的模型）。
+ *
+ * 与「服务端每轮都会拒绝」的关系：服务端是真正的闸门（它按模型的 context_window
+ * 判定），这里只是**别让用户白点一次发送**——历史只会更长，同一模型下重发必然同样
+ * 失败，而他那时才看到报错。所以这里是 UX 层的推导，不是第二份判定逻辑：它只认
+ * 服务端给出的 `error.code`，自己不算任何 token。
+ *
+ * 锁只在溢出时的那个模型上成立：同一份历史在 32k 窗口上超限、在 1M 窗口上没问题。
+ * 拿不到模型 id（老记录）时不再区分模型，一律锁——宁可多拦一次，也不要让用户
+ * 对着一个必然失败的会话反复点发送。
+ */
+export function contextExhausted(
+  messages: readonly RuntimeMessage[] | undefined,
+  currentModel: string | null,
+): boolean {
+  const list = messages ?? [];
+  const last = list[list.length - 1];
+  if (!last || last.role !== 'assistant') return false;
+
+  const custom = last.metadata?.custom as MessageCustomMetadata | undefined;
+  if (custom?.error?.code !== 'context_overflow') return false;
+
+  const lockedOn = custom.model;
+  return typeof lockedOn !== 'string' || lockedOn === currentModel;
 }

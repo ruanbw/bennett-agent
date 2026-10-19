@@ -20,6 +20,8 @@ function runFields(run: Run): MessageChanges {
     thinking: run.thinking,
     thinkingMs: run.thinkingMs,
     toolCalls: run.toolCalls,
+    // 本轮请求的模型：上下文是否已满按模型判定，锁定状态靠它区分
+    model: run.model ?? null,
     // 事件到达顺序：没有它，刷新后思考/工具/正文只能按默认顺序近似还原
     partOrder: run.partOrder ?? [],
     // 备用模型信息：刷新后提示行仍然要显示，否则用户会以为还是主模型答的

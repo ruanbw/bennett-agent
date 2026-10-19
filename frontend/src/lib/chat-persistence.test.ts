@@ -278,3 +278,18 @@ describe('partOrder 落库与读回', () => {
     expect(parts.map((part) => part.type)).toEqual(['tool-call', 'text', 'tool-call'])
   })
 })
+
+describe('本轮模型的落库（上下文锁按模型区分）', () => {
+  it('saveFinal 把本轮请求的模型写进记录', async () => {
+    await saveFinal('m1', makeRun({ model: 'group/auto-tiny', sawDone: true, finished: true }))
+
+    expect(dbMock.update).toHaveBeenCalledWith('m1', expect.objectContaining({ model: 'group/auto-tiny' }))
+  })
+
+  it('run 上没有模型时写 null，而不是把字段漏掉', async () => {
+    // 漏掉字段会让「上下文锁在哪个模型上」读回 undefined，语义从「未知」漂成「没有」
+    await saveProgress('m1', makeRun({ model: null }))
+
+    expect(dbMock.update).toHaveBeenCalledWith('m1', expect.objectContaining({ model: null }))
+  })
+})

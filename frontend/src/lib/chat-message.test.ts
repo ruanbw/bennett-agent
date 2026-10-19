@@ -12,6 +12,7 @@ import type {
 import {
   buildLiveMessage,
   buildParts,
+  contextExhausted,
   pendingClarification,
   toRuntimeMessage,
   type PartKind,
@@ -197,8 +198,21 @@ describe('toRuntimeMessage', () => {
       clarification: null,
       fallback: null,
       error: null,
+      // 老记录没有 model：呈现为零值而不是 undefined，否则 metadata 形状随记录而变
+      model: null,
       incomplete: false,
     })
+  })
+
+  it('把本轮的模型带进 metadata.custom（上下文锁靠它区分模型）', () => {
+    const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '答', createdAt: 1 }
+
+    expect(assertMessage(toRuntimeMessage({ ...base, model: 'group/auto-tiny' })).metadata.custom.model).toBe(
+      'group/auto-tiny',
+    )
+    expect(assertMessage(buildLiveMessage(run({ model: 'group/auto-tiny' }))).metadata.custom.model).toBe(
+      'group/auto-tiny',
+    )
   })
 
   it('用户消息不带 status', () => {
@@ -380,5 +394,52 @@ describe('pendingClarification（R-6：从消息列表推导，不用 handled �
 
   it('只有 question 非空的才算提问', () => {
     expect(pendingClarification([assistantWith({ options: ['A'] })], false)).toBeNull()
+  })
+})
+
+describe('contextExhausted（上下文已满 → 锁住输入框）', () => {
+  const overflowing = (model: string | null = 'group/auto-tiny'): RuntimeMessage => ({
+    id: 'm1',
+    role: 'assistant',
+    content: '',
+    metadata: { custom: { model, error: { message: '上下文已满', retryable: false, code: 'context_overflow' } } },
+  })
+
+  it('最后一条是上下文溢出的助手消息 → 锁', () => {
+    expect(contextExhausted([overflowing()], 'group/auto-tiny')).toBe(true)
+  })
+
+  it('换成别的模型 → 解锁（提示文案说的另一条出路）', () => {
+    // 同一份历史在 32k 窗口上超限、在 1M 窗口上没问题，所以锁必须跟着模型走
+    expect(contextExhausted([overflowing('group/auto-tiny')], 'group/auto-mega')).toBe(false)
+  })
+
+  it('拿不到模型 id（老记录）→ 一律锁', () => {
+    // 宁可多拦一次，也不要让用户对着一个必然失败的会话反复点发送
+    expect(contextExhausted([overflowing(null)], 'group/auto-mega')).toBe(true)
+  })
+
+  it('用户再次提问后（最后一条是 user）→ 不再锁', () => {
+    // 与 pendingClarification 同一条推理：新消息一到，推导条件自然不成立
+    const messages: RuntimeMessage[] = [overflowing(), { id: 'm2', role: 'user', content: '再问' }]
+
+    expect(contextExhausted(messages, 'group/auto-tiny')).toBe(false)
+  })
+
+  it('其它失败（超时/5xx）不锁', () => {
+    const other: RuntimeMessage = {
+      id: 'm1',
+      role: 'assistant',
+      content: '',
+      metadata: { custom: { model: 'group/auto-tiny', error: { message: '生成超时', retryable: true, code: null } } },
+    }
+
+    expect(contextExhausted([other], 'group/auto-tiny')).toBe(false)
+  })
+
+  it('没有失败信息 / 空列表 / undefined 都不锁', () => {
+    expect(contextExhausted([{ id: 'm1', role: 'assistant', content: '', metadata: {} }], 'm')).toBe(false)
+    expect(contextExhausted([], 'm')).toBe(false)
+    expect(contextExhausted(undefined, 'm')).toBe(false)
   })
 })

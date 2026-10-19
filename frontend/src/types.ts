@@ -204,6 +204,14 @@ export interface MessageRecord {
   sessionId: string;
   role: ChatRole;
   content: string;
+  /**
+   * 本轮生成实际请求的模型 id。
+   *
+   * 上下文是否已满**是按模型判定的**（同一份历史在 32k 窗口上超限、在 1M 窗口上没问题），
+   * 所以“这个会话被上下文锁住了”必须知道锁在哪个模型上。老记录没有这个字段 → null，
+   * 按“模型未知”处理（见 `isContextExhausted`）。
+   */
+  model?: string | null;
   thinking?: string | null;
   thinkingMs?: number;
   toolCalls?: ToolCallRecord[];
@@ -277,6 +285,13 @@ export interface MessageCustomMetadata {
   fallback?: FallbackState | null;
   /** 本轮失败的结构化记录；可重试时消息下方渲染「重试」按钮。 */
   error?: RunError | null;
+  /**
+   * 本轮请求的模型 id（落库形状 `MessageRecord.model` 的运行时镜像）。
+   *
+   * 「会话是否被上下文锁住」靠它区分：锁只对溢出时的那个模型成立，换一个窗口
+   * 更大的模型就该放行（提示文案也正是这么写的），所以这个字段不能省。
+   */
+  model?: string | null;
   /**
    * 本轮渲染不完整（丢过帧、或流没有干净收尾）。落库形状 `MessageRecord.incomplete`
    * 的运行时镜像：写入由 chat-message.ts 负责，展示由 thread.aui.tsx 负责。

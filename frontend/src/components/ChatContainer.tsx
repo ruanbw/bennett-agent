@@ -183,6 +183,7 @@ export function ChatContainer({
           onSelectModel={onSelectModel}
           onSelectReasoningEffort={onSelectReasoningEffort}
           onRefreshModels={onRefreshModels}
+          onCreateSession={onCreateSession}
         />
       </div>
     </div>

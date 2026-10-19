@@ -28,6 +28,7 @@ import {
   ArrowUpIcon,
   CheckIcon,
   CopyIcon,
+  PlusIcon,
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
@@ -36,8 +37,9 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
+import { contextExhausted } from "@/lib/chat-message";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
-import type { FallbackState, ModelItem, RunError } from "@/types";
+import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -93,6 +95,8 @@ interface ThreadProps {
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void | Promise<unknown>;
+  /** 上下文已满时的出路：开一个新会话。由 ChatContainer 透传（App 提供）。 */
+  onCreateSession?: () => void | Promise<unknown>;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -103,9 +107,13 @@ export const Thread: FC<ThreadProps> = ({
   onSelectModel = () => {},
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  onCreateSession,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
   const isRunning = useAuiState(isThreadRunning);
+  // 上下文已满：输入框锁住并给出「新建会话」。服务端每轮都会拒绝，这里只是不让用户
+  // 白点一次发送，并把他直接送到唯一的出路（推导规则见 lib/chat-message.ts）。
+  const contextLocked = useAuiState((s) => contextExhausted(s.thread.messages, currentModel));
   // 提问状态来自 context，不再由 ChatProvider 通过 cloneElement 注入
   const clarification = useClarification();
 
@@ -198,6 +206,8 @@ export const Thread: FC<ThreadProps> = ({
               onSelectModel={onSelectModel}
               onSelectReasoningEffort={onSelectReasoningEffort}
               onRefreshModels={onRefreshModels}
+              contextLocked={contextLocked}
+              onCreateSession={onCreateSession}
             />
           </div>
         </div>
@@ -237,6 +247,9 @@ const Composer: FC<{
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void | Promise<unknown>;
   inputRef?: RefObject<HTMLTextAreaElement | null>;
+  /** 本会话上下文已满：锁住输入框并给出「新建会话」按钮。 */
+  contextLocked?: boolean;
+  onCreateSession?: () => void | Promise<unknown>;
 }> = ({
   models,
   modelsError = null,
@@ -246,6 +259,8 @@ const Composer: FC<{
   onSelectReasoningEffort = () => {},
   onRefreshModels,
   inputRef,
+  contextLocked = false,
+  onCreateSession,
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
 
@@ -253,16 +268,47 @@ const Composer: FC<{
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
   const blockedByAttachments = attachmentCount > 0;
+  // 两个禁用理由共存时以上下文为准：附件可以移除，换模型/新会话不能省
+  const blocked = contextLocked || blockedByAttachments;
+  const inputPlaceholder = contextLocked ? "本会话上下文已满，请新建会话继续" : "问点什么吧...";
+  const sendTooltip = contextLocked
+    ? "本会话上下文已满，请新建会话"
+    : blockedByAttachments
+      ? "附件暂不支持，请先移除"
+      : "发送消息";
 
   return (
     <ComposerPrimitive.Root
       className="relative flex w-full flex-col"
       onSubmit={(e) => {
-        if (blockedByAttachments) {
+        if (blocked) {
           e.preventDefault();
         }
       }}
     >
+      {/*
+        上下文已满：输入框还在，但不是可以继续提问的输入框。把它做成一条常驻横条而不是
+        一次性 toast——「不能继续提问」是个持续状态，刷新后依旧成立（记录上的 error.code
+        推导而来），而 toast 会消失、也不解释为什么发不出去。
+      */}
+      {contextLocked && (
+        <div
+          role="status"
+          className="border-destructive/40 bg-destructive/10 text-destructive mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs"
+        >
+          <span>本会话上下文已满，无法继续提问；请新建会话，或换用上下文窗口更大的模型。</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-6 shrink-0 cursor-pointer px-2 text-[11px]"
+            onClick={() => void onCreateSession?.()}
+          >
+            <PlusIcon className="size-3" />
+            新建会话
+          </Button>
+        </div>
+      )}
       <div className="flex w-full flex-col rounded-2xl border border-border bg-muted/20 focus-within:border-ring/50 focus-within:bg-background transition-all shadow-sm">
         <ComposerAttachments />
         {/*
@@ -271,12 +317,13 @@ const Composer: FC<{
         */}
         <ComposerPrimitive.Input
           ref={inputRef}
-          placeholder="问点什么吧..."
-          className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60"
+          placeholder={inputPlaceholder}
+          disabled={contextLocked}
+          className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed disabled:opacity-60"
           rows={1}
           aria-label="输入消息"
           onKeyDown={(e) => {
-            if (blockedByAttachments && e.key === "Enter" && !e.shiftKey) {
+            if (blocked && e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
             }
           }}
@@ -324,14 +371,14 @@ const Composer: FC<{
             <AuiIf condition={(s) => !s.thread.isRunning}>
               <ComposerPrimitive.Send asChild>
                 <TooltipIconButton
-                  tooltip={blockedByAttachments ? "附件暂不支持，请先移除" : "发送消息"}
+                  tooltip={sendTooltip}
                   side="top"
                   type="button"
                   variant="default"
                   size="icon"
-                  disabled={blockedByAttachments}
+                  disabled={blocked}
                   className="size-8 rounded-xl cursor-pointer"
-                  aria-label={blockedByAttachments ? "附件暂不支持，请先移除后再发送" : "发送消息"}
+                  aria-label={sendTooltip}
                 >
                   <ArrowUpIcon className="size-4" />
                 </TooltipIconButton>
@@ -461,6 +508,11 @@ const AssistantActionBar: FC = () => {
   const isLast = useAuiState((s) => s.message.isLast);
   // 重新生成只对最后一条助手消息开放：历史回答上的 Reload 会重跑别的那条
   const canReload = useAuiState(isLastAssistantMessage);
+  // 上下文已满时不提供「重新生成」：历史只会更长，同一个模型下重跑必然同样失败。
+  // 保留「复制」是对的——用户可能只想要刚才那段回答。
+  const contextLocked = useAuiState(
+    (s) => (s.message.metadata.custom as MessageCustomMetadata | undefined)?.error?.code === "context_overflow",
+  );
 
   return (
     <ActionBarPrimitive.Root
@@ -483,7 +535,7 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      {canReload && (
+      {canReload && !contextLocked && (
         <ActionBarPrimitive.Reload asChild>
           <TooltipIconButton tooltip="重新生成" className="size-7 p-0">
             <RefreshCwIcon className="size-3.5" />
