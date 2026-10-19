@@ -155,7 +155,7 @@ describe('loadContextMessages', () => {
       record({ id: 'u2', role: 'user', content: '选 A', createdAt: 3 }),
     ]
 
-    const context = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+    const { messages: context } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
 
     expect(context).toHaveLength(3)
     expect(context[0]).toEqual({ role: 'user', content: '帮我选一个' })
@@ -174,7 +174,7 @@ describe('loadContextMessages', () => {
       record({ id: 'a-current', role: 'assistant', content: '', createdAt: 3 }),
     ]
 
-    const context = await loadContextMessages('s1', { excludeId: 'a-current', limit: 30 })
+    const { messages: context } = await loadContextMessages('s1', { excludeId: 'a-current', limit: 30 })
 
     expect(context).toEqual([{ role: 'user', content: '你好' }])
   })
@@ -184,7 +184,7 @@ describe('loadContextMessages', () => {
       record({ id: 'a1', role: 'assistant', content: 'x'.repeat(32_000), createdAt: 1 }),
     ]
 
-    const context = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+    const { messages: context } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
 
     expect(context[0].content).toHaveLength(CONTEXT_MAX_MESSAGE_CHARS)
   })
@@ -309,5 +309,105 @@ describe('真实用量的落库', () => {
     await saveProgress('m1', makeRun({ usage: null }))
 
     expect(dbMock.update).toHaveBeenCalledWith('m1', expect.objectContaining({ usage: null }))
+  })
+})
+
+describe('真实用量锚点（给服务端的上下文预算用）', () => {
+  const usage = { contextTokens: 1065, contextWindow: 1048000, outputTokens: 2, cacheReadTokens: 896 }
+
+  /** 14 条贴满单条上限的记录（合计 420k 字符，必然触发总量裁剪）；usageOn 指定谁带用量。 */
+  const bigHistory = (usageOn: Record<string, number>): MessageRecord[] =>
+    Array.from({ length: 14 }, (_, index) => {
+      const id = `m${index}`
+      const tokens = usageOn[id]
+      return record({
+        id,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: 'x'.repeat(32_000),
+        createdAt: index + 1,
+        usage: tokens ? { ...usage, contextTokens: tokens } : null,
+      })
+    })
+
+  it('取最后一条带用量的助手消息，下标对应真正发出去的数组', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '答', usage, createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+    ]
+
+    const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(anchor).toEqual({ messageIndex: 1, contextTokens: 1065 })
+    // 锚点字段不能跟着发上游：协议里只该有 role / content
+    expect(messages[1]).toEqual({ role: 'assistant', content: '答' })
+  })
+
+  it('空白的助手占位消息被滤掉后，下标跟着前移', async () => {
+    // 这是最容易错的一处：锚点下标必须按「滤过、裁过之后」的数组算
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '答', usage, createdAt: 2 }),
+      record({ id: 'a-empty', role: 'assistant', content: '   ', createdAt: 3 }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 4 }),
+    ]
+
+    const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(messages).toHaveLength(3)
+    expect(anchor).toEqual({ messageIndex: 1, contextTokens: 1065 })
+  })
+
+  it('没有任何用量时没有锚点（首轮 / 老记录 / 上游没报）', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '答', createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+    ]
+
+    const { anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(anchor).toBeNull()
+  })
+
+  it('用量为 0 不当锚点（那只会把预算算小，等于放行一次必然超限的请求）', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '答',
+        usage: { ...usage, contextTokens: 0 },
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+    ]
+
+    const { anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(anchor).toBeNull()
+  })
+
+  it('锚点所在的消息被裁掉时没有锚点（不能拿一个已不在数组里的位置去算）', async () => {
+    // 14 条 × 30k 字符（单条先被截到 30k）= 420k > 380k 总量上限 → 最旧的两条被丢。
+    // 用量只挂在 m1 上，它正好被丢掉：此时必须放弃锚点、退回估算，而不是继续用一个
+    // 指向别处的下标。
+    dbMock.records = bigHistory({ m1: 111 })
+
+    const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(messages).toHaveLength(12)
+    expect(anchor).toBeNull()
+  })
+
+  it('裁剪后锚点下标跟着前移，仍指向带用量那条消息', async () => {
+    dbMock.records = bigHistory({ m7: 222 })
+
+    const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
+
+    expect(messages).toHaveLength(12)
+    // m7 原在第 7 位，丢掉最旧两条后落在第 5 位
+    expect(anchor).toEqual({ messageIndex: 5, contextTokens: 222 })
+    expect(messages[5].role).toBe('assistant')
   })
 })

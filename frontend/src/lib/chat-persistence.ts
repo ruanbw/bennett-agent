@@ -91,6 +91,27 @@ export interface ContextMessage {
 }
 
 /**
+ * 回传的真实用量锚点：`messageIndex` 指的是**送达模型的那个数组**里的位置。
+ *
+ * 下标必须对应 `messages` 而不是本地记录：中间还可能被 `clampContextMessages` 裁过、
+ * 空白占位消息也被滤过，位置早就不是记录里的了。
+ */
+export interface ContextAnchor {
+  messageIndex: number;
+  contextTokens: number;
+}
+
+/**
+ * 回放用的消息：比协议多一个「这条消息产生的那轮真实用量」。
+ *
+ * 它只在本地推导锚点时有用，发请求前会被剥掉（`loadContextMessages` 的返回把消息
+ * 压回 `{role, content}`）——协议里多一个字段就多一处两边要对齐的地方。
+ */
+interface ReplayableMessage extends ContextMessage {
+  anchorTokens?: number;
+}
+
+/**
  * 单条 content 的前端上限。后端是 32_000（`app/schemas/chat.py:MAX_MESSAGE_CHARS`），
  * 这里留 2000 字符余量：同一份内容在两侧的计数口径将来可能微调，贴边等于随时 422。
  */
@@ -123,20 +144,22 @@ function totalChars(messages: readonly ContextMessage[]): number {
  *
  * 纯函数：不改入参，未超限时原样返回内容（不做任何无谓改写）。
  */
-export function clampContextMessages(
-  messages: readonly ContextMessage[],
+export function clampContextMessages<T extends ContextMessage>(
+  messages: readonly T[],
   {
     maxContentChars = CONTEXT_MAX_MESSAGE_CHARS,
     maxTotalChars = CONTEXT_MAX_TOTAL_CHARS,
   }: ClampContextOptions = {},
-): ContextMessage[] {
+): T[] {
   const withinPerMessage = messages.every((message) => message.content.length <= maxContentChars);
   if (withinPerMessage && totalChars(messages) <= maxTotalChars) return [...messages];
 
+  // `as T`：这里只改 content，其余字段（含锚点这类本地附加字段）原样带过去。
+  // 泛型无法表达「浅拷贝并覆盖某字段仍是 T」，但这是本函数唯一的改动方式。
   const clamped = messages.map((message) =>
-    message.content.length > maxContentChars
+    (message.content.length > maxContentChars
       ? { ...message, content: message.content.slice(0, maxContentChars) }
-      : { ...message },
+      : { ...message }) as T,
   );
 
   while (clamped.length > 1 && totalChars(clamped) > maxTotalChars) clamped.shift();
@@ -149,7 +172,7 @@ export function clampContextMessages(
     }
     const others = total - clamped[longest].content.length;
     const budget = Math.max(0, maxTotalChars - others);
-    clamped[longest] = { ...clamped[longest], content: clamped[longest].content.slice(0, budget) };
+    clamped[longest] = { ...clamped[longest], content: clamped[longest].content.slice(0, budget) } as T;
   }
 
   return clamped;
@@ -172,11 +195,19 @@ function renderClarification(clarification: ClarificationState): string {
   return lines.join('\n');
 }
 
-function toContextMessage(message: MessageRecord): ContextMessage {
-  if (message.role === 'assistant' && !message.content.trim() && message.clarification) {
-    return { role: message.role, content: renderClarification(message.clarification) };
-  }
-  return { role: message.role, content: message.content };
+function toReplayable(message: MessageRecord): ReplayableMessage {
+  const content =
+    message.role === 'assistant' && !message.content.trim() && message.clarification
+      ? renderClarification(message.clarification)
+      : message.content;
+
+  // 只有助手消息能带用量：它是那一轮回答产生的那次请求的 prompt token 数
+  const anchorTokens =
+    message.role === 'assistant' && typeof message.usage?.contextTokens === 'number'
+      ? message.usage.contextTokens
+      : undefined;
+
+  return { role: message.role, content, anchorTokens };
 }
 
 /**
@@ -194,7 +225,7 @@ function toContextMessage(message: MessageRecord): ContextMessage {
 export async function loadContextMessages(
   sessionId: string,
   { excludeId, limit }: { excludeId: string; limit: number },
-): Promise<ContextMessage[]> {
+): Promise<{ messages: ContextMessage[]; anchor: ContextAnchor | null }> {
   const all = await loadSessionMessages(sessionId);
 
   const replayable = all
@@ -203,7 +234,22 @@ export async function loadContextMessages(
       (message) => message.role !== 'assistant' || message.content.trim() || message.clarification,
     )
     .slice(-limit)
-    .map(toContextMessage);
+    .map(toReplayable);
 
-  return clampContextMessages(replayable);
+  const clamped = clampContextMessages(replayable);
+
+  // 锚点在**裁剪之后**算：下标要对应真正发出去的那个数组。
+  // 从这里往回找最后一条带真实用量的助手消息——它的 `contextTokens` 覆盖了它之前的
+  // 全部内容（含系统提示词），所以预检只需再估算它之后的那几条。
+  let anchor: ContextAnchor | null = null;
+  for (let index = clamped.length - 1; index >= 0; index -= 1) {
+    const tokens = clamped[index].anchorTokens;
+    if (typeof tokens === 'number' && tokens > 0) {
+      anchor = { messageIndex: index, contextTokens: tokens };
+      break;
+    }
+  }
+
+  // 只把协议字段交出去：`anchorTokens` 是本地推导用的，不跟着发上游
+  return { messages: clamped.map(({ role, content }) => ({ role, content })), anchor };
 }

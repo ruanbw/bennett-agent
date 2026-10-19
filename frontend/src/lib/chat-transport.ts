@@ -26,6 +26,11 @@ export interface StreamChatParams {
   model: string | null;
   reasoningEffort: string | null;
   messages: Array<{ role: string; content: string }>;
+  /**
+   * 上一轮的真实用量锚点（可选）。服务端拿它把上下文预算从「估算整份历史」缩成
+   * 「真值 + 估算新增消息」。没有（首轮、或上游没回用量）就不发这个字段。
+   */
+  contextAnchor?: { messageIndex: number; contextTokens: number } | null;
   signal: AbortSignal;
 }
 
@@ -203,6 +208,7 @@ export async function* streamChat({
   model,
   reasoningEffort,
   messages,
+  contextAnchor = null,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
   // 走 apiFetch：带上 cookie，并在会话过期（401）时通知全局退回登录页
@@ -213,6 +219,15 @@ export async function* streamChat({
       model,
       reasoning_effort: reasoningEffort,
       messages,
+      // 线上字段名用 snake_case：与 messages / reasoning_effort 保持一致
+      ...(contextAnchor
+        ? {
+            context_anchor: {
+              message_index: contextAnchor.messageIndex,
+              context_tokens: contextAnchor.contextTokens,
+            },
+          }
+        : {}),
     }),
     signal,
   });

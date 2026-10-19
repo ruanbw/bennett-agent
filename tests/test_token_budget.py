@@ -22,6 +22,7 @@ from app.services.token_budget import (
     overflow_message,
     resolve_context_budget,
     resolve_reserve_tokens,
+    usable_anchor,
 )
 
 
@@ -252,3 +253,76 @@ def test_overflow_message_carries_numbers_and_actions():
     assert "group/auto-x" in message
     # 两个动作缺一不可：只告诉用户「超了」等于让他自己猜怎么继续
     assert "新建会话" in message and "模型" in message
+
+
+# ---------------------------------------------------------------------
+# 锚点：沿用上一轮的真实用量，只估算新增消息
+# ---------------------------------------------------------------------
+def anchor(index, tokens):
+    from app.schemas.chat import ContextAnchor
+
+    return ContextAnchor(message_index=index, context_tokens=tokens)
+
+
+def test_usable_anchor_needs_an_assistant_message(caplog):
+    """用量是那一轮回答产生的：指向 user 消息说明客户端算错了位置。"""
+    messages = [msg("user", "问"), msg("assistant", "答"), msg("user", "再问")]
+
+    assert usable_anchor(messages, anchor(1, 5_000)) is not None
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        assert usable_anchor(messages, anchor(0, 5_000)) is None
+    assert "不是 assistant" in caplog.text
+
+
+@pytest.mark.parametrize("index", [2, 99])
+def test_usable_anchor_rejects_out_of_range(index, caplog):
+    """越界就退回估算，不能让一个坏下标打断整轮对话。"""
+    messages = [msg("user", "问"), msg("assistant", "答")]
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        assert usable_anchor(messages, anchor(index, 5_000)) is None
+    assert "越界" in caplog.text
+
+
+def test_usable_anchor_rejects_a_negative_index_built_bypassing_the_schema(caplog):
+    """负下标由 schema 拦（ge=0），但本函数是公开的，也要自己保一道。"""
+    from app.schemas.chat import ContextAnchor
+
+    negative = ContextAnchor.model_construct(message_index=-1, context_tokens=5_000)
+    messages = [msg("user", "问"), msg("assistant", "答")]
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        assert usable_anchor(messages, negative) is None
+    assert "越界" in caplog.text
+
+
+def test_usable_anchor_passes_through_when_absent():
+    assert usable_anchor([msg("user", "问")], None) is None
+
+
+async def test_anchor_only_estimates_the_delta(monkeypatch):
+    """锚点之后只有一条新提问：估算范围从「整份历史」缩到「一条消息」。"""
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    messages = [msg("user", "很长的历史" * 100), msg("assistant", "很长的回答" * 100), msg("user", "新问题")]
+
+    blind = await resolve_context_budget("m", messages)
+    anchored = await resolve_context_budget("m", messages, anchor(1, 40_000))
+
+    assert blind is not None and anchored is not None
+    assert blind.basis == "estimate"
+    assert anchored.basis == "anchor"
+    # 锚点值 + 只估算最后一条
+    assert anchored.used_tokens == 40_000 + MESSAGE_OVERHEAD_TOKENS + estimate_tokens("新问题")
+    # 盲估把整份历史都算进去了，而锚点那条路径只动了最后一条
+    assert blind.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_unusable_anchor_falls_back_to_the_blind_estimate(monkeypatch):
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    messages = [msg("user", "问"), msg("assistant", "答"), msg("user", "再问")]
+
+    budget = await resolve_context_budget("m", messages, anchor(0, 40_000))
+
+    assert budget is not None
+    assert budget.basis == "estimate"
+    assert budget.used_tokens == estimate_messages_tokens(messages)

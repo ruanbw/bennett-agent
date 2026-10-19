@@ -167,6 +167,7 @@ async def chat_stream(request: ChatRequest):
             model_to_use,
             request.messages,
             reasoning_effort=request.reasoning_effort,
+            context_anchor=request.context_anchor,
         ):
             yield to_sse_frame(event)
 

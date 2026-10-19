@@ -50,6 +50,29 @@ class ChatMessage(BaseModel):
         return self
 
 
+class ContextAnchor(BaseModel):
+    """客户端回传的「上一轮真实用量」锚点。
+
+    服务端不保存会话状态（历史由客户端全量回放），所以「这份历史到底占多少 token」
+    只有上游知道——它上一轮回报过。把这个数字连同它对应的消息位置一起回传，预算就
+    只需估算锚点**之后**的那几条新消息，而不是从零估算整份历史。
+
+    为什么不能只要 `context_tokens` 不要位置：token 数与「截止到哪一条」是一体的，
+    单给一个数字无从知道要再从哪条开始累加。
+    """
+
+    message_index: int = Field(
+        ...,
+        ge=0,
+        description="锚点消息在 `messages` 里的下标；必须是 assistant（那一轮的用量是它产生的）",
+    )
+    context_tokens: int = Field(
+        ...,
+        gt=0,
+        description="那一轮上游回报的上下文 token 数（最后一次请求的 prompt token 数）",
+    )
+
+
 class ChatRequest(BaseModel):
     model: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS, description="选用的模型标识符")
     reasoning_effort: str | None = Field(
@@ -63,6 +86,13 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=MAX_HISTORY_MESSAGES,
         description="历史与当前对话消息列表",
+    )
+    context_anchor: ContextAnchor | None = Field(
+        None,
+        description=(
+            "可选：上一轮上游回报的真实用量锚点。提供后上下文预检只估算锚点之后的消息，"
+            "精度高于纯估算；缺失或不可用时服务端自己估算（不报错，因为这是可选的精度提升）。"
+        ),
     )
 
     @field_validator("model", mode="before")

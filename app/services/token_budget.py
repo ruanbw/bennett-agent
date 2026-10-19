@@ -21,9 +21,10 @@
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from app.config import settings
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, ContextAnchor
 from app.services.agent_factory import render_system_prompt
 from app.services.model_service import get_model_limits
 
@@ -123,6 +124,10 @@ class ContextBudget:
     纯数据（不在属性里读 settings）：它的三个消费方——拒绝判定、裁剪规划、测试——
     需要的是同一份数字，把计算塞进属性会让「同一个对象读两次得到两个值」。
     `limit_tokens` 已经含了安全系数，因此直接与 `used_tokens` 比较即可。
+
+    `basis` 说明 `used_tokens` 是怎么来的：`estimate`（从零估算整份历史）还是
+    `anchor`（沿用上一轮的真实用量 + 只估算新增消息）。两者相差可能很大，所以它
+    必须跟着日志和文案走，否则现场无法解释「为什么这次判得比上次宽」。
     """
 
     model: str
@@ -132,6 +137,7 @@ class ContextBudget:
     overhead_tokens: int
     limit_tokens: int
     used_tokens: int
+    basis: Literal["estimate", "anchor"] = "estimate"
 
     @property
     def over_limit(self) -> bool:
@@ -149,6 +155,7 @@ def build_budget(
     max_output_tokens: int | None,
     used_tokens: int,
     overhead_tokens: int,
+    basis: Literal["estimate", "anchor"] = "estimate",
 ) -> ContextBudget:
     """把各项凑成一个预算快照。单列成函数是为了让「上限怎么算的」只有一处。"""
     reserve_tokens = resolve_reserve_tokens(context_window, max_output_tokens)
@@ -162,10 +169,39 @@ def build_budget(
         overhead_tokens=overhead_tokens,
         limit_tokens=limit_tokens,
         used_tokens=used_tokens,
+        basis=basis,
     )
 
 
-async def resolve_context_budget(model_name: str, messages: list[ChatMessage]) -> ContextBudget | None:
+def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> ContextAnchor | None:
+    """判断这个锚点能不能用；不能用返回 None（退回到从零估算）。
+
+    两个条件都必需：
+
+    1. 下标在范围内，且指向一条 **assistant** 消息——用量是那一轮回答产生的，指向
+       user 消息说明客户端算错了位置，此时「锚点之后的增量」根本不对应任何真实区间；
+    2. `context_tokens` 为正（schema 已经拦了，但本函数是公开的，这里自己再保一道）。
+
+    不能用时**不报错**：锚点只是精度提升，客户端版本错位/历史被裁剪都不该让对话
+    失败——退回估算即可。但要留一条日志，否则「锚点没生效」会静默变成「预算怎么
+    忽然变宽了」。
+    """
+    if anchor is None:
+        return None
+    if not 0 <= anchor.message_index < len(messages):
+        logger.warning("上下文锚点下标越界，退回估算 (index=%d, messages=%d)", anchor.message_index, len(messages))
+        return None
+    if messages[anchor.message_index].role != "assistant":
+        logger.warning("上下文锚点指向的不是 assistant 消息，退回估算 (index=%d)", anchor.message_index)
+        return None
+    return anchor
+
+
+async def resolve_context_budget(
+    model_name: str,
+    messages: list[ChatMessage],
+    anchor: ContextAnchor | None = None,
+) -> ContextBudget | None:
     """解析本轮的上下文预算；无法判定时返回 `None`。
 
     返回 `None` 的三种情形都意味着**放行**：
@@ -173,6 +209,9 @@ async def resolve_context_budget(model_name: str, messages: list[ChatMessage]) -
     1. 守卫被配置关掉（`context_guard_mode = "off"`）；
     2. 网关没报这个模型的 `context_window`（没数据就不猜）；
     3. 模型不在网关列表里（白名单已放行过未知 id，这里不应反悔）。
+
+    给了可用的锚点就只估算锚点之后的消息：上游上一轮已经告诉我们真实值，没必要
+    把整份历史重新猜一遍。
     """
     if settings.context_guard_mode == "off":
         return None
@@ -185,12 +224,22 @@ async def resolve_context_budget(model_name: str, messages: list[ChatMessage]) -
     # 系统提示词 + 工具 schema 也要占窗口，且它们是每轮都发的固定开销：
     # 不扣掉这部分，预算会在长会话里刚好偏小一截。
     overhead_tokens = estimate_tokens(render_system_prompt()) + TOOL_SCHEMA_OVERHEAD_TOKENS
+
+    anchor = usable_anchor(messages, anchor)
+    if anchor is not None:
+        used_tokens = anchor.context_tokens + estimate_messages_tokens(messages[anchor.message_index + 1 :])
+        basis: Literal["estimate", "anchor"] = "anchor"
+    else:
+        used_tokens = estimate_messages_tokens(messages)
+        basis = "estimate"
+
     return build_budget(
         model=model_name,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
-        used_tokens=estimate_messages_tokens(messages),
+        used_tokens=used_tokens,
         overhead_tokens=overhead_tokens,
+        basis=basis,
     )
 
 
@@ -232,4 +281,5 @@ __all__ = [
     "overflow_message",
     "resolve_context_budget",
     "resolve_reserve_tokens",
+    "usable_anchor",
 ]

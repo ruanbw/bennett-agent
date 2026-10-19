@@ -132,6 +132,53 @@ describe('请求体', () => {
     })
   })
 
+  it('有锚点时按 snake_case 带上 context_anchor', async () => {
+    const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
+
+    for await (const _ of streamChat({
+      model: 'openai/gpt-4o',
+      reasoningEffort: null,
+      messages: [
+        { role: 'user', content: '问' },
+        { role: 'assistant', content: '答' },
+        { role: 'user', content: '再问' },
+      ],
+      contextAnchor: { messageIndex: 1, contextTokens: 1065 },
+      signal: NO_SIGNAL,
+    })) {
+      // 消费掉
+    }
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(JSON.parse(init.body)).toEqual({
+      model: 'openai/gpt-4o',
+      reasoning_effort: null,
+      messages: [
+        { role: 'user', content: '问' },
+        { role: 'assistant', content: '答' },
+        { role: 'user', content: '再问' },
+      ],
+      context_anchor: { message_index: 1, context_tokens: 1065 },
+    })
+    void url
+  })
+
+  it('没有锚点时整个字段都不出现（老后端不认识它也能照常跑）', async () => {
+    const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
+
+    for await (const _ of streamChat({
+      model: null,
+      reasoningEffort: null,
+      messages: [{ role: 'user', content: '你好' }],
+      signal: NO_SIGNAL,
+    })) {
+      // 消费掉
+    }
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect('context_anchor' in JSON.parse(init.body)).toBe(false)
+  })
+
   it('把 AbortSignal 透传给 fetch', async () => {
     const controller = new AbortController()
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })

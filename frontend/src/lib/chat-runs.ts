@@ -258,7 +258,7 @@ async function executeRun(run: RunState): Promise<void> {
   let stopped = false;
 
   try {
-    const contextMessages = await loadContextMessages(sessionId, {
+    const { messages: contextMessages, anchor: contextAnchor } = await loadContextMessages(sessionId, {
       excludeId: assistantMsgId,
       limit: HISTORY_LIMIT,
     });
@@ -267,6 +267,8 @@ async function executeRun(run: RunState): Promise<void> {
       model,
       reasoningEffort,
       messages: contextMessages,
+      // 上一轮上游回报的真实用量：有了它，服务端只估算它之后的那几条消息
+      contextAnchor,
       signal: controller.signal,
     })) {
       if (applyEvent(sessionId, event)) flushPartial();

@@ -861,8 +861,8 @@ def small_window(monkeypatch):
     return token_budget
 
 
-async def collect_async(messages, model="openai/gpt-4o"):
-    return [event async for event in chat_service.stream_chat_events(model, messages)]
+async def collect_async(messages, model="openai/gpt-4o", context_anchor=None):
+    return [event async for event in chat_service.stream_chat_events(model, messages, context_anchor=context_anchor)]
 
 
 async def test_over_limit_history_is_refused_with_a_typed_code(monkeypatch, small_window):
@@ -1139,3 +1139,60 @@ def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(monkeypatch,
         assert list(chat_service.translate_event(terminal_event(model_response()))) == []
 
     assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+
+
+# ---------------------------------------------------------------------
+# 锚点参与预算（真实用量 > 估算）
+# ---------------------------------------------------------------------
+async def test_anchor_rescues_a_history_the_blind_estimate_rejects(monkeypatch, small_window):
+    """同一份历史：盲估超限被拒，带上真实用量就放行。
+
+    这就是锚点存在的意义：估算器对稀有汉字会低估/高估（实测对 cl100k 是 0.41x~1.03x），
+    而上一轮上游给的是**真值**。判定依据从「猜整份历史」变成「真值 + 一条新消息」。
+    """
+    from app.schemas.chat import ContextAnchor
+
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent())
+
+    # 历史很长（盲估 ~7k tokens，超过这个 8k 窗口的可用上限），但真实用量只有 300
+    long_history = "很长的历史。" * 1200
+    messages = [
+        msg("user", long_history),
+        msg("assistant", "答"),
+        msg("user", "新问题"),
+    ]
+
+    refused = await collect_async(messages)
+    assert refused[-1].type == "error" and refused[-1].code == "context_overflow"
+
+    allowed = await collect_async(
+        messages,
+        context_anchor=ContextAnchor(message_index=1, context_tokens=300),
+    )
+    assert [event.type for event in allowed] == ["done"]
+
+
+async def test_anchor_basis_is_logged_for_the_field(monkeypatch, small_window, caplog):
+    """日志里要能看出这次判定用的是估算还是锚点，否则现场无法解释宽严变化。"""
+    from app.schemas.chat import ContextAnchor
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        await collect_async(
+            [msg("user", "你" * 20_000)],
+            context_anchor=ContextAnchor(message_index=0, context_tokens=1),
+        )
+
+    assert "超出模型预算" in caplog.text
+    # 指向 user 消息的锚点不可用 → 退回估算，日志里应是 estimate
+    assert "basis=estimate" in caplog.text
+
+
+async def test_over_limit_with_the_anchor_also_reports_the_anchor_basis(monkeypatch, small_window, caplog):
+    from app.schemas.chat import ContextAnchor
+
+    messages = [msg("user", "问"), msg("assistant", "答"), msg("user", "新问题")]
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        await collect_async(messages, context_anchor=ContextAnchor(message_index=1, context_tokens=999_999))
+
+    assert "basis=anchor" in caplog.text

@@ -29,7 +29,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, ContextAnchor
 from app.schemas.events import (
     ChatEvent,
     ClarificationRequest,
@@ -423,6 +423,7 @@ async def stream_chat_events(
     model_name: str,
     messages: list[ChatMessage],
     reasoning_effort: str | None = None,
+    context_anchor: ContextAnchor | None = None,
 ) -> AsyncGenerator[ChatEvent, None]:
     """产出本轮对话的聊天事件流。
 
@@ -447,11 +448,12 @@ async def stream_chat_events(
     seen_clarification_ids: set[str] = set()
 
     # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
-    budget = await resolve_context_budget(model_name, messages)
+    budget = await resolve_context_budget(model_name, messages, context_anchor)
     if budget is not None and budget.over_limit:
         logger.warning(
-            "上下文超出模型预算，已拒绝本轮 (model=%s, used=%d, limit=%d, window=%d, messages=%d)",
+            "上下文超出模型预算，已拒绝本轮 (model=%s, basis=%s, used=%d, limit=%d, window=%d, messages=%d)",
             model_name,
+            budget.basis,
             budget.used_tokens,
             budget.limit_tokens,
             budget.context_window,

@@ -223,3 +223,41 @@ def test_defaults_are_unchanged():
     request = ChatRequest(messages=[user()])
     assert request.model is None
     assert request.reasoning_effort is None
+
+
+# ---------------------------------------------------------------------
+# 上下文锚点（可选的精度提升）
+# ---------------------------------------------------------------------
+def test_context_anchor_is_optional():
+    """老客户端不发它，行为必须完全不变（预检退回估算）。"""
+    assert ChatRequest(messages=[user()]).context_anchor is None
+
+
+def test_context_anchor_is_accepted():
+    request = ChatRequest(
+        messages=[user("问"), {"role": "assistant", "content": "答"}, user("再问")],
+        context_anchor={"message_index": 1, "context_tokens": 1065},
+    )
+
+    assert request.context_anchor is not None
+    assert request.context_anchor.message_index == 1
+    assert request.context_anchor.context_tokens == 1065
+
+
+@pytest.mark.parametrize(
+    ("anchor", "expected"),
+    [
+        ({"message_index": -1, "context_tokens": 100}, "greater_than_equal"),  # 负下标
+        ({"message_index": 0, "context_tokens": 0}, "greater_than"),  # 用量不可能为 0
+        ({"message_index": 0, "context_tokens": -5}, "greater_than"),
+        ({"message_index": 0}, "missing"),
+        ({"context_tokens": 100}, "missing"),
+    ],
+)
+def test_malformed_context_anchor_is_rejected(anchor, expected):
+    """字段本身坏掉是客户端 bug，直接 422——不要静默忽略，否则精度问题永远查不出来。
+
+    与「锚点不可用」（下标越界/指向 user 消息）不同：那两种是**历史变了**的正常情形，
+    由 `token_budget.usable_anchor` 退回估算处理，不报错。
+    """
+    assert reject(ChatRequest, messages=[user()], context_anchor=anchor) == expected
