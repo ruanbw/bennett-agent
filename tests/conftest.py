@@ -74,13 +74,15 @@ async def _clear_model_registry() -> None:
 
     from app.db import AppSetting, ModelProvider, ProviderModel, async_session_maker
     from app.services.agent_factory import reset_agent_cache
-    from app.services.model_service import reset_models_cache
+    from app.services.model_service import REGISTRY_MARKER_KEY, reset_models_cache
 
     async with async_session_maker() as session:
         await session.execute(delete(ProviderModel))
         await session.execute(delete(ModelProvider))
-        # 初始化标记也要清：否则「引导过一次」之后的用例会永久走数据库权威分支
-        await session.execute(delete(AppSetting))
+        # 初始化标记也要清：否则「引导过一次」之后的用例会永久走数据库权威分支。
+        # 只删这一行：app_setting 是通用键值表，整表清空会连未来新增的应用级设置一起
+        # 静默清掉，测试与线上行为分叉。
+        await session.execute(delete(AppSetting).where(AppSetting.key == REGISTRY_MARKER_KEY))
         await session.commit()
 
     reset_models_cache()
