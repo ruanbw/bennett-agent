@@ -6,6 +6,7 @@
 
 from app.config import settings
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
+from app.tools.guard import TOOL_FAILURE_RESULT, ToolErrorIsolation
 from app.tools.registry import (
     ManagedTool,
     RiskLevel,
@@ -74,7 +75,9 @@ __all__ = [
     "ALL_TOOLS",
     "ManagedTool",
     "RiskLevel",
+    "TOOL_FAILURE_RESULT",
     "ToolCategory",
+    "ToolErrorIsolation",
     "ToolRegistry",
     "ask_user_clarification",
     "build_tools",

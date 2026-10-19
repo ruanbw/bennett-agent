@@ -26,6 +26,7 @@ from pydantic_ai.providers.litellm import LiteLLMProvider
 from app.config import settings
 from app.prompts import prompt_manager
 from app.tools import build_tools
+from app.tools.guard import ToolErrorIsolation
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ TITLE_SYSTEM_INSTRUCTION = (
 
 #: 缓存条目上限。远大于实际用到的模型数，同时给「客户端乱传 model 名」兜底。
 AGENT_CACHE_SIZE = 32
+
+#: 工具异常隔离能力。无状态，所有缓存条目共用同一个实例即可。
+#: 没有它时，任意工具抛出的非 `ModelRetry` 异常都会中止整轮生成（见 `app/tools/guard.py`）。
+_TOOL_ERROR_ISOLATION = ToolErrorIsolation()
 
 #: 建连 / 写 / 取连接的硬上限。它们不需要可配置：超出这些值已经说明网络或上游异常。
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -157,6 +162,9 @@ def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[ob
         model=model,
         system_prompt=system_prompt,
         tools=build_tools(),
+        # 工具是外部边界：一个工具抛异常不应该让整轮回答作废。
+        # 兜底只作用于「漏网抛出来」的异常，工具自己返回文案的路径不受影响。
+        capabilities=[_TOOL_ERROR_ISOLATION],
     )
 
 
