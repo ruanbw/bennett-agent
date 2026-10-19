@@ -39,6 +39,31 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 之后由超管在管理后台把别的账号设为管理员。三个角色的权限见 `app/roles.py`：
 `user` 只能对话，`admin` 能进后台维护提供商与封禁用户，`superadmin` 额外能调整角色。
 
+## 评测
+
+`evals/` 是一套**行为回归**用例：改提示词、换模型、动工具定义之后跑一遍，就知道哪些
+已经能工作的行为变了。判分只看工具调用序列与硬性边界（该不该用工具、用哪一个、
+澄清选项几个、有没有泄露系统提示词），不比文本相似度。
+
+```bash
+uv run python scripts/run_eval.py --list           # 看用例，不连网关
+uv run python scripts/run_eval.py                  # 全量，自动与同模型上一次对比
+uv run python scripts/run_eval.py --tag clarify    # 按标签过滤
+uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
+```
+
+- 会真实调用上游模型并**产生费用**，因此不在 CI 里运行。
+- 报告落在 `evals/runs/<模型>/<时间戳>.json`（已忽略），含每轮完整回答、工具入参与
+  真实 token 用量。`--baseline auto` 取同模型最近一份报告做 diff，其中 **新失败
+  （newly_failed）** 是唯一需要立刻处理的信号：它表示某个用例从 PASS 变成了 FAIL。
+- `requires: [tavily]` 的用例在没配 `TAVILY_API_KEY` 时记为 SKIP 而不是失败——没有 key
+  时这个工具根本不会被装配。
+- 用例格式见 `evals/cases.yaml` 顶部注释；断言与聚合是纯逻辑（`evals/harness.py`），
+  由 `tests/test_eval_harness.py` 覆盖，不需要网关。
+
+默认会把 `CONTEXT_GUARD_MODE` 关掉：短用例永远碰不到预算，开着只会让每条用例多查一次
+模型窗口。要连同预算判定一起测就加 `--context-guard`。
+
 ## API
 
 | 端点 | 说明 |
@@ -58,9 +83,10 @@ production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。
 
 ```text
 app/          FastAPI：api / config / prompts / schemas / services / tools / db.py
+evals/        行为回归评测：用例（cases.yaml）/ 断言与报告（harness.py）/ 执行器（runner.py）
 frontend/     React 19 + Vite + Tailwind 4 + assistant-ui（components/admin = 管理后台）
 prompts/      Jinja2 提示词模板
-scripts/      seed_admin.py（播种初始超管）
+scripts/      seed_admin.py（播种初始超管）、run_eval.py（跑评测）
 main.py       CLI 与 --web 入口
 ```
 

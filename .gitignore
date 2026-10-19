@@ -9,6 +9,8 @@ wheels/
 # 工具产物
 .pytest_cache/
 .ruff_cache/
+# 评测产物：报告里有完整回答与 token 用量，属于运行数据不是源码
+evals/runs/
 
 # SQLite 数据库（认证用）
 # -wal / -shm 是 WAL 模式的副产物，必须一起忽略：只忽略主库会留下一堆孤儿文件
