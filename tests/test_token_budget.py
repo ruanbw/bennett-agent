@@ -5,14 +5,16 @@
 **放行**的未知情形。数字本身不是契约（换分词器就该变），量级与方向才是。
 """
 
+import time
 from dataclasses import FrozenInstanceError
 
 import pytest
 
 from app.config import settings
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import MAX_HISTORY_CHARS, ChatMessage
 from app.services import token_budget
 from app.services.token_budget import (
+    ASCII_CHARS_PER_TOKEN,
     MESSAGE_OVERHEAD_TOKENS,
     TOOL_SCHEMA_OVERHEAD_TOKENS,
     ContextBudget,
@@ -81,6 +83,52 @@ def test_empty_text_costs_nothing():
 )
 def test_estimate_tokens_is_language_aware(text, expected):
     assert estimate_tokens(text) == expected
+
+
+def _reference_estimate_tokens(text: str) -> int:
+    """逐字符参考实现：宽窄分开累计后再向上取整，不走被测函数的循环与 ASCII 快路径。
+
+    宽字符判定用生产谓词 `_is_wide_char`（它本身由 `test_estimate_tokens_is_language_aware`
+    逐语言锁定），这里独立复算的是「宽窄分开累计」与「窄字符按 4 向上取整」。
+    """
+    wide = sum(1 for char in text if token_budget._is_wide_char(char))
+    narrow = len(text) - wide
+    return wide + -(-narrow // ASCII_CHARS_PER_TOKEN)
+
+
+# 本机（CPython 3.10）实测基线，不是阈值：400k 纯 ASCII 约 0.01ms（isascii 快路径），
+# 400k 中文约 330ms、中英混排约 520ms（逐字符循环）。非 ASCII 只锁结果、不锁时间。
+def test_max_size_ascii_history_is_estimated_without_a_per_char_loop():
+    text = "a" * MAX_HISTORY_CHARS
+
+    start = time.perf_counter()
+    tokens = estimate_tokens(text)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert tokens == MAX_HISTORY_CHARS // ASCII_CHARS_PER_TOKEN
+    assert tokens == _reference_estimate_tokens(text)
+    assert elapsed_ms < 50, f"{MAX_HISTORY_CHARS} 字符 ASCII 估算耗时 {elapsed_ms:.1f}ms，快路径失效了"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ("中文分词与全角标点，测。" * 40_000)[:MAX_HISTORY_CHARS],
+        ("hello world 这是一段中文 test " * 20_000)[:MAX_HISTORY_CHARS],
+    ],
+    ids=["chinese", "mixed"],
+)
+def test_max_size_non_ascii_history_matches_the_reference_count(text):
+    """非 ASCII 路径可以慢，但不能算错：宽窄混排的结果必须与逐字符口径逐字一致。"""
+    assert estimate_tokens(text) == _reference_estimate_tokens(text)
+
+
+def test_wide_and_narrow_runs_are_summed_separately():
+    """宽窄分开累计：合并成「总长度 / 4」会把中文段低估成四分之一。"""
+    text = "中文" * 100_000 + "x" * 200_001
+
+    assert estimate_tokens(text) == 200_000 + -(-200_001 // ASCII_CHARS_PER_TOKEN)
+    assert estimate_tokens(text) != -(-len(text) // ASCII_CHARS_PER_TOKEN)
 
 
 def test_cyrillic_is_not_treated_as_wide():

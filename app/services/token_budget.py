@@ -71,9 +71,27 @@ def estimate_tokens(text: str) -> int:
 
     宽字符按 1 token/字计，其余按 4 字符/token 向上取整。这个口径对中文略偏高
     （多数分词器常见汉字约为 0.6~1 token），偏高是刻意的安全方向。
+
+    性能边界要写清楚，因为它的调用方是全量历史：
+
+    - 纯 ASCII（英文、代码、JSON）走 `str.isascii()` 快路径，整个判定在 C 层一次
+      完成，40 万字符也是微秒级。
+    - 只要含一个非 ASCII 字符就退到逐字符循环（O(n) 次 Python 调用），40 万中文
+      在本机约 330ms、中英混排约 520ms。
+
+    没有为后者引入更快的手段：`str.translate` 预建表要一次性构造十七万条目的
+    dict（约十几 MB 常驻），预编译正则也仍在百毫秒级，两者都不改变「非纯 ASCII 文本
+    代价随长度线性增长」这件事；numpy 之类的新依赖对这里更是过剩。真出现长中文历史
+    卡住事件循环，应当先做增量估算（只算新增消息），而不是继续抠单次循环常数。
     """
     if not text:
         return 0
+
+    # 纯 ASCII 时全是窄字符，口径就是 4 字符/token：交给 C 层的 isascii() 判一次，
+    # 不必逐字符走 Python 循环。无锚点时每轮都要对整份历史跑一遍（网关流式不回
+    # usage 就没有锚点），40 万字符的循环是百毫秒级，会挡住同一进程内其它 SSE。
+    if text.isascii():
+        return -(-len(text) // ASCII_CHARS_PER_TOKEN)
 
     wide = 0
     narrow = 0
