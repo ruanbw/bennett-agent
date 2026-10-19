@@ -1022,6 +1022,38 @@ def test_context_overflow_reaches_the_client_over_sse(monkeypatch):
 
 
 # ---------------------------------------------------------------------
+# 数据库配置下模型解析失败（C1）
+#
+# 管理员在请求途中停用/删除模型时，`resolve_model_target` 返回 None。这条分支以前
+# 传了一个 `StreamError.code` 不认识的取值，构造事件时就抛 ValidationError；此时 SSE
+# 已经开场、`event_generator` 没有兜底，客户端拿不到任何终止事件，只看到连接被掐断。
+# 下面锁客户端实际收到的东西：一条带合法分类的终止事件。
+# ---------------------------------------------------------------------
+async def test_disabled_model_is_rejected_with_a_typed_code(monkeypatch):
+    async def unresolvable(_key):
+        return None
+
+    async def config_exists():
+        return True
+
+    monkeypatch.setattr(chat_service, "resolve_model_target", unresolvable)
+    monkeypatch.setattr(chat_service, "provider_config_exists", config_exists)
+    # 分支一旦失效，别让用例真的去打上游：拿到的一定是这条错误事件
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent())
+
+    events = await collect_async([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["error"]
+    error = events[0]
+    assert error.code == "model_unavailable"
+    # 同一个请求再发一次结果不会变：不给「重试」按钮
+    assert error.retryable is False
+    # 文案要是人能读懂的原因与动作，不是内部错误编号
+    assert "模型已停用或不存在" in error.message
+    assert "错误编号" not in error.message
+
+
+# ---------------------------------------------------------------------
 # 真实用量（上游字段，不是估算）
 #
 # 这份数据一直在流里（`run_stream_events` 尾部的 AgentRunResultEvent），此前被丢掉，
