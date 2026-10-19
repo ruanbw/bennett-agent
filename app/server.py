@@ -12,11 +12,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.chat import router as api_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
+from app.services.auth import promote_configured_superusers
 from app.services.http_client import close_http_client
+from app.services.model_service import seed_default_provider
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
     # 使用 create_all（而非 Alembic）的取舍见 app/db.py 的 create_db_and_tables。
     await create_db_and_tables()
+
+    # 首次启动（或库里一条提供商都没有）时，用环境变量引导出一条「默认网关」，
+    # 让升级前的部署不至于因为管理后台还没配置就没有任何模型可用。只写库不联网。
+    try:
+        if await seed_default_provider():
+            logger.info("模型提供商已从环境变量完成引导，可在管理后台继续维护")
+    except Exception:  # noqa: BLE001 - 引导失败不应阻止服务启动
+        logger.warning("模型提供商引导失败（不影响启动）", exc_info=True)
+
+    # 管理员只能来自 SUPERUSER_EMAILS：每次启动重跑，运维改环境变量后重启即生效
+    try:
+        await promote_configured_superusers()
+    except Exception:  # noqa: BLE001 - 同上，管理后台不可用不应阻止对话服务启动
+        logger.warning("提升白名单管理员失败（不影响启动）", exc_info=True)
+
     await _cleanup_expired_sessions_on_startup()
 
     try:
@@ -105,6 +123,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(api_router)
+    app.include_router(admin_router)
 
     return app
 

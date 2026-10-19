@@ -6,6 +6,7 @@ import { ChatProvider } from './components/ChatProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LoginPage } from './components/LoginPage';
 import { Sidebar } from './components/Sidebar';
+import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
 import { useAuth } from './hooks/use-auth';
 import { useChatSessions } from './hooks/use-chat-sessions';
@@ -119,6 +120,8 @@ function AuthLoadingScreen() {
 
 export interface AuthenticatedShellProps {
   userEmail: string | null;
+  isSuperuser: boolean;
+  onOpenAdmin: () => void;
   onLogout: () => void | Promise<unknown>;
 }
 
@@ -164,7 +167,7 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
  * 已登录才该跑的副作用，只有整个组件按登录态挂载/卸载才能自然做到，而 hook 不能
  * 条件调用。
  */
-function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
+function AuthenticatedShell({ userEmail, isSuperuser, onOpenAdmin, onLogout }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
   const {
     sessions,
@@ -240,6 +243,8 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
         isOpen={isSidebarOpen}
         onToggleOpen={handleToggleSidebar}
         userEmail={userEmail}
+        isSuperuser={isSuperuser}
+        onOpenAdmin={onOpenAdmin}
         onLogout={onLogout}
       />
 
@@ -303,6 +308,13 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
 export function App() {
   const { status, user, pending, error, login, register, logout, clearError } = useAuth();
 
+  // 管理后台是覆盖层：状态放在 App 才能让 AuthenticatedShell 始终挂载（聊天状态不丢）
+  const [adminOpen, setAdminOpen] = useState(false);
+
+  // 会话过期或主动登出后状态回到 anonymous：在渲染期就地复位（React 官方 pattern），
+  // 否则标记会留到下一次登录，管理后台一进来就又弹出来。
+  if (status !== 'authenticated' && adminOpen) setAdminOpen(false);
+
   return (
     <ThemeProvider>
       {status === 'loading' ? (
@@ -316,7 +328,19 @@ export function App() {
           onClearError={clearError}
         />
       ) : (
-        <AuthenticatedShell userEmail={user?.email ?? null} onLogout={logout} />
+        <>
+          <AuthenticatedShell
+            userEmail={user?.email ?? null}
+            isSuperuser={user?.is_superuser ?? false}
+            onOpenAdmin={() => setAdminOpen(true)}
+            onLogout={logout}
+          />
+          {adminOpen && (
+            <ErrorBoundary fallbackTitle="管理后台加载异常">
+              <AdminConsole userEmail={user?.email ?? null} onClose={() => setAdminOpen(false)} />
+            </ErrorBoundary>
+          )}
+        </>
       )}
     </ThemeProvider>
   );

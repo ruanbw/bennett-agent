@@ -30,6 +30,7 @@ from app.config import settings
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.prompts import prompt_manager
 from app.services.fallback_tracker import record_fallback
+from app.services.model_target import ModelTarget
 from app.services.upstream_errors import is_fallback_eligible
 from app.tools import build_tools
 from app.tools.guard import ToolErrorIsolation
@@ -98,22 +99,26 @@ def _settings_cache_key() -> tuple[object, ...]:
     )
 
 
-def build_provider() -> LiteLLMProvider:
+def build_provider(target: ModelTarget | None = None) -> LiteLLMProvider:
     """构造 LiteLLM provider。
 
-    所有模型接入点共用，避免 base_url 与密钥兜底逻辑第三次分叉。
+    所有模型接入点共用，避免 base_url 与密钥兜底逻辑第三次分叉。`target=None` 表示
+    尚未接入管理后台的旧路径，取环境变量；否则取该提供商自己的端点与凭据。
 
     这里显式关闭 SDK 的自动重试（openai 默认 `max_retries=2`）：网关（LiteLLM）
     自己就会重试上游，两层重试叠加空闲超时会把单轮对话的最坏耗时乘上去。pydantic-ai
     2.31.1 的 `LiteLLMProvider` 没有 `max_retries` 参数，只能自己构造 `AsyncOpenAI`
     再通过官方支持的 `openai_client=` 传入（见其 `__init__` 重载）。
     """
+    base_url = target.base_url if target is not None else settings.litellm_api_base
+    api_key = target.api_key if target is not None else settings.litellm_api_key
+
     # AsyncOpenAI 内部会自建 httpx 客户端并继承环境里的代理设置；坏 no_proxy 会让它
     # 在构造阶段就抛 InvalidURL（见 app/config/proxy_env.py），因此先清理再构造。
     sanitize_no_proxy_env()
     client = AsyncOpenAI(
-        base_url=settings.litellm_api_base,
-        api_key=settings.litellm_api_key or "sk-no-key",
+        base_url=base_url,
+        api_key=api_key or "sk-no-key",
         max_retries=0,
     )
     return LiteLLMProvider(openai_client=client)
@@ -153,8 +158,17 @@ def _configured_fallback_name(primary_name: str) -> str | None:
     return fallback_name
 
 
-def _build_fallback_handler(primary_name: str, fallback_name: str) -> Callable[[Exception], bool]:
+def _build_fallback_handler(
+    primary_label: str,
+    fallback_label: str,
+    primary_name: str | None = None,
+    fallback_name: str | None = None,
+) -> Callable[[Exception], bool]:
     """`FallbackModel` 的切换判定：复用上游错误分类，只切「换模型可能救回来」的失败。
+
+    `*_label` 是给事件/用量用的对外标识（数据库路径下是路由键），`*_name` 是发给
+    上游的模型名（只用于日志，缺省时与 label 相同）。两者分开是因为用量事件要按
+    **路由键**再查一次窗口。
 
     不切的情况：401/403（同一套网关凭据，备用模型也会失败）、400/404（请求或模型
     本身的问题）——这些按分类文案直接告诉用户，避免无意义地多打一次上游。
@@ -162,6 +176,8 @@ def _build_fallback_handler(primary_name: str, fallback_name: str) -> Callable[[
     日志放在这里而不是最终异常处：`FallbackExceptionGroup` 只说「都失败了」，
     不会告诉你主模型当时是因为什么失败。
     """
+    primary_name = primary_name or primary_label
+    fallback_name = fallback_name or fallback_label
 
     def should_fallback(error: Exception) -> bool:
         if not is_fallback_eligible(error):
@@ -173,13 +189,17 @@ def _build_fallback_handler(primary_name: str, fallback_name: str) -> Callable[[
             exc_info=True,
         )
         # 只有真的切换才记录：对话流会把它翻译成 `fallback` 事件告诉用户本轮是谁答的。
-        record_fallback(primary_name, fallback_name)
+        record_fallback(primary_label, fallback_label)
         return True
 
     return should_fallback
 
 
-def _build_chat_model(model_name: str, model_settings: dict[str, object]) -> Model:
+def _build_chat_model(
+    model_name: str,
+    model_settings: dict[str, object],
+    target: ModelTarget | None = None,
+) -> Model:
     """构造主对话模型，配置了备用模型时包一层 `FallbackModel`。
 
     兜底顺序：`FallbackModel` 先在**流打开阶段**切备用模型（pydantic-ai 的
@@ -187,8 +207,35 @@ def _build_chat_model(model_name: str, model_settings: dict[str, object]) -> Mod
     备用模型也失败后，`chat_service` 的瞬时错误重试再整轮试一次。
 
     备用模型与主模型共用同样的 `model_settings`（思考等级、超时）——它必须能接受
-    这些参数，否则切换本身就会 400。这条约束写进了 `Settings.fallback_model_name`。
+    这些参数，否则切换本身就会 400。数据库路径下备用模型被限制在**同一提供商**内
+    （见 `model_service.resolve_model_target`）。
     """
+    if target is not None:
+        primary = OpenAIChatModel(
+            model_name=target.upstream_model,
+            provider=build_provider(target),
+            settings=model_settings or None,
+        )
+        fallback = target.fallback
+        if fallback is None:
+            return primary
+
+        fallback_model = OpenAIChatModel(
+            model_name=fallback.upstream_model,
+            provider=build_provider(fallback),
+            settings=model_settings or None,
+        )
+        return FallbackModel(
+            primary,
+            fallback_model,
+            fallback_on=_build_fallback_handler(
+                target.key,
+                fallback.key,
+                target.upstream_model,
+                fallback.upstream_model,
+            ),
+        )
+
     primary = OpenAIChatModel(
         model_name=model_name,
         provider=build_provider(),
@@ -199,12 +246,16 @@ def _build_chat_model(model_name: str, model_settings: dict[str, object]) -> Mod
     if fallback_name is None:
         return primary
 
-    fallback = OpenAIChatModel(
+    fallback_model = OpenAIChatModel(
         model_name=fallback_name,
         provider=build_provider(),
         settings=model_settings or None,
     )
-    return FallbackModel(primary, fallback, fallback_on=_build_fallback_handler(model_name, fallback_name))
+    return FallbackModel(
+        primary,
+        fallback_model,
+        fallback_on=_build_fallback_handler(model_name, fallback_name, model_name, fallback_name),
+    )
 
 
 def render_system_prompt() -> str:
@@ -222,12 +273,18 @@ def render_system_prompt() -> str:
 
 
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
-def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
+def _build_agent_cached(
+    model_name: str,
+    effort: str | None,
+    cache_key: tuple[object, ...],
+    target: ModelTarget | None,
+) -> Agent:  # noqa: ANN401
     """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
 
-    `effort` 必须已经归一化、`cache_key` 必须来自 `_settings_cache_key()`：
-    两者都只在缓存键里起作用，用来保证「等价的输入命中同一个槽位」与
-    「配置变了就换槽位」。
+    `effort` 必须已经归一化、`cache_key` 必须来自 `_settings_cache_key()`、`target`
+    来自 `model_service.resolve_model_target()`：三者都参与缓存键，用来保证「等价的
+    输入命中同一个槽位」与「配置变了就换槽位」。`ModelTarget` 是 frozen dataclass，
+    本身可哈希；管理员改了地址/密钥/模型后会产生新的 target，旧缓存自然不再命中。
     """
     system_prompt = render_system_prompt()
 
@@ -239,7 +296,7 @@ def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[ob
     if timeout is not None:
         model_settings["timeout"] = timeout
 
-    model = _build_chat_model(model_name, model_settings)
+    model = _build_chat_model(model_name, model_settings, target)
 
     return Agent(
         model=model,
@@ -251,26 +308,43 @@ def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[ob
     )
 
 
-def build_agent(model_name: str, reasoning_effort: str | None = None) -> Agent:  # noqa: ANN401
+def build_agent(
+    model_name: str,
+    reasoning_effort: str | None = None,
+    *,
+    target: ModelTarget | None = None,
+) -> Agent:  # noqa: ANN401
     """装配主对话 Agent。CLI 与 Web 都必须走这里，否则两者会再次漂移。
 
     归一化必须在进入缓存**之前**完成：否则 `"HIGH"` / `"high"` / `" high "` 会各占
     一个缓存槽，客户端换个大小写或空格就能把 32 个槽位挤满，把真实条目淘汰掉。
+
+    `target` 由调用方先解析（异步、查库）；`None` 表示旧版环境变量路径。
     """
-    return _build_agent_cached(model_name, normalize_reasoning_effort(reasoning_effort), _settings_cache_key())
+    return _build_agent_cached(
+        model_name,
+        normalize_reasoning_effort(reasoning_effort),
+        _settings_cache_key(),
+        target,
+    )
 
 
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
-def _build_title_agent_cached(model_name: str, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
+def _build_title_agent_cached(
+    model_name: str,
+    cache_key: tuple[object, ...],
+    target: ModelTarget | None,
+) -> Agent:  # noqa: ANN401
     """装配会话标题生成 Agent 的缓存实现，只应由 `build_title_agent` 调用。
 
-    `cache_key` 只用于缓存失效；标题 agent 只用得到其中的 base_url 与超时，
+    `cache_key` 只用于缓存失效；标题 agent 只用得到其中的超时与提供商配置，
     但共用同一个键更简单，多失效一次没有代价。
     """
     timeout = build_upstream_timeout()
+    upstream_name = target.upstream_model if target is not None else model_name
     model = OpenAIChatModel(
-        model_name=model_name,
-        provider=build_provider(),
+        model_name=upstream_name,
+        provider=build_provider(target),
         settings={"timeout": timeout} if timeout is not None else None,
     )
     return Agent(
@@ -279,9 +353,9 @@ def _build_title_agent_cached(model_name: str, cache_key: tuple[object, ...]) ->
     )
 
 
-def build_title_agent(model_name: str) -> Agent:  # noqa: ANN401
+def build_title_agent(model_name: str, *, target: ModelTarget | None = None) -> Agent:  # noqa: ANN401
     """装配会话标题生成 Agent：另一个 system prompt，且不挂工具。"""
-    return _build_title_agent_cached(model_name, _settings_cache_key())
+    return _build_title_agent_cached(model_name, _settings_cache_key(), target)
 
 
 def reset_agent_cache() -> None:

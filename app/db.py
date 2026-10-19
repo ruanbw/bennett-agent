@@ -1,4 +1,4 @@
-"""数据库基础设施：异步引擎、ORM 基类，以及用户与会话两张表。
+"""数据库基础设施：异步引擎、ORM 基类，以及用户 / 会话 / 模型提供商三组表。
 
 ## 为什么是 SQLite
 
@@ -9,11 +9,17 @@
 **唯一会迫使换库的情况是多机部署**——SQLite 文件是本地的，多实例会各写各的。
 届时换 Postgres 只需改 `database_url` 与这里的引擎构造。
 
-## 两张表的职责
+## 各组表的职责
 
 - `user`：fastapi-users 的标准用户表（邮箱 + 密码哈希 + 三个布尔位）。
+  `is_active=False` 就是「封禁」：认证依赖要求 active=True，且封禁时会删掉该用户的
+  全部会话行，所以在途请求与刷新页面都会立刻失效。
 - `access_token`：**服务端会话**。一条记录 = 一个登录态。这是「不用 JWT」的落点：
   token 只是一串随机值，状态在库里，因此登出/踢人/改密失效都是删一行，立即生效。
+- `model_provider` / `provider_model`：管理后台维护的模型提供商与模型清单。
+  提供商保存 base_url 与 API key（每个提供商可以指向不同的网关或官方 API），模型行
+  保存上游模型名、展示名与**启用开关**。对外路由键是 `{provider.slug}/{model_id}`，
+  因为不同提供商可能提供同名模型。
 """
 
 import logging
@@ -28,9 +34,21 @@ from fastapi_users_db_sqlalchemy.access_token import (
     SQLAlchemyAccessTokenDatabase,
     SQLAlchemyBaseAccessTokenTableUUID,
 )
-from sqlalchemy import delete, event
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    event,
+)
+from sqlalchemy import Uuid as SQLUuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.config import settings
 
@@ -46,7 +64,11 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
 
     字段由 fastapi-users 定义：`id`(UUID) / `email` / `hashed_password` /
     `is_active` / `is_superuser` / `is_verified`。
-    本项目不做权限分级，因此 `is_superuser` 只作为预留位，未参与任何判断。
+
+    - `is_active=False` 是**封禁**：认证依赖要求 active=True，且封禁接口会同时删除
+      该用户的全部会话行，因此在途请求与刷新都会立即生效。
+    - `is_superuser=True` 是**管理后台**的入口。没有任何接口能把自己提升为管理员，
+      只能由部署者通过 `SUPERUSER_EMAILS` 环境变量指定。
     """
 
 
@@ -56,6 +78,115 @@ class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
     `user_id` 带 `ondelete="cascade"`，但 SQLite 默认**不启用**外键约束，
     所以下面必须显式 `PRAGMA foreign_keys=ON`，否则删用户后会话记录会残留。
     """
+
+
+class ModelProvider(Base):
+    """模型提供商：一个可独立寻址的 OpenAI 兼容端点。
+
+    `base_url` / `api_key` 是**运行时**凭据，不再只来自环境变量：管理后台可以接入
+    多个提供商（本机 LiteLLM 网关、官方 API、自建 vLLM……），每个提供商用自己的
+    凭据与模型清单。
+
+    `slug` 是生成一次、之后不随改名变化的稳定标识——它参与对外模型路由键
+    (`{slug}/{model_id}`)，改名不能把用户已保存的模型选择悄悄改掉。
+
+    **API key 明文存库**：本项目是单机部署，`.env` 里的密钥同样是明文。对外 API
+    永远只返回掩码（见 `app/schemas/admin.py:mask_api_key`），并在文档里注明：
+    需要更强隔离时应改用密钥管理服务，而不是在这里加一层自造加密。
+    """
+
+    __tablename__ = "model_provider"
+
+    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True, index=True)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    models: Mapped[list["ProviderModel"]] = relationship(
+        back_populates="provider",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class AppSetting(Base):
+    """极简键值表，目前只存「模型注册表是否已经初始化」。
+
+    为什么需要这个标记：库里一条提供商都没有时有两种完全不同的含义——
+
+    1. 全新部署，管理后台还没配置（此时应该退回旧的 `LITELLM_API_BASE` 路径，
+       否则升级后第一次启动就没有任何模型可用）；
+    2. 管理员把提供商全删了（此时应该**没有任何模型**，而不是悄悄恢复环境变量配置）。
+
+    只看 `model_provider` 有没有行无法区分两者。初始化标记在首次引导或首次创建
+    提供商时写入，之后永不清除——删光提供商仍然维持「数据库是权威」。
+    """
+
+    __tablename__ = "app_setting"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ProviderModel(Base):
+    """提供商下的一个模型；`enabled` 是对用户是否可见/可选的开关。
+
+    `model_id` 是**发给上游的名字**（例如 `openai/gpt-4o` 或 `deepseek-chat`），
+    不参与 URL。对外键由 `provider.slug` + `model_id` 拼成：不同提供商可以各自
+    提供同名模型，直接拿 `model_id` 做键会互相覆盖。
+
+    `(provider_id, model_id)` 唯一：同步上游列表时按这个组合 upsert，重复同步不会
+    产生重复行，也不会把管理员手动调过的 `enabled` / 展示名覆盖回去。
+    """
+
+    __tablename__ = "provider_model"
+    __table_args__ = (UniqueConstraint("provider_id", "model_id", name="uq_provider_model"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        SQLUuid(as_uuid=True),
+        ForeignKey("model_provider.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    supported_reasoning_levels: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    provider: Mapped[ModelProvider] = relationship(back_populates="models")
 
 
 def _resolve_database_url(url: str) -> str:
@@ -103,6 +234,9 @@ if engine.dialect.name == "sqlite":
 
 async def create_db_and_tables() -> None:
     """启动时建表。
+
+    新增的 `model_provider` / `provider_model` 两张表由 `create_all` 自动创建；
+    已有表（user / access_token）不会被动到。
 
     **没有引入 Alembic**：当前还没有「改已有列」的迁移需求，多一套工具链不划算。
     注意 `create_all` 只创建缺失的表，**不会修改已存在的表结构**；一旦需要给现有

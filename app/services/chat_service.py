@@ -42,6 +42,7 @@ from app.schemas.events import (
 )
 from app.services.agent_factory import build_agent, build_title_agent
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
+from app.services.model_service import provider_config_exists, resolve_model_target
 from app.services.token_budget import overflow_message, resolve_context_budget
 from app.services.upstream_errors import (
     is_retryable_for_user,
@@ -435,6 +436,18 @@ async def stream_chat_events(
     """
     seen_clarification_ids: set[str] = set()
 
+    # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（并发下
+    # 管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关——用户会以为
+    # 自己在用一个已被停用的模型。
+    target = await resolve_model_target(model_name)
+    if target is None and await provider_config_exists():
+        yield StreamError(
+            message="模型已停用或不存在，请刷新模型列表后重试",
+            retryable=False,
+            code="model_unavailable",
+        )
+        return
+
     # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
     budget = await resolve_context_budget(model_name, messages)
     if budget is not None and budget.over_limit:
@@ -467,7 +480,7 @@ async def stream_chat_events(
         return
 
     try:
-        agent = build_agent(model_name, reasoning_effort=reasoning_effort)
+        agent = build_agent(model_name, reasoning_effort=reasoning_effort, target=target)
     except Exception:
         error_id = _new_error_id()
         logger.exception("模型初始化失败 (error_id=%s, model=%s)", error_id, model_name)
@@ -547,7 +560,10 @@ async def generate_title_from_prompt(model_name: str, prompt: str) -> str:
     失败时回退到「首行截断」——标题只是装饰，不该让用户看到报错。
     """
     try:
-        agent = build_title_agent(model_name)
+        target = await resolve_model_target(model_name)
+        if target is None and await provider_config_exists():
+            raise RuntimeError(f"模型不可用: {model_name}")
+        agent = build_title_agent(model_name, target=target)
         result = await agent.run(f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}")
         title = result.output.strip().strip(_TITLE_QUOTE_CHARS)
         return title[:MAX_TITLE_CHARS] if title else DEFAULT_TITLE

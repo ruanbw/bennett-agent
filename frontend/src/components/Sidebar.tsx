@@ -35,6 +35,9 @@ export interface SidebarProps {
   onToggleOpen?: () => void;
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
+  /** 超级管理员才渲染管理后台入口；普通用户可不传。 */
+  isSuperuser?: boolean;
+  onOpenAdmin?: () => void;
 }
 
 /**
@@ -65,6 +68,8 @@ export function Sidebar({
   onToggleOpen,
   userEmail,
   onLogout,
+  isSuperuser = false,
+  onOpenAdmin,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -462,7 +467,12 @@ export function Sidebar({
         )}
       </div>
 
-      <AccountBar email={userEmail} onLogout={onLogout} />
+      <AccountBar
+        email={userEmail}
+        onLogout={onLogout}
+        isSuperuser={isSuperuser}
+        onOpenAdmin={onOpenAdmin}
+      />
 
       {confirmDialog}
     </aside>
