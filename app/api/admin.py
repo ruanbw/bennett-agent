@@ -50,6 +50,7 @@ from app.schemas.admin import (
 from app.services import model_service
 from app.services.auth import apply_role, count_superadmins, current_admin, current_superadmin
 from app.services.model_service import (
+    ApiKeyRequiredError,
     DuplicateModelError,
     InvalidModelStateError,
     ProviderFetchError,
@@ -140,16 +141,14 @@ async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
         if fields.get(key) is None:
             fields.pop(key, None)
 
-    provider = await _require_provider(provider_id)
+    await _require_provider(provider_id)
 
-    # 换地址等于换凭据：新地址的主人能在下次「测试连接」里收到库里那份明文 key，
-    # 所以没重新填 key 就不许改地址。只改名字/启用状态时仍然可以不填（前端每次保存
-    # 都会原样回传 base_url，因此这里比的是**是否变化**，不是「有没有传」）。
-    if "base_url" in fields and fields["base_url"] != provider.base_url and "api_key" not in fields:
-        raise HTTPException(status_code=400, detail="更换 Base URL 时必须重新填写 API Key")
-
+    # 「换地址必须重填 key」这条规则在服务层（`model_service.update_provider`）：它需要
+    # 先读出库里那条提供商才知道有没有 key 可泄露，而路由层这一层只是再查一遍。
     try:
         provider = await model_service.update_provider(provider_id, **fields)
+    except ApiKeyRequiredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except ProviderFetchError as exc:
         # 与 create 一致：地址不合法是输入问题（400），不是上游故障
         raise HTTPException(status_code=400, detail=str(exc)) from None

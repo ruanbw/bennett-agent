@@ -24,11 +24,7 @@ from app.schemas.chat import (
 from app.schemas.events import ChatEvent
 from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
-from app.services.model_service import (
-    fetch_available_models,
-    get_default_model_key,
-    get_known_model_ids,
-)
+from app.services.model_service import ChatModelSnapshot, fetch_available_models, resolve_chat_model
 
 router = APIRouter(prefix="/api")
 
@@ -112,35 +108,31 @@ def to_sse_frame(event: ChatEvent) -> ServerSentEvent:
     return ServerSentEvent(data=event.model_dump_json())
 
 
-async def _ensure_model_is_known(model: str | None) -> None:
-    """模型白名单：显式传入的 model 必须是网关真实暴露的 id。
+async def resolve_request_model(model: str | None) -> ChatModelSnapshot:
+    """解析本轮实际使用的模型：白名单 + 目标 + 窗口上限，一次读库。
 
-    没有这一道，登录用户能拿服务端的 key 去调网关没暴露（或更贵）的模型——`model`
-    只是转发给上游的字符串，此前不校验。`get_known_model_ids()` 返回 None 表示拿不到
-    网关列表（上游故障/兜底），此时**放行**：校验服务不可用不该让对话功能跟着不可用。
-    """
-    if not model:
-        return
-
-    known_ids = await get_known_model_ids()
-    if known_ids is not None and model not in known_ids:
-        raise HTTPException(status_code=400, detail=f"模型 {model} 不在可用模型列表中，请从模型列表中选择。")
-
-
-async def _resolve_request_model(model: str | None) -> str:
-    """确定本轮实际使用的模型路由键。
-
-    客户端不传时取后台默认模型；数据库已配置但没有任何启用模型时返回 503——
+    客户端不传 `model` 时取后台默认模型；数据库已配置但没有任何启用模型时返回 503——
     不能回退到 `MODEL_NAME`，那会让「管理员停用了全部模型」看起来像是没生效。
-    """
-    if model:
-        await _ensure_model_is_known(model)
-        return model
 
-    default_key = await get_default_model_key()
-    if not default_key:
+    白名单（`known_ids`）：显式传入的 model 必须是网关真实暴露的 id。没有这一道，
+    登录用户能拿服务端的 key 去调网关没暴露（或更贵）的模型——`model` 只是转发给上游
+    的字符串。`known_ids is None` 表示拿不到网关列表（旧版路径的上游故障/兜底），
+    此时**放行**：校验服务不可用不该让对话功能跟着不可用。
+
+    数据库路径下「这个 key 不在启用模型里」不会在这里 400：`target=None` 留给对话流
+    以 SSE 的 `model_unavailable` 收尾（流已经开了，客户端拿得到可展示的失败原因）。
+    这里只做「显式传了一个不在白名单里的 key」这一种 400。
+    """
+    snapshot = await resolve_chat_model(model)
+
+    if model:
+        if snapshot.known_ids is not None and model not in snapshot.known_ids:
+            raise HTTPException(status_code=400, detail=f"模型 {model} 不在可用模型列表中，请从模型列表中选择。")
+        return snapshot
+
+    if not snapshot.key:
         raise HTTPException(status_code=503, detail="管理员尚未启用任何模型，请联系管理员。")
-    return default_key
+    return snapshot
 
 
 @router.get(
@@ -162,8 +154,8 @@ async def get_models():
 )
 async def generate_title(request: TitleGenerateRequest):
     """提取首条用户提示词的意向，调用模型生成极简会话标题"""
-    model_to_use = await _resolve_request_model(request.model)
-    title = await generate_title_from_prompt(model_to_use, request.prompt)
+    snapshot = await resolve_request_model(request.model)
+    title = await generate_title_from_prompt(snapshot, request.prompt)
     return TitleGenerateResponse(title=title)
 
 
@@ -178,11 +170,11 @@ async def chat_stream(request: ChatRequest):
     客户端无状态上传完整会话历史；服务端不保存任何会话状态。
     事件以 `done` 或 `error` 收尾。
     """
-    model_to_use = await _resolve_request_model(request.model)
+    snapshot = await resolve_request_model(request.model)
 
     async def event_generator():
         async for event in stream_chat_events(
-            model_to_use,
+            snapshot,
             request.messages,
             reasoning_effort=request.reasoning_effort,
             context_anchor=request.context_anchor,

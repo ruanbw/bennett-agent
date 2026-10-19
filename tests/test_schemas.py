@@ -33,9 +33,18 @@ def reject(factory, **kwargs):
     return exc_info.value.errors()[0]["type"]
 
 
-def fillers(count):
-    """构造 count 条各占满单条上限的消息。"""
-    return [user("x" * MAX_MESSAGE_CHARS)] * count
+def assistant(content="ok", **extra):
+    return {"role": "assistant", "content": content, **extra}
+
+
+def fillers(count, chars=MAX_MESSAGE_CHARS):
+    """构造 count 条各占 `chars` 字符、且严格 user/assistant 交替的消息。
+
+    角色必须交替：严格交替校验会先于总量判定拒绝「连续同角色」的历史，用它来测总量
+    上限就测不到目标分支了。`count` 为奇数时末条是 user（首末都必须是 user 的约束）。
+    """
+    roles = ["user" if index % 2 == 0 else "assistant" for index in range(count)]
+    return [{"role": role, "content": "x" * chars} for role in roles]
 
 
 # ---------------------------------------------------------------------
@@ -82,7 +91,7 @@ def test_empty_assistant_message_is_allowed():
 
 
 # ---------------------------------------------------------------------
-# 历史形状：首条与末条都必须是 user
+# 历史形状：首条与末条都必须是 user，且严格交替
 # ---------------------------------------------------------------------
 def test_history_must_start_with_user():
     """Anthropic 类上游要求首条为 user；`[assistant, user]` 此前会直通上游再 400。"""
@@ -93,16 +102,49 @@ def test_history_must_end_with_user():
     assert reject(ChatRequest, messages=[user("你好"), {"role": "assistant", "content": "你好呀"}]) == "value_error"
 
 
+def test_consecutive_user_messages_are_rejected():
+    """连续同角色会被装配层合并/丢弃，模型看到的上下文与用户以为的不一致。
+
+    这是 F2 的回归锁：此前只查首末条，`[user, user]` 能一路走到服务层。
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        ChatRequest(messages=[user("第一条"), user("第二条")])
+
+    message = exc_info.value.errors()[0]["msg"]
+    assert "交替" in message
+    assert "第 1 条与第 2 条" in message
+
+
+def test_consecutive_assistant_messages_are_rejected():
+    with pytest.raises(ValidationError) as exc_info:
+        ChatRequest(messages=[user("问"), assistant("答一"), assistant("答二"), user("再问")])
+
+    assert "第 2 条与第 3 条" in exc_info.value.errors()[0]["msg"]
+
+
+def test_order_is_checked_before_alternation():
+    """首条不是 user 时先报首条：那是最早出错的位置，改完才轮到交替问题。"""
+    with pytest.raises(ValidationError) as exc_info:
+        ChatRequest(messages=[assistant("答一"), assistant("答二"), user("问")])
+
+    assert exc_info.value.errors()[0]["msg"] == "Value error, 第一条消息必须是 user 消息"
+
+
 # ---------------------------------------------------------------------
 # ChatRequest 列表长度
 # ---------------------------------------------------------------------
 def test_history_at_message_limit_is_accepted():
-    messages = [user("hi")] * MAX_HISTORY_MESSAGES
-    assert len(ChatRequest(messages=messages).messages) == MAX_HISTORY_MESSAGES
+    """条数上限是 100，但「首末都是 user + 严格交替」意味着合法历史只能是奇数条。
+
+    因此能取到的最大值是 99；100 条本身不可达（第 100 条必然是 assistant）。
+    """
+    limit = MAX_HISTORY_MESSAGES - 1
+    messages = fillers(limit, chars=1)
+    assert len(ChatRequest(messages=messages).messages) == limit
 
 
 def test_history_over_message_limit_is_rejected():
-    assert reject(ChatRequest, messages=[user("hi")] * (MAX_HISTORY_MESSAGES + 1)) == "too_long"
+    assert reject(ChatRequest, messages=fillers(MAX_HISTORY_MESSAGES + 1)) == "too_long"
 
 
 def test_empty_history_is_rejected():
@@ -121,8 +163,9 @@ def test_total_history_budget_is_enforced():
     assert reject(ChatRequest, messages=fillers(count)) == "value_error"
 
 
-def test_total_history_budget_just_under_limit_is_accepted():
-    count = MAX_HISTORY_CHARS // MAX_MESSAGE_CHARS
+def test_total_history_budget_under_limit_is_accepted():
+    """小于上限的历史照常通过（条数取奇数以满足「末条是 user」）。"""
+    count = MAX_HISTORY_CHARS // MAX_MESSAGE_CHARS - 1
     request = ChatRequest(messages=fillers(count))
     assert sum(len(m.content) for m in request.messages) <= MAX_HISTORY_CHARS
 
@@ -130,10 +173,17 @@ def test_total_history_budget_just_under_limit_is_accepted():
 def test_total_history_budget_counts_thinking():
     """thinking 不计入总预算的话，可以用它绕过上限。"""
     per_message = MAX_MESSAGE_CHARS + MAX_THINKING_CHARS
-    count = MAX_HISTORY_CHARS // per_message + 1
+    # +2 再对齐到奇数：保证末条是 user，否则会先被交替/末条校验拦住，测不到总量分支
+    count = MAX_HISTORY_CHARS // per_message + 2
+    count += 1 if count % 2 == 0 else 0
     assert count <= MAX_HISTORY_MESSAGES, "前提：该用例不应先被条数上限拦住"
 
-    messages = [user("x" * MAX_MESSAGE_CHARS, thinking="t" * MAX_THINKING_CHARS)] * count
+    messages = [
+        user("x" * MAX_MESSAGE_CHARS, thinking="t" * MAX_THINKING_CHARS)
+        if index % 2 == 0
+        else assistant("x" * MAX_MESSAGE_CHARS, thinking="t" * MAX_THINKING_CHARS)
+        for index in range(count)
+    ]
     assert reject(ChatRequest, messages=messages) == "value_error"
 
 

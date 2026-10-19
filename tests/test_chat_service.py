@@ -84,6 +84,19 @@ def test_history_must_start_with_user_even_when_shorter():
         convert_chat_history([msg("assistant", "只有一条")])
 
 
+def test_history_must_alternate_roles():
+    """连续同角色会被 pydantic-ai 装配成非法序列，模型看到的上下文与用户以为的不同。
+
+    schema 层同样拦（`ChatRequest._check_message_order`），这里锁的是服务层自己的
+    兜底：`convert_chat_history` 是公开函数，别的调用方不经过 schema。
+    """
+    with pytest.raises(InvalidChatHistory, match="交替"):
+        convert_chat_history([msg("user", "问一"), msg("user", "问二")])
+
+    with pytest.raises(InvalidChatHistory, match="第 2 条与第 3 条"):
+        convert_chat_history([msg("user", "问"), msg("assistant", "答一"), msg("assistant", "答二")])
+
+
 def test_invalid_chat_history_is_a_value_error():
     """保持 ValueError 兼容：调用方历史上按 ValueError 捕获。"""
     assert issubclass(InvalidChatHistory, ValueError)
@@ -100,10 +113,13 @@ def test_single_user_message_has_empty_history():
 
 
 def test_last_message_becomes_prompt_not_history():
-    prompt, history = convert_chat_history([msg("user", "第一句"), msg("user", "第二句")])
+    prompt, history = convert_chat_history([msg("user", "第一句"), msg("assistant", "答"), msg("user", "第二句")])
 
     assert prompt == "第二句"
-    assert describe(history) == [("request", (("UserPromptPart", "第一句"),))]
+    assert describe(history) == [
+        ("request", (("UserPromptPart", "第一句"),)),
+        ("response", (("TextPart", "答"),)),
+    ]
 
 
 def test_prompt_keeps_surrounding_whitespace():
@@ -150,12 +166,14 @@ def test_assistant_without_thinking_has_only_text():
 
 
 def test_empty_assistant_message_is_skipped():
-    """空助手消息是流式占位符，不能进上下文污染模型输入。"""
-    _, history = convert_chat_history(
-        [msg("user", "问"), msg("assistant", ""), msg("assistant", ""), msg("user", "再问")]
-    )
+    """空助手消息是流式占位符，不能进上下文污染模型输入。
 
-    # 用户消息保留，两个空的 assistant 占位都被丢掉
+    连续多个空占位现在会被交替校验拒绝（见 `test_history_must_alternate_roles`）：
+    客户端本来也只会为本轮生成一条占位消息。
+    """
+    _, history = convert_chat_history([msg("user", "问"), msg("assistant", ""), msg("user", "再问")])
+
+    # 用户消息保留，空的 assistant 占位被丢掉
     assert describe(history) == [("request", (("UserPromptPart", "问"),))]
 
 

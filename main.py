@@ -26,9 +26,9 @@ from app.db import create_db_and_tables, engine
 from app.services.agent_factory import build_agent, render_system_prompt
 from app.services.http_client import close_http_client
 from app.services.model_service import (
+    ChatModelSnapshot,
     get_default_model_key,
-    get_model_limits,
-    resolve_model_target,
+    resolve_chat_model,
     seed_default_provider,
 )
 from app.services.token_budget import (
@@ -62,8 +62,16 @@ def _budget_for_cli(model_key: str, history: list[ModelMessage], context_window:
     )
 
 
-async def run_interactive_loop(agent: Agent, model_key: str = "") -> None:  # noqa: ANN401
-    """运行终端交互式 Agent Loop，并以流式输出展示。"""
+async def run_interactive_loop(
+    agent: Agent,  # noqa: ANN401
+    model_key: str = "",
+    limits: tuple[int | None, int | None] = (None, None),
+) -> None:
+    """运行终端交互式 Agent Loop，并以流式输出展示。
+
+    `limits` 是 `(context_window, max_output_tokens)`，由 `build_cli_agent` 在一次解析
+    里顺带取到；以前这里在入口处单独 `get_model_limits(model_key)` 再全量扫一遍启用模型。
+    """
     print("=" * 60)
     print(" Bennett Agent 启动成功 (流式响应模式)")
     print(f" [环境] APP_ENV:          {settings.app_env}")
@@ -73,7 +81,7 @@ async def run_interactive_loop(agent: Agent, model_key: str = "") -> None:  # no
     print("提示: 输入你的问题（输入 'exit' 或 'quit' 退出，输入 'clear' 重置上下文）\n")
 
     message_history: list[ModelMessage] = []
-    context_window, max_output = await get_model_limits(model_key) if model_key else (None, None)
+    context_window, max_output = limits
 
     while True:
         try:
@@ -97,7 +105,11 @@ async def run_interactive_loop(agent: Agent, model_key: str = "") -> None:  # no
 
         # 预算预检：Web 在每轮开头做同样的事。不做的话长会话必然撞上游 400，
         # 而用户看到的只有一句“模型不可用”。
-        budget = _budget_for_cli(model_key, message_history, context_window, max_output)
+        #
+        # 估算放进线程：真分词器不存在，估算是一段纯 Python 循环，长中文历史要几百
+        # 毫秒（见 `token_budget.estimate_tokens` 的性能说明），这期间事件循环里别的
+        # 任务（HTTP、定时器）都会被挡住。
+        budget = await asyncio.to_thread(_budget_for_cli, model_key, message_history, context_window, max_output)
         if budget is not None and budget.over_limit:
             print(
                 f"\n[上下文已满] 本会话约 {budget.used_tokens:,} tokens，"
@@ -142,28 +154,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def build_cli_agent() -> tuple[Agent, str]:  # noqa: ANN401
+async def build_cli_agent() -> tuple[Agent, ChatModelSnapshot]:  # noqa: ANN401
     """CLI 的装配入口：与 Web 共用管理后台里的提供商配置。
 
     CLI 不走 FastAPI lifespan，所以自己建表 + 引导一次默认提供商。解析顺序：
     环境变量里的 `MODEL_NAME` 若是后台的合法路由键就直用它，否则取后台默认模型；
     数据库还没有任何配置时退回旧版环境变量路径（`target=None`）。
 
-    返回 `(agent, model_key)`：调用方需要 `model_key` 去查上下文窗口，把它在
-    装配内部丢掉就会让 CLI 无法做预算预检。
+    两个候选键合并成**一次**解析：`resolve_chat_model` 同时给出 target 与窗口上限，
+    调用方不必再为预算预检单独查一遍库（以前 `resolve_model_target` 被调了两次）。
+    返回整个快照而不是 `(agent, key)`：快照里的窗口上限就是 CLI 预算预检要的数字。
     """
     await create_db_and_tables()
     await seed_default_provider()
 
-    target = await resolve_model_target(settings.model_name)
-    model_key = settings.model_name
-    if target is None:
+    snapshot = await resolve_chat_model(settings.model_name)
+    if snapshot.target is None:
         default_key = await get_default_model_key()
-        if default_key:
-            model_key = default_key
-            target = await resolve_model_target(default_key)
+        if default_key and default_key != snapshot.key:
+            snapshot = await resolve_chat_model(default_key)
 
-    return build_agent(model_key, target=target), model_key
+    return build_agent(snapshot.key, target=snapshot.target), snapshot
 
 
 async def _run_cli() -> None:
@@ -180,8 +191,8 @@ async def _run_cli() -> None:
     finally 做，CLI 不走 lifespan，不补就会留下未折叠的 SQLite WAL。
     """
     try:
-        agent, model_key = await build_cli_agent()
-        await run_interactive_loop(agent, model_key)
+        agent, snapshot = await build_cli_agent()
+        await run_interactive_loop(agent, snapshot.key, (snapshot.context_window, snapshot.max_output_tokens))
     finally:
         try:
             await close_http_client()
