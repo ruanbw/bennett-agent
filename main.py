@@ -15,7 +15,9 @@ from pydantic_ai.messages import ModelMessage
 
 from app.config import settings
 from app.config.proxy_env import sanitize_no_proxy_env
+from app.db import create_db_and_tables
 from app.services.agent_factory import build_agent
+from app.services.model_service import get_default_model_key, resolve_model_target, seed_default_provider
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def build_cli_agent() -> Agent:  # noqa: ANN401
+    """CLI 的装配入口：与 Web 共用管理后台里的提供商配置。
+
+    CLI 不走 FastAPI lifespan，所以自己建表 + 引导一次默认提供商。解析顺序：
+    环境变量里的 `MODEL_NAME` 若是后台的合法路由键就直用它，否则取后台默认模型；
+    数据库还没有任何配置时退回旧版环境变量路径（`target=None`）。
+    """
+    await create_db_and_tables()
+    await seed_default_provider()
+
+    target = await resolve_model_target(settings.model_name)
+    model_key = settings.model_name
+    if target is None:
+        default_key = await get_default_model_key()
+        if default_key:
+            model_key = default_key
+            target = await resolve_model_target(default_key)
+
+    return build_agent(model_key, target=target)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -119,7 +142,8 @@ def main() -> None:
             proxy_headers=False,
         )
     else:
-        asyncio.run(run_interactive_loop(build_agent(settings.model_name)))
+        cli_agent = asyncio.run(build_cli_agent())
+        asyncio.run(run_interactive_loop(cli_agent))
 
 
 if __name__ == "__main__":

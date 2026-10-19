@@ -24,7 +24,11 @@ from app.schemas.chat import (
 from app.schemas.events import ChatEvent
 from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
-from app.services.model_service import fetch_available_models, get_known_model_ids
+from app.services.model_service import (
+    fetch_available_models,
+    get_default_model_key,
+    get_known_model_ids,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -123,6 +127,22 @@ async def _ensure_model_is_known(model: str | None) -> None:
         raise HTTPException(status_code=400, detail=f"模型 {model} 不在可用模型列表中，请从模型列表中选择。")
 
 
+async def _resolve_request_model(model: str | None) -> str:
+    """确定本轮实际使用的模型路由键。
+
+    客户端不传时取后台默认模型；数据库已配置但没有任何启用模型时返回 503——
+    不能回退到 `MODEL_NAME`，那会让「管理员停用了全部模型」看起来像是没生效。
+    """
+    if model:
+        await _ensure_model_is_known(model)
+        return model
+
+    default_key = await get_default_model_key()
+    if not default_key:
+        raise HTTPException(status_code=503, detail="管理员尚未启用任何模型，请联系管理员。")
+    return default_key
+
+
 @router.get(
     "/models",
     response_model=ModelListResponse,
@@ -142,8 +162,7 @@ async def get_models():
 )
 async def generate_title(request: TitleGenerateRequest):
     """提取首条用户提示词的意向，调用模型生成极简会话标题"""
-    await _ensure_model_is_known(request.model)
-    model_to_use = (request.model.strip() if request.model else "") or settings.model_name
+    model_to_use = await _resolve_request_model(request.model)
     title = await generate_title_from_prompt(model_to_use, request.prompt)
     return TitleGenerateResponse(title=title)
 
@@ -159,8 +178,7 @@ async def chat_stream(request: ChatRequest):
     客户端无状态上传完整会话历史；服务端不保存任何会话状态。
     事件以 `done` 或 `error` 收尾。
     """
-    await _ensure_model_is_known(request.model)
-    model_to_use = (request.model.strip() if request.model else "") or settings.model_name
+    model_to_use = await _resolve_request_model(request.model)
 
     async def event_generator():
         async for event in stream_chat_events(

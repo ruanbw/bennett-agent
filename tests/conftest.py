@@ -22,6 +22,14 @@ import pytest
 _TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="bennett-test-db-"))
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_DIR}/test.db"
 
+# 关闭「启动时用环境变量引导默认提供商」。
+#
+# 测试里大多数模型用例针对的是**旧版网关路径**（mock `/v1/models` 后断言解析/兜底/
+# 缓存），而 TestClient 启动应用会执行引导，库里一旦有提供商，`model_service` 就切到
+# 数据库权威分支，那些用例会莫名其妙地只看得到 .env 里的默认模型。
+# 需要引导行为的用例（管理后台）显式往库里写提供商；引导本身另有单元测试。
+os.environ["BOOTSTRAP_PROVIDER_FROM_ENV"] = "false"
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_test_db_dir():
@@ -32,6 +40,54 @@ def _cleanup_test_db_dir():
     """
     yield
     shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _create_test_schema():
+    """整个会话开始前建表。
+
+    模型配置服务现在每个请求都会查 `model_provider` 表（有配置时数据库就是权威）。
+    不做这一步，直接调用 `fetch_available_models()` 的用例会拿到
+    `no such table: model_provider`，而不再是旧版的网关兜底。
+    """
+    import asyncio
+
+    from app.db import create_db_and_tables
+
+    asyncio.run(create_db_and_tables())
+    yield
+
+
+async def _clear_model_registry() -> None:
+    """清空提供商/模型表并重置装配缓存。
+
+    这些是**跨用例共享的数据库状态**：任何用 TestClient 启动应用的用例都会触发
+    「首次启动引导默认提供商」，于是后续依赖旧版网关路径的用例会突然看到数据库
+    权威分支。按用例清空比给每个用例写清理代码可靠。
+    """
+    from sqlalchemy import delete
+
+    from app.db import AppSetting, ModelProvider, ProviderModel, async_session_maker
+    from app.services.agent_factory import reset_agent_cache
+    from app.services.model_service import reset_models_cache
+
+    async with async_session_maker() as session:
+        await session.execute(delete(ProviderModel))
+        await session.execute(delete(ModelProvider))
+        # 初始化标记也要清：否则「引导过一次」之后的用例会永久走数据库权威分支
+        await session.execute(delete(AppSetting))
+        await session.commit()
+
+    reset_models_cache()
+    reset_agent_cache()
+
+
+@pytest.fixture(autouse=True)
+async def _reset_model_registry():
+    """每个用例前后都从空注册表开始（见 `_clear_model_registry`）。"""
+    await _clear_model_registry()
+    yield
+    await _clear_model_registry()
 
 
 def _reset_limiter(module: object, attr: str) -> None:

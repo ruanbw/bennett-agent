@@ -225,6 +225,22 @@ class Settings(BaseSettings):
             "（服务端永不过期），而 cookie Max-Age=0 又会立即删除 cookie，语义互相矛盾。"
         ),
     )
+    superuser_emails: str = Field(
+        default="",
+        description=(
+            "逗号分隔的超级管理员邮箱。启动时与注册时自动把匹配账号提升为 superuser，"
+            "这是管理后台的唯一引导方式（没有可自助点击的「成为管理员」）。"
+            "匹配大小写不敏感；生产环境应只包含受信邮箱。"
+        ),
+    )
+    bootstrap_provider_from_env: bool = Field(
+        default=True,
+        description=(
+            "首次启动（model_provider 表为空）时是否用 LITELLM_API_BASE / MODEL_NAME "
+            "创建一条「默认网关」提供商。关闭后管理后台从空白开始配置；"
+            "注意删光提供商后重启会再次引导，要临时停用请把提供商设为禁用而不是删除。"
+        ),
+    )
 
     @field_validator("app_env", mode="before")
     @classmethod
@@ -272,6 +288,10 @@ class Settings(BaseSettings):
             return default_origins
         origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
         return origins or default_origins
+
+    def get_superuser_emails(self) -> set[str]:
+        """解析管理员邮箱白名单；比较时统一小写（邮箱本地部分在实际投递中不区分大小写）。"""
+        return {item.strip().lower() for item in self.superuser_emails.split(",") if item.strip()}
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),

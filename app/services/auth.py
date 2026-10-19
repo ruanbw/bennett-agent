@@ -37,11 +37,13 @@ from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.exceptions import InvalidPasswordException
+from sqlalchemy import func, update
 
 from app.config import settings
 from app.db import (
     AccessToken,
     User,
+    async_session_maker,
     cleanup_expired_access_tokens,
     delete_user_access_tokens,
     get_access_token_db,
@@ -57,6 +59,38 @@ logger = logging.getLogger(__name__)
 #: （已实测 201）。本项目没有邮箱验证、忘记密码也走不了自助流程，密码是唯一凭据，
 #: 因此设下限是有意义的，不是形式主义。
 MIN_PASSWORD_LENGTH = 8
+
+
+def is_configured_superuser(email: str | None) -> bool:
+    """邮箱是否在 `SUPERUSER_EMAILS` 白名单里（大小写不敏感）。"""
+    if not email:
+        return False
+    return email.strip().lower() in settings.get_superuser_emails()
+
+
+async def promote_configured_superusers() -> int:
+    """启动时把白名单邮箱对应的账号提升为超级管理员，返回变更行数。
+
+    管理后台没有「把自己设为管理员」的接口——那等于把提权入口暴露给任何登录用户。
+    引导只能来自部署者掌握的环境变量。每次启动重跑一遍：运维新增邮箱后重启即生效，
+    也不需要手工改库。幂等（已标记的不会计入行数）。
+    """
+    emails = settings.get_superuser_emails()
+    if not emails:
+        return 0
+
+    async with async_session_maker() as session:
+        result = await session.execute(
+            update(User)
+            .where(func.lower(User.email).in_(emails), User.is_superuser.is_(False))
+            .values(is_superuser=True, is_verified=True)
+        )
+        await session.commit()
+        changed = result.rowcount or 0
+
+    if changed:
+        logger.info("已提升 %d 个账号为超级管理员", changed)
+    return changed
 
 
 cookie_transport = CookieTransport(
@@ -118,7 +152,16 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             raise InvalidPasswordException(reason=f"密码至少需要 {MIN_PASSWORD_LENGTH} 个字符")
 
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
+        """新用户注册后：白名单邮箱立即提升为管理员。
+
+        只靠启动提升不够：管理员账号往往是在服务启动之后才注册的。`security` 保证
+        注册接口不能自封管理员（`safe=True` 排除了该字段），这里的提升只认部署者
+        写在环境变量里的邮箱，不认请求体。
+        """
         logger.info("新用户注册: id=%s", user.id)
+        if is_configured_superuser(user.email):
+            await self.user_db.update(user, {"is_superuser": True, "is_verified": True})
+            logger.info("白名单账号注册，已提升为超级管理员: id=%s", user.id)
 
     async def on_after_login(
         self, user: User, request: Request | None = None, response: Response | None = None
@@ -156,3 +199,7 @@ fastapi_users = FastAPIUsers[User, uuid.UUID](get_user_manager, [auth_backend])
 
 #: 端点网关依赖：未登录或账号已停用 → 401。
 current_active_user = fastapi_users.current_user(active=True)
+
+#: 管理后台依赖：未登录/停用 → 401，登录但不是超级管理员 → 403。
+#: `active=True` 同时覆盖了「封禁后即使 token 没被删也进不来」这一层。
+current_superuser = fastapi_users.current_user(active=True, superuser=True)

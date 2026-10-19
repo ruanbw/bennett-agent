@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useState } from 'react';
-import { Check, Laptop, Loader2, LogOut, Moon, MoreHorizontal, Settings, Sun } from 'lucide-react';
+import { Check, Laptop, Loader2, LogOut, Moon, MoreHorizontal, Settings, ShieldCheck, Sun } from 'lucide-react';
 
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { ConfirmDialog } from './ui/confirm-dialog';
@@ -27,9 +27,18 @@ export interface AccountBarProps {
   email: string | null;
   onLogout: () => void | Promise<unknown>;
   collapsed?: boolean;
+  /** 是否渲染管理后台入口：只有超级管理员能拿到。 */
+  isSuperuser?: boolean;
+  onOpenAdmin?: () => void;
 }
 
-export function AccountBar({ email, onLogout, collapsed = false }: AccountBarProps) {
+export function AccountBar({
+  email,
+  onLogout,
+  collapsed = false,
+  isSuperuser = false,
+  onOpenAdmin,
+}: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -100,6 +109,14 @@ export function AccountBar({ email, onLogout, collapsed = false }: AccountBarPro
             <Settings className="size-4 text-muted-foreground" />
             <span>设置</span>
           </DropdownMenuItem>
+
+          {/* 入口只对超级管理员可见；直接访问接口的权限仍由后端裁决 */}
+          {isSuperuser && onOpenAdmin && (
+            <DropdownMenuItem onClick={() => onOpenAdmin()}>
+              <ShieldCheck className="size-4 text-muted-foreground" />
+              <span>管理后台</span>
+            </DropdownMenuItem>
+          )}
 
           <DropdownMenuSeparator />
 

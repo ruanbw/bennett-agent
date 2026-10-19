@@ -21,17 +21,17 @@
 ```text
 .
 ├── app/
-│   ├── api/                # FastAPI 路由与 SSE 端点（auth.py = 认证接口）
+│   ├── api/                # FastAPI 路由与 SSE 端点（auth.py = 认证，admin.py = 管理后台）
 │   ├── config/             # 配置管理 (多环境)
 │   ├── prompts/            # 提示词渲染器 (PromptManager)
 │   ├── schemas/            # Pydantic 请求/响应数据模型
-│   ├── services/           # 核心业务服务 (对话流、模型管理、认证装配)
+│   ├── services/           # 核心业务服务 (对话流、模型注册表、认证装配)
 │   ├── tools/              # 工具函数与统一注册中心
-│   ├── db.py               # SQLAlchemy 异步引擎 + user / access_token 两张表
+│   ├── db.py               # SQLAlchemy 异步引擎 + 用户 / 会话 / 提供商 / 模型四组表
 │   └── server.py           # FastAPI 服务装配（纯 API，不托管前端产物）
 ├── frontend/               # React 19 + assistant-ui 前端项目（Vite 独立运行）
 │   ├── .env                # 后端接口地址（留空 = 走 Vite 代理，同源）
-│   └── src/                # 页面、组件、运行时与 Dexie 本地存储
+│   └── src/                # 页面、组件、运行时与 Dexie 本地存储（components/admin = 管理后台）
 ├── prompts/                # 提示词模板 (Jinja2)
 ├── .env.example            # 环境变量模板
 ├── main.py                 # 入口 (支持 CLI 流式与 --web FastAPI 服务)
@@ -111,7 +111,53 @@ production 下需要时用 `ENABLE_API_DOCS=true` 显式打开。
 
 未接入邮件，因此**没有忘记密码与邮箱验证**流程（需要 SMTP）。
 
-### 5. 为什么走 Vite 代理而不是直连后端
+### 5. 管理后台（模型提供商 / 模型开关 / 用户封禁）
+
+模型提供商不再只能通过环境变量配置：管理后台可以接入多个 OpenAI 兼容端点（本机
+LiteLLM 网关、官方 API、自建 vLLM……），每个端点有自己的 Base URL / API Key，并可
+逐个启用或停用模型。
+
+**进入方式**：部署者在环境变量里写 `SUPERUSER_EMAILS`（逗号分隔），重启服务（或让
+该邮箱新注册）后，该账号的侧边栏头像菜单里会出现「管理后台」。没有任何接口能把
+自己或别人提升为管理员。
+
+```bash
+SUPERUSER_EMAILS=ops@example.com uv run python main.py --web
+```
+
+管理后台包含两块：
+
+- **模型提供商**：新增 / 编辑 / 删除提供商；「测试连接」检查 Base URL 与 Key；
+  「同步模型」从提供商的 `/v1/models` upsert 模型清单（不会覆盖已调过的启用状态与
+  默认模型）；对每个模型单独启停、设为默认、手动补充。
+- **用户管理**：按邮箱搜索、分页浏览；封禁会同时删除该用户的全部服务端会话，
+  已打开的页面下一个请求就变 401（不是等 cookie 过期）；解封后可以重新登录。
+  不能封禁自己或其他超级管理员。
+
+几条与旧行为有关的约定：
+
+- 对外模型 id 是 `{provider.slug}/{model_id}`（例如 `default/openai/gpt-4o`）。
+  不同提供商可以各自提供同名模型，所以不能只用上游模型名做键。
+- 数据库里一旦有提供商（或初始化标记），它就是**唯一权威**：环境变量里的
+  `LITELLM_*` / `MODEL_NAME` 只是首次启动的引导值。在后台删光提供商会得到
+  「没有任何可用模型」，不会偷偷回退到环境变量。
+- 初始引导可用 `BOOTSTRAP_PROVIDER_FROM_ENV=false` 关闭，从空白开始配置。
+- API Key 在响应里只返回掩码（`api_key_hint`），更新时留空表示不修改。
+
+| 管理端点 | 说明 |
+|---|---|
+| `GET/POST /api/admin/providers` | 列出 / 新增提供商 |
+| `PATCH/DELETE /api/admin/providers/{id}` | 更新 / 删除提供商（删模型级联） |
+| `POST /api/admin/providers/{id}/test` | 测试连通性（失败也是 200 + `ok=false`） |
+| `POST /api/admin/providers/{id}/sync` | 同步上游模型清单 |
+| `GET/POST /api/admin/providers/{id}/models` | 列出 / 手动添加模型 |
+| `PATCH/DELETE /api/admin/models/{id}` | 启停、设为默认、改名、删除 |
+| `GET /api/admin/users` | 搜索 / 分页列出用户 |
+| `POST /api/admin/users/{id}/ban` \| `/unban` | 封禁（踢下线）/ 解封 |
+
+所有 `/api/admin/*` 都要求超级管理员：未登录/已封禁 → 401，登录但无权限 → 403。
+
+### 6. 为什么走 Vite 代理而不是直连后端
 
 `frontend/.env` 的 `VITE_API_BASE_URL` 默认**留空**，请求走相对路径 `/api`，由
 `vite.config.js` 的 `server.proxy` 转发到后端。这样开发期前后端**同源**，cookie 天然
