@@ -2,8 +2,10 @@
 
 装配层（`agent_factory`）负责把主/备模型包成 `FallbackModel`，切换判定来自
 `_build_fallback_handler`——这里验证它接上之后真的「瞬时失败切、客户端错误不切」，
-包括流式路径。
+包括流式路径，以及切换事实如何变成对用户可见的 `fallback` 事件。
 """
+
+import asyncio
 
 import pytest
 from pydantic_ai import Agent
@@ -12,6 +14,8 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
+from app.schemas.chat import ChatMessage
+from app.services import chat_service
 from app.services.agent_factory import _build_fallback_handler
 
 
@@ -57,3 +61,33 @@ async def test_streaming_failure_before_the_first_event_switches():
 
     async with agent.run_stream("你好") as result:
         assert await result.get_output() == "from-fallback"
+
+
+def test_real_fallback_model_is_surfaced_as_a_chat_event(monkeypatch):
+    """端到端锁住 ContextVar 接缝：FallbackModel 内部切换 → `fallback` 事件。
+
+    上面的用例只验证模型层行为；这里把真正的 Agent 交给 `stream_chat_events`，
+    确认切换记录跨过 pydantic-ai 的内部调用仍能被收集到，并排在正文之前。
+    """
+
+    def fail(messages, info):
+        raise ModelHTTPError(status_code=503, model_name="openai/gpt-4o")
+
+    model = FallbackModel(
+        FunctionModel(fail, stream_function=fail, model_name="openai/gpt-4o"),
+        TestModel(custom_output_text="备用模型的回答", model_name="openai/gpt-4o-mini"),
+        fallback_on=_build_fallback_handler("openai/gpt-4o", "openai/gpt-4o-mini"),
+    )
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: Agent(model))
+
+    async def collect():
+        messages = [ChatMessage(role="user", content="你好")]
+        return [event async for event in chat_service.stream_chat_events("openai/gpt-4o", messages)]
+
+    events = asyncio.run(collect())
+
+    assert events[0].type == "fallback"
+    assert events[0].from_model == "openai/gpt-4o"
+    assert events[0].to_model == "openai/gpt-4o-mini"
+    assert events[-1].type == "done"
+    assert "".join(event.delta for event in events if event.type == "content") == "备用模型的回答"

@@ -92,6 +92,14 @@ export interface ClarificationEvent {
   allow_custom_input: boolean;
 }
 
+export interface FallbackEvent {
+  type: 'fallback';
+  /** 失败的主模型 id（网关路由格式）。 */
+  from_model: string;
+  /** 实际完成本轮回答的备用模型 id。 */
+  to_model: string;
+}
+
 export interface DoneEvent {
   type: 'done';
 }
@@ -100,6 +108,13 @@ export interface StreamErrorEvent {
   type: 'error';
   /** 只含可以外泄的文案（校验原文或错误编号），见 CODE_REVIEW.md C-4。 */
   message: string;
+  /**
+   * 是否值得让用户手动重试（决定是否显示「重试」按钮）。
+   *
+   * 可选：旧服务端不返回该字段，视为 `false`——宁可不给按钮，也不要给一个必然失败的
+   * 按钮。服务端自动重试是另一套判定，与此无关。
+   */
+  retryable?: boolean;
 }
 
 export type ChatEvent =
@@ -108,6 +123,7 @@ export type ChatEvent =
   | ToolCallEvent
   | ToolResultEvent
   | ClarificationEvent
+  | FallbackEvent
   | DoneEvent
   | StreamErrorEvent
   | TransportIncompleteEvent;
@@ -148,6 +164,23 @@ export interface ClarificationState {
   allowCustomInput: boolean;
 }
 
+/**
+ * 本轮回答实际由备用模型完成时记录的事实。
+ *
+ * 独立字段而不是拼进 `content`：notice 一旦写进正文，会被当作助手历史再次发给模型，
+ * 也会被复制/导出当成回答的一部分。
+ */
+export interface FallbackState {
+  fromModel: string;
+  toModel: string;
+}
+
+/** 本轮失败的结构化记录；`retryable` 决定消息下方是否显示「重试」按钮。 */
+export interface RunError {
+  message: string;
+  retryable: boolean;
+}
+
 export interface MessageRecord {
   id: string;
   sessionId: string;
@@ -159,6 +192,8 @@ export interface MessageRecord {
   stopped?: boolean;
   incomplete?: boolean;
   clarification?: ClarificationState | null;
+  fallback?: FallbackState | null;
+  error?: RunError | null;
   /**
    * 内容块到达顺序。老记录没有这个字段，`buildParts` 会退回默认顺序，
    * 所以它必须是可选的（IndexedDB 里已存在的记录不会因加字段而失效）。
@@ -199,6 +234,8 @@ export interface Run {
    */
   partOrder?: PartKind[];
   clarification: ClarificationState | null;
+  fallback: FallbackState | null;
+  error: RunError | null;
   sawDone: boolean;
   stopped: boolean;
   incomplete: boolean;
@@ -218,6 +255,10 @@ export interface MessageCustomMetadata {
   stopped: boolean;
   thinkingMs: number;
   clarification: ClarificationState | null;
+  /** 本轮回答是否由备用模型完成；`thread.aui.tsx` 据此渲染一行提示。 */
+  fallback?: FallbackState | null;
+  /** 本轮失败的结构化记录；可重试时消息下方渲染「重试」按钮。 */
+  error?: RunError | null;
   /**
    * 本轮渲染不完整（丢过帧、或流没有干净收尾）。落库形状 `MessageRecord.incomplete`
    * 的运行时镜像：写入由 chat-message.ts 负责，展示由 thread.aui.tsx 负责。

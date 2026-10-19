@@ -164,6 +164,10 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         stopped: Boolean(record.stopped),
         thinkingMs: record.thinkingMs ?? 0,
         clarification: record.clarification ?? null,
+        // 备用模型信息：老记录没有该字段 → null，呈现与修复前一致
+        fallback: record.fallback ?? null,
+        // 失败信息：刷新后「重试」按钮仍按服务端当初的判定显示
+        error: record.error ?? null,
         // F6 结算出的「半截回复」语义：thread 据此渲染「不完整」标记。
         // 老记录没有这个字段 → false，与修复前的呈现一致。
         incomplete: Boolean(record.incomplete),
@@ -199,6 +203,10 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
         // 与 toRuntimeMessage 同一条契约：同一轮的覆盖层与落库记录必须给出一致的
         // 「不完整」标记，否则页面刷新前后表现会不一样。
         incomplete: Boolean(run.incomplete),
+        // 与落库记录保持一致：切换提示在生成中就显示，不必等本轮结束
+        fallback: run.fallback ?? null,
+        // 失败信息：错误到达后立即映射，生成结束时按钮已可点
+        error: run.error ?? null,
         // 生成中不呈现提问：等本轮完全结束再拉起浮层，
         // 否则用户还没看清选项就可能被下一段增量挤走
         clarification: run.finished ? (run.clarification ?? null) : null,

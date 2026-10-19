@@ -28,6 +28,7 @@ from pydantic_ai.providers.litellm import LiteLLMProvider
 
 from app.config import settings
 from app.prompts import prompt_manager
+from app.services.fallback_tracker import record_fallback
 from app.services.upstream_errors import is_fallback_eligible
 from app.tools import build_tools
 from app.tools.guard import ToolErrorIsolation
@@ -167,6 +168,8 @@ def _build_fallback_handler(primary_name: str, fallback_name: str) -> Callable[[
             fallback_name,
             exc_info=True,
         )
+        # 只有真的切换才记录：对话流会把它翻译成 `fallback` 事件告诉用户本轮是谁答的。
+        record_fallback(primary_name, fallback_name)
         return True
 
     return should_fallback

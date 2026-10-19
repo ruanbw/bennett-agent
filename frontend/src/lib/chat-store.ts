@@ -206,6 +206,8 @@ export function createRun({
     toolCalls: [],
     partOrder: [],
     clarification: null,
+    fallback: null,
+    error: null,
     sawDone: false,
     sawError: false,
     damaged: false,
@@ -394,8 +396,15 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       };
       break;
 
+    case 'fallback':
+      // 独立字段而不是拼进正文：正文会作为助手历史再次发给模型，也会被复制/导出
+      run.fallback = { fromModel: event.from_model, toModel: event.to_model };
+      break;
+
     case 'error':
       run.sawError = true;
+      // 结构化记录供「重试」按钮使用；正文里的提示保留，历史/复制时仍能看出这轮失败
+      run.error = { message: event.message, retryable: event.retryable === true };
       run.content += `\n\n> ⚠️ **错误**: ${event.message}`;
       break;
 

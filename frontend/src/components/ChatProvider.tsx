@@ -357,6 +357,9 @@ export function ChatProvider({
           toolCalls: [],
           stopped: false,
           clarification: null,
+          // 重新生成是全新一轮：旧的失败/备用模型事实不能带进来
+          fallback: null,
+          error: null,
         });
       } catch (err) {
         // 清不掉旧内容不影响本轮生成：内存覆盖层与终态落库都会盖过去
@@ -370,7 +373,9 @@ export function ChatProvider({
             ? {
                 ...m,
                 content: [],
-                metadata: { custom: { stopped: false, thinkingMs: 0, clarification: null } },
+                metadata: {
+                  custom: { stopped: false, thinkingMs: 0, clarification: null, fallback: null, error: null },
+                },
               }
             : m
         )

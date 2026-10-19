@@ -32,6 +32,7 @@ from pydantic_ai.messages import (
 from app.schemas.chat import ChatMessage
 from app.services import chat_service
 from app.services.chat_service import CLARIFICATION_TOOL_NAME, InvalidChatHistory, convert_chat_history
+from app.services.fallback_tracker import record_fallback
 
 
 @pytest.fixture(autouse=True)
@@ -453,6 +454,51 @@ def test_classified_error_is_logged_with_its_correlation_id(monkeypatch, caplog)
 
 
 # ---------------------------------------------------------------------
+# 错误是否可重试（P2：前端据此显示「重试」按钮）
+#
+# 只影响 UI：401/403/400/404 再发一次请求结果不会变，不给按钮；5xx/429/超时/
+# 未分类异常交给用户决定。服务端自动重试的判定与这个是两套（见 upstream_errors）。
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "status,expected",
+    [(401, False), (403, False), (400, False), (404, False), (429, True), (500, True)],
+)
+def test_upstream_error_carries_a_user_retry_flag(monkeypatch, status, expected):
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(error=http_error(status)))
+
+    events = collect_events([msg("user", "你好")])
+
+    assert events[-1].type == "error"
+    assert events[-1].retryable is expected
+
+
+def test_invalid_history_is_not_retryable():
+    """请求本身不合法：同样的请求再发一次，校验还会失败。"""
+    events = collect_events([blank_user_message()])
+
+    assert events[-1].retryable is False
+
+
+def test_budget_timeout_is_retryable(monkeypatch):
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(hang=True))
+    monkeypatch.setattr(chat_service, "TOTAL_STREAM_BUDGET_SECONDS", 0.05)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert events[0].type == "error"
+    assert events[0].retryable is True
+
+
+def test_internal_error_is_retryable(monkeypatch):
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent(error=RuntimeError("boom")))
+
+    events = collect_events([msg("user", "你好")])
+
+    assert events[-1].retryable is True
+
+
+# ---------------------------------------------------------------------
 # 总时长预算（P1）
 #
 # 上游超时是「空闲」语义，SDK 又在下面叠了重试，单轮对话此前可以无限拖长。
@@ -583,6 +629,52 @@ def test_error_after_streaming_is_not_retried(monkeypatch):
     assert agent.calls == 1
     assert [event.type for event in events] == ["content", "error"]
     assert events[0].delta == "开头"
+
+
+# ---------------------------------------------------------------------
+# 备用模型切换的可见性（P1）
+#
+# 切换发生在 agent 内部（FallbackModel 的回调），这里用 `on_enter` 模拟它的时机：
+# 流打开、任何正文之前。用户需要知道这轮是谁答的。
+# ---------------------------------------------------------------------
+def test_model_fallback_is_reported_before_the_first_content(monkeypatch):
+    stream_events = [PartStartEvent(index=0, part=TextPart(content="回答"))]
+    agent = fake_agent(
+        stream_events,
+        on_enter=lambda: record_fallback("openai/gpt-4o", "openai/gpt-4o-mini"),
+    )
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in events] == ["fallback", "content", "done"]
+    assert events[0].from_model == "openai/gpt-4o"
+    assert events[0].to_model == "openai/gpt-4o-mini"
+
+
+def test_fallback_from_a_failed_attempt_is_not_reported(monkeypatch):
+    """第一次尝试切了备用模型但仍整体失败、第二次成功：不能误报「本轮已切换」。"""
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    stream_events = [PartStartEvent(index=0, part=TextPart(content="回答"))]
+    calls = {"count": 0}
+
+    class RetryAgent:
+        def run_stream_events(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return fake_stream(
+                    (),
+                    error=http_error(503),
+                    on_enter=lambda: record_fallback("openai/gpt-4o", "openai/gpt-4o-mini"),
+                )
+            return fake_stream(stream_events)
+
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: RetryAgent())
+
+    events = collect_events([msg("user", "你好")])
+
+    assert calls["count"] == 2
+    assert [event.type for event in events] == ["content", "done"]
 
 
 # ---------------------------------------------------------------------

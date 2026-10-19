@@ -22,6 +22,10 @@ function runFields(run: Run): MessageChanges {
     toolCalls: run.toolCalls,
     // 事件到达顺序：没有它，刷新后思考/工具/正文只能按默认顺序近似还原
     partOrder: run.partOrder ?? [],
+    // 备用模型信息：刷新后提示行仍然要显示，否则用户会以为还是主模型答的
+    fallback: run.fallback ?? null,
+    // 失败信息：刷新后「重试」按钮仍然可用（是否可重试由服务端判定并持久化）
+    error: run.error ?? null,
   };
 }
 

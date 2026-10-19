@@ -17,6 +17,7 @@ from app.services.upstream_errors import (
     GENERIC_STREAM_ERROR_MESSAGE,
     SERVICE_UNAVAILABLE_MESSAGE,
     is_fallback_eligible,
+    is_retryable_for_user,
     is_retryable_upstream_error,
     upstream_error_message,
 )
@@ -100,3 +101,33 @@ def test_connection_error_is_retryable_and_fallback_eligible():
 
     assert is_retryable_upstream_error(error)
     assert is_fallback_eligible(error)
+
+
+# ---------------------------------------------------------------------
+# 用户手动重试（P2：UI 是否显示「重试」按钮）
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (429, True),
+        (500, True),
+        (503, True),
+    ],
+)
+def test_user_retry_matches_the_error_classification(status, expected):
+    assert is_retryable_for_user(http_error(status)) is expected
+
+
+def test_unclassified_errors_are_left_to_the_user_to_retry():
+    """拿不到状态码的异常（流中断、内部错误）交回用户判断，而不是替他决定。"""
+    assert is_retryable_for_user(RuntimeError("boom")) is True
+
+
+def test_group_members_decide_user_retry():
+    group = FallbackExceptionGroup("all models failed", [http_error(503), http_error(401)])
+
+    assert is_retryable_for_user(group) is True

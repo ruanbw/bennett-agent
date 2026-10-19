@@ -34,13 +34,19 @@ from app.schemas.events import (
     ClarificationRequest,
     ContentDelta,
     Done,
+    FallbackUsed,
     StreamError,
     ThinkingDelta,
     ToolCall,
     ToolResult,
 )
 from app.services.agent_factory import build_agent, build_title_agent
-from app.services.upstream_errors import is_retryable_upstream_error, upstream_error_message
+from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
+from app.services.upstream_errors import (
+    is_retryable_for_user,
+    is_retryable_upstream_error,
+    upstream_error_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +400,13 @@ async def _iterate_with_total_budget(
         yield event
 
 
+def _take_fallback_events(occurrences: list[FallbackOccurrence]) -> Iterator[FallbackUsed]:
+    """把本轮收集到的切换记录按发生顺序转成事件，并清空收集器。"""
+    while occurrences:
+        occurrence = occurrences.pop(0)
+        yield FallbackUsed(from_model=occurrence.primary_model, to_model=occurrence.fallback_model)
+
+
 async def stream_chat_events(
     model_name: str,
     messages: list[ChatMessage],
@@ -409,6 +422,9 @@ async def stream_chat_events(
     看到重复内容，并让带副作用的工具执行两次——这种情况下直接以 `StreamError` 收尾。
     重试的等待时间也计入总预算，不会把总时长上限拖长。
 
+    装配层配置了备用模型且真的发生了切换时，会先产出一个 `FallbackUsed` 事件：
+    用户需要知道本轮回答来自另一个模型，否则排障时既不知道是谁答的，也容易把备用
+    模型的能力差异误判成「这个模型变差了」。
     """
     seen_clarification_ids: set[str] = set()
 
@@ -416,12 +432,13 @@ async def stream_chat_events(
         current_prompt, history = convert_chat_history(messages)
     except InvalidChatHistory as exc:
         # 刻意写给用户看的校验文案，可以原样返回。请求本身不合法，重试结果一样。
-        yield StreamError(message=str(exc))
+        yield StreamError(message=str(exc), retryable=False)
         return
     except Exception:
         error_id = _new_error_id()
         logger.exception("对话历史转换失败 (error_id=%s)", error_id)
-        yield StreamError(message=f"请求处理失败，请重试（错误编号 {error_id}）")
+        # 内部错误而非用户输入问题：可能是瞬时故障，允许用户重试
+        yield StreamError(message=f"请求处理失败，请重试（错误编号 {error_id}）", retryable=True)
         return
 
     try:
@@ -429,60 +446,72 @@ async def stream_chat_events(
     except Exception:
         error_id = _new_error_id()
         logger.exception("模型初始化失败 (error_id=%s, model=%s)", error_id, model_name)
-        yield StreamError(message=f"模型初始化失败，请重试或切换模型（错误编号 {error_id}）")
+        yield StreamError(message=f"模型初始化失败，请重试或切换模型（错误编号 {error_id}）", retryable=True)
         return
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + TOTAL_STREAM_BUDGET_SECONDS
     attempt = 0
 
-    while True:
-        attempt += 1
-        # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。
-        emitted = False
+    # 收集器必须覆盖整个重试循环：切换发生在 agent 内部，却要在本层翻译成事件。
+    with collect_fallbacks() as fallbacks:
+        while True:
+            attempt += 1
+            # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。
+            emitted = False
+            # 上一次尝试可能记录了切换却没走到事件阶段（随后整体失败）。重试成功后
+            # 用户看到的是这一轮的结果，不能把上一轮的切换误报成「本轮已切换」。
+            fallbacks.clear()
 
-        try:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise StreamTimeoutError(f"超出总时长预算 {TOTAL_STREAM_BUDGET_SECONDS}s")
+            try:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise StreamTimeoutError(f"超出总时长预算 {TOTAL_STREAM_BUDGET_SECONDS}s")
 
-            async with agent.run_stream_events(current_prompt, message_history=history) as stream:
-                async for event in _iterate_with_total_budget(stream, remaining):
-                    for chat_event in translate_event(event, seen_clarification_ids):
-                        emitted = True
-                        yield chat_event
-            break
-        except asyncio.CancelledError:
-            # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
-            # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
-            raise
-        except StreamTimeoutError:
-            error_id = _new_error_id()
-            logger.warning(
-                "流式生成超出总时长预算 %ss，已中止 (error_id=%s, model=%s)",
-                TOTAL_STREAM_BUDGET_SECONDS,
-                error_id,
-                model_name,
-            )
-            yield StreamError(message=STREAM_TIMEOUT_MESSAGE)
-            return
-        except Exception as exc:
-            if not emitted and attempt < MAX_STREAM_ATTEMPTS and is_retryable_upstream_error(exc):
+                async with agent.run_stream_events(current_prompt, message_history=history) as stream:
+                    async for event in _iterate_with_total_budget(stream, remaining):
+                        # 切换发生在流打开阶段，先于任何模型事件：在第一条事件之前告诉用户。
+                        for fallback in _take_fallback_events(fallbacks):
+                            emitted = True
+                            yield fallback
+                        for chat_event in translate_event(event, seen_clarification_ids):
+                            emitted = True
+                            yield chat_event
+                break
+            except asyncio.CancelledError:
+                # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
+                # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
+                raise
+            except StreamTimeoutError:
+                error_id = _new_error_id()
                 logger.warning(
-                    "上游瞬时失败，重试本轮生成 (第 %d/%d 次, model=%s)",
-                    attempt + 1,
-                    MAX_STREAM_ATTEMPTS,
+                    "流式生成超出总时长预算 %ss，已中止 (error_id=%s, model=%s)",
+                    TOTAL_STREAM_BUDGET_SECONDS,
+                    error_id,
                     model_name,
-                    exc_info=True,
                 )
-                # 退避也受总预算约束：睡过头后下一轮的 remaining<=0 会按超时收尾。
-                await asyncio.sleep(STREAM_RETRY_BACKOFF_SECONDS)
-                continue
+                yield StreamError(message=STREAM_TIMEOUT_MESSAGE, retryable=True)
+                return
+            except Exception as exc:
+                if not emitted and attempt < MAX_STREAM_ATTEMPTS and is_retryable_upstream_error(exc):
+                    logger.warning(
+                        "上游瞬时失败，重试本轮生成 (第 %d/%d 次, model=%s)",
+                        attempt + 1,
+                        MAX_STREAM_ATTEMPTS,
+                        model_name,
+                        exc_info=True,
+                    )
+                    # 退避也受总预算约束：睡过头后下一轮的 remaining<=0 会按超时收尾。
+                    await asyncio.sleep(STREAM_RETRY_BACKOFF_SECONDS)
+                    continue
 
-            error_id = _new_error_id()
-            logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
-            yield StreamError(message=f"{upstream_error_message(exc)}（错误编号 {error_id}）")
-            return
+                error_id = _new_error_id()
+                logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
+                yield StreamError(
+                    message=f"{upstream_error_message(exc)}（错误编号 {error_id}）",
+                    retryable=is_retryable_for_user(exc),
+                )
+                return
 
     yield Done()
 

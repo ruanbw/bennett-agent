@@ -73,6 +73,19 @@ class ClarificationRequest(BaseModel):
     allow_custom_input: bool = True
 
 
+class FallbackUsed(BaseModel):
+    """主模型失败，本轮已自动切换到备用模型。
+
+    为什么要有这个事件：切换本身是静默的，但用户看到的回答来自另一个模型。
+    不告诉用户，排障时既不知道这轮是谁答的，也会把备用模型的能力差异误判成
+    「这个模型变差了」。事件只带模型 id，不带上游错误原文（那部分进日志）。
+    """
+
+    type: Literal["fallback"] = "fallback"
+    from_model: str
+    to_model: str
+
+
 class Done(BaseModel):
     """本轮生成正常结束。"""
 
@@ -85,15 +98,27 @@ class StreamError(BaseModel):
     `message` 只允许放可以外泄的文案：校验类错误可以给原文，内部异常只能给关联 ID。
     这条边界由 `app/services/chat_service.py::stream_chat_events` 的三条兜底分支
     实现（`_new_error_id` 只把 ID 回给客户端），背景见 CODE_REVIEW.md C-4。
+
+    `retryable` 只用于**客户端是否显示「重试」按钮**：它不代表服务端会自动重试，
+    也不保证重试一定成功。凭据/权限问题（401/403）与请求本身的问题（400/404）
+    标 false——同一个请求再发一次结果不会变。
     """
 
     type: Literal["error"] = "error"
     message: str
+    retryable: bool = False
 
 
 #: SSE 事件载荷。判别键是 `type`，客户端可以直接按它 switch。
 ChatEvent = Annotated[
-    ContentDelta | ThinkingDelta | ToolCall | ToolResult | ClarificationRequest | Done | StreamError,
+    ContentDelta
+    | ThinkingDelta
+    | ToolCall
+    | ToolResult
+    | ClarificationRequest
+    | FallbackUsed
+    | Done
+    | StreamError,
     Field(discriminator="type"),
 ]
 
@@ -102,6 +127,7 @@ __all__ = [
     "ClarificationRequest",
     "ContentDelta",
     "Done",
+    "FallbackUsed",
     "StreamError",
     "ThinkingDelta",
     "ToolCall",

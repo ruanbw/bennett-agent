@@ -24,6 +24,7 @@ import {
 import {
   AlertTriangleIcon,
   ArrowDownIcon,
+  ArrowLeftRightIcon,
   ArrowUpIcon,
   CheckIcon,
   CopyIcon,
@@ -36,7 +37,7 @@ import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
-import type { ModelItem } from "@/types";
+import type { FallbackState, ModelItem, RunError } from "@/types";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -368,9 +369,35 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
   );
 };
 
+/**
+ * `metadata.custom` 是运行时透传的任意形状：按鸭子类型取，字段缺失/写坏就当没有。
+ *
+ * 校验放在组件外而不是 `useAuiState` 的 selector 里：selector 必须返回稳定引用
+ * （这里返回的是 metadata 上的原始值），在里面构造新对象会让快照每次都变。
+ */
+const readFallback = (value: unknown): FallbackState | null => {
+  if (!value || typeof value !== "object") return null;
+  const { fromModel, toModel } = value as Partial<FallbackState>;
+  return typeof fromModel === "string" && typeof toModel === "string"
+    ? { fromModel, toModel }
+    : null;
+};
+
+/** 失败信息同理：只在结构完整时返回，否则当作没有（老记录/写坏的数据）。 */
+const readError = (value: unknown): RunError | null => {
+  if (!value || typeof value !== "object") return null;
+  const { message, retryable } = value as Partial<RunError>;
+  return typeof message === "string" ? { message, retryable: retryable === true } : null;
+};
+
 const AssistantMessage: FC = () => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
   const incomplete = useAuiState(isMessageIncomplete);
+  const fallback = readFallback(useAuiState((s) => s.message.metadata.custom?.fallback));
+  const error = readError(useAuiState((s) => s.message.metadata.custom?.error));
+  // 只给最后一条助手消息显示重试：重跑历史回答会覆盖别的轮次（与 Reload 的约束一致）
+  const isLast = useAuiState(isLastAssistantMessage);
+  const canRetry = isLast && error?.retryable === true;
 
   return (
     <MessagePrimitive.Root
@@ -394,6 +421,27 @@ const AssistantMessage: FC = () => {
         <div className="text-muted-foreground/70 mt-1 flex items-center gap-1.5 text-[11px]">
           <SquareIcon className="size-2.5 fill-current" />
           生成已停止
+        </div>
+      )}
+
+      {fallback && (
+        <div className="text-muted-foreground/70 mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+          <ArrowLeftRightIcon className="size-3" />
+          已切换备用模型：{fallback.fromModel} → {fallback.toModel}
+        </div>
+      )}
+
+      {canRetry && (
+        <div className="mt-2 flex">
+          <ActionBarPrimitive.Reload asChild>
+            <button
+              type="button"
+              className="border-border/70 text-foreground hover:bg-muted focus-visible:ring-ring/50 inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors focus-visible:ring-1 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+            >
+              <RefreshCwIcon className="size-3.5" />
+              重试
+            </button>
+          </ActionBarPrimitive.Reload>
         </div>
       )}
 

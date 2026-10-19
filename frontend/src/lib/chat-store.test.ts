@@ -193,11 +193,38 @@ describe('事件折叠', () => {
     })
   })
 
+  it('fallback 事件记录模型切换，且不写进正文', () => {
+    start('a')
+    expect(
+      applyEvent('a', { type: 'fallback', from_model: 'openai/gpt-4o', to_model: 'openai/gpt-4o-mini' }),
+    ).toBe(true)
+    applyEvent('a', { type: 'content', delta: '答' })
+
+    const run = getRun('a')!
+    expect(run.fallback).toEqual({ fromModel: 'openai/gpt-4o', toModel: 'openai/gpt-4o-mini' })
+    // 写进正文会被当成助手历史再次发给模型，也会被复制/导出当成回答的一部分
+    expect(run.content).toBe('答')
+  })
+
   it('error 事件追加可见提示', () => {
     start('a')
     applyEvent('a', { type: 'error', message: '上游炸了' })
 
     expect(getRun('a')!.content).toContain('**错误**: 上游炸了')
+  })
+
+  it('error 事件记录服务端给出的 retryable，供「重试」按钮判断', () => {
+    start('a')
+    applyEvent('a', { type: 'error', message: '上游炸了', retryable: true })
+
+    expect(getRun('a')!.error).toEqual({ message: '上游炸了', retryable: true })
+  })
+
+  it('旧服务端不返回 retryable 时按不可重试处理', () => {
+    start('a')
+    applyEvent('a', { type: 'error', message: '校验失败' })
+
+    expect(getRun('a')!.error).toEqual({ message: '校验失败', retryable: false })
   })
 
   it('INCOMPLETE 追加中断提示并标记不完整', () => {

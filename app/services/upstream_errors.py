@@ -4,10 +4,11 @@
 
 1. **给用户看什么**（`upstream_error_message`）——只依据状态码与「是否超时」，
    上游原文（响应体、URL、密钥上下文）永不外泄；
-2. **要不要自动重试**（`is_retryable_upstream_error`）——只认「过一会儿就可能
-   成功」的失败，避免对 4xx/限流做无意义的重试。
+2. **要不要自动重试 / 要不要切备用模型**（`is_retryable_upstream_error` /
+   `is_fallback_eligible`）——只认「过一会儿/换一个模型就可能成功」的失败。
 
-之前这些逻辑都长在 `chat_service` 里，现在集中在这里供对话流直接使用。
+之前这些逻辑都长在 `chat_service` 里；备用模型要复用同一套判定，若在
+`agent_factory` 里再抄一份，两处对「哪些错误可恢复」的理解迟早会不一致。
 """
 
 import asyncio
@@ -117,6 +118,26 @@ def is_fallback_eligible(exc: BaseException) -> bool:
     if any(_status_code(item) == 429 for item in iter_exception_chain(exc)):
         return True
     return is_retryable_upstream_error(exc)
+
+
+#: 用户手动重试也不会成功的状态码：凭据/权限问题（401/403）与请求本身的问题
+#: （400/404）。这些错误已经在文案里提示「换模型」或「联系管理员」，给重试按钮
+#: 只会让用户重复一次必然失败的操作。
+_NON_RETRYABLE_STATUSES = frozenset({400, 401, 403, 404})
+
+
+def is_retryable_for_user(exc: BaseException) -> bool:
+    """用户点「重试」是否可能成功（只用于 UI 是否展示重试按钮）。
+
+    与 `is_retryable_upstream_error`（服务端自动重试）不同：这里更宽——429、超时、
+    连接错误、未分类异常都算「值得让用户再试一次」，因为是否重试由用户决定；
+    只有明确的请求/凭据问题才标 false。
+    """
+    for item in iter_exception_chain(exc):
+        status = _status_code(item)
+        if status is not None:
+            return status not in _NON_RETRYABLE_STATUSES
+    return True
 
 
 def upstream_error_message(exc: BaseException) -> str:

@@ -60,6 +60,8 @@ const run = (overrides: RunOverrides = {}): Run & { partOrder?: PartKind[] } =>
     thinkingMs: 0,
     toolCalls: [],
     clarification: null,
+    fallback: null,
+    error: null,
     stopped: false,
     finished: false,
     ...overrides,
@@ -193,6 +195,8 @@ describe('toRuntimeMessage', () => {
       stopped: false,
       thinkingMs: 0,
       clarification: null,
+      fallback: null,
+      error: null,
       incomplete: false,
     })
   })
@@ -209,6 +213,22 @@ describe('toRuntimeMessage', () => {
     expect(assertMessage(toRuntimeMessage({ ...base, incomplete: true })).metadata.custom.incomplete).toBe(true)
     // 字段缺失（老记录）时行为不变：没有标记
     expect(assertMessage(toRuntimeMessage(base)).metadata.custom.incomplete).toBe(false)
+  })
+
+  it('把记录上的 fallback 映射进 metadata.custom（刷新后仍能显示切换提示）', () => {
+    const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '答', createdAt: 1 }
+    const fallback = { fromModel: 'openai/gpt-4o', toModel: 'openai/gpt-4o-mini' }
+
+    expect(assertMessage(toRuntimeMessage(base)).metadata.custom.fallback).toBeNull()
+    expect(assertMessage(toRuntimeMessage({ ...base, fallback })).metadata.custom.fallback).toEqual(fallback)
+  })
+
+  it('把记录上的 error 映射进 metadata.custom（刷新后重试按钮仍可用）', () => {
+    const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '半截', createdAt: 1 }
+    const error = { message: '服务暂时不可用，请重试', retryable: true }
+
+    expect(assertMessage(toRuntimeMessage(base)).metadata.custom.error).toBeNull()
+    expect(assertMessage(toRuntimeMessage({ ...base, error })).metadata.custom.error).toEqual(error)
   })
 })
 
@@ -251,6 +271,21 @@ describe('buildLiveMessage', () => {
   it('live 覆盖层与落库记录给出同一条 incomplete 语义', () => {
     expect(assertMessage(buildLiveMessage(run())).metadata.custom.incomplete).toBe(false)
     expect(assertMessage(buildLiveMessage(run({ incomplete: true }))).metadata.custom.incomplete).toBe(true)
+  })
+
+  it('切换提示在生成中就映射进 metadata.custom，不等本轮结束', () => {
+    const fallback = { fromModel: 'openai/gpt-4o', toModel: 'openai/gpt-4o-mini' }
+
+    expect(assertMessage(buildLiveMessage(run({ fallback, finished: false }))).metadata.custom.fallback).toEqual(
+      fallback,
+    )
+  })
+
+  it('失败信息在生成中/结束后都带 retryable，按钮不必等落库', () => {
+    const error = { message: '生成异常，请重试', retryable: true }
+
+    expect(assertMessage(buildLiveMessage(run({ error, finished: false }))).metadata.custom.error).toEqual(error)
+    expect(assertMessage(buildLiveMessage(run({ error, finished: true }))).metadata.custom.error).toEqual(error)
   })
 })
 
