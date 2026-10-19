@@ -225,9 +225,16 @@ describe('toRuntimeMessage', () => {
 
   it('把记录上的 error 映射进 metadata.custom（刷新后重试按钮仍可用）', () => {
     const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '半截', createdAt: 1 }
-    const error = { message: '服务暂时不可用，请重试', retryable: true }
+    const error = { message: '服务暂时不可用，请重试', retryable: true, code: null }
 
     expect(assertMessage(toRuntimeMessage(base)).metadata.custom.error).toBeNull()
+    expect(assertMessage(toRuntimeMessage({ ...base, error })).metadata.custom.error).toEqual(error)
+  })
+
+  it('失败分类随记录一起还原（刷新后仍能区分「上下文已满」与一般错误）', () => {
+    const base: MessageRecord = { id: 'm1', sessionId: 's1', role: 'assistant', content: '半截', createdAt: 1 }
+    const error = { message: '本会话上下文超出上限', retryable: false, code: 'context_overflow' as const }
+
     expect(assertMessage(toRuntimeMessage({ ...base, error })).metadata.custom.error).toEqual(error)
   })
 })
@@ -282,7 +289,7 @@ describe('buildLiveMessage', () => {
   })
 
   it('失败信息在生成中/结束后都带 retryable，按钮不必等落库', () => {
-    const error = { message: '生成异常，请重试', retryable: true }
+    const error = { message: '生成异常，请重试', retryable: true, code: null }
 
     expect(assertMessage(buildLiveMessage(run({ error, finished: false }))).metadata.custom.error).toEqual(error)
     expect(assertMessage(buildLiveMessage(run({ error, finished: true }))).metadata.custom.error).toEqual(error)

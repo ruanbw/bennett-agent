@@ -22,6 +22,7 @@ from app.services.model_service import (
     _parse_reasoning_levels,
     fetch_available_models,
     get_known_model_ids,
+    get_model_limits,
     reset_models_cache,
 )
 
@@ -502,6 +503,64 @@ async def test_chat_endpoint_rejects_model_outside_gateway_list(monkeypatch):
 
     assert excinfo.value.status_code == 400
     assert "不在可用模型列表" in excinfo.value.detail
+
+
+# ---------------------------------------------------------------------
+# 模型窗口与最大输出
+# ---------------------------------------------------------------------
+async def test_model_limits_come_from_gateway(fake_http):
+    fake_http(
+        FakeResponse(
+            payload={
+                "data": [
+                    {
+                        "id": "a/one",
+                        "context_window": 128000,
+                        "max_output_tokens": 16384,
+                    },
+                    {"id": "b/two", "context_window": 1000000},
+                ]
+            }
+        )
+    )
+
+    assert await get_model_limits("a/one") == (128000, 16384)
+    # 单字段缺失只影响那一项，不整个作废
+    assert await get_model_limits("b/two") == (1000000, None)
+
+
+async def test_model_limits_are_unknown_for_an_unknown_id(fake_http):
+    """不在网关列表里 = 无法判定，而不是 0。
+
+    0 会被下游当成「窗口为零」，把所有请求都判成超限；None 才是「不知道」。
+    """
+    fake_http(FakeResponse(payload={"data": [{"id": "a/one", "context_window": 128000}]}))
+
+    assert await get_model_limits("c/three") == (None, None)
+
+
+async def test_model_limits_are_unknown_when_the_list_is_a_fallback(fake_http):
+    """兜底条目刻意不伪造窗口（`_fallback` 只报模型名），此时一律按未知处理。"""
+    fake_http(FakeResponse(status_code=500))
+
+    assert await get_model_limits(settings.model_name) == (None, None)
+
+
+async def test_model_limits_tolerate_a_malformed_window(fake_http):
+    """`'128k'` 这类字符串不被换算成 128000：猜出来的窗口会误导预算判定。"""
+    fake_http(
+        FakeResponse(
+            payload={
+                "data": [
+                    {"id": "a/one", "context_window": "128k"},
+                    {"id": "b/two", "context_window": True},
+                ]
+            }
+        )
+    )
+
+    assert await get_model_limits("a/one") == (None, None)
+    assert await get_model_limits("b/two") == (None, None)
 
 
 async def test_chat_endpoint_accepts_whitelisted_model(monkeypatch):

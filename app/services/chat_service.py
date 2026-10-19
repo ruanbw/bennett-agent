@@ -42,6 +42,7 @@ from app.schemas.events import (
 )
 from app.services.agent_factory import build_agent, build_title_agent
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
+from app.services.token_budget import overflow_message, resolve_context_budget
 from app.services.upstream_errors import (
     is_retryable_for_user,
     is_retryable_upstream_error,
@@ -417,6 +418,12 @@ async def stream_chat_events(
     以 `Done` 或 `StreamError` 收尾；调用方不需要自己判断「流断了没有」。
     整轮受 `TOTAL_STREAM_BUDGET_SECONDS` 约束，超预算同样以 `StreamError` 收尾。
 
+    上下文预算预检（`app/services/token_budget.py`）排在最前面：历史是按字符上限
+    全量回放上来的，而字符与 token 不是一个量纲——超限的请求以前会一路走到上游，
+    换回一个 400，再被翻译成「模型不可用，请更换模型」。那既不是真实原因，
+    也不是可执行的建议（400 不重试、也不切备用模型）。超限时直接以
+    `code="context_overflow"` 的 `StreamError` 收尾，不发上游、不装配 agent。
+
     上游的**瞬时**失败（5xx / 超时 / 连接错误）会重试一次，但有一个硬前提：本轮
     还没有向客户端产出任何事件。一旦正文、思考或工具调用已经流出，重试就会让用户
     看到重复内容，并让带副作用的工具执行两次——这种情况下直接以 `StreamError` 收尾。
@@ -427,6 +434,24 @@ async def stream_chat_events(
     模型的能力差异误判成「这个模型变差了」。
     """
     seen_clarification_ids: set[str] = set()
+
+    # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
+    budget = await resolve_context_budget(model_name, messages)
+    if budget is not None and budget.over_limit:
+        logger.warning(
+            "上下文超出模型预算，已拒绝本轮 (model=%s, used=%d, limit=%d, window=%d, messages=%d)",
+            model_name,
+            budget.used_tokens,
+            budget.limit_tokens,
+            budget.context_window,
+            len(messages),
+        )
+        yield StreamError(
+            message=overflow_message(budget),
+            retryable=False,
+            code="context_overflow",
+        )
+        return
 
     try:
         current_prompt, history = convert_chat_history(messages)

@@ -104,6 +104,15 @@ export interface DoneEvent {
   type: 'done';
 }
 
+/**
+ * 失败分类。
+ *
+ * `context_overflow`：上下文超出模型窗口。重试必然同样失败（历史只会更长），
+ * 用户只能新建会话或换窗口更大的模型——所以既不给「重试」按钮，也不能只说
+ * 「出错了」。
+ */
+export type ErrorCode = 'context_overflow';
+
 export interface StreamErrorEvent {
   type: 'error';
   /** 只含可以外泄的文案（校验原文或错误编号），见 CODE_REVIEW.md C-4。 */
@@ -115,6 +124,13 @@ export interface StreamErrorEvent {
    * 按钮。服务端自动重试是另一套判定，与此无关。
    */
   retryable?: boolean;
+  /**
+   * 失败分类（机器可读）。`type` 只告诉我们「这是一个 error」而区分不了「哪一种失败」，
+   * 靠 `message` 里的中文做判断等于把文案当成协议。
+   *
+   * 可选：旧服务端不返回该字段，视为「未分类」。
+   */
+  code?: ErrorCode;
 }
 
 export type ChatEvent =
@@ -179,6 +195,8 @@ export interface FallbackState {
 export interface RunError {
   message: string;
   retryable: boolean;
+  /** 失败分类，见 `StreamErrorEvent.code`；未分类时为 null（老记录/老服务端）。 */
+  code: ErrorCode | null;
 }
 
 export interface MessageRecord {

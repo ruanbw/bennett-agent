@@ -207,6 +207,20 @@ def _build_chat_model(model_name: str, model_settings: dict[str, object]) -> Mod
     return FallbackModel(primary, fallback, fallback_on=_build_fallback_handler(model_name, fallback_name))
 
 
+def render_system_prompt() -> str:
+    """渲染主对话的系统提示词。
+
+    独立成函数是因为它有两个消费方：装配（`_build_agent_cached`）与上下文预算
+    （`token_budget` 要把它算进每轮的固定开销）。两处各写一遍 render 参数，
+    改了其中一处就会出现「预算按 A 算、实际发出去的是 B」。
+    """
+    return prompt_manager.render(
+        SYSTEM_PROMPT_TEMPLATE,
+        app_env=settings.app_env,
+        assistant_name=settings.assistant_name,
+    )
+
+
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
 def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
     """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
@@ -215,11 +229,7 @@ def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[ob
     两者都只在缓存键里起作用，用来保证「等价的输入命中同一个槽位」与
     「配置变了就换槽位」。
     """
-    system_prompt = prompt_manager.render(
-        SYSTEM_PROMPT_TEMPLATE,
-        app_env=settings.app_env,
-        assistant_name=settings.assistant_name,
-    )
+    system_prompt = render_system_prompt()
 
     model_settings: dict[str, object] = {}
     if effort:

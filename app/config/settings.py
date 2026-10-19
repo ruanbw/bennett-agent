@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 from dotenv import dotenv_values
 from pydantic import Field, field_validator, model_validator
@@ -161,6 +162,35 @@ class Settings(BaseSettings):
         description=(
             "上游模型调用的**空闲**超时（秒）：多久没收到数据就放弃。不是总时长，"
             "因此不会提前掉长长的流式输出。0 表示不限制。"
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # 上下文窗口预算
+    # ------------------------------------------------------------------
+    context_guard_mode: Literal["off", "reject"] = Field(
+        default="reject",
+        description=(
+            "历史超出模型上下文窗口时的处置：off = 不判定（一律放行，回到改动前的行为）；"
+            "reject = 拒绝本轮并告知用户。窗口取自网关的 context_window，网关没报时一律放行。"
+        ),
+    )
+    context_reserve_tokens: int = Field(
+        default=8192,
+        ge=0,
+        description=(
+            "预留 token 数（留给模型写回复的空间），在网关没报 max_output_tokens 时生效；"
+            "报了就用上游声明的值。两种取值都会被压在 context_window 的一半以内，"
+            "避免窗口小的模型被预留吃光预算。"
+        ),
+    )
+    context_safety_ratio: float = Field(
+        default=0.9,
+        gt=0,
+        le=1,
+        description=(
+            "预算的安全系数：可用上限 = (窗口 - 预留 - 固定开销) × 本值。token 数是估算值"
+            "（无分词器依赖，见 app/services/token_budget.py），留一成余量避免贴着上限判断。"
         ),
     )
 

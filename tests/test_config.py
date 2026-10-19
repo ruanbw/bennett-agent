@@ -373,3 +373,50 @@ def test_new_fields_accept_explicit_overrides():
 
     assert config.cors_allow_credentials is True
     assert config.enable_api_docs is False
+
+
+# ---------------------------------------------------------------------
+# 上下文窗口预算
+# ---------------------------------------------------------------------
+def test_context_guard_defaults_are_conservative():
+    config = Settings(_env_file=None)
+
+    # 默认拒绝而不是默默丢掉历史：丢历史是「改了用户看到的上下文却不说」的那类改动，
+    # 不该是默认行为。
+    assert config.context_guard_mode == "reject"
+    assert config.context_reserve_tokens == 8192
+    assert config.context_safety_ratio == 0.9
+
+
+@pytest.mark.parametrize("mode", ["off", "reject"])
+def test_context_guard_accepts_the_documented_modes(mode):
+    assert Settings(context_guard_mode=mode, _env_file=None).context_guard_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["", "OFF", "skip", "block", "trim"])
+def test_context_guard_rejects_unknown_modes(mode):
+    """拼错的模式必须启动即报错。
+
+    静默回落到某个默认值是最坏的一种：运维以为已经关掉了守卫（或者已经改成裁剪），
+    实际还在拒绝用户的请求。
+    """
+    with pytest.raises(ValidationError) as exc:
+        Settings(context_guard_mode=mode, _env_file=None)
+
+    assert "context_guard_mode" in str(exc.value)
+
+
+@pytest.mark.parametrize("ratio", [0, -0.1, 1.5])
+def test_context_safety_ratio_must_be_a_fraction(ratio):
+    """0 会把可用上限压成零（所有请求都超限），>1 等于没有余量。"""
+    with pytest.raises(ValidationError) as exc:
+        Settings(context_safety_ratio=ratio, _env_file=None)
+
+    assert "context_safety_ratio" in str(exc.value)
+
+
+def test_context_reserve_rejects_negative_values():
+    with pytest.raises(ValidationError) as exc:
+        Settings(context_reserve_tokens=-1, _env_file=None)
+
+    assert "context_reserve_tokens" in str(exc.value)

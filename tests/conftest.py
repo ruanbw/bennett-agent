@@ -68,3 +68,21 @@ def _reset_rate_limiters():
 
     _reset_limiter(chat_api, "_limiter")
     _reset_limiter(rate_limit, "_auth_limiter")
+
+
+@pytest.fixture(autouse=True)
+def _stub_context_window(monkeypatch):
+    """上下文预算预检默认走「网关没报窗口」这条放行路径。
+
+    预检要查网关的模型列表（真实 HTTP），而开发机上 3425 很可能真的挂着一个网关：
+    不隔离的话，同一份代码在有网关的机器上会按真实窗口开始拒绝历史较长的用例，
+    表现为「本机能跑、CI 不能跑」或反之。需要预算真正生效的用例自己
+    monkeypatch `token_budget.get_model_limits`（见 tests/test_token_budget.py 的
+    `patch_limits`，或者 test_chat_service 里的 over 用例）。
+    """
+    from app.services import token_budget
+
+    async def unknown_limits(_model_id):
+        return None, None
+
+    monkeypatch.setattr(token_budget, "get_model_limits", unknown_limits)

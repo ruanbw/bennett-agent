@@ -256,6 +256,27 @@ async def get_known_model_ids() -> set[str] | None:
     return {model.id for model in result.models}
 
 
+async def get_model_limits(model_id: str) -> tuple[int | None, int | None]:
+    """取某个模型的 `(context_window, max_output_tokens)`。
+
+    两处返回 None 的语义都是「无法判定」，调用方（上下文预算）据此放行而不是猜一个
+    默认窗口：
+
+    1. 网关列表来自兜底（上游不可用）——兜底条目刻意不伪造窗口；
+    2. 这个 id 不在网关列表里——模型白名单已经放行过未知 id，这里不该反悔。
+
+    单个字段缺失时只返回 `None` 的那一项（例如只报了窗口、没报最大输出）。
+    """
+    result, is_fallback = await _load_models(use_cache=True)
+    if is_fallback:
+        return None, None
+
+    for model in result.models:
+        if model.id == model_id:
+            return model.context_window, model.max_output_tokens
+    return None, None
+
+
 async def _fetch_from_gateway(default_model_id: str) -> tuple[ModelListResponse, bool]:
     headers = {}
     if settings.litellm_api_key:

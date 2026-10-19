@@ -102,11 +102,17 @@ class StreamError(BaseModel):
     `retryable` 只用于**客户端是否显示「重试」按钮**：它不代表服务端会自动重试，
     也不保证重试一定成功。凭据/权限问题（401/403）与请求本身的问题（400/404）
     标 false——同一个请求再发一次结果不会变。
+
+    `code` 是给机器看的失败分类，`type` 只能区分「哪一类事件」而区分不了「哪一种
+    失败」。目前只有一个取值：`context_overflow`（上下文超出模型窗口，重试必然
+    同样失败，用户只能新建会话/换更大的模型）。客户端不该去猜 `message` 里的
+    中文，也不该把「重试按钮」当作万能出路。
     """
 
     type: Literal["error"] = "error"
     message: str
     retryable: bool = False
+    code: Literal["context_overflow"] | None = None
 
 
 #: SSE 事件载荷。判别键是 `type`，客户端可以直接按它 switch。

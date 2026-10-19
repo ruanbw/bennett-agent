@@ -217,14 +217,43 @@ describe('事件折叠', () => {
     start('a')
     applyEvent('a', { type: 'error', message: '上游炸了', retryable: true })
 
-    expect(getRun('a')!.error).toEqual({ message: '上游炸了', retryable: true })
+    expect(getRun('a')!.error).toEqual({ message: '上游炸了', retryable: true, code: null })
   })
 
   it('旧服务端不返回 retryable 时按不可重试处理', () => {
     start('a')
     applyEvent('a', { type: 'error', message: '校验失败' })
 
-    expect(getRun('a')!.error).toEqual({ message: '校验失败', retryable: false })
+    expect(getRun('a')!.error).toEqual({ message: '校验失败', retryable: false, code: null })
+  })
+
+  it('上下文超限的提示换标签，不和一般故障混为一类', () => {
+    start('a')
+    // 服务端文案里带用量与动作，前端不再自己拼一遍（重复拼接会两处漂移）
+    applyEvent('a', {
+      type: 'error',
+      message: '本会话上下文约 900,000 tokens，超出上限……请新建会话后继续提问',
+      retryable: false,
+      code: 'context_overflow',
+    })
+
+    expect(getRun('a')!.content).toContain('**上下文已满**:')
+    expect(getRun('a')!.content).not.toContain('**错误**:')
+    expect(getRun('a')!.error?.code).toBe('context_overflow')
+  })
+
+  it('未知的 code 不落进 run（不让协议外的字符串影响渲染判断）', () => {
+    start('a')
+    const run = getRun('a')!
+    applyEvent('a', {
+      type: 'error',
+      message: '出错了',
+      // 模拟更新的服务端发了本版前端还认不出的分类
+      code: 'something_new' as unknown as undefined,
+    })
+
+    expect(run.content).toContain('**错误**:')
+    expect(run.error?.code).toBeNull()
   })
 
   it('INCOMPLETE 追加中断提示并标记不完整', () => {

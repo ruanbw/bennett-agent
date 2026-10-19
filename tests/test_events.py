@@ -11,6 +11,7 @@ import json
 import logging
 import uuid
 
+import pydantic
 import pytest
 from fastapi.testclient import TestClient
 from pydantic_ai.messages import (
@@ -280,6 +281,7 @@ def test_str_name_dispatch_would_have_missed_subclasses():
         ToolResult(tool_call_id="c", tool_name="t", result="ok"),
         ClarificationRequest(tool_call_id="c", question="选？", options=["A"]),
         StreamError(message="出错了"),
+        StreamError(message="上下文超了", retryable=False, code="context_overflow"),
     ],
 )
 def test_sse_frame_is_data_only_and_newline_safe(event):
@@ -362,3 +364,26 @@ def test_chat_sse_response_headers(monkeypatch):
     assert response.headers["x-accel-buffering"] == "no"
     # 半开连接兜底：库默认 send_timeout=None，等于不设超时
     assert chat_api.ChatEventSourceResponse(fake_stream()).send_timeout == chat_api.SSE_SEND_TIMEOUT_SECONDS
+
+
+# ---------------------------------------------------------------------
+# 失败分类（code）
+# ---------------------------------------------------------------------
+def test_stream_error_code_defaults_to_none():
+    """`code` 必须可选：老客户端不认识它，不能因为多了一个字段就崩。"""
+    assert StreamError(message="出错了").code is None
+
+
+def test_stream_error_code_survives_serialization():
+    """`type` 只区分「哪一类事件」，区分不了「哪一种失败」——判定要靠 code。"""
+    raw = to_sse_frame(StreamError(message="超了", code="context_overflow")).encode().decode()
+    parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+
+    assert parsed["code"] == "context_overflow"
+    assert parsed["type"] == "error"
+
+
+def test_unknown_stream_error_code_is_rejected():
+    """写错分类名要在构造时就报错，而不是让客户端静默落到「不认识」分支。"""
+    with pytest.raises(pydantic.ValidationError):
+        StreamError(message="出错了", code="not_a_real_code")

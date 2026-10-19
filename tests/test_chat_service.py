@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import json
 import logging
 import re
 
@@ -828,3 +829,191 @@ def test_tool_call_delta_stays_a_deliberate_debug_ignore(caplog):
     assert events == []
     assert "ToolCallPartDelta" in caplog.text
     assert [record.levelno for record in caplog.records if record.levelno >= logging.WARNING] == []
+
+
+# ---------------------------------------------------------------------
+# 上下文预算预检
+#
+# 挡住的是「字符没超上限、token 已经爆了」这一类请求：它们以前会照发上游，换回一个
+# 400，再被翻译成「模型不可用，请更换模型」——归因错，动作也错（400 不重试、
+# 不切备用模型）。下面既锁判定结果，也锁「判定必须发生在装配与上游调用之前」。
+# ---------------------------------------------------------------------
+@pytest.fixture
+def small_window(monkeypatch):
+    """把模型窗口压到 8k 并固定预留，让一条普通消息就能超限。
+
+    `context_reserve_tokens` 必须一起改：网关的 `max_output_tokens` 为 0 时会回落到
+    配置值，默认 8192 会把 8k 的窗口直接扣光，用例就测不出「历史多长算超限」了。
+    """
+    from app.config import settings
+    from app.services import token_budget
+
+    monkeypatch.setattr(settings, "context_guard_mode", "reject")
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    monkeypatch.setattr(token_budget, "_WARNED_UNKNOWN_WINDOWS", set())
+
+    async def limits(_model_id):
+        return 8_192, 0
+
+    monkeypatch.setattr(token_budget, "get_model_limits", limits)
+    return token_budget
+
+
+async def collect_async(messages, model="openai/gpt-4o"):
+    return [event async for event in chat_service.stream_chat_events(model, messages)]
+
+
+async def test_over_limit_history_is_refused_with_a_typed_code(monkeypatch, small_window):
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: pytest.fail("超限的请求不该走到装配"),
+    )
+
+    events = await collect_async([msg("user", "你" * 20_000)])
+
+    assert [event.type for event in events] == ["error"]
+    error = events[0]
+    assert error.code == "context_overflow"
+    # 重试必然同样失败：不允许给「重试」按钮
+    assert error.retryable is False
+    # 文案要给出可执行的动作与数字，否则用户只能猜
+    assert "新建会话" in error.message
+    assert "tokens" in error.message
+
+
+async def test_over_limit_is_logged_with_the_numbers(monkeypatch, small_window, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        await collect_async([msg("user", "你" * 20_000)])
+
+    assert "超出模型预算" in caplog.text
+    # 日志里要有判定依据，否则线上只能复现不能解释
+    assert "window=8192" in caplog.text
+
+
+async def test_history_within_the_budget_still_reaches_the_agent(monkeypatch, small_window):
+    calls = []
+
+    def record_agent(*_args, **_kwargs):
+        calls.append(_args)
+        return fake_agent()
+
+    monkeypatch.setattr(chat_service, "build_agent", record_agent)
+
+    events = await collect_async([msg("user", "你好")])
+
+    assert calls and events[-1].type == "done"
+
+
+async def test_guard_can_be_disabled(monkeypatch, small_window):
+    """`context_guard_mode=off` 回到改动前的行为：一律放行。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "context_guard_mode", "off")
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent())
+
+    events = await collect_async([msg("user", "你" * 20_000)])
+
+    assert events[-1].type == "done"
+
+
+async def test_unknown_window_falls_back_to_passing_through(monkeypatch, small_window):
+    """境外的模型（网关没报窗口）不能被预算拦下。"""
+    from app.services import token_budget
+
+    async def unknown(_model_id):
+        return None, None
+
+    monkeypatch.setattr(token_budget, "get_model_limits", unknown)
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: fake_agent())
+
+    events = await collect_async([msg("user", "你" * 20_000)])
+
+    assert events[-1].type == "done"
+
+
+async def test_budget_uses_the_model_actually_requested(monkeypatch, small_window):
+    """预算按本轮的 model 解析，不能拿配置里的默认模型去算。"""
+    from app.services import token_budget
+
+    seen = []
+
+    async def limits(model_id):
+        seen.append(model_id)
+        return 8_192, 0
+
+    monkeypatch.setattr(token_budget, "get_model_limits", limits)
+
+    await collect_async([msg("user", "你" * 20_000)], model="group/auto-tiny")
+
+    assert seen == ["group/auto-tiny"]
+
+
+def test_context_overflow_reaches_the_client_over_sse(monkeypatch):
+    """端到端接线：HTTP 路由 → 认证 → 真实 service → SSE 帧。
+
+    单元用例证明了「超限会被拒」，这里证明的是**接线**：守卫真的挂在 `/api/chat` 这条
+    路径上，而不是一个没人调用的函数。上游故意指向一个没人监听的端口——如果预检没拦住，
+    这一轮会以「服务暂时不可用」（连接类错误，可重试）收尾，断言立刻抓得住；
+    拿到 `context_overflow` 就说明请求根本没发出去。
+    """
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.db import User
+    from app.server import create_app
+    from app.services import model_service, token_budget
+    from app.services.auth import current_active_user
+
+    class FakeModelsResponse:
+        status_code = 200
+
+        def json(self):
+            # 网关只报一个 2k 窗口的模型：正常长度的会话就能超限
+            return {"data": [{"id": "group/auto-tiny", "context_window": 2_000, "max_output_tokens": 256}]}
+
+    class FakeModelsClient:
+        async def get(self, *_args, **_kwargs):
+            return FakeModelsResponse()
+
+    def fake_user() -> User:
+        return User(
+            id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            email="context-guard@example.com",
+            hashed_password="not-a-real-hash",
+            is_active=True,
+            is_superuser=False,
+            is_verified=False,
+        )
+
+    monkeypatch.setattr(settings, "context_guard_mode", "reject")
+    monkeypatch.setattr(settings, "context_reserve_tokens", 256)
+    monkeypatch.setattr(settings, "chat_rate_limit_per_minute", 30)
+    monkeypatch.setattr(settings, "litellm_api_base", "http://127.0.0.1:1")
+    # 真实实现：让预检自己去网关列表取窗口（conftest 默认把它换成「拿不到窗口」）
+    monkeypatch.setattr(token_budget, "get_model_limits", model_service.get_model_limits)
+    monkeypatch.setattr(model_service, "get_http_client", lambda: FakeModelsClient())
+
+    app = create_app()
+    app.dependency_overrides[current_active_user] = fake_user
+
+    model_service.reset_models_cache()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat",
+                json={"model": "group/auto-tiny", "messages": [{"role": "user", "content": "你" * 3_000}]},
+            )
+    finally:
+        # 模块级缓存会跨文件生效：留着这份假列表，后面的用例会按 2k 窗口去判定
+        model_service.reset_models_cache()
+
+    assert response.status_code == 200
+    frames = [line[len("data: ") :] for line in response.text.splitlines() if line.startswith("data: ")]
+    payloads = [json.loads(frame) for frame in frames]
+
+    assert [payload["type"] for payload in payloads] == ["error"]
+    assert payloads[0]["code"] == "context_overflow"
+    assert payloads[0]["retryable"] is False

@@ -387,8 +387,10 @@ const readFallback = (value: unknown): FallbackState | null => {
 /** 失败信息同理：只在结构完整时返回，否则当作没有（老记录/写坏的数据）。 */
 const readError = (value: unknown): RunError | null => {
   if (!value || typeof value !== "object") return null;
-  const { message, retryable } = value as Partial<RunError>;
-  return typeof message === "string" ? { message, retryable: retryable === true } : null;
+  const { message, retryable, code } = value as Partial<RunError>;
+  return typeof message === "string"
+    ? { message, retryable: retryable === true, code: code === "context_overflow" ? code : null }
+    : null;
 };
 
 const AssistantMessage: FC = () => {
@@ -398,7 +400,8 @@ const AssistantMessage: FC = () => {
   const error = readError(useAuiState((s) => s.message.metadata.custom?.error));
   // 只给最后一条助手消息显示重试：重跑历史回答会覆盖别的轮次（与 Reload 的约束一致）
   const isLast = useAuiState(isLastAssistantMessage);
-  const canRetry = isLast && error?.retryable === true;
+  // 上下文超限即使被标成可重试也不给按钮：重试的请求只会更长，必然再超一次
+  const canRetry = isLast && error?.retryable === true && error.code !== "context_overflow";
 
   return (
     <MessagePrimitive.Root
