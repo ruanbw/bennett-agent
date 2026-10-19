@@ -1,61 +1,153 @@
 /**
- * 侧边栏底部的账号区：当前用户 + 登出。
+ * 侧边栏底部账号区 — 参照 DeepSeek 官方 UI：
  *
- * 独立成组件而不是塞进 Sidebar：Sidebar 已经承担「列表 + 选择状态」这一件事，
- * 账号与登出属于另一个变更理由（主题切换当初也是这么拆出去的）。
- *
- * 登出带确认：误点会中断当前正在进行的对话，而登出后要重新输入邮箱和密码才能回来。
- * 确认文案同时说明会清空本机会话记录——登出要清本地库（防跨账号泄漏），不说清就是
- * 悄悄删掉用户的数据。
- *
- * 登出期间按钮显示转圈并禁用：登出请求失败时会重试一次，最长可能要等两个超时周期，
- * 期间没有任何反馈的话用户只会反复点，发出多个登出请求。
+ * 完全没有 border-top 分割线，视觉上与上方列表融为一体。
+ * 左侧圆形头像，中间用户昵称，右侧三点按钮。
+ * 点击整行或三点按钮弹出下拉菜单（设置入口、外观主题、退出登录）。
  */
 
 import { useCallback, useState } from 'react';
-import { Loader2, LogOut } from 'lucide-react';
+import { Check, Laptop, Loader2, LogOut, Moon, MoreHorizontal, Settings, Sun } from 'lucide-react';
 
+import { Avatar, AvatarFallback } from './ui/avatar';
 import { ConfirmDialog } from './ui/confirm-dialog';
-import { Button } from './ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
+import { SettingsDialog } from './SettingsDialog';
+import { useTheme } from '../context/theme-context';
 
 export interface AccountBarProps {
   email: string | null;
   onLogout: () => void | Promise<unknown>;
+  collapsed?: boolean;
 }
 
-export function AccountBar({ email, onLogout }: AccountBarProps) {
+export function AccountBar({ email, onLogout, collapsed = false }: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const { theme, setTheme } = useTheme();
 
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
     try {
       await onLogout();
     } catch (err) {
-      // 登出本身已经尽力而为（useAuth 内部兜底），这里只保证转圈状态一定会结束
       console.error('登出失败:', err);
     } finally {
       setLoggingOut(false);
     }
   }, [onLogout]);
 
-  return (
-    <div className="flex items-center gap-1 border-t border-border px-3 py-2">
-      {/* 邮箱可能很长，必须 truncate；title 让鼠标悬停时仍能看到全称 */}
-      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={email ?? undefined}>
-        {email ?? '未登录'}
-      </span>
+  const nickname = email ? email.split('@')[0] : '未登录';
+  const initial = email ? nickname.charAt(0).toUpperCase() : '未';
 
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => setConfirming(true)}
-        disabled={loggingOut}
-        aria-label={loggingOut ? '正在登出' : '登出'}
-        title={loggingOut ? '正在登出' : '登出'}
-      >
-        {loggingOut ? <Loader2 className="animate-spin" /> : <LogOut />}
-      </Button>
+  return (
+    <div className={collapsed ? 'p-2 flex justify-center' : 'px-2.5 py-2'}>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          className={
+            collapsed
+              ? 'size-9 flex items-center justify-center rounded-full hover:bg-accent/60 transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring'
+              : 'group w-full flex items-center gap-2.5 px-2 py-1.5 rounded-xl hover:bg-accent/40 transition text-left cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring'
+          }
+          aria-label="用户账户与设置菜单"
+          title={collapsed ? `${nickname} (${email ?? '未登录'})` : undefined}
+        >
+          <Avatar size="sm" className="border-0 shrink-0">
+            <AvatarFallback className="bg-foreground/5 text-foreground/70 text-[11px] font-semibold">
+              {initial}
+            </AvatarFallback>
+          </Avatar>
+
+          {!collapsed && (
+            <>
+              <span className="min-w-0 flex-1 text-[13px] font-medium text-foreground/85 truncate select-none">
+                {nickname}
+              </span>
+              <MoreHorizontal
+                className="size-4 text-muted-foreground/50 shrink-0 group-hover:text-muted-foreground transition-colors"
+                aria-hidden="true"
+              />
+            </>
+          )}
+        </DropdownMenuTrigger>
+
+        <DropdownMenuContent
+          side={collapsed ? 'right' : 'top'}
+          align={collapsed ? 'end' : 'start'}
+          sideOffset={8}
+          className="w-60 p-1.5"
+        >
+          <div className="px-2.5 py-2">
+            <div className="text-xs font-medium text-foreground truncate">{nickname}</div>
+            <div className="text-[11px] text-muted-foreground truncate mt-0.5" title={email ?? undefined}>
+              {email ?? '未登录'}
+            </div>
+          </div>
+
+          <DropdownMenuSeparator />
+
+          <DropdownMenuItem onClick={() => setSettingsOpen(true)}>
+            <Settings className="size-4 text-muted-foreground" />
+            <span>设置</span>
+          </DropdownMenuItem>
+
+          <DropdownMenuSeparator />
+
+          {/* Menulabel 用的是 base-ui 的 GroupLabel，必须在 Group 内——
+              否则直接抛「MenuGroupContext is missing」把整棵树打挂 */}
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>外观主题</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => setTheme('light')} className="justify-between">
+              <div className="flex items-center gap-2.5">
+                <Sun className="size-4 text-amber-500" />
+                <span>浅色</span>
+              </div>
+              {theme === 'light' && <Check className="size-3.5 text-primary" />}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setTheme('dark')} className="justify-between">
+              <div className="flex items-center gap-2.5">
+                <Moon className="size-4 text-sky-400" />
+                <span>深色</span>
+              </div>
+              {theme === 'dark' && <Check className="size-3.5 text-primary" />}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setTheme('system')} className="justify-between">
+              <div className="flex items-center gap-2.5">
+                <Laptop className="size-4 text-muted-foreground" />
+                <span>跟随系统</span>
+              </div>
+              {theme === 'system' && <Check className="size-3.5 text-primary" />}
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+
+          <DropdownMenuSeparator />
+
+          <DropdownMenuItem
+            onClick={() => setConfirming(true)}
+            disabled={loggingOut}
+            className="text-destructive hover:bg-destructive/10 data-[highlighted]:bg-destructive/10 data-[highlighted]:text-destructive"
+          >
+            {loggingOut ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <LogOut className="size-4" />
+            )}
+            <span>{loggingOut ? '正在登出...' : '退出登录'}</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} userEmail={email} />
 
       <ConfirmDialog
         open={confirming}

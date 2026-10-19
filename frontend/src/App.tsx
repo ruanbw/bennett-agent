@@ -238,12 +238,13 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
         onBatchTogglePin={setPinned}
         onClearAllSessions={clearAllSessions}
         isOpen={isSidebarOpen}
+        onToggleOpen={handleToggleSidebar}
         userEmail={userEmail}
         onLogout={onLogout}
       />
 
       {/* 遮罩：仅移动端抽屉需要 */}
-      {isSidebarOpen && (
+      {isMobile && isSidebarOpen && (
         <div
           onClick={() => setIsSidebarOpen(false)}
           aria-hidden="true"
@@ -266,6 +267,10 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
               currentReasoningEffort={currentReasoningEffort}
             >
               <ChatContainer
+                sessionTitle={sessions.find((s) => s.id === currentSessionId)?.title}
+                onUpdateTitle={(title) => {
+                  if (currentSessionId) void updateTitle(currentSessionId, title);
+                }}
                 models={models}
                 modelsError={modelsError}
                 currentModel={currentModel}
@@ -275,6 +280,7 @@ function AuthenticatedShell({ userEmail, onLogout }: AuthenticatedShellProps) {
                 onRefreshModels={refreshModels}
                 onToggleSidebar={handleToggleSidebar}
                 onCreateSession={handleCreateSession}
+                isSidebarOpen={isSidebarOpen}
               />
             </ChatProvider>
           </ErrorBoundary>

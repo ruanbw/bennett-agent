@@ -4,19 +4,18 @@ import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
 import { visibleSelection } from '../lib/session-list';
+import { groupSessionsByDate } from '../lib/session-grouping';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
 import { SidebarSessionItem } from './SidebarSessionItem';
-import { ThemeSwitcher } from './ThemeSwitcher';
 
-/** 破坏性操作的确认请求：调用方以状态持有「确认后做什么」，ConfirmDialog 只负责呈现。 */
+/** 破坏性操作的确认请求 */
 export interface ConfirmRequest {
   title: string;
   description: string;
   confirmLabel: string;
   destructive: boolean;
-  /** 确认后的动作。ConfirmDialog 同步调用它，所以实现方必须自己接住失败（见 runAction）。 */
   onConfirm: () => void;
 }
 
@@ -24,7 +23,6 @@ export interface SidebarProps {
   sessions: SessionRecord[];
   currentSessionId: string | null;
   onSelectSession: (id: string) => void;
-  // 回调一律放宽到 `void | Promise<unknown>`：消费方既有同步实现也有 async 实现
   onCreateSession: () => void | Promise<unknown>;
   onUpdateTitle: (id: string, title: string) => void | Promise<unknown>;
   onDeleteSession: (id: string) => void | Promise<unknown>;
@@ -33,20 +31,24 @@ export interface SidebarProps {
   onBatchTogglePin: (ids: string[], pinned: boolean) => void | Promise<unknown>;
   onClearAllSessions: () => void | Promise<unknown>;
   isOpen: boolean;
-  /** 当前登录用户邮箱，展示在底部账号区。 */
+  /** 收起侧边栏。桌面端收起后由 ChatContainer 顶栏的胶囊工具栏负责重新展开。 */
+  onToggleOpen?: () => void;
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
 }
 
 /**
- * 历史会话侧边栏：搜索、单条操作、多选批量操作、主题切换。
+ * 历史会话侧边栏（DeepSeek 风格）。
  *
- * 本组件只保留「列表 + 选择状态」这一件事，条目、批量栏与主题切换各自独立成组件
- * （原文件 463 行，同时承担五件事）。
+ * 布局：
+ *   顶部   —— 品牌名 + 搜索图标 + 收起图标
+ *   操作区 —— 全圆角胶囊「开启新对话」
+ *   列表   —— 按时间分组（今天 / 昨天 / 7 天内 / 30 天内 / 更早），
+ *             分组标题右侧放多选管理入口；条目本身只有文字 + hover 三点菜单
+ *   底部   —— 头像 + 昵称 + 三点（无分割线）
  *
- * O-1：订阅的是「哪些会话在跑」这个集合的快照，而不是全局增量版本——
- * 流式输出不会让侧边栏重渲染。
- * O-5：破坏性操作改用 Dialog，不再用 `window.confirm()`。
+ * 收起时整个 aside 不渲染（不是把宽度设成 0）：入口转移到 ChatContainer 顶栏的
+ * 胶囊工具栏，避免留下一块不可见但仍然参与布局 / 聚焦的空白区域。
  */
 export function Sidebar({
   sessions,
@@ -60,6 +62,7 @@ export function Sidebar({
   onBatchTogglePin,
   onClearAllSessions,
   isOpen,
+  onToggleOpen,
   userEmail,
   onLogout,
 }: SidebarProps) {
@@ -72,6 +75,7 @@ export function Sidebar({
   const cancelEditRef = useRef(false);
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -81,7 +85,6 @@ export function Sidebar({
   const [actionError, setActionError] = useState<string | null>(null);
 
   const runningKey = useSyncExternalStore(subscribeRunningSessions, getRunningSessionsKey);
-  // Set 查表 O(1)：此前每行 `runningIds.includes(...)` 是 O(k)
   const runningIds = useMemo(
     () => new Set(runningKey ? runningKey.split(',') : []),
     [runningKey],
@@ -92,6 +95,9 @@ export function Sidebar({
     if (!query) return sessions;
     return sessions.filter((session) => (session.title || '').toLowerCase().includes(query));
   }, [sessions, searchQuery]);
+
+  // 按时间分组：列表从「一整条平铺」变成有节奏的分段，长列表更好扫读
+  const sessionGroups = useMemo(() => groupSessionsByDate(filteredSessions), [filteredSessions]);
 
   // 批量操作只作用于「可见且被选中」的集合：搜索藏起来的选中项不会被顺带删除，
   // 确认弹窗的数量也因此等于实际删除集合。
@@ -248,32 +254,84 @@ export function Sidebar({
     void runAction(() => onCreateSession(), '新建会话失败，请重试');
   }, [onCreateSession, runAction]);
 
+  // 收起后整块不渲染：入口由 ChatContainer 顶栏的胶囊工具栏接替，
+  // 不留「宽度 0 但仍可聚焦」的死区。确认弹窗仍要挂载——
+  // 收起前发起、收起后才确认的删除不能因为侧边栏隐了而丢。
+  const confirmDialog = (
+    <ConfirmDialog
+      open={Boolean(confirmRequest)}
+      onOpenChange={(open) => {
+        if (!open) setConfirmRequest(null);
+      }}
+      title={confirmRequest?.title ?? ''}
+      description={confirmRequest?.description}
+      confirmLabel={confirmRequest?.confirmLabel}
+      destructive={confirmRequest?.destructive}
+      onConfirm={() => confirmRequest?.onConfirm?.()}
+    />
+  );
+
+  if (!isOpen) return confirmDialog;
+
   return (
     <aside
       aria-label="历史对话侧边栏"
-      // React 19 的 inert 是布尔属性；此前传的是 `''`，语义上等值但不符合类型约定
-      inert={!isOpen}
-      // 底色用不透明的 bg-sidebar 而非 bg-muted/20：抽屉在移动端浮在遮罩之上，
-      // 半透明底色会让背后内容透出来（桌面端两者视觉完全一致，见 index.css 的 --sidebar）
-      className={`w-64 border-r flex flex-col h-full select-none transition-transform duration-200 z-30 shrink-0 bg-sidebar absolute md:relative inset-y-0 left-0 ${
-        isOpen ? 'translate-x-0' : '-translate-x-full md:hidden pointer-events-none'
-      }`}
+      className="w-64 shrink-0 flex flex-col h-full select-none bg-sidebar absolute md:relative inset-y-0 left-0 z-30"
     >
-      <div className="p-3 pb-2 space-y-2">
-        <button
-          type="button"
-          onClick={handleCreateSession}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-md border hover:bg-accent hover:text-accent-foreground transition cursor-pointer"
-        >
-          <Plus size={14} aria-hidden="true" />
-          <span>新对话</span>
-        </button>
+      <div className="px-3 pt-4 pb-3 space-y-3 shrink-0">
+        {/* 品牌 + 顶部图标 */}
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[15px] font-semibold tracking-tight text-foreground select-none">
+            Bennett
+          </span>
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => {
+                setSearchOpen((open) => !open);
+                if (searchOpen) setSearchQuery('');
+              }}
+              className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition cursor-pointer"
+              title="搜索对话"
+              aria-label="搜索对话"
+              aria-expanded={searchOpen}
+            >
+              <Search size={16} aria-hidden="true" />
+            </button>
+            {onToggleOpen && (
+              <button
+                type="button"
+                onClick={onToggleOpen}
+                className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition cursor-pointer"
+                title="收起侧边栏"
+                aria-label="收起侧边栏"
+              >
+                {/* 方框 + 左竖线，与展开后的胶囊工具栏保持同一套视觉语言 */}
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="3" width="18" height="18" rx="3" />
+                  <line x1="9" y1="3" x2="9" y2="21" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
 
-        <div className="flex items-center gap-1.5">
-          <div className="relative flex-1 flex items-center">
+        {/* 搜索框：点图标才展开，平时只有图标，不占列表空间 */}
+        {searchOpen && (
+          <div className="relative flex items-center">
             <Search
               size={13}
-              className="absolute left-2.5 text-muted-foreground pointer-events-none"
+              className="absolute left-3 text-muted-foreground pointer-events-none"
               aria-hidden="true"
             />
             <input
@@ -282,45 +340,39 @@ export function Sidebar({
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="搜索历史会话..."
               aria-label="搜索历史会话"
-              className="w-full bg-background border rounded-md pl-8 pr-7 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-ring/50"
+              autoFocus
+              className="w-full bg-foreground/[0.04] rounded-xl pl-8 pr-8 py-2 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring/30"
             />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
-                title="清除搜索"
-              >
-                <X size={12} aria-hidden="true" />
-                <span className="sr-only">清除搜索</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                setSearchOpen(false);
+              }}
+              className="absolute right-2.5 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
+              title="关闭搜索"
+            >
+              <X size={12} aria-hidden="true" />
+              <span className="sr-only">关闭搜索</span>
+            </button>
           </div>
+        )}
 
-          <button
-            type="button"
-            onClick={() => {
-              setIsSelectMode((value) => !value);
-              setSelectedIds(new Set());
-            }}
-            title={isSelectMode ? '退出多选' : '多选管理'}
-            aria-pressed={isSelectMode}
-            className={`p-1.5 rounded-md transition cursor-pointer text-xs shrink-0 ${
-              isSelectMode
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
-            }`}
-          >
-            <SlidersHorizontal size={14} aria-hidden="true" />
-            <span className="sr-only">{isSelectMode ? '退出多选' : '多选管理'}</span>
-          </button>
-        </div>
+        {/* 开启新对话：全圆角胶囊 */}
+        <button
+          type="button"
+          onClick={handleCreateSession}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-[13px] font-medium rounded-full border border-border/70 bg-background hover:bg-accent/40 text-foreground transition cursor-pointer"
+        >
+          <Plus size={16} strokeWidth={2} aria-hidden="true" />
+          <span>开启新对话</span>
+        </button>
       </div>
 
       {actionError && (
         <div
           role="alert"
-          className="mx-3 mb-1.5 flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive"
+          className="mx-3 mb-1.5 flex items-start gap-1.5 rounded-xl border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive"
         >
           <span className="flex-1">{actionError}</span>
           <button
@@ -350,53 +402,69 @@ export function Sidebar({
         />
       )}
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+      <div className="flex-1 overflow-y-auto pb-2">
         {filteredSessions.length === 0 ? (
-          <div className="text-xs text-muted-foreground text-center py-8">
+          <div className="text-xs text-muted-foreground text-center py-12">
             {searchQuery ? '未找到相关对话' : '暂无历史对话'}
           </div>
         ) : (
-          filteredSessions.map((session) => (
-            <SidebarSessionItem
-              key={session.id}
-              session={session}
-              isActive={currentSessionId === session.id && !isSelectMode}
-              isRunning={runningIds.has(session.id)}
-              isSelected={selectedIds.has(session.id)}
-              isSelectMode={isSelectMode}
-              isEditing={editingId === session.id}
-              // 非编辑行恒为空串，否则每次击键都会让 n-1 行的 props 变化、memo 失效
-              editingTitle={editingId === session.id ? editingTitle : ''}
-              onEditingTitleChange={handleEditingTitleChange}
-              onStartEdit={startEdit}
-              onSaveEdit={saveEdit}
-              onCancelEdit={cancelEdit}
-              onSelect={onSelectSession}
-              onToggleSelect={toggleSelect}
-              onTogglePin={handleTogglePin}
-              onRequestDelete={requestDeleteSession}
-            />
+          sessionGroups.map((group, groupIndex) => (
+            <section key={group.label}>
+              <div className="flex items-center justify-between pl-4 pr-2.5 pt-4 pb-1">
+                <h3 className="text-[11px] font-medium text-muted-foreground/70 select-none">
+                  {group.label}
+                </h3>
+                {/* 多选管理入口挂在第一个分组标题右侧，与 DeepSeek 的位置一致 */}
+                {groupIndex === 0 && !searchOpen && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSelectMode((value) => !value);
+                      setSelectedIds(new Set());
+                    }}
+                    title={isSelectMode ? '退出多选' : '多选管理'}
+                    aria-pressed={isSelectMode}
+                    className={`p-1 rounded-md transition cursor-pointer shrink-0 ${
+                      isSelectMode
+                        ? 'bg-accent text-accent-foreground'
+                        : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent/60'
+                    }`}
+                  >
+                    <SlidersHorizontal size={13} aria-hidden="true" />
+                    <span className="sr-only">{isSelectMode ? '退出多选' : '多选管理'}</span>
+                  </button>
+                )}
+              </div>
+              <div className="px-2 space-y-0.5">
+                {group.sessions.map((session) => (
+                  <SidebarSessionItem
+                    key={session.id}
+                    session={session}
+                    isActive={currentSessionId === session.id && !isSelectMode}
+                    isRunning={runningIds.has(session.id)}
+                    isSelected={selectedIds.has(session.id)}
+                    isSelectMode={isSelectMode}
+                    isEditing={editingId === session.id}
+                    editingTitle={editingId === session.id ? editingTitle : ''}
+                    onEditingTitleChange={handleEditingTitleChange}
+                    onStartEdit={startEdit}
+                    onSaveEdit={saveEdit}
+                    onCancelEdit={cancelEdit}
+                    onSelect={onSelectSession}
+                    onToggleSelect={toggleSelect}
+                    onTogglePin={handleTogglePin}
+                    onRequestDelete={requestDeleteSession}
+                  />
+                ))}
+              </div>
+            </section>
           ))
         )}
       </div>
 
-      <div className="p-3">
-        <ThemeSwitcher />
-      </div>
-
       <AccountBar email={userEmail} onLogout={onLogout} />
 
-      <ConfirmDialog
-        open={Boolean(confirmRequest)}
-        onOpenChange={(open) => {
-          if (!open) setConfirmRequest(null);
-        }}
-        title={confirmRequest?.title ?? ''}
-        description={confirmRequest?.description}
-        confirmLabel={confirmRequest?.confirmLabel}
-        destructive={confirmRequest?.destructive}
-        onConfirm={() => confirmRequest?.onConfirm?.()}
-      />
+      {confirmDialog}
     </aside>
   );
 }

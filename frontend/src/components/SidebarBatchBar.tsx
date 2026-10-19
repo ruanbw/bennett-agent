@@ -38,16 +38,16 @@ export function SidebarBatchBar({
   const isEmpty = selectedCount === 0;
 
   return (
-    <div className="px-3 py-1.5 bg-muted/60 text-xs flex flex-col gap-1.5">
-      <div className="flex items-center justify-between text-muted-foreground">
+    <div className="mx-2 my-1 rounded-xl bg-foreground/[0.04] p-2.5 text-xs flex flex-col gap-2">
+      <div className="flex items-center justify-between text-muted-foreground px-0.5">
         <span className="font-medium text-foreground" aria-live="polite">
           已选 {selectedCount} 项
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <button
             type="button"
             onClick={onToggleSelectAll}
-            className="hover:text-foreground cursor-pointer underline text-[11px]"
+            className="hover:text-foreground cursor-pointer text-[11px]"
           >
             {isAllSelected ? '取消全选' : '全选'}
           </button>
@@ -61,12 +61,12 @@ export function SidebarBatchBar({
         </div>
       </div>
 
-      <div className="flex items-center gap-1.5 pt-1">
+      <div className="flex items-center gap-1.5">
         <button
           type="button"
           onClick={() => trigger(onPinSelected, '置顶选中会话失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-background hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition"
           title="置顶选中会话"
         >
           <Pin size={11} aria-hidden="true" />
@@ -76,7 +76,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onUnpinSelected, '取消置顶失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-background hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition"
           title="取消选中会话的置顶"
         >
           <PinOff size={11} aria-hidden="true" />
@@ -86,7 +86,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onRequestBatchDelete, '批量删除失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer transition"
           title="删除选中"
         >
           <Trash2 size={11} aria-hidden="true" />
@@ -98,7 +98,7 @@ export function SidebarBatchBar({
         <button
           type="button"
           onClick={() => trigger(onRequestClearAll, '清空会话失败')}
-          className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 mt-0.5 text-[11px] text-destructive hover:bg-destructive/10 rounded-md transition cursor-pointer"
+          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-destructive/80 hover:text-destructive hover:bg-destructive/10 rounded-lg transition cursor-pointer"
           title="清空所有会话记录"
         >
           <Trash2 size={12} aria-hidden="true" />

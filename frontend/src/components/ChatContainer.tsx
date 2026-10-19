@@ -1,10 +1,13 @@
-import { PanelLeft, Plus } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
+import { Check, Pencil, Plus, X } from 'lucide-react';
 
 import { Thread } from './assistant-ui/elements/thread.aui';
 import { ChatSessionNotices } from './ChatProvider';
 import type { ModelItem } from '../types';
 
 export interface ChatContainerProps {
+  sessionTitle?: string;
+  onUpdateTitle?: (title: string) => void | Promise<unknown>;
   models: ModelItem[];
   modelsError?: string | null;
   currentModel: string | null;
@@ -13,18 +16,20 @@ export interface ChatContainerProps {
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void | Promise<unknown>;
   onToggleSidebar: () => void;
-  // 既当 onClick 用，也（在 App 层）传给 Sidebar；两处都接受同步或异步实现
   onCreateSession?: () => void | Promise<unknown>;
+  /** 侧边栏是否展开，决定是否展示左上角胶囊工具栏 */
+  isSidebarOpen: boolean;
 }
 
 /**
- * 对话主区域：顶栏 + Thread。
+ * 对话主区域：顶栏（胶囊工具栏 + 可编辑标题）+ Thread。
  *
- * 不再转发提问相关的 prop——那三个 prop 原本由 ChatProvider 通过 `cloneElement`
- * 注入、再经这里原样传给 Thread，是一层看不见的耦合。现在 Thread 直接从
- * `clarification-context` 取。
+ * 当侧边栏折叠时，左上角出现仿 DeepSeek 的胶囊药丸工具栏（Pill Toolbar），
+ * 包含：展开侧边栏、搜索、新对话 三个图标按钮，带细边框和微阴影。
  */
 export function ChatContainer({
+  sessionTitle,
+  onUpdateTitle,
   models,
   modelsError,
   currentModel,
@@ -34,39 +39,139 @@ export function ChatContainer({
   onRefreshModels,
   onToggleSidebar,
   onCreateSession,
+  isSidebarOpen,
 }: ChatContainerProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [prevSessionTitle, setPrevSessionTitle] = useState(sessionTitle);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const cancelEditRef = useRef(false);
+
+  if (prevSessionTitle !== sessionTitle) {
+    setPrevSessionTitle(sessionTitle);
+    if (!isEditing) {
+      setEditingTitle(sessionTitle || '新对话');
+    }
+  }
+
+  const handleStartEdit = useCallback(() => {
+    cancelEditRef.current = false;
+    setEditingTitle(sessionTitle || '新对话');
+    setIsEditing(true);
+  }, [sessionTitle]);
+
+  const handleSaveTitle = useCallback(
+    async (e?: React.FormEvent) => {
+      e?.preventDefault();
+      if (cancelEditRef.current) {
+        cancelEditRef.current = false;
+        setIsEditing(false);
+        return;
+      }
+      const trimmed = editingTitle.trim();
+      setIsEditing(false);
+      if (!trimmed || trimmed === sessionTitle) return;
+      try {
+        await onUpdateTitle?.(trimmed);
+      } catch (err) {
+        console.error('修改会话标题失败:', err);
+      }
+    },
+    [editingTitle, sessionTitle, onUpdateTitle]
+  );
+
+  const handleCancelEdit = useCallback(() => {
+    cancelEditRef.current = true;
+    setIsEditing(false);
+    setEditingTitle(sessionTitle || '新对话');
+  }, [sessionTitle]);
+
   return (
     <div className="flex-1 flex flex-col h-full bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center justify-between px-3 z-10 shrink-0 bg-background/80 backdrop-blur select-none">
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition cursor-pointer"
-          title="切换侧边栏"
-          aria-label="切换侧边栏"
-        >
-          <PanelLeft size={16} aria-hidden="true" />
-        </button>
+      <header className="h-12 flex items-center justify-between px-3 z-10 shrink-0 select-none">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          {/* 侧边栏折叠时：左上角胶囊药丸工具栏（仿 DeepSeek 收缩态） */}
+          {!isSidebarOpen && (
+            <div className="flex items-center border border-border/60 rounded-xl shadow-xs bg-background overflow-hidden shrink-0">
+              <button
+                type="button"
+                onClick={onToggleSidebar}
+                className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                title="展开侧边栏"
+                aria-label="展开侧边栏"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="9" y1="3" x2="9" y2="21" />
+                </svg>
+              </button>
+              {onCreateSession && (
+                <button
+                  type="button"
+                  onClick={onCreateSession}
+                  className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                  title="新建对话"
+                  aria-label="新建对话"
+                >
+                  <Plus size={16} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
 
-        {/* 仅在移动端（md:hidden）展示右上角新建会话按钮 */}
-        {onCreateSession && (
-          <button
-            type="button"
-            onClick={onCreateSession}
-            className="md:hidden flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md border border-border/80 hover:bg-accent hover:text-accent-foreground text-foreground transition cursor-pointer"
-            title="新建对话"
-            aria-label="新建对话"
-          >
-            <Plus size={14} aria-hidden="true" />
-            <span>新对话</span>
-          </button>
-        )}
+          {/* 可编辑的会话标题 */}
+          {isEditing ? (
+            <form onSubmit={handleSaveTitle} className="flex items-center gap-1 min-w-0">
+              <input
+                ref={inputRef}
+                type="text"
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                onBlur={handleSaveTitle}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') handleCancelEdit();
+                }}
+                className="h-7 px-2.5 text-sm font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground w-48 sm:w-72"
+                maxLength={100}
+                placeholder="输入会话标题..."
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer"
+                title="保存"
+                aria-label="保存"
+              >
+                <Check className="size-3.5 text-primary" />
+              </button>
+              <button
+                type="button"
+                onMouseDown={handleCancelEdit}
+                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer"
+                title="取消"
+                aria-label="取消"
+              >
+                <X className="size-3.5" />
+              </button>
+            </form>
+          ) : (
+            <div
+              className="group flex items-center gap-1.5 max-w-[50vw] sm:max-w-md px-2 py-1 rounded-lg hover:bg-muted/50 transition cursor-pointer min-w-0"
+              onClick={handleStartEdit}
+              title="点击修改会话标题"
+            >
+              <span className="text-sm font-medium text-foreground truncate select-none">
+                {sessionTitle || '新对话'}
+              </span>
+              <Pencil
+                className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition shrink-0"
+                aria-hidden="true"
+              />
+            </div>
+          )}
+        </div>
       </header>
 
-      {/*
-        会话级提示条（发送未成功 / 本轮回复未能落库）。放在对话区顶部而不是塞进消息流：
-        它描述的是「这一轮的状态」，不是某条消息的内容，也绝不能挡住后续发送。
-      */}
       <ChatSessionNotices />
 
       <div className="flex-1 overflow-hidden">
