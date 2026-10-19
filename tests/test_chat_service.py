@@ -218,7 +218,7 @@ def collect_events(messages):
     return asyncio.run(run())
 
 
-def fake_stream(events=(), error=None, hang=False):
+def fake_stream(events=(), error=None, hang=False, on_enter=None):
     """把一串 pydantic-ai 事件包成 `run_stream_events` 需要的异步上下文。"""
 
     class FakeStream:
@@ -226,6 +226,9 @@ def fake_stream(events=(), error=None, hang=False):
             self._events = list(events)
 
         async def __aenter__(self):
+            # 备用模型切换发生在「流打开」阶段，用它模拟 agent 内部记录切换的时机
+            if on_enter is not None:
+                on_enter()
             return self
 
         async def __aexit__(self, *_exc):
@@ -246,10 +249,10 @@ def fake_stream(events=(), error=None, hang=False):
     return FakeStream()
 
 
-def fake_agent(events=(), error=None, hang=False):
+def fake_agent(events=(), error=None, hang=False, on_enter=None):
     class FakeAgent:
         def run_stream_events(self, *_args, **_kwargs):
-            return fake_stream(events, error=error, hang=hang)
+            return fake_stream(events, error=error, hang=hang, on_enter=on_enter)
 
     return FakeAgent()
 
@@ -493,6 +496,93 @@ async def test_cancellation_propagates_instead_of_becoming_a_stream_error(monkey
         await pending
 
     await stream.aclose()
+
+
+# ---------------------------------------------------------------------
+# 上游瞬时失败重试（P1）
+#
+# 只重试「换一次就可能成功」的失败（5xx / 超时 / 连接错误），且必须发生在
+# **还没有向客户端产出任何事件**时：一旦正文/工具调用已流出，重试会造成重复内容，
+# 带副作用的工具还会执行两次。4xx 与 429 不重试。
+# ---------------------------------------------------------------------
+def flaky_agent(failures, events=()):
+    """前 `len(failures)` 次调用抛对应异常，之后正常结束；记录调用次数。"""
+
+    class FlakyAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def run_stream_events(self, *_args, **_kwargs):
+            failure = failures[self.calls] if self.calls < len(failures) else None
+            self.calls += 1
+            return fake_stream(events, error=failure)
+
+    return FlakyAgent()
+
+
+def test_transient_upstream_error_is_retried_once(monkeypatch):
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    agent = flaky_agent([http_error(503)])
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert agent.calls == 2
+    assert [event.type for event in events] == ["done"]
+
+
+def test_connection_error_is_retried(monkeypatch):
+    """连接类异常在 pydantic-ai 里被包成没有 status_code 的 ModelAPIError。"""
+    error = ModelAPIError(model_name="openai/gpt-4o", message="connection failed")
+    error.__cause__ = httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    agent = flaky_agent([error])
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert agent.calls == 2
+    assert [event.type for event in events] == ["done"]
+
+
+def test_retry_budget_is_exhausted_after_one_attempt(monkeypatch):
+    """重试只有**一次**：第二次仍失败就按分类文案收尾，不再拖时间。"""
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    agent = flaky_agent([http_error(503), http_error(503)])
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert agent.calls == 2
+    assert [event.type for event in events] == ["error"]
+    assert "服务暂时不可用" in events[0].message
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429])
+def test_client_errors_are_not_retried(monkeypatch, status):
+    """4xx 是请求本身的问题，原样重试不会有不同结果；429 再打一次只会加重限流。"""
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    agent = flaky_agent([http_error(status)])
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    collect_events([msg("user", "你好")])
+
+    assert agent.calls == 1
+
+
+def test_error_after_streaming_is_not_retried(monkeypatch):
+    """已经流出正文后再失败，重试会让用户看到重复内容——只能以错误收尾。"""
+    monkeypatch.setattr(chat_service, "STREAM_RETRY_BACKOFF_SECONDS", 0)
+    stream_events = [PartStartEvent(index=0, part=TextPart(content="开头"))]
+    agent = flaky_agent([http_error(503)], events=stream_events)
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_a, **_k: agent)
+
+    events = collect_events([msg("user", "你好")])
+
+    assert agent.calls == 1
+    assert [event.type for event in events] == ["content", "error"]
+    assert events[0].delta == "开头"
 
 
 # ---------------------------------------------------------------------

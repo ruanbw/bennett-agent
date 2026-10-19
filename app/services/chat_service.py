@@ -11,7 +11,6 @@ from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any
 from uuid import uuid4
 
-import httpx
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -41,6 +40,7 @@ from app.schemas.events import (
     ToolResult,
 )
 from app.services.agent_factory import build_agent, build_title_agent
+from app.services.upstream_errors import is_retryable_upstream_error, upstream_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +60,16 @@ _TITLE_QUOTE_CHARS = "\"'“”‘’"
 #: 这一道是总体上界：超预算即中止并给出可重试的提示。
 TOTAL_STREAM_BUDGET_SECONDS = 600
 
-#: 上游 HTTP 状态码 → 可外泄的中文文案。只映射「能指导用户下一步动作」的状态码，
-#: 其余一律走通用文案：把上游细节猜错后写进用户可见消息，比笼统更糟。
-_STATUS_ERROR_MESSAGES: dict[int, str] = {
-    400: "模型不可用，请更换模型",
-    401: "上游认证配置问题，请联系管理员",
-    403: "上游认证配置问题，请联系管理员",
-    404: "模型不可用，请更换模型",
-    429: "上游限流，请稍后重试",
-}
+#: 上游**瞬时**失败的重试预算。首次请求 + 1 次重试。
+#: 只用于「换一次就可能成功」的失败（5xx、超时、连接类错误），4xx 与限流不重试：
+#: 前者是请求本身的问题，后者再打一次只会加重上游负担。重试必须在**还没向客户端
+#: 产出任何事件**时进行，否则正文会重复、带副作用的工具会执行两次。
+MAX_STREAM_ATTEMPTS = 2
+STREAM_RETRY_BACKOFF_SECONDS = 0.5
 
-SERVICE_UNAVAILABLE_MESSAGE = "服务暂时不可用，请重试"
-GENERIC_STREAM_ERROR_MESSAGE = "生成异常，请重试"
+#: 上游 HTTP 状态码 → 可外泄的中文文案，以及「要不要重试 / 切备用模型」的判定，
+#: 统一在 `app/services/upstream_errors.py`：备用模型装配（`agent_factory`）必须与
+#: 对话流共用同一套判定，否则两处对「哪些错误可恢复」的理解会漂移。
 STREAM_TIMEOUT_MESSAGE = "生成超时，请重试"
 
 #: `allow_custom_input` 的「假值」写法。`bool("false")` 是 True——网关把 JSON 布尔
@@ -100,49 +98,6 @@ def _new_error_id() -> str:
     一律不外泄，仅进日志。
     """
     return uuid4().hex[:12]
-
-
-def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
-    """沿 `__cause__` / `__context__` 遍历异常链（并防御环状链）。"""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        current = current.__cause__ or current.__context__
-
-
-def _is_timeout_error(exc: BaseException) -> bool:
-    """异常链里是否出现过超时。
-
-    pydantic-ai 会把 SDK 的连接类异常统一包装成 `ModelAPIError`（该类型**没有**
-    `status_code`），超时信息只留在 `__cause__` 链上（openai.APITimeoutError →
-    httpx.TimeoutException），所以这里按链找，而不是只看最外层类型。
-    """
-    return any(
-        isinstance(item, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException))
-        for item in _iter_exception_chain(exc)
-    )
-
-
-def upstream_error_message(exc: BaseException) -> str:
-    """把上游异常映射成可以推给用户的中文文案。
-
-    只依据两个信号：HTTP 状态码（`ModelHTTPError.status_code`）与「是否超时」。
-    状态码用安全取值：拿不到、类型不对、或不在映射表里都归入通用文案——上游原文
-    可能带 URL、provider 上下文甚至密钥，永不外泄。
-    """
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int) and not isinstance(status, bool):
-        if status in _STATUS_ERROR_MESSAGES:
-            return _STATUS_ERROR_MESSAGES[status]
-        if 500 <= status < 600:
-            return SERVICE_UNAVAILABLE_MESSAGE
-
-    if _is_timeout_error(exc):
-        return SERVICE_UNAVAILABLE_MESSAGE
-
-    return GENERIC_STREAM_ERROR_MESSAGE
 
 
 def _warn_unknown_once(key: str, message: str, *args: Any) -> None:  # noqa: ANN401
@@ -448,13 +403,19 @@ async def stream_chat_events(
 
     以 `Done` 或 `StreamError` 收尾；调用方不需要自己判断「流断了没有」。
     整轮受 `TOTAL_STREAM_BUDGET_SECONDS` 约束，超预算同样以 `StreamError` 收尾。
+
+    上游的**瞬时**失败（5xx / 超时 / 连接错误）会重试一次，但有一个硬前提：本轮
+    还没有向客户端产出任何事件。一旦正文、思考或工具调用已经流出，重试就会让用户
+    看到重复内容，并让带副作用的工具执行两次——这种情况下直接以 `StreamError` 收尾。
+    重试的等待时间也计入总预算，不会把总时长上限拖长。
+
     """
     seen_clarification_ids: set[str] = set()
 
     try:
         current_prompt, history = convert_chat_history(messages)
     except InvalidChatHistory as exc:
-        # 刻意写给用户看的校验文案，可以原样返回
+        # 刻意写给用户看的校验文案，可以原样返回。请求本身不合法，重试结果一样。
         yield StreamError(message=str(exc))
         return
     except Exception:
@@ -471,30 +432,57 @@ async def stream_chat_events(
         yield StreamError(message=f"模型初始化失败，请重试或切换模型（错误编号 {error_id}）")
         return
 
-    try:
-        async with agent.run_stream_events(current_prompt, message_history=history) as stream:
-            async for event in _iterate_with_total_budget(stream, TOTAL_STREAM_BUDGET_SECONDS):
-                for chat_event in translate_event(event, seen_clarification_ids):
-                    yield chat_event
-    except asyncio.CancelledError:
-        # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
-        # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
-        raise
-    except StreamTimeoutError:
-        error_id = _new_error_id()
-        logger.warning(
-            "流式生成超出总时长预算 %ss，已中止 (error_id=%s, model=%s)",
-            TOTAL_STREAM_BUDGET_SECONDS,
-            error_id,
-            model_name,
-        )
-        yield StreamError(message=STREAM_TIMEOUT_MESSAGE)
-        return
-    except Exception as exc:
-        error_id = _new_error_id()
-        logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
-        yield StreamError(message=f"{upstream_error_message(exc)}（错误编号 {error_id}）")
-        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TOTAL_STREAM_BUDGET_SECONDS
+    attempt = 0
+
+    while True:
+        attempt += 1
+        # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。
+        emitted = False
+
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise StreamTimeoutError(f"超出总时长预算 {TOTAL_STREAM_BUDGET_SECONDS}s")
+
+            async with agent.run_stream_events(current_prompt, message_history=history) as stream:
+                async for event in _iterate_with_total_budget(stream, remaining):
+                    for chat_event in translate_event(event, seen_clarification_ids):
+                        emitted = True
+                        yield chat_event
+            break
+        except asyncio.CancelledError:
+            # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
+            # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
+            raise
+        except StreamTimeoutError:
+            error_id = _new_error_id()
+            logger.warning(
+                "流式生成超出总时长预算 %ss，已中止 (error_id=%s, model=%s)",
+                TOTAL_STREAM_BUDGET_SECONDS,
+                error_id,
+                model_name,
+            )
+            yield StreamError(message=STREAM_TIMEOUT_MESSAGE)
+            return
+        except Exception as exc:
+            if not emitted and attempt < MAX_STREAM_ATTEMPTS and is_retryable_upstream_error(exc):
+                logger.warning(
+                    "上游瞬时失败，重试本轮生成 (第 %d/%d 次, model=%s)",
+                    attempt + 1,
+                    MAX_STREAM_ATTEMPTS,
+                    model_name,
+                    exc_info=True,
+                )
+                # 退避也受总预算约束：睡过头后下一轮的 remaining<=0 会按超时收尾。
+                await asyncio.sleep(STREAM_RETRY_BACKOFF_SECONDS)
+                continue
+
+            error_id = _new_error_id()
+            logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
+            yield StreamError(message=f"{upstream_error_message(exc)}（错误编号 {error_id}）")
+            return
 
     yield Done()
 
