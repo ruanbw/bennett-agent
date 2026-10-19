@@ -30,10 +30,8 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_DIR}/test.db"
 # 需要引导行为的用例（管理后台）显式往库里写提供商；引导本身另有单元测试。
 os.environ["BOOTSTRAP_PROVIDER_FROM_ENV"] = "false"
 
-# 注册现在是邀请码制：未配置邀请码时注册接口一律 403。绝大多数用例都要真注册账号，
-# 这里给整个会话配一个固定邀请码（各测试文件从 `settings.registration_invite_code`
-# 读取，不硬编码）。需要验证「注册关闭」的用例自己 monkeypatch 该字段为空。
-os.environ["REGISTRATION_INVITE_CODE"] = "test-invite-code"
+# 造管理员只能直接写库（见 `tests/accounts.py` 的 `set_role_in_db`）：注册出来的账号一律
+# role=user，没有任何环境变量能让某个邮箱自动获得权限。
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -51,9 +49,9 @@ def _cleanup_test_db_dir():
 def _create_test_schema():
     """整个会话开始前建表。
 
-    模型配置服务现在每个请求都会查 `model_provider` 表（有配置时数据库就是权威）。
+    模型配置服务每个请求都会查 `model_provider` 表（有配置时数据库就是权威）。
     不做这一步，直接调用 `fetch_available_models()` 的用例会拿到
-    `no such table: model_provider`，而不再是旧版的网关兜底。
+    `no such table: model_provider`。
     """
     import asyncio
 

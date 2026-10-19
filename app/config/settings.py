@@ -120,9 +120,8 @@ class Settings(BaseSettings):
     model_description_field: str = Field(
         default="magpie_label",
         description=(
-            "上游模型条目里用作展示描述的字段名。改动前这个字段名硬编码在"
-            "model_service 里，让一个自称网关无关的模块耦合到了特定网关；"
-            "缺失时回退为 'provider name'。"
+            "上游模型条目里用作展示描述的字段名；缺失时回退为 'provider name'。"
+            "做成配置项而不是常量，否则一个自称网关无关的模块会耦合到特定网关的字段名。"
         ),
     )
     assistant_name: str = Field(default="Bennett", description="助手名称")
@@ -171,7 +170,7 @@ class Settings(BaseSettings):
     context_guard_mode: Literal["off", "reject"] = Field(
         default="reject",
         description=(
-            "历史超出模型上下文窗口时的处置：off = 不判定（一律放行，回到改动前的行为）；"
+            "历史超出模型上下文窗口时的处置：off = 不判定（一律放行）；"
             "reject = 拒绝本轮并告知用户。窗口取自网关的 context_window，网关没报时一律放行。"
         ),
     )
@@ -223,21 +222,6 @@ class Settings(BaseSettings):
         description=(
             "登录态有效期（秒），默认 30 天，下限 60：0 会让 fastapi-users 认为「不设过期」"
             "（服务端永不过期），而 cookie Max-Age=0 又会立即删除 cookie，语义互相矛盾。"
-        ),
-    )
-    registration_invite_code: str = Field(
-        default="",
-        description=(
-            "注册邀请码。为空 = 关闭公开注册（注册接口一律 403「注册已关闭」）；"
-            "非空时注册必须携带完全一致的邀请码。它只用于注册校验，任何日志都不输出该值。"
-        ),
-    )
-    superuser_emails: str = Field(
-        default="",
-        description=(
-            "逗号分隔的超级管理员邮箱。启动时自动把已存在的匹配账号提升为 superuser；"
-            "注册时则必须邀请码校验通过才会提升——这是管理后台的唯一引导方式"
-            "（没有可自助点击的「成为管理员」）。匹配大小写不敏感；生产环境应只包含受信邮箱。"
         ),
     )
     provider_block_private_targets: bool = Field(
@@ -306,10 +290,6 @@ class Settings(BaseSettings):
             return default_origins
         origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
         return origins or default_origins
-
-    def get_superuser_emails(self) -> set[str]:
-        """解析管理员邮箱白名单；比较时统一小写（邮箱本地部分在实际投递中不区分大小写）。"""
-        return {item.strip().lower() for item in self.superuser_emails.split(",") if item.strip()}
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),

@@ -1,10 +1,16 @@
-"""管理后台 HTTP 接口：模型提供商 / 模型开关 / 用户封禁。
+"""管理后台 HTTP 接口：模型提供商 / 模型开关 / 用户封禁 / 角色管理。
 
-## 权限边界
+## 权限边界（三档 RBAC）
 
-整个路由挂在 `current_superuser` 上：未登录/已封禁 → 401，登录但不是超级管理员 →
-403。超级管理员只能来自 `SUPERUSER_EMAILS` 环境变量（见 `app/services/auth.py`），
-没有任何接口能把自己或别人提升为管理员——管理后台不该成为提权路径。
+整个路由挂在 `current_admin` 上：未登录/已封禁 → 401，登录但 `role < admin` → 403。
+角色定义与等级见 `app/roles.py`。
+
+只有**改别人角色**这一个动作额外要求 `superadmin`（`current_superadmin`）。分档依据是
+「误操作代价」——配错提供商会让全站没模型可用，但配错角色会让某人意外拿到或失去后台
+权限，且很难靠重试纠正（本项目没有邮箱验证，也没有忘记密码）。
+
+**没有任何接口能把自己提权**：角色接口要求 `superadmin`，而把自己从 `superadmin`
+降下来的动作同样被拒绝（见 `set_user_role` 的约束）——否则一次误点就能把管理后台锁死。
 
 ## 封禁的真实语义
 
@@ -26,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import User, delete_user_access_tokens, get_async_session
+from app.roles import Role
 from app.schemas.admin import (
     ModelCreate,
     ModelRead,
@@ -35,12 +42,13 @@ from app.schemas.admin import (
     ProviderSyncResult,
     ProviderTestResult,
     ProviderUpdate,
+    RoleUpdate,
     UserAdminRead,
     UserPage,
     mask_api_key,
 )
 from app.services import model_service
-from app.services.auth import current_superuser
+from app.services.auth import apply_role, count_superadmins, current_admin, current_superadmin
 from app.services.model_service import (
     DuplicateModelError,
     InvalidModelStateError,
@@ -53,7 +61,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/admin",
     tags=["admin"],
-    dependencies=[Depends(current_superuser)],
+    dependencies=[Depends(current_admin)],
 )
 
 
@@ -266,6 +274,7 @@ def _user_read(user: User) -> UserAdminRead:
         is_active=user.is_active,
         is_superuser=user.is_superuser,
         is_verified=user.is_verified,
+        role=user.role,
     )
 
 
@@ -294,14 +303,18 @@ async def list_users(
 @router.post("/users/{user_id}/ban", response_model=UserAdminRead, summary="封禁用户")
 async def ban_user(
     user_id: uuid.UUID,
-    admin: User = Depends(current_superuser),  # noqa: B008
+    admin: User = Depends(current_admin),  # noqa: B008
     session: AsyncSession = Depends(get_async_session),  # noqa: B008
 ):
     """封禁用户并立即踢下线。
 
-    约束：不能封禁自己（唯一能进后台的人把自己锁在外面，只能改环境变量重启），
-    也不能封禁其他超级管理员（同级账号互封会让管理后台失去可预期性）。需要收回
-    某人的管理员身份时，应从 `SUPERUSER_EMAILS` 移除后重启，而不是在这里点封禁。
+    约束：不能封禁自己，也不能封禁**同级或更高级**的账号。
+
+    这里的「级别」按 `role` 判而不是按 `is_superuser`：一个 `admin` 封不了一个
+    `superadmin`，否则下级就能靠封号把上级挤掉；同一级别之间也互封不了，因为那会让
+    管理后台失去可预期性（谁先动手谁赢）。
+
+    需要收回某人的管理员身份时用角色接口降级（见 `set_user_role`），不是在这里封号。
     """
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="不能封禁当前登录的管理员账号")
@@ -309,8 +322,13 @@ async def ban_user(
     target = await session.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
-    if target.is_superuser:
-        raise HTTPException(status_code=400, detail="不能封禁超级管理员")
+    if target.role_level >= admin.role_level:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "不能封禁超级管理员" if target.role_level >= Role.SUPERADMIN else "不能封禁同级管理员"
+            ),
+        )
 
     target.is_active = False
     await session.commit()
@@ -330,4 +348,76 @@ async def unban_user(
 
     target.is_active = True
     await session.commit()
+    return _user_read(target)
+
+
+# ---------------------------------------------------------------------
+# 角色管理（仅 superadmin）
+# ---------------------------------------------------------------------
+@router.patch(
+    "/users/{user_id}/role",
+    response_model=UserAdminRead,
+    summary="设置用户角色（仅超级管理员）",
+)
+async def set_user_role(
+    user_id: uuid.UUID,
+    payload: RoleUpdate,
+    admin: User = Depends(current_superadmin),  # noqa: B008
+    session: AsyncSession = Depends(get_async_session),  # noqa: B008
+):
+    """把一个用户的角色改成 `payload.role`。
+
+    三条约束，每条都对应一种「一次误操作就把后台锁死」的真实故障：
+
+    1. **不能改自己的角色**——把自己从 superadmin 降成 admin，之后连撤销都做不到。
+    2. **不能修改已封禁账号的角色**——先解封再改，否则两件事的先后顺序会让「为什
+       么他还是进不去」变得难以解释。
+    3. **不能降级最后一个 superadmin**。
+
+    第 3 条在单请求顺序执行时是**不可达的**：操作者自己就是超管，而第 1 条已经禁了
+    改自己，所以目标也是超管就意味着库里至少有两人。保留它是因为并发场景：A 降 B 的
+    同时 B 降 A，两个请求各自读到的 `count_superadmins()` 都是 2，于是两个都通过，
+    结果库里零个超管、后台永久锁死。SQLite 单进程下这需要两个 async 请求交错，窗口
+    很窄但存在；换成多 worker 部署就会变成真实概率。
+
+    删掉它的唯一条件是给角色变更加行锁或改成单条带子查询的 UPDATE。
+
+    成功后会**删掉该用户的全部会话**：角色变了但旧 token 还能用，等于权限变更要等到
+    对方重新登录才生效，而那时谁也不会记得去验一下。删完对方下一次请求就是 401，
+    重新登录后 `/api/auth/me` 返回新角色，前端据此显示或隐藏入口。他重新登录即可，
+    密码没变，不会被锁在外面。
+    """
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="不能修改自己的角色")
+
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if not target.is_active:
+        raise HTTPException(status_code=400, detail="该账号已被封禁，请先解封再修改角色")
+
+    new_role = Role.parse(payload.role)
+    old_role = target.role_level
+    if new_role == old_role:
+        # 幂等：重复提交同一个角色不算错误，但也不必写库与踢会话
+        return _user_read(target)
+
+    if old_role >= Role.SUPERADMIN > new_role and await count_superadmins() <= 1:
+        raise HTTPException(status_code=400, detail="不能降级最后一个超级管理员，后台将无人可管")
+
+    apply_role(target, new_role)
+    await session.commit()
+    # commit 后对象已过期，刷一次再序列化；不重新查库是因为同一 session 里就是刚写的行
+    await session.refresh(target)
+
+    # 权限变更必须立即生效：删掉旧会话，对方下次请求就是 401，重新登录后拿到新角色
+    removed = await delete_user_access_tokens(target.id)
+    logger.info(
+        "角色变更: id=%s %s -> %s by=%s 已失效会话=%d",
+        target.id,
+        old_role.name.lower(),
+        new_role.name.lower(),
+        admin.id,
+        removed,
+    )
     return _user_read(target)

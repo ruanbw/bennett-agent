@@ -14,8 +14,11 @@
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.roles import ALL_ROLES, ROLE_USER
 
 MAX_NAME_CHARS = 80
 MAX_URL_CHARS = 500
@@ -169,6 +172,30 @@ class UserAdminRead(BaseModel):
     is_active: bool
     is_superuser: bool
     is_verified: bool
+    #: 角色字符串（`user` / `admin` / `superadmin`）。前端展示徒标与按钮禁用状态都靠它。
+    role: str = ROLE_USER
+
+
+class RoleUpdate(BaseModel):
+    """角色变更请求。
+
+    用 `Literal` 而不是裸 `str`：非法值必须在入口就 422，而不是悄悄被
+    `Role.parse` 降级成 `user`——那会让「我把 A 改成 admn 了但没生效」变成一场猜测。
+
+    `superadmin` 刻意**不在**允许值里：最高一档只能经运维通道（`scripts/seed_admin.py`）
+    授予，不能通过 HTTP 接口互相提权。
+    """
+
+    role: Literal["user", "admin"]
+
+    @field_validator("role")
+    @classmethod
+    def _known(cls, value: str) -> str:
+        # Literal 已经挡了；这里保留显式检查，让「新增中档位」时忘记同步 ALL_ROLES
+        # 的改动在这里立刻炸掉，而不是静默放过。
+        if value not in ALL_ROLES:
+            raise ValueError(f"必须是 {list(ALL_ROLES)} 之一")
+        return value
 
 
 class UserPage(BaseModel):

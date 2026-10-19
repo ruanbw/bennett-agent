@@ -25,19 +25,27 @@ JWT 把状态放在令牌内部，服务端无法单方面作废——登出只�
 轮换它也不会让任何登录态失效（要让会话失效请删 `access_token` 行）。它目前只喂给
 `UserManager.reset_password_token_secret` / `verification_token_secret`，等将来接入
 邮件流程（重置密码、邮箱验证）时才真正生效。
+
+## 角色从哪里来
+
+**只在数据库里**（`user.role`，见 `app/roles.py`）。唯一入口：播种脚本建初始超管
+（`scripts/seed_admin.py`），之后由超管在管理后台给人升/降级。没有任何路径能让
+注册、启动或环境变量直接授予角色。
+
+`apply_role()` 是 `role` 与派生布尔位 `is_superuser` 的**唯一**写入口。
 """
 
 import logging
 import uuid
 from typing import Any
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin, schemas
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.exceptions import InvalidPasswordException
-from sqlalchemy import func, update
+from sqlalchemy import func, select
 
 from app.config import settings
 from app.db import (
@@ -49,6 +57,7 @@ from app.db import (
     get_access_token_db,
     get_user_db,
 )
+from app.roles import ADMIN_LEVEL, ROLE_SUPERADMIN, Role
 
 logger = logging.getLogger(__name__)
 
@@ -61,36 +70,29 @@ logger = logging.getLogger(__name__)
 MIN_PASSWORD_LENGTH = 8
 
 
-def is_configured_superuser(email: str | None) -> bool:
-    """邮箱是否在 `SUPERUSER_EMAILS` 白名单里（大小写不敏感）。"""
-    if not email:
-        return False
-    return email.strip().lower() in settings.get_superuser_emails()
+def apply_role(user: User, role: Role) -> None:
+    """**唯一**改动用户角色的入口：同时写 `role` 与派生的 `is_superuser`。
 
+    两列必须一起改。fastapi-users 的基表强制带 `is_superuser`，而它是内置
+    `current_user(superuser=True)` 依赖的判据；若只改 `role`，两套依赖会给出相反结论。
+    指望每个人记住「不要用内置的那个」太脆弱，因此这里保持同步，同时**鉴权只读 role**。
 
-async def promote_configured_superusers() -> int:
-    """启动时把白名单邮箱对应的账号提升为超级管理员，返回变更行数。
-
-    管理后台没有「把自己设为管理员」的接口——那等于把提权入口暴露给任何登录用户。
-    引导只能来自部署者掌握的环境变量。每次启动重跑一遍：运维新增邮箱后重启即生效，
-    也不需要手工改库。幂等（已标记的不会计入行数）。
+    不提交事务：调用方（路由 / 种子脚本）在自己的 session 上决定何时 commit。
     """
-    emails = settings.get_superuser_emails()
-    if not emails:
-        return 0
+    user.role = role.value_str
+    user.is_superuser = role >= ADMIN_LEVEL
+    # 管理员账号一并记为已验证：本项目没有邮箱验证流程，让 is_verified 长期为 False
+    # 只会在前端多显示一行无用提示。
+    if role >= ADMIN_LEVEL:
+        user.is_verified = True
 
+
+async def count_superadmins() -> int:
+    """当前 superadmin 数量。用于「不能降级最后一个超管」的前置检查。"""
     async with async_session_maker() as session:
-        result = await session.execute(
-            update(User)
-            .where(func.lower(User.email).in_(emails), User.is_superuser.is_(False))
-            .values(is_superuser=True, is_verified=True)
-        )
-        await session.commit()
-        changed = result.rowcount or 0
-
-    if changed:
-        logger.info("已提升 %d 个账号为超级管理员", changed)
-    return changed
+        return await session.scalar(
+            select(func.count()).select_from(User).where(User.role == ROLE_SUPERADMIN)
+        ) or 0
 
 
 cookie_transport = CookieTransport(
@@ -113,8 +115,8 @@ def get_database_strategy(
     lifetime = settings.session_lifetime_seconds
     if lifetime <= 0:
         # 防御纵深：fastapi-users 的 read_token 用 `if self.lifetime_seconds:` 判断是否
-        # 检查过期（0 是假值 → 永不过期），而 settings 目前没有拒绝 0/负值的校验。
-        # 这里补一道，任何绕过 settings 校验的调用路径都拿不到永不过期的策略。
+        # 检查过期（0 是假值 → 永不过期）。settings 已有 ge=60 兜底，这里再补一道，
+        # 任何绕过 settings 校验的调用路径都拿不到永不过期的策略。
         raise ValueError(
             f"session_lifetime_seconds 必须 >=60，当前为 {lifetime}：0/负值会让服务端会话永不过期，请设 >=60。"
         )
@@ -154,11 +156,10 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
         """新用户注册后只记一条日志。
 
-        **提权不在这里**：项目没有邮箱验证，邮箱字符串本身不能证明归属，谁能抢到
-        那个地址谁就能拿到超管。因此提权改由注册路由在邀请码校验通过后显式完成
-        （见 `app/api/auth.py`），本钩子不再看白名单。
+        **角色维持默认的 `user`**：注册完全开放，但建号不授予任何特权，提权只能由
+        管理后台完成（见 `app/api/admin.py` 的角色接口）。
         """
-        logger.info("新用户注册: id=%s", user.id)
+        logger.info("新用户注册: id=%s role=%s", user.id, user.role)
 
     async def on_after_login(
         self, user: User, request: Request | None = None, response: Response | None = None
@@ -197,6 +198,27 @@ fastapi_users = FastAPIUsers[User, uuid.UUID](get_user_manager, [auth_backend])
 #: 端点网关依赖：未登录或账号已停用 → 401。
 current_active_user = fastapi_users.current_user(active=True)
 
-#: 管理后台依赖：未登录/停用 → 401，登录但不是超级管理员 → 403。
-#: `active=True` 同时覆盖了「封禁后即使 token 没被删也进不来」这一层。
-current_superuser = fastapi_users.current_user(active=True, superuser=True)
+
+async def current_admin(user: User = Depends(current_active_user)) -> User:  # noqa: B008
+    """管理后台依赖：`role >= admin` 才放行，否则 403。
+
+    不用内置的 `current_user(superuser=True)`：它读的是 `is_superuser` 布尔位，
+    而本项目的判据是 `role`（见 `app/roles.py`）。两者目前由 `apply_role` 保持同步，
+    但**鉴权只该有一个来源**——真漏同步一次，读布尔位的那条路就是静默越权。
+
+    401 / 403 的分工与内置依赖一致：没有有效登录态是 401，登录了但权限不够是 403。
+    前端靠这个区分「重新登录」与「找管理员要权限」。
+    """
+    if user.role_level < ADMIN_LEVEL:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
+async def current_superadmin(user: User = Depends(current_admin)) -> User:  # noqa: B008
+    """最高一档：只有 superadmin 才能改别人的角色。"""
+    if user.role_level < Role.SUPERADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要超级管理员权限（只有超级管理员可以调整角色）",
+        )
+    return user

@@ -63,12 +63,7 @@ def client():
 
 
 def register_body(email, password=PASSWORD):
-    """注册请求体。
-
-    注册已改为邀请码制：邀请码从配置读（conftest 给整个会话设了一个），避免在各个
-    用例里硬编码一个和服务端配置可能漂移的字面值。
-    """
-    return {"email": email, "password": password, "invite_code": settings.registration_invite_code}
+    return {"email": email, "password": password}
 
 
 def register(client, email, password=PASSWORD):
@@ -156,11 +151,7 @@ def test_login_sets_httponly_lax_cookie(client):
 
 
 def test_logout_revokes_session_server_side(client):
-    """**这是选会话而非 JWT 的核心理由。**
-
-    JWT 的登出只是让客户端删掉本地副本，令牌在过期前依然有效。这里登出会真的删掉
-    服务端会话记录，所以把登出前的 cookie 原样塞回去也无法恢复登录态。
-    """
+    """登出会真的删掉服务端会话记录，所以把登出前的 cookie 原样塞回去也恢复不了。"""
     email = unique_email()
     register(client, email)
     login(client, email)
@@ -195,12 +186,10 @@ def test_each_login_gets_a_distinct_session(client):
 # 安全断言
 # ---------------------------------------------------------------------
 def test_register_cannot_self_promote_to_superuser(client):
-    """注册接口必须忽略客户端传来的 `is_superuser`。
+    """注册接口必须忽略客户端传来的 `is_superuser` / `is_active` / `is_verified`。
 
-    `BaseUserCreate` 里确实带 `is_superuser` / `is_active` / `is_verified`，但注册路由
-    调用 `user_manager.create(..., safe=True)`，而 `safe=True` 会走 `create_update_dict()`，
-    该方法显式排除这三个字段。本用例是这条链路的回归锁——框架升级若改掉这个行为，
-    这里必须失败。
+    `BaseUserCreate` 里带着这三个字段，但注册路由调用 `user_manager.create(..., safe=True)`，
+    而 `safe=True` 会走 `create_update_dict()`，该方法显式排除它们。
     """
     response = client.post(
         "/api/auth/register",
@@ -220,7 +209,7 @@ def test_register_cannot_self_promote_to_superuser(client):
 def test_login_failure_is_400_not_401(client):
     """登录失败 400（凭据问题），未登录访问 401（缺登录态）。
 
-    前端要靠这个区分「密码错了」和「会话过期了」，两者该给的提示完全不同。
+    前端靠这个区分「密码错了」和「会话过期了」。
     """
     email = unique_email()
     register(client, email)
@@ -236,11 +225,7 @@ def test_unknown_user_login_is_rejected(client):
 
 
 def test_login_requires_form_encoding(client):
-    """发 JSON 会得到 422，而不是「密码错误」。
-
-    这条用例把「登录用表单编码」这个约定钉住——否则前端很容易写成 JSON，
-    然后收到一个看不出原因的 422。
-    """
+    """发 JSON 会得到 422，而不是「密码错误」——登录契约是表单编码。"""
     email = unique_email()
     register(client, email)
 
@@ -257,11 +242,8 @@ def test_duplicate_registration_is_rejected(client):
 
 
 def test_register_rejects_short_password(client):
-    """密码下限的回归锁。
-
-    基类的 `validate_password` 是**空实现**（源码里只有一句「你应该重载这个方法」），
-    不覆盖就能用 1 个字符注册成功（已实测 201）。这里锁住覆盖行为：若框架升级后改了
-    默认行为、或有人误删了这个覆盖，本用例必须失败。
+    """密码下限的回归锁：基类的 `validate_password` 是**空实现**，不覆盖就能用 1 个
+    字符注册成功（已实测 201）。
     """
     response = client.post(
         "/api/auth/register",

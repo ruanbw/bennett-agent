@@ -1,7 +1,6 @@
 """进程内限流（C-3）。
 
-`/api/chat` 允许匿名调用，没有限流时任何能访问该端口的人都在消耗上游额度。
-默认监听地址已改回环，但那只挡住「不是本机的人」。
+`/api/chat` 消耗上游额度，没有限流时任何能访问该端口的人都在花配额。
 
 HTTP 层用例**不能真的打模型**：本机 `.env` 里配着真实网关，一旦走到生成路径就会
 真发一次请求（慢、花钱、结果不确定）。所以生成器与标题生成都被替换掉了。
@@ -67,7 +66,7 @@ def app_client(monkeypatch, rate_limit):
     必须以上下文管理器使用：sse-starlette 依赖 ASGI lifespan 初始化 `AppStatus`，
     否则 `EventSourceResponse` 的 ping 任务不会结束。
 
-    `/api/*` 现已要求登录，这里把 `current_active_user` 替换成固定用户。被替换的只是
+    `/api/*` 要求登录，这里把 `current_active_user` 替换成固定用户。被替换的只是
     **登录态判断**，路由与限流依赖仍会真实执行——这样限流用例挂掉时，原因只可能是限流。
     """
     monkeypatch.setattr(settings, "chat_rate_limit_per_minute", rate_limit)
@@ -105,11 +104,9 @@ def login_body():
 
 
 def register_body():
-    # 注册已改为邀请码制：邀请码取当前配置（conftest 给整个会话设了一个）
     return {
         "email": f"rl-{uuid.uuid4().hex[:10]}@example.com",
         "password": "hunter2hunter2",
-        "invite_code": settings.registration_invite_code,
     }
 
 
@@ -201,8 +198,8 @@ def test_eviction_prefers_expired_key_over_still_usable_key(monkeypatch):
 def test_lru_eviction_never_resets_a_banned_key():
     """max_keys 小时 churn 新 key 不能重置已封禁的键。
 
-    改动前 `_evict` 按「最近命中时间」挑最旧的键删。已封禁的键的命中停留在封禁那一刻，
-    恰好是最旧的，于是攻击者只要依次插入几个新 key 就能清掉自己的封禁。
+    已封禁的键命中停留在封禁那一刻，按「最近命中时间」淘汰它恰好最旧，于是依次插入
+    几个新 key 就能消掉自己的封禁。
     """
     limiter = SlidingWindowLimiter(limit=3, window_seconds=60, max_keys=2)
 
@@ -218,10 +215,7 @@ def test_lru_eviction_never_resets_a_banned_key():
 
 
 def test_zero_or_negative_limit_means_unlimited():
-    """与 settings 的「0=关闭」一致：limit <= 0 直接放行，而不是全拒绝。
-
-    改动前返回 (False, window_seconds)，把「关闭」实现成了「封死所有请求」。
-    """
+    """与 settings 的「0=关闭」一致：limit <= 0 直接放行，而不是全拒绝。"""
     limiter = SlidingWindowLimiter(limit=0, window_seconds=60)
     assert limiter.check("ip") == (True, 0.0)
 
@@ -261,8 +255,8 @@ def test_hit_exactly_on_window_boundary_is_expired(monkeypatch):
 def test_concurrent_checks_are_safe():
     """并发冒烟：多线程混跑下不抛异常、追踪表上限依然成立。
 
-    真实调用来自 asyncio 事件循环（check 是纯同步函数，单线程内天然原子），这里再加一层
-    线程压力，锁住「并发不会把追踪表撑爆、不会崩」。
+    真实调用来自 asyncio 事件循环（check 是纯同步函数，单线程内天然原子），这里再加
+    一层线程压力。
     """
     limiter = SlidingWindowLimiter(limit=5, window_seconds=60, max_keys=3)
     errors: list[BaseException] = []
@@ -351,7 +345,7 @@ def test_returns_429_with_retry_after(monkeypatch, fake_upstream):
 
     assert response.status_code == 429
     assert int(response.headers["Retry-After"]) >= 1
-    # 对话 429 同样要带标准配额头（与认证端点一致）；此前漏传 limit，客户端读不到配额
+    # 对话 429 同样要带标准配额头（与认证端点一致），否则客户端读不到配额
     assert response.headers["X-RateLimit-Limit"] == "2"
     assert response.headers["X-RateLimit-Remaining"] == "0"
     assert int(response.headers["X-RateLimit-Reset"]) >= 1
@@ -407,9 +401,8 @@ def test_models_endpoint_is_not_limited(monkeypatch):
 def test_chat_quota_is_per_account_not_per_ip(monkeypatch, fake_upstream):
     """对话配额按**账号**计，换 IP 换不来新配额。
 
-    改动前按 IP 计数，而前端同源代理（开发期 Vite、生产 Nginx）下后端看到的
-    `client.host` 永远是代理地址，配额会从「每 IP」退化成「全站」——一个人打满就
-    挡住所有人。本用例直接钉住新语义。
+    按 IP 计数在前端同源代理（开发期 Vite、生产 Nginx）下会退化成「全站」——后端看到的
+    `client.host` 永远是代理地址，一个人打满就挡住所有人。
     """
     monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
     with app_client(monkeypatch, rate_limit=1) as client:
@@ -432,10 +425,7 @@ def test_zero_disables_limiting(monkeypatch, fake_upstream):
 # 认证端点限流（按 IP）
 # ---------------------------------------------------------------------
 def test_login_brute_force_is_blocked(monkeypatch):
-    """密码暴力破解必须被挡住。
-
-    加上限流之前，认证端点**完全没有**限流——密码可以被无限次尝试。
-    """
+    """密码暴力破解必须被挡住：认证端点同样在成本路径上。"""
     with auth_client(monkeypatch, auth_rate_limit=3) as client:
         for _ in range(3):
             assert client.post("/api/auth/login", data=login_body()).status_code == 400
@@ -500,10 +490,7 @@ def test_auth_forged_xff_leftmost_does_not_create_a_bucket(monkeypatch):
 
 
 def test_logout_is_not_rate_limited(monkeypatch):
-    """登出不能被限流卡住。
-
-    给登出也加限流会造出一个糟糕的失败模式：用户被限流后连登出都做不了。
-    """
+    """登出不能被限流卡住：用户被限流后连登出都做不了。"""
     with auth_client(monkeypatch, auth_rate_limit=1) as client:
         # 先耗尽登录配额
         client.post("/api/auth/login", data=login_body())
@@ -522,8 +509,8 @@ def test_auth_limiting_can_be_disabled(monkeypatch):
 # ---------------------------------------------------------------------
 # 启动参数（main.py）
 # ---------------------------------------------------------------------
-#: 这几个用例只依赖 argparse 与 uvicorn 调用，和限流无关；放在本文件是因为本轮修复
-#: 只允许改动 tests/test_rate_limit.py，没有可用的 tests/test_main.py。
+#: 这几个用例只依赖 argparse 与 uvicorn 调用，和限流无关；没有单独的 test_main.py，
+#: 放在这里是因为本文件已持有启动参数相关用例。
 def stub_uvicorn_run(monkeypatch) -> list[dict]:
     """拦下 uvicorn.run，避免用例真的起服务；返回调用记录。"""
     import uvicorn

@@ -2,13 +2,16 @@
 
 覆盖的都是「接错线会静默失效」的契约：
 
-- 管理接口只有超级管理员能进（403），匿名 401；
+- 管理接口需要 `role >= admin`（普通用户 403），匿名 401；
 - API key 只返回掩码，更新时留空 = 不修改；
 - 禁用模型/提供商后，`/api/models` 与对话白名单**同时**生效；
 - 同步上游是 upsert，不会覆盖管理员调过的启用状态；
-- 封禁会立刻删掉会话（不是等 cookie 过期），且不能封自己/其他管理员。
+- 封禁会立刻删掉会话（不是等 cookie 过期），且不能封自己/同级或更高等级。
+
+角色相关的完整链路（升/降级、踢会话、最后一个超管的守卫）在 `tests/test_roles.py`。
 """
 
+import asyncio
 import socket
 import uuid
 
@@ -17,10 +20,11 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.db import create_db_and_tables
+from app.roles import Role
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.server import create_app
 from app.services import model_service
-from app.services.auth import promote_configured_superusers
+from tests.accounts import set_role_in_db
 
 PASSWORD = "hunter2hunter2"
 
@@ -36,11 +40,7 @@ def client():
 
 
 def register(client: TestClient, email: str) -> str:
-    # 注册已改为邀请码制：邀请码取当前配置（conftest 给整个会话设了一个）
-    response = client.post(
-        "/api/auth/register",
-        json={"email": email, "password": PASSWORD, "invite_code": settings.registration_invite_code},
-    )
+    response = client.post("/api/auth/register", json={"email": email, "password": PASSWORD})
     assert response.status_code == 201, response.text
     return response.json()["id"]
 
@@ -54,16 +54,18 @@ def login_expecting_failure(client: TestClient, email: str) -> int:
     return client.post("/api/auth/login", data={"username": email, "password": PASSWORD}).status_code
 
 
-def make_admin(client: TestClient, monkeypatch) -> str:
+def make_admin(client: TestClient, _monkeypatch=None) -> str:
+    """造一个已登录的 admin，返回 email。第二个参数已用不上，保留只为调用点签名一致。"""
     email = unique_email("admin")
-    monkeypatch.setattr(settings, "superuser_emails", email)
     register(client, email)
+    asyncio.run(set_role_in_db(email, Role.ADMIN))
     login(client, email)
     return email
 
 
-#: 提供商出站目标必须是公网地址（内网地址会被 `_fetch_remote_models` 拒绝）。用 IP
-#: 字面量而不是域名：守卫会解析主机名，用例不该依赖 DNS。
+#: 提供商出站目标的默认值。用 IP 字面量而不是域名：守卫会解析主机名，用例不该依赖
+#: DNS；用公网 IP 而不是环回/私网，因为那些地址在默认模式下本就放行，代表不了
+#: 「正常目标」。
 PROVIDER_BASE_URL = "http://93.184.216.34:9999/v1"
 
 
@@ -92,7 +94,8 @@ def create_model(client: TestClient, provider_id: str, *, model_id: str = "test-
 # ---------------------------------------------------------------------
 # 权限
 # ---------------------------------------------------------------------
-def test_admin_requires_superuser(client, monkeypatch):
+def test_admin_endpoints_require_admin_role(client, monkeypatch):
+    """匿名 401，登录但 role < admin 则 403。"""
     assert client.get("/api/admin/providers").status_code == 401
 
     email = unique_email()
@@ -103,29 +106,32 @@ def test_admin_requires_superuser(client, monkeypatch):
     assert client.get("/api/admin/users").status_code == 403
 
 
-def test_superuser_is_granted_by_configured_email(client, monkeypatch):
-    email = make_admin(client, monkeypatch)
+def test_admin_can_reach_the_console_once_its_role_is_set(client):
+    """写库后即生效：`/api/auth/me` 的 `role` / `is_superuser` 与库一致，且能真进后台。"""
+    email = make_admin(client)
 
     me = client.get("/api/auth/me")
     assert me.status_code == 200
-    assert me.json()["is_superuser"] is True
     assert me.json()["email"] == email
+    assert me.json()["role"] == "admin"
+    # is_superuser 是 role 的派生镜像（apply_role 保持同步），admin 即为 True
+    assert me.json()["is_superuser"] is True
+    assert client.get("/api/admin/providers").status_code == 200
 
 
-def test_startup_promotion_is_idempotent(monkeypatch):
-    import asyncio
+def test_startup_never_promotes_anyone(client):
+    """启动流程不得改任何人的角色：连续两次启动后，一个普通账号仍然是普通用户。"""
+    email = unique_email("never-admin")
+    register(client, email)
 
-    email = unique_email("late-admin")
-    with TestClient(create_app()) as client:
-        register(client, email)
+    # 再启动两次应用（lifespan 每次都跑一遍）
+    for _ in range(2):
+        with TestClient(create_app()):
+            pass
 
-    monkeypatch.setattr(settings, "superuser_emails", email)
-    assert asyncio.run(promote_configured_superusers()) == 1
-    assert asyncio.run(promote_configured_superusers()) == 0
-
-    with TestClient(create_app()) as client:
-        login(client, email)
-        assert client.get("/api/admin/providers").status_code == 200
+    login(client, email)
+    assert client.get("/api/auth/me").json()["role"] == "user"
+    assert client.get("/api/admin/providers").status_code == 403
 
 
 # ---------------------------------------------------------------------
@@ -402,11 +408,6 @@ def test_clearing_the_api_key_while_changing_base_url_leaves_nothing_to_leak(cli
 # ---------------------------------------------------------------------
 # 出站目标地址检查（API Key 不能送到元数据服务／任意主机）
 # ---------------------------------------------------------------------
-#: 提供商出站目标默认用 IP 字面量而不是域名：守卫会解析主机名，用例不该依赖 DNS。
-#: 用公网 IP，因为默认模式下环回/私网也是放行的，不该靠它们来代表「正常目标」。
-PROVIDER_BASE_URL = "http://93.184.216.34:9999/v1"
-
-
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -527,20 +528,28 @@ def test_ban_kills_existing_session_and_blocks_login(client, monkeypatch):
     login(client, victim_email)
 
 
-def test_cannot_ban_self_or_another_superuser(client, monkeypatch):
-    admin_email = make_admin(client, monkeypatch)
+def test_cannot_ban_self_or_a_higher_role(client, monkeypatch):
+    make_admin(client)
     admin_id = client.get("/api/auth/me").json()["id"]
 
     self_ban = client.post(f"/api/admin/users/{admin_id}/ban")
     assert self_ban.status_code == 400
     assert "当前登录" in self_ban.json()["detail"]
 
-    other_email = unique_email("admin2")
-    monkeypatch.setattr(settings, "superuser_emails", f"{admin_email},{other_email}")
-    other_id = register(client, other_email)
-    other_ban = client.post(f"/api/admin/users/{other_id}/ban")
-    assert other_ban.status_code == 400
-    assert "超级管理员" in other_ban.json()["detail"]
+    # 同级与更高等级都封不了：admin 动不了另一个 admin，也动不了 superadmin
+    peer_email = unique_email("admin2")
+    peer_id = register(client, peer_email)
+    asyncio.run(set_role_in_db(peer_email, Role.ADMIN))
+    peer_ban = client.post(f"/api/admin/users/{peer_id}/ban")
+    assert peer_ban.status_code == 400
+    assert "同级" in peer_ban.json()["detail"]
+
+    root_email = unique_email("root")
+    root_id = register(client, root_email)
+    asyncio.run(set_role_in_db(root_email, Role.SUPERADMIN))
+    root_ban = client.post(f"/api/admin/users/{root_id}/ban")
+    assert root_ban.status_code == 400
+    assert "超级管理员" in root_ban.json()["detail"]
 
 
 def test_user_list_supports_search_and_pagination(client, monkeypatch):

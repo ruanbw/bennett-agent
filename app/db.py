@@ -45,12 +45,14 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     event,
+    text,
 )
 from sqlalchemy import Uuid as SQLUuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.config import settings
+from app.roles import ALL_ROLES, ROLE_SUPERADMIN, ROLE_USER, Role
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +64,32 @@ class Base(DeclarativeBase):
 class User(SQLAlchemyBaseUserTableUUID, Base):
     """用户表。
 
-    字段由 fastapi-users 定义：`id`(UUID) / `email` / `hashed_password` /
-    `is_active` / `is_superuser` / `is_verified`。
+    fastapi-users 定义的部分：`id`(UUID) / `email` / `hashed_password` /
+    `is_active` / `is_superuser` / `is_verified`。本项目自己加的：`role`。
 
     - `is_active=False` 是**封禁**：认证依赖要求 active=True，且封禁接口会同时删除
       该用户的全部会话行，因此在途请求与刷新都会立即生效。
-    - `is_superuser=True` 是**管理后台**的入口。没有任何接口能把自己提升为管理员，
-      只能由部署者通过 `SUPERUSER_EMAILS` 环境变量指定。
+    - `role` 是**唯一的权限判据**（见 `app/roles.py`）。账号的来源只有两个：
+      播种脚本建出的超管，或公开注册出来的普通用户；**角色只能由管理后台授予**，
+      服务里没有任何「注册即管理员」的路径。
+    - `is_superuser` 是 `role` 的**派生镜像**（`role >= admin`），由 `apply_role()`
+      单点写入。保留它只是因为 fastapi-users 的基表强制带这一列，**鉴权绝不读它**——
+      否则同一个问题会有两个答案，而它们迟早不一致。
     """
+
+    #: 存储成小写字符串而不是 Enum：SQLite 里是 TEXT，加档位不用改表结构
+    #: （本项目没有 Alembic）。取值与等级见 `app/roles.py`。
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=ROLE_USER,
+        server_default=ROLE_USER,
+    )
+
+    @property
+    def role_level(self) -> Role:
+        """解析后的角色等级。非法值时降级为 USER（见 `Role.parse`）。"""
+        return Role.parse(self.role)
 
 
 class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
@@ -83,9 +103,8 @@ class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
 class ModelProvider(Base):
     """模型提供商：一个可独立寻址的 OpenAI 兼容端点。
 
-    `base_url` / `api_key` 是**运行时**凭据，不再只来自环境变量：管理后台可以接入
-    多个提供商（本机 LiteLLM 网关、官方 API、自建 vLLM……），每个提供商用自己的
-    凭据与模型清单。
+    `base_url` / `api_key` 是**运行时**凭据：管理后台可以接入多个提供商（本机 LiteLLM
+    网关、官方 API、自建 vLLM……），每个提供商用自己的凭据与模型清单。
 
     `slug` 是生成一次、之后不随改名变化的稳定标识——它参与对外模型路由键
     (`{slug}/{model_id}`)，改名不能把用户已保存的模型选择悄悄改掉。
@@ -232,18 +251,65 @@ if engine.dialect.name == "sqlite":
         cursor.close()
 
 
+async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnection
+    """给已存在的 `user` 表补上 `role` 列并回填历史数据（幂等）。
+
+    **为什么需要手写**：`create_all` 只创建缺失的**表**，对已存在的表一个字节都不
+    改。而 `bennett.db` 里已经有账号了，不加这一步，升级后每次查询都会撞上
+    `no such column: user.role`——表现为「整个站点 500」。
+
+    三步，全部可重复执行：
+
+    1. 列不存在 → `ALTER TABLE user ADD COLUMN role`（SQLite 允许带 DEFAULT 的 NOT NULL
+       加列，已有行自动取默认值 `'user'`）；
+    2. 回填：历史 `is_superuser=1` 的账号升级为 `superadmin`，否则老管理员的入口会
+       在升级瞬间消失，而服务里**没有任何自助恢复路径**；
+    3. 规范化：把手工改库写进去的非法值收敛到 `'user'`，避免它们一路飘到鉴权层。
+    """
+    columns = {row[1] for row in (await conn.execute(text("PRAGMA table_info(user)"))).fetchall()}
+    if not columns:
+        # 表还不存在（全新库且 create_all 尚未建出）——create_all 会带上 role，无需处理
+        return
+
+    if "role" not in columns:
+        await conn.execute(
+            text(f"ALTER TABLE user ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT '{ROLE_USER}'")
+        )
+        logger.info("已为 user 表添加 role 列（默认 %s）", ROLE_USER)
+
+    backfilled = await conn.execute(
+        text("UPDATE user SET role = :admin WHERE is_superuser = 1 AND role = :user").bindparams(
+            admin=ROLE_SUPERADMIN, user=ROLE_USER
+        )
+    )
+    if backfilled.rowcount:
+        logger.info("已把 %d 个历史超级管理员回填为 role=%s", backfilled.rowcount, ROLE_SUPERADMIN)
+
+    # 规范化非法值：占位符显式展开，不拼字符串（role 值来自本模块常量，非常不可信输入，
+    # 但仍不把变量名拼进 SQL）。
+    placeholders = ", ".join(f":r{index}" for index in range(len(ALL_ROLES)))
+    params: dict[str, str] = {f"r{index}": value for index, value in enumerate(ALL_ROLES)}
+    params["user"] = ROLE_USER
+    normalized = await conn.execute(
+        text(f"UPDATE user SET role = :user WHERE role NOT IN ({placeholders})").bindparams(**params)
+    )
+    if normalized.rowcount:
+        logger.warning("已把 %d 个非法 role 值规范化为 %s", normalized.rowcount, ROLE_USER)
+
+
 async def create_db_and_tables() -> None:
-    """启动时建表。
+    """启动时建表 + 补齐列（幂等）。
 
     新增的 `model_provider` / `provider_model` 两张表由 `create_all` 自动创建；
     已有表（user / access_token）不会被动到。
 
-    **没有引入 Alembic**：当前还没有「改已有列」的迁移需求，多一套工具链不划算。
-    注意 `create_all` 只创建缺失的表，**不会修改已存在的表结构**；一旦需要给现有
-    表加列，应改用 Alembic，而不是指望这里生效。
+    **没有引入 Alembic**：迁移需求目前只有「给 user 表加 role 列」这一处，为它引入
+    一整套工具链不划算。代价是新增的列改动必须在 `_migrate_user_role_column` 里手写
+    并保持幂等。**再出现第二处加列时应该换成 Alembic**，而不是继续往这里堆。
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_user_role_column(conn)
 
     logger.info("数据库就绪: %s", DATABASE_URL)
 
