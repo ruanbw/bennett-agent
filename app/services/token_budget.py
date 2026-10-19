@@ -17,8 +17,17 @@
 上游没报 `context_window` 时**不做判定**（返回 `None`，放行）：与
 `model_service.get_known_model_ids` 的取舍一致——拿不到数据时宁可放行，
 也不要拿一个编出来的窗口去拦用户的请求。
+
+## 长文本不阻塞事件循环
+
+`resolve_context_budget` 是每个 `/api/chat` 请求的必经路径，而单进程服务里一次
+几百毫秒的同步计算会挡住所有在飞的 SSE（估算的代价随文本长度线性增长，见
+`estimate_tokens`）。所以按量分流：待估算的字符总数超过
+`THREAD_ESTIMATE_CHARS_THRESHOLD` 时把估算放进 `asyncio.to_thread`，低于阈值走
+同步快路径——小请求不值得付线程调度的钱。
 """
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -45,6 +54,16 @@ TOOL_SCHEMA_OVERHEAD_TOKENS = 512
 #: 对中日韩文字接近 1 字符/token —— 两者分开算，而不是整段一律按 4 字符折算
 #: （那会把中文用量低估到四分之一，正是需要拦住的场景）。
 ASCII_CHARS_PER_TOKEN = 4
+
+#: 单次估算的字符数阈值：超过它就把估算挪进线程。
+#:
+#: 50_000 字符在中英混排口径下约 50~65ms 的逐字符循环（本机实测），已经超过一个
+#: SSE 事件间隔的量级；40 万字符则是 300~500ms，足够让同进程内其它对话明显卡顿。
+#: 阈值不能取太小：`asyncio.to_thread` 每次都要走一次线程池调度（任务提交 + 唤醒），
+#: 对几千字符的常规请求反而是净损失，而这类请求在 C 层快路径上只需微秒。
+#: 纯 ASCII 文本即使超过阈值也不会变慢（`estimate_tokens` 的 `isascii()` 快路径），
+#: 多付的只是一次线程往返——比误让百毫秒级循环占住循环更划算。
+THREAD_ESTIMATE_CHARS_THRESHOLD = 50_000
 
 
 def _is_wide_char(char: str) -> bool:
@@ -84,15 +103,19 @@ def estimate_tokens(text: str) -> int:
 
     没有为后者引入更快的手段：`str.translate` 预建表要一次性构造十七万条目的
     dict（约十几 MB 常驻），预编译正则也仍在百毫秒级，两者都不改变「非纯 ASCII 文本
-    代价随长度线性增长」这件事；numpy 之类的新依赖对这里更是过剩。真出现长中文历史
-    卡住事件循环，应当先做增量估算（只算新增消息），而不是继续抠单次循环常数。
+    代价随长度线性增长」这件事；numpy 之类的新依赖对这里更是过剩。
+
+    既然单次循环无法再压，就把「别卡住事件循环」的责任放在调用方：
+    `resolve_context_budget` 在字符总量超过 `THREAD_ESTIMATE_CHARS_THRESHOLD` 时
+    用 `asyncio.to_thread` 调用估算，本函数本身仍是同步的纯计算。
     """
     if not text:
         return 0
 
     # 纯 ASCII 时全是窄字符，口径就是 4 字符/token：交给 C 层的 isascii() 判一次，
     # 不必逐字符走 Python 循环。无锚点时每轮都要对整份历史跑一遍（网关流式不回
-    # usage 就没有锚点），40 万字符的循环是百毫秒级，会挡住同一进程内其它 SSE。
+    # usage 就没有锚点），40 万字符的逐字符循环是百毫秒级，会挡住同一进程内其它
+    # SSE——这正是 `resolve_context_budget` 把大输入挪进线程的原因。
     if text.isascii():
         return -(-len(text) // ASCII_CHARS_PER_TOKEN)
 
@@ -112,6 +135,9 @@ def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
 
     `thinking` 也计入：`convert_chat_history` 会把它重建成 `ThinkingPart` 一并发给
     上游，因此它同样占窗口。前端当前不回放思考链，但后端不能依赖这一点。
+
+    同步函数：异步调用方不要直接调它，走 `_estimate_messages_tokens_off_loop`，
+    那才是按量决定要不要让出事件循环的入口。
     """
     total = 0
     for message in messages:
@@ -251,6 +277,27 @@ def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> 
     return anchor
 
 
+def _history_chars(messages: Sequence[ChatMessage]) -> int:
+    """待估算历史里 `content + thinking` 的字符总数。
+
+    只求 `len` 而不做任何逐字符判定，所以它自己在多大输入下都是微秒级——用它来
+    判断「估算值不值得挪进线程」不会把省下的时间又花掉。
+    """
+    return sum(len(message.content) + len(message.thinking or "") for message in messages)
+
+
+async def _estimate_messages_tokens_off_loop(messages: list[ChatMessage]) -> int:
+    """按字符量决定：同步估算，还是放进线程后 await。
+
+    两种路径的返回值必须逐位相同（同一个函数，只是调度方式不同），否则「历史长短」
+    会悄悄影响预算判定。锚点路径传入的是 `messages[index:]` 切片，阈值因此按「这次
+    真正要估算的那段」算，而不是整份历史。
+    """
+    if _history_chars(messages) > THREAD_ESTIMATE_CHARS_THRESHOLD:
+        return await asyncio.to_thread(estimate_messages_tokens, messages)
+    return estimate_messages_tokens(messages)
+
+
 async def resolve_context_budget(
     model_name: str,
     messages: list[ChatMessage],
@@ -273,6 +320,10 @@ async def resolve_context_budget(
       也没被估算。这个 used 就是真实 prompt 的规模，**不再**扣固定开销。
     - `estimate`：从零估算的 messages 用量，**不含**固定开销，由 `build_budget` 从
       可用空间里扣掉。
+
+    两条路径的估算都经过 `_estimate_messages_tokens_off_loop`：长历史的逐字符循环
+    不能让本请求之外的 SSE 陪着等。系统提示词那部分固定开销保持同步——它是常量级
+    文本，量级与一个请求参数的线程往返相当，挪走没有收益。
     """
     if settings.context_guard_mode == "off":
         return None
@@ -289,11 +340,11 @@ async def resolve_context_budget(
     anchor = usable_anchor(messages, anchor)
     if anchor is not None:
         # 从锚点那条（assistant）起算：锚点值是产生它的那次请求的 prompt，不含它自己。
-        used_tokens = anchor.context_tokens + estimate_messages_tokens(messages[anchor.message_index :])
+        used_tokens = anchor.context_tokens + await _estimate_messages_tokens_off_loop(messages[anchor.message_index :])
         used_tokens_include_overhead = True
         basis: Literal["estimate", "anchor"] = "anchor"
     else:
-        used_tokens = estimate_messages_tokens(messages)
+        used_tokens = await _estimate_messages_tokens_off_loop(messages)
         used_tokens_include_overhead = False
         basis = "estimate"
 
@@ -348,6 +399,7 @@ def overflow_message(budget: ContextBudget) -> str:
 __all__ = [
     "ContextBudget",
     "MESSAGE_OVERHEAD_TOKENS",
+    "THREAD_ESTIMATE_CHARS_THRESHOLD",
     "TOOL_SCHEMA_OVERHEAD_TOKENS",
     "build_budget",
     "estimate_messages_tokens",
@@ -390,3 +442,39 @@ def _safe_str(value: object) -> str:
         return str(value)
     except Exception:  # noqa: BLE001 - 估算是尽力而为
         return ""
+
+
+async def estimate_agent_messages_tokens_async(messages: Sequence[ModelMessage]) -> int:
+    """`estimate_agent_messages_tokens` 的异步包装：长历史估算不让出线程就卡住循环。
+
+    用途：CLI 的预算计算（`main._budget_for_cli`）目前是同步函数，所以本包装**暂无
+    调用方**；它留给 CLI 那次调用改到事件循环内时接线，届时 Web/CLI 两条路径就都
+    不会再在事件循环上跑百毫秒级的逐字符循环。
+
+    为什么要带阈值：CLI 的历史同样可能是几万 token 的会话，但绝大多数时候只有几千
+    字符——全部走线程等于给小请求白付一次线程调度。阈值与 Web 路径共用同一个常量，
+    两条路径的分流点因此不会漂移。
+
+    结果与同步函数逐位一致（同一个实现，只是调度方式不同）。
+    """
+    if _agent_messages_chars(messages) > THREAD_ESTIMATE_CHARS_THRESHOLD:
+        return await asyncio.to_thread(estimate_agent_messages_tokens, messages)
+    return estimate_agent_messages_tokens(messages)
+
+
+def _agent_messages_chars(messages: Sequence[ModelMessage]) -> int:
+    """pydantic-ai 消息里字符串部件（正文、思考链、工具参数）的总字符数。
+
+    与 `estimate_agent_messages_tokens` 扫的是同一批字段：阈值判定必须量的是
+    马上要算的东西，统计口径不一致时会出现「量小走同步、实际却很慢」的漏网。
+    """
+    total = 0
+    for message in messages:
+        for part in getattr(message, "parts", ()):
+            content = getattr(part, "content", None)
+            if isinstance(content, str):
+                total += len(content)
+            args = getattr(part, "args", None)
+            if args is not None:
+                total += len(args) if isinstance(args, str) else len(_safe_str(args))
+    return total
