@@ -38,6 +38,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
@@ -349,7 +350,25 @@ async def _enabled_rows(session) -> list[tuple[ProviderModel, ModelProvider]]:  
     return [(row[0], row[1]) for row in rows]
 
 
-def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelTarget:
+async def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelTarget:
+    """组装一次调用的目标，并在**所有出站之前**校验地址。
+
+    为什么把守卫放在这里：这是唯一构造带 `base_url` 的 `ModelTarget` 的地方
+    （`resolve_model_target` 主模型与备用模型都走它），也就卡住了 `build_provider`
+    的出站。放在 CRUD 层不够——库里可能有守卫上线前就存在的行，或者写入时
+    严格模式还是关的。
+
+    校验失败会抛 `ProviderFetchError` 而不是返回 None：`None` 的语义是「模型不存在」，
+    会变成用户侧的「模型已停用或不存在，请刷新模型列表」——而真实原因是服务端配置
+    违规，让用户去刷一个本来正常的列表只会误导。错误分类见
+    `app/services/chat_service.py` 的预检兜底（会归为 internal_error 并附关联 ID）。
+
+    代价：每个对话请求多一次地址判断。字面量 IP（自建 vLLM、`127.0.0.1`）是纯计算；
+    域名要走 `getaddrinfo`（已放进线程），相对上游几秒的等待可以忽略。这里**不缓存**
+    结果：缓存会把「先解析公网、后重绑内网」的窗口从单次请求拉到整个进程生命周期，
+    等于用一点延迟换掉 DNS rebinding 的防线。
+    """
+    await _reject_private_target(provider.base_url)
     return ModelTarget(
         key=make_model_key(provider.slug, model.model_id),
         upstream_model=model.model_id,
@@ -428,7 +447,12 @@ async def create_provider(
     api_key: str | None = None,
     enabled: bool = True,
 ) -> ModelProvider:
-    """新建提供商。slug 由名称生成并保证唯一。"""
+    """新建提供商。slug 由名称生成并保证唯一。
+
+    地址在这里就校验（而非等到第一次「测试连接」）：管理员填错内网/元数据地址时
+    应当当场看到 400 与原因，而不是存进去之后某次对话才静默失败。
+    """
+    await _reject_private_target(base_url.strip())
     async with async_session_maker() as session:
         provider = ModelProvider(
             name=name.strip(),
@@ -442,7 +466,10 @@ async def create_provider(
         await _mark_registry_initialized(session)
         await session.commit()
         loaded = await _load_provider(session, provider.id)
-        assert loaded is not None
+        if loaded is None:
+            # 理论上不可能（刚提交完），但用 `assert` 的话 `python -O` 会把它删掉，
+            # 返回 None 而类型标注仍写着 ModelProvider，错误点被推到调用方。
+            raise ProviderFetchError("创建提供商后无法重新读取，请重试")
         return loaded
 
 
@@ -463,18 +490,37 @@ async def update_provider(
         if name is not _UNSET:
             provider.name = str(name).strip()
         if base_url is not _UNSET:
-            provider.base_url = str(base_url).strip().rstrip("/")
+            # 只校验变化过的新地址：不动地址的保存不该因为旧行违规而失败（那种行由
+            # `_build_target` 在真正出站时拦住）。
+            next_base_url = str(base_url).strip().rstrip("/")
+            if next_base_url != provider.base_url:
+                await _reject_private_target(next_base_url)
+            provider.base_url = next_base_url
         if api_key is not _UNSET:
-            provider.api_key = str(api_key) if api_key else None
+            # `str(None)` 会写出字符串 "None" 并被当成真实 key 发给上游。
+            provider.api_key = (str(api_key).strip() or None) if api_key else None
         if enabled is not _UNSET:
             provider.enabled = bool(enabled)
 
+        # 任何后台写操作都算「后台已接管」：只靠 create / seed 写标记的话，
+        # 标记功能上线前就已配置的库（只有 provider 行、没有 marker）在删光提供商后
+        # 重启会被环境变量重新引导出一条「默认网关」，与 settings 的承诺相反。
+        await _mark_registry_initialized(session)
         await session.commit()
         return await _load_provider(session, provider_id)
 
 
 async def delete_provider(provider_id: uuid.UUID) -> bool:
-    """删除提供商及其全部模型。"""
+    """删除提供商及其全部模型。
+
+    同样写入 registry 标记：删光提供商是**管理员的明确意图**，不代表「回到出厂状态」。
+    不写标记的话，旧库（只有 provider 行、没有 marker）删完重启会被
+    `seed_default_provider` 用 `LITELLM_API_BASE` 重建一条默认网关，用户视角是
+    「我删干净了，重启后模型又回来了」。
+
+    需要暂时停用某个提供商请用 `enabled=False`，而不是删除——这一点与
+    `settings.bootstrap_provider_from_env` 的说明一致。
+    """
     async with async_session_maker() as session:
         provider = await session.get(ModelProvider, provider_id)
         if provider is None:
@@ -482,6 +528,7 @@ async def delete_provider(provider_id: uuid.UUID) -> bool:
         # 显式删子表：SQLite 的 FK 级联依赖连接级 PRAGMA，这里不把数据完整性压在它上面
         await session.execute(delete(ProviderModel).where(ProviderModel.provider_id == provider_id))
         await session.delete(provider)
+        await _mark_registry_initialized(session)
         await session.commit()
         return True
 
@@ -628,8 +675,17 @@ def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
 async def _reject_private_target(base_url: str) -> None:
     """出站前检查目标地址，命中则抛 `ProviderFetchError`。
 
-    后台配置的提供商共用这一条出站路径（「测试连接」与「同步模型」），而请求里带着
-    库里存的明文 API Key，因此地址本身也要管：
+    调用点有三处，覆盖全部出站路径（之前只在前两处）：
+
+    - `create_provider` / `update_provider`：管理员写入时就拒，当场看到 400 与原因，
+      而不是等到下一次「测试连接」才发现；
+    - `_fetch_remote_models`：「测试连接」与「同步模型」，这两个请求里带明文 API Key；
+    - `_build_target`：真正跑对话的出站（`agent_factory.build_provider` 用它构造
+      `AsyncOpenAI`）。这一处是必须的——之前只检查了前两处，于是把
+      `provider_block_private_targets` 打开后，管理员只要「建提供商 → 建模型 → 发一条
+      对话」就能绕过，配置项名不副实。
+
+    两种拒绝强度：
 
     - 元数据族（链路本地 / 未指定 / 组播）**永远拒绝**——盲 SSRF 打元数据服务是
       这条路径上唯一「不需要先拿到凭据」就能换到新凭据的攻击；
@@ -640,6 +696,10 @@ async def _reject_private_target(base_url: str) -> None:
     主机名交给 `getaddrinfo` 解析而不是只认字面量：十进制写法（`http://2130706433/`）
     在解析层等价于 127.0.0.1，只看字面量会漏。解析是阻塞调用，放进线程执行。
     解析失败（域名不存在等）不是内网信号，这里不拒绝——交给后面的连接错误去报。
+
+    已知边界：解析与连接是两次独立的 DNS 查询，中间域名可以变（TOCTOU）。这里不做
+    钉 IP 连接，因为那需要绕过 httpx 的 URL 解析、把 TLS SNI 自己接回来，代价远大于
+    收益——能利用它必须先控制管理员填写的域名。
     """
     host = urlsplit(base_url).hostname
     if not host:
@@ -734,6 +794,19 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
 
     已存在模型的 `enabled` / `is_default` 保持不变；展示名与能力元数据会被上游刷新。
     上游不再返回的模型**不删除**：那可能只是临时不完整，管理员可以手动停用。
+
+    ## 两个曾经会变成 500 的输入
+
+    1. **上游响应里同一个 id 出现两次**（网关聚合多个上游时常见）。之前的实现
+       每次 `existing.get(item.id)` 落空就 `session.add`，第二条重复行提交时撞
+       `uq_provider_model`（`app/db.py`）→ `IntegrityError` → 未捕获 → 500，
+       而且整次同步（包括本来有效的新增）随事务回滚一起丢弃。
+    2. **两个管理员并发点「同步」**。两个 session 各自读到空快照，各自插入同一个
+       `(provider_id, model_id)`，同样撞约束。这种竞态没法靠「读之前再查一次」解决，
+       只能把唯一约束当作权威、把冲突翻译成可读的重试提示。
+
+    所以循环里维护快照（新建的行也塞回 `existing`，重复 id 直接跳过），并在提交处
+    捕获 `IntegrityError`。
     """
     provider = await get_provider(provider_id)
     if provider is None:
@@ -746,10 +819,20 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
             (await session.scalars(select(ProviderModel).where(ProviderModel.provider_id == provider_id))).all()
         )
         existing = {row.model_id: row for row in existing_rows}
+        #: 本轮已经处理过的 id。上游重复返回同一个 id 时，第二次直接跳过：
+        #: 既不能重复 add（撞唯一约束），也不该把它当成「更新」（两次内容一样，
+        #: 报成更新会让「新增/更新」计数失真）。
+        seen: set[str] = set()
         created = 0
         updated = 0
+        duplicated = 0
 
         for item in remote:
+            if item.id in seen:
+                duplicated += 1
+                continue
+            seen.add(item.id)
+
             row = existing.get(item.id)
             if row is None:
                 session.add(
@@ -776,7 +859,17 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
             row.max_output_tokens = item.max_output_tokens
             updated += 1
 
-        await session.commit()
+        if duplicated:
+            logger.warning("上游模型列表里有 %d 个重复 id，已跳过（provider=%s）", duplicated, provider.name)
+
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            # 并发同步：另一个请求抢先插入了同一 (provider_id, model_id)。
+            # 把约束冲突翻译成可重试的提示，而不是让 500 消失得无影无踪。
+            await session.rollback()
+            logger.warning("同步提供商模型撞唯一约束（可能是并发同步）: provider=%s", provider.name)
+            raise ProviderFetchError("同步与另一次同步冲突，请稍后重试") from exc
 
     logger.info(
         "同步提供商模型 (provider=%s): 上游=%d 新增=%d 更新=%d",
@@ -863,14 +956,14 @@ async def resolve_model_target(key: str) -> ModelTarget | None:
     if match is None:
         return None
 
-    target = _build_target(*match)
+    target = await _build_target(*match)
     fallback_name = (settings.fallback_model_name or "").strip()
     if not fallback_name or fallback_name == target.upstream_model:
         return target
 
     for model, provider in rows:
         if provider.id == match[1].id and model.model_id == fallback_name:
-            return replace(target, fallback=_build_target(model, provider))
+            return replace(target, fallback=await _build_target(model, provider))
 
     return target
 

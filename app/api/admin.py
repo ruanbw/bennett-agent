@@ -118,12 +118,17 @@ async def list_providers():
     summary="新增模型提供商",
 )
 async def create_provider(payload: ProviderCreate):
-    provider = await model_service.create_provider(
-        name=payload.name,
-        base_url=payload.base_url,
-        api_key=payload.api_key,
-        enabled=payload.enabled,
-    )
+    try:
+        provider = await model_service.create_provider(
+            name=payload.name,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            enabled=payload.enabled,
+        )
+    except ProviderFetchError as exc:
+        # 地址不合法是**输入问题**（400），不是上游故障（502）：管理员改一下地址就能
+        # 通过，用 502 会让他以为网关挂了。与 test/sync 的 502 刻意不同。
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return _provider_read(provider)
 
 
@@ -143,7 +148,11 @@ async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
     if "base_url" in fields and fields["base_url"] != provider.base_url and "api_key" not in fields:
         raise HTTPException(status_code=400, detail="更换 Base URL 时必须重新填写 API Key")
 
-    provider = await model_service.update_provider(provider_id, **fields)
+    try:
+        provider = await model_service.update_provider(provider_id, **fields)
+    except ProviderFetchError as exc:
+        # 与 create 一致：地址不合法是输入问题（400），不是上游故障
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     if provider is None:
         raise HTTPException(status_code=404, detail="提供商不存在")
     return _provider_read(provider)
@@ -325,9 +334,7 @@ async def ban_user(
     if target.role_level >= admin.role_level:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "不能封禁超级管理员" if target.role_level >= Role.SUPERADMIN else "不能封禁同级管理员"
-            ),
+            detail=("不能封禁超级管理员" if target.role_level >= Role.SUPERADMIN else "不能封禁同级管理员"),
         )
 
     target.is_active = False
@@ -340,11 +347,25 @@ async def ban_user(
 @router.post("/users/{user_id}/unban", response_model=UserAdminRead, summary="解封用户")
 async def unban_user(
     user_id: uuid.UUID,
+    admin: User = Depends(current_admin),  # noqa: B008
     session: AsyncSession = Depends(get_async_session),  # noqa: B008
 ):
+    """解封用户。
+
+    等级校验与 `ban_user` **完全对称**（不能解封同级或更高级）。不对称的后果比它
+    看起来严重：超管封了一个 admin，随后**任意另一个 admin** 都能把他放回来——
+    `ban_user` 想建立的「同级互封不行、收回管理员身份只能走降级」就不成立了。
+
+    解封不删会话（对方本来就被封着，没有有效会话），所以不需要 `delete_user_access_tokens`。
+    """
     target = await session.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if target.role_level >= admin.role_level:
+        raise HTTPException(
+            status_code=400,
+            detail=("不能解封超级管理员" if target.role_level >= Role.SUPERADMIN else "不能解封同级管理员"),
+        )
 
     target.is_active = True
     await session.commit()

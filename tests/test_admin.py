@@ -473,21 +473,51 @@ async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
     await model_service._reject_private_target("https://provider.invalid/v1")
 
 
-def test_metadata_target_never_gets_the_stored_key(client, monkeypatch):
-    """端到端：库里存着明文 key，但目标是元数据地址时「测试连接/同步」不发出请求。"""
+def test_metadata_target_is_refused_at_creation(client, monkeypatch):
+    """写入时就拒：管理员当场看到 400 与原因，而不是存进去等某次对话才静默失败。"""
     make_admin(client, monkeypatch)
-    provider = create_provider(
-        client, base_url="http://169.254.169.254/latest/meta-data", api_key="sk-super-secret-value"
+
+    response = client.post(
+        "/api/admin/providers",
+        json={"name": "元数据服务", "base_url": "http://169.254.169.254/latest/meta-data", "api_key": "sk-x"},
     )
 
-    result = client.post(f"/api/admin/providers/{provider['id']}/test")
+    assert response.status_code == 400
+    assert "链路本地" in response.json()["detail"]
+
+
+def test_metadata_target_never_gets_the_stored_key(client, monkeypatch):
+    """端到端：库里已经存着明文 key（守卫上线前写入的历史行），也不发出请求。
+
+    写入路径现在会拒（见上一个用例），但库里可能有守卫上线前就存在的行，或者写入时
+    严格模式还是关的。这条锁的是「即使真进了库，`test` / `sync` 也不会把 key 送出去」。
+    """
+    make_admin(client, monkeypatch)
+    provider_id = asyncio.run(
+        _insert_provider_directly(
+            name="历史遗留", base_url="http://169.254.169.254/latest/meta-data", api_key="sk-super-secret-value"
+        )
+    )
+
+    result = client.post(f"/api/admin/providers/{provider_id}/test")
     assert result.status_code == 200
     assert result.json()["ok"] is False
     assert "链路本地" in result.json()["error"]
 
-    sync = client.post(f"/api/admin/providers/{provider['id']}/sync")
+    sync = client.post(f"/api/admin/providers/{provider_id}/sync")
     assert sync.status_code == 502
     assert "链路本地" in sync.json()["detail"]
+
+
+async def _insert_provider_directly(*, name: str, base_url: str, api_key: str) -> str:
+    """绕过 API 与守卫，直接写一行提供商——模拟守卫上线前就已存在的配置。"""
+    from app.db import ModelProvider, async_session_maker
+
+    async with async_session_maker() as session:
+        provider = ModelProvider(name=name, slug=f"legacy-{uuid.uuid4().hex[:8]}", base_url=base_url, api_key=api_key)
+        session.add(provider)
+        await session.commit()
+        return str(provider.id)
 
 
 def test_public_target_reaches_the_provider(client, monkeypatch):
@@ -552,6 +582,54 @@ def test_cannot_ban_self_or_a_higher_role(client, monkeypatch):
     assert "超级管理员" in root_ban.json()["detail"]
 
 
+def test_cannot_unban_a_peer_or_higher_role(client, monkeypatch):
+    """解封与封禁**等级对称**。
+
+    不对称的后果：超管封了一个 admin，随后**任意另一个 admin** 都能把他放回来——
+    `ban_user` 想建立的「同级互封不行、收回管理员身份只能走降级」就不成立了。
+    """
+    # 造一个超管（用来封 admin）与一个普通 admin（用来试越权解封）
+    root_email = unique_email("root")
+    register(client, root_email)
+    asyncio.run(set_role_in_db(root_email, Role.SUPERADMIN))
+
+    actor_email = unique_email("actor")
+    register(client, actor_email)
+    asyncio.run(set_role_in_db(actor_email, Role.ADMIN))
+
+    # 目标：另一个 admin，已被超管封禁
+    target_email = unique_email("target")
+    target_id = register(client, target_email)
+    asyncio.run(set_role_in_db(target_email, Role.ADMIN))
+
+    with TestClient(create_app()) as root_client:
+        login(root_client, root_email)
+        banned = root_client.post(f"/api/admin/users/{target_id}/ban")
+        assert banned.status_code == 200, banned.text
+        assert banned.json()["is_active"] is False
+
+    with TestClient(create_app()) as actor_client:
+        login(actor_client, actor_email)
+
+        # admin 解封同级 admin：拒绝（这一步以前会成功）
+        peer_unban = actor_client.post(f"/api/admin/users/{target_id}/unban")
+        assert peer_unban.status_code == 400
+        assert "同级" in peer_unban.json()["detail"]
+
+        # admin 解封超管：同样拒绝
+        root_id = root_client.get("/api/auth/me").json()["id"]
+        root_unban = actor_client.post(f"/api/admin/users/{root_id}/unban")
+        assert root_unban.status_code == 400
+        assert "超级管理员" in root_unban.json()["detail"]
+
+    # 超管解封 admin 是合法的（自上而下可以）
+    with TestClient(create_app()) as root_client:
+        login(root_client, root_email)
+        allowed = root_client.post(f"/api/admin/users/{target_id}/unban")
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["is_active"] is True
+
+
 def test_user_list_supports_search_and_pagination(client, monkeypatch):
     make_admin(client, monkeypatch)
     prefix = f"search-{uuid.uuid4().hex[:8]}"
@@ -599,3 +677,107 @@ def test_chat_request_schema_accepts_provider_scoped_key(client, monkeypatch):
 
     request = ChatRequest(model=model["key"], messages=[ChatMessage(role="user", content="你好")])
     assert request.model == model["key"]
+
+
+def test_sync_tolerates_duplicate_ids_from_upstream(client, monkeypatch):
+    """上游同一个 id 出现两次不能变成 500。
+
+    网关聚合多个上游时这种情况常见。修复前每条重复行都会 `session.add` 一次，提交
+    时撞 `uq_provider_model` → `IntegrityError` → 未捕获 → 500，且整次同步（包括
+    本来有效的新增）随事务回滚一起丢掉。
+    """
+    make_admin(client, monkeypatch)
+    provider = create_provider(client)
+
+    duplicated = {
+        "data": [
+            {"id": "vendor/model-a", "display_name": "Model A"},
+            {"id": "vendor/model-b", "display_name": "Model B"},
+            {"id": "vendor/model-a", "display_name": "Model A (dup)"},
+        ]
+    }
+    monkeypatch.setattr(
+        model_service, "get_http_client", lambda: FakeProviderClient(FakeProviderResponse(payload=duplicated))
+    )
+
+    response = client.post(f"/api/admin/providers/{provider['id']}/sync")
+
+    assert response.status_code == 200, response.text
+    # 重复项既不重复计新增，也不计更新
+    assert response.json() == {"fetched": 3, "created": 2, "updated": 0}
+    models = client.get(f"/api/admin/providers/{provider['id']}/models").json()
+    assert sorted(item["model_id"] for item in models) == ["vendor/model-a", "vendor/model-b"]
+
+
+def test_sync_repeated_with_duplicates_stays_idempotent(client, monkeypatch):
+    """第二次同步（行已存在）时重复 id 走「更新」分支，同样不能 500。"""
+    make_admin(client, monkeypatch)
+    provider = create_provider(client)
+    duplicated = {
+        "data": [
+            {"id": "vendor/model-a", "display_name": "A1"},
+            {"id": "vendor/model-a", "display_name": "A2"},
+        ]
+    }
+    monkeypatch.setattr(
+        model_service, "get_http_client", lambda: FakeProviderClient(FakeProviderResponse(payload=duplicated))
+    )
+
+    first = client.post(f"/api/admin/providers/{provider['id']}/sync")
+    assert first.status_code == 200, first.text
+    assert first.json() == {"fetched": 2, "created": 1, "updated": 0}
+
+    second = client.post(f"/api/admin/providers/{provider['id']}/sync")
+    assert second.status_code == 200, second.text
+    # 只有第一次出现的那条算「更新」，重复的那条跳过
+    assert second.json() == {"fetched": 2, "created": 0, "updated": 1}
+
+
+async def test_sync_translates_integrity_error_into_retryable_message(monkeypatch):
+    """并发同步撞唯一约束时要给可读的重试提示，不能裸抛 IntegrityError。"""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db import async_session_maker
+    from app.roles import Role as _Role  # noqa: F401 - 仅为保持导入风格一致
+
+    provider = await model_service.create_provider(
+        name="并发测试提供商", base_url="http://concurrent.test:4000/v1", api_key="sk-c"
+    )
+    remote = [{"id": "vendor/x", "display_name": "X"}]
+    monkeypatch.setattr(
+        model_service,
+        "get_http_client",
+        lambda: FakeProviderClient(FakeProviderResponse(payload={"data": remote})),
+    )
+
+    class ExplodingSession:
+        """包一层：commit 时抛 IntegrityError，模拟并发抢占。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def commit(self):
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+        async def __aenter__(self):
+            await self._inner.__aenter__()
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return await self._inner.__aexit__(*exc_info)
+
+    original = async_session_maker
+
+    def patched():
+        return ExplodingSession(original())
+
+    monkeypatch.setattr(model_service, "async_session_maker", patched)
+
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service.sync_provider_models(provider.id)
+
+    assert "冲突" in str(excinfo.value)
+    assert "重试" in str(excinfo.value)

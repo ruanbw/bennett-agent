@@ -138,6 +138,62 @@ def test_agent_uses_the_target_upstream_model_and_base_url():
     assert str(agent.model.provider.client.base_url).startswith("http://target-a.test/v1")
 
 
+# ---------------------------------------------------------------------
+# 出站地址守卫覆盖「真正跑对话」的路径
+#
+# 守卫以前只挂在 `/test` 与 `/sync` 两条管理路径上，于是把
+# `provider_block_private_targets` 打开后，管理员只要「建提供商 → 建模型 → 发一条
+# 对话」就能绕过去——配置项名不副实。下面锁的是解析阶段（也就是出站之前）就拦住。
+# ---------------------------------------------------------------------
+async def _seed_provider_with_url(monkeypatch, base_url: str):
+    """直接写库造一行违规提供商（绕过 create 时的写入校验，模拟历史遗留行）。"""
+    monkeypatch.setattr(settings, "fallback_model_name", None)
+    from app.db import ModelProvider, async_session_maker
+
+    async with async_session_maker() as session:
+        provider = ModelProvider(name="遗留提供商", slug="legacy", base_url=base_url, api_key="sk-legacy")
+        session.add(provider)
+        await session.flush()
+        from app.db import ProviderModel
+
+        session.add(
+            ProviderModel(provider_id=provider.id, model_id="legacy-model", display_name="Legacy", enabled=True)
+        )
+        await session.commit()
+    return model_service.make_model_key("legacy", "legacy-model")
+
+
+async def test_metadata_target_is_refused_before_the_model_call(monkeypatch):
+    """库里已存着元数据地址时，解析阶段就拒——不会走到构造上游客户端。"""
+    key = await _seed_provider_with_url(monkeypatch, "http://169.254.169.254/latest/meta-data")
+
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service.resolve_model_target(key)
+
+    assert "链路本地" in str(excinfo.value)
+
+
+async def test_private_target_is_refused_in_strict_mode_before_the_model_call(monkeypatch):
+    """严格模式打开后，环回/私网地址同样在解析阶段被拦。"""
+    key = await _seed_provider_with_url(monkeypatch, "http://127.0.0.1:9999/v1")
+    monkeypatch.setattr(settings, "provider_block_private_targets", True)
+
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service.resolve_model_target(key)
+
+    assert "内网" in str(excinfo.value)
+
+
+async def test_localhost_gateway_still_works_by_default(monkeypatch):
+    """默认配置下本机网关必须能用——否则会把文档里最主要的用法拦掉。"""
+    key = await _seed_provider_with_url(monkeypatch, "http://127.0.0.1:4000/v1")
+
+    target = await model_service.resolve_model_target(key)
+
+    assert target is not None
+    assert target.base_url == "http://127.0.0.1:4000/v1"
+
+
 def test_agent_cache_is_invalidated_when_provider_credentials_change():
     """管理员改了 API Key/地址后必须换一个装配结果，否则「后台改了没生效」。"""
     base = ModelTarget(
@@ -199,3 +255,85 @@ async def test_model_enable_flag_controls_public_list(monkeypatch, enabled):
 
     expected = model_service.make_model_key(provider.slug, "primary-model")
     assert (expected in keys) is enabled
+
+
+# ---------------------------------------------------------------------
+# 「删光提供商后重启不会再次引导」的承诺
+#
+# `settings.bootstrap_provider_from_env` 的文档写得很明确：初始化标记写入后永不
+# 清除。但标记以前只在 `seed_default_provider` 与 `create_provider` 里写，`delete_provider`
+# 与 `update_provider` 不写。于是「标记功能上线前就已配置的库」（只有 provider 行、
+# 没有 marker，`_provider_config_exists` 的 docstring 明确承认这种库存在）：
+#
+#     管理员把提供商全删 → 库里的行没了、marker 也没有 → 下次启动 seed 判定
+#     「从未配置」→ 用 LITELLM_API_BASE 重新造一条默认网关。
+#
+# 用户视角是「我删干净了，重启后模型又回来了」。下面锁住删除/更新也写标记。
+# ---------------------------------------------------------------------
+async def _legacy_db_without_marker(monkeypatch, *, base_url: str = "http://legacy-gw.local:4000/v1"):
+    """造一个「标记功能上线前」的库：有 provider 行，**没有** marker。"""
+    monkeypatch.setattr(settings, "bootstrap_provider_from_env", True)
+    monkeypatch.setattr(settings, "litellm_api_base", "http://env-gateway.local:4000/v1")
+    monkeypatch.setattr(settings, "model_name", "openai/gpt-4o")
+    monkeypatch.setattr(settings, "fallback_model_name", None)
+
+    from app.db import ModelProvider, ProviderModel, async_session_maker
+
+    async with async_session_maker() as session:
+        assert await session.get(AppSetting, model_service.REGISTRY_MARKER_KEY) is None
+        provider = ModelProvider(name="旧库遗留", slug="legacy-db", base_url=base_url, api_key="sk-legacy")
+        session.add(provider)
+        await session.flush()
+        session.add(
+            ProviderModel(provider_id=provider.id, model_id="legacy-model", display_name="Legacy", enabled=True)
+        )
+        await session.commit()
+        return provider.id
+
+
+async def test_deleting_every_provider_marks_the_registry_as_initialized(monkeypatch):
+    """删光提供商不能「回到出厂状态」——重启不该被环境变量重新引导。"""
+    provider_id = await _legacy_db_without_marker(monkeypatch)
+
+    # 删之前先确认：这个库确实没有 marker（否则用例测的是别的东西）
+    async with async_session_maker() as session:
+        assert await session.get(AppSetting, model_service.REGISTRY_MARKER_KEY) is None
+
+    assert await model_service.delete_provider(provider_id) is True
+
+    async with async_session_maker() as session:
+        assert await session.get(AppSetting, model_service.REGISTRY_MARKER_KEY) is not None
+
+    # 关键断言：重启的引导必须放弃
+    assert await model_service.provider_config_exists() is True
+    assert await model_service.seed_default_provider() is False
+    assert await model_service.list_providers() == []
+    # 而且不能偷偷退回环境变量网关
+    assert await model_service.get_default_model_key() is None
+
+
+async def test_updating_a_provider_also_marks_the_registry(monkeypatch):
+    """任何后台写操作都算接管，不只是 create。"""
+    provider_id = await _legacy_db_without_marker(monkeypatch)
+    async with async_session_maker() as session:
+        assert await session.get(AppSetting, model_service.REGISTRY_MARKER_KEY) is None
+
+    updated = await model_service.update_provider(provider_id, name="改过的名字")
+
+    assert updated is not None
+    async with async_session_maker() as session:
+        assert await session.get(AppSetting, model_service.REGISTRY_MARKER_KEY) is not None
+
+
+async def test_clearing_api_key_does_not_store_the_string_none(monkeypatch):
+    """`str(None)` 会写出字符串 "None" 并被当成真实 key 发给上游。"""
+    provider, _, _ = await _seed_provider(monkeypatch)
+
+    cleared = await model_service.update_provider(provider.id, api_key=None)
+
+    assert cleared is not None
+    assert cleared.api_key is None
+
+    blanked = await model_service.update_provider(provider.id, api_key="   ")
+    assert blanked is not None
+    assert blanked.api_key is None
