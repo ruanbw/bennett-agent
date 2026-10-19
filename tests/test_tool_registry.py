@@ -148,4 +148,5 @@ def test_global_all_tools_contains_standard_tools():
     """验证全局 ALL_TOOLS 包含了系统的核心工具。"""
     names = {tool.name for tool in ALL_TOOLS}
     assert "ask_user_clarification" in names
+    assert "get_current_time" in names
     assert "tavily_search" in names

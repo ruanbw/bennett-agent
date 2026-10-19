@@ -125,25 +125,42 @@ def test_build_tools_always_contains_clarification(monkeypatch):
         assert "ask_user_clarification" in {tool.__name__ for tool in build_tools()}
 
 
+def test_build_tools_always_contains_current_time(monkeypatch):
+    """时间工具是纯本地计算，不依赖任何配置——否则「今天几号」只能靠模型猜。"""
+    from app.tools import build_tools
+
+    for key in (None, "tvly-test-key"):
+        monkeypatch.setattr(settings, "tavily_api_key", key)
+        assert "get_current_time" in {tool.__name__ for tool in build_tools()}
+
+
 def test_build_tools_adds_tavily_only_with_a_key(monkeypatch):
     """没有 key 时挂 tavily 只是给模型一个必然失败的工具，白烧一轮 token。"""
     from app.tools import build_tools
 
     monkeypatch.setattr(settings, "tavily_api_key", None)
-    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification"]
+    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification", "get_current_time"]
 
     monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
-    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification", "tavily_search"]
+    assert [tool.__name__ for tool in build_tools()] == [
+        "ask_user_clarification",
+        "get_current_time",
+        "tavily_search",
+    ]
 
 
 def test_tavily_tool_follows_config_without_restart(monkeypatch):
     """缓存键含 tavily 配置，改配置后无需重启进程就能换掉工具装配。"""
     monkeypatch.setattr(settings, "tavily_api_key", None)
-    assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {"ask_user_clarification"}
+    assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {
+        "ask_user_clarification",
+        "get_current_time",
+    }
 
     monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
     assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {
         "ask_user_clarification",
+        "get_current_time",
         "tavily_search",
     }
 

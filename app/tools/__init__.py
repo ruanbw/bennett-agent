@@ -6,6 +6,7 @@
 
 from app.config import settings
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
+from app.tools.current_time import get_current_time as _raw_get_current_time
 from app.tools.guard import TOOL_FAILURE_RESULT, ToolErrorIsolation
 from app.tools.registry import (
     ManagedTool,
@@ -40,6 +41,19 @@ clarification_tool: ManagedTool = registry.register(
     enabled_checker=None,
 )(_raw_ask_clarification)
 
+current_time_tool: ManagedTool = registry.register(
+    category=ToolCategory.SYSTEM,
+    risk_level=RiskLevel.READ_ONLY,
+    tags=["time", "clock"],
+    description=(
+        "获取当前的日期、时间与星期，并附带时区与 UTC 时间。"
+        "当问题涉及「今天」「现在」「今年」「最近」「还有几天」等与当前时间相关的内容时调用。"
+    ),
+    # 纯本地计算，没有外部依赖，也不存在慢调用，因此不需要超时与启用开关。
+    timeout=None,
+    enabled_checker=None,
+)(_raw_get_current_time)
+
 tavily_tool: ManagedTool = registry.register(
     category=ToolCategory.SEARCH,
     risk_level=RiskLevel.READ_ONLY,
@@ -58,6 +72,8 @@ def build_tools() -> list[ManagedTool]:
 
     - `ask_user_clarification` 始终可用：它是交互协议的一部分（服务端会把它翻译成
       `clarification` 事件），不依赖任何外部服务；
+    - `get_current_time` 始终可用：纯本地计算，没有可失败的分支；模型自己的时间感
+      是过期的，缺了它「今天几号」只能靠猜；
     - `tavily_search` 只在配置了 `TAVILY_API_KEY` 时才挂：没有 key 时这个工具只会
       给模型返回「未配置」错误，白占一轮工具调用的 token，还会让模型以为自己能联网。
 
@@ -69,6 +85,7 @@ def build_tools() -> list[ManagedTool]:
 
 # 保持底层函数原样导出，确保老代码与直接测试函数调用的兼容性
 ask_user_clarification = _raw_ask_clarification
+get_current_time = _raw_get_current_time
 tavily_search = _raw_tavily_search
 
 __all__ = [
@@ -82,6 +99,8 @@ __all__ = [
     "ask_user_clarification",
     "build_tools",
     "clarification_tool",
+    "current_time_tool",
+    "get_current_time",
     "registry",
     "tavily_search",
     "tavily_tool",
