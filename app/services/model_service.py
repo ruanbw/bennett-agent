@@ -605,21 +605,37 @@ async def delete_provider_model(model_uuid: uuid.UUID) -> bool:
         return True
 
 
-def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """环回 / 私有 / 链路本地 / 未指定 / 保留段：都不该作为出站目标。
+def _is_metadata_range(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """链路本地 / 未指定 / 组播：**任何配置下**都不接受的出站目标。
 
-    `is_global` 正好是这些类别的并集（还覆盖 100.64/10 这类运营商内网段），比逐个写
-    `is_private` / `is_loopback` / `is_link_local` 更难漏掉一种。
+    这一族没有任何「合法的模型网关」用途，却正好覆盖云厂商的实例元数据服务
+    （169.254.169.254、fe80:: 链路本地），是最该堵死的那一类。
+    """
+    return address.is_link_local or address.is_unspecified or address.is_multicast
+
+
+def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """环回 / 私有 / 保留段：只有开启严格模式时才拒绝。
+
+    `is_global` 是这些类别的并集（还覆盖 100.64/10 这类运营商内网段），比逐个写
+    `is_private` / `is_loopback` 更难漏掉一种。**但默认不启用**：本机 LiteLLM 网关
+    （`LITELLM_API_BASE` 的默认值就是 `http://localhost:4000`）与自建 vLLM 常在同一台
+    机器或内网，一刀切会把项目文档里最主要的用法拦掉。
     """
     return not address.is_global
 
 
 async def _reject_private_target(base_url: str) -> None:
-    """出站前拒绝指向内网的目标地址，抛 `ProviderFetchError`。
+    """出站前检查目标地址，命中则抛 `ProviderFetchError`。
 
     后台配置的提供商共用这一条出站路径（「测试连接」与「同步模型」），而请求里带着
-    库里存的明文 API Key：允许指向 127.0.0.1 / 10.x / 169.254.169.254 就等于把凭据
-    交给内网任意一台机器（盲 SSRF）。
+    库里存的明文 API Key，因此地址本身也要管：
+
+    - 元数据族（链路本地 / 未指定 / 组播）**永远拒绝**——盲 SSRF 打元数据服务是
+      这条路径上唯一「不需要先拿到凭据」就能换到新凭据的攻击；
+    - 环回与私网**默认放行**（`settings.provider_block_private_targets = true` 才拒绝）。
+      它是纵深防御而不是主防线：真正让 key 不外流的是「改 Base URL 必须重输 API Key」，
+      那条规则让攻击者没法把**别人**的 key 送到自己的地址上。
 
     主机名交给 `getaddrinfo` 解析而不是只认字面量：十进制写法（`http://2130706433/`）
     在解析层等价于 127.0.0.1，只看字面量会漏。解析是阻塞调用，放进线程执行。
@@ -647,7 +663,9 @@ async def _reject_private_target(base_url: str) -> None:
                 continue
 
     for address in candidates:
-        if _is_internal_address(address):
+        if _is_metadata_range(address):
+            raise ProviderFetchError(f"Base URL 不允许指向链路本地或未指定地址（{address}）")
+        if settings.provider_block_private_targets and _is_internal_address(address):
             raise ProviderFetchError(f"Base URL 不允许指向内网地址（{address}）")
 
 
@@ -657,7 +675,7 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
     错误文案只给管理员看，因此不包含上游响应体（可能含有内部信息），只保留状态码
     与异常类型；完整异常写日志。
     """
-    # 先确认目标不是内网，再组装 Authorization 头——这个请求带着明文 API Key
+    # 先检查目标地址，再组装 Authorization 头——这个请求带着明文 API Key
     await _reject_private_target(provider.base_url)
 
     headers: dict[str, str] = {}

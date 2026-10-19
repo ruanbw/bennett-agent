@@ -400,22 +400,50 @@ def test_clearing_the_api_key_while_changing_base_url_leaves_nothing_to_leak(cli
 
 
 # ---------------------------------------------------------------------
-# 出站前拒绝内网目标（API Key 不能送到任意主机）
+# 出站目标地址检查（API Key 不能送到元数据服务／任意主机）
 # ---------------------------------------------------------------------
+#: 提供商出站目标默认用 IP 字面量而不是域名：守卫会解析主机名，用例不该依赖 DNS。
+#: 用公网 IP，因为默认模式下环回/私网也是放行的，不该靠它们来代表「正常目标」。
+PROVIDER_BASE_URL = "http://93.184.216.34:9999/v1"
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
-        "http://127.0.0.1:9999/v1",
-        "http://localhost:9999/v1",
+        # 元数据族：任何配置下都拒绝（169.254.169.254 是云厂商实例元数据服务）
         "http://169.254.169.254/latest/meta-data",
+        "http://0.0.0.0:9999/v1",
+        "http://[fe80::1]:9999/v1",
+    ],
+)
+async def test_metadata_targets_are_always_rejected(base_url):
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service._reject_private_target(base_url)
+    assert "链路本地" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # 文档里最主要的用法：本机 LiteLLM 网关 / 内网自建 vLLM
+        "http://127.0.0.1:3425/v1",
+        "http://localhost:4000/v1",
         "http://10.0.0.1:8000/v1",
         "http://172.16.5.4/v1",
         "http://192.168.1.10/v1",
-        "http://0.0.0.0:9999/v1",
         "http://[::1]:9999/v1",
     ],
 )
-async def test_private_targets_are_rejected(base_url):
+async def test_loopback_and_private_targets_are_allowed_by_default(base_url):
+    await model_service._reject_private_target(base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://127.0.0.1:3425/v1", "http://localhost:4000/v1", "http://10.0.0.1:8000/v1"],
+)
+async def test_private_targets_are_rejected_in_strict_mode(monkeypatch, base_url):
+    monkeypatch.setattr(settings, "provider_block_private_targets", True)
     with pytest.raises(model_service.ProviderFetchError) as excinfo:
         await model_service._reject_private_target(base_url)
     assert "内网" in str(excinfo.value)
@@ -444,19 +472,21 @@ async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
     await model_service._reject_private_target("https://provider.invalid/v1")
 
 
-def test_internal_target_never_gets_the_stored_key(client, monkeypatch):
-    """端到端：库里存着明文 key，但目标是内网时「测试连接/同步」不发出请求。"""
+def test_metadata_target_never_gets_the_stored_key(client, monkeypatch):
+    """端到端：库里存着明文 key，但目标是元数据地址时「测试连接/同步」不发出请求。"""
     make_admin(client, monkeypatch)
-    provider = create_provider(client, base_url="http://127.0.0.1:9999/v1", api_key="sk-super-secret-value")
+    provider = create_provider(
+        client, base_url="http://169.254.169.254/latest/meta-data", api_key="sk-super-secret-value"
+    )
 
     result = client.post(f"/api/admin/providers/{provider['id']}/test")
     assert result.status_code == 200
     assert result.json()["ok"] is False
-    assert "内网" in result.json()["error"]
+    assert "链路本地" in result.json()["error"]
 
     sync = client.post(f"/api/admin/providers/{provider['id']}/sync")
     assert sync.status_code == 502
-    assert "内网" in sync.json()["detail"]
+    assert "链路本地" in sync.json()["detail"]
 
 
 def test_public_target_reaches_the_provider(client, monkeypatch):

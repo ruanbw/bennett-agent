@@ -240,6 +240,15 @@ class Settings(BaseSettings):
             "（没有可自助点击的「成为管理员」）。匹配大小写不敏感；生产环境应只包含受信邮箱。"
         ),
     )
+    provider_block_private_targets: bool = Field(
+        default=False,
+        description=(
+            "提供商出站目标是否必须为公网地址（环回/私有/保留段一律拒绝）。默认关闭："
+            "本机 LiteLLM 网关与自建 vLLM 常在同一台机器或内网，开启会把文档里最主要的"
+            "用法拦掉。无论开关如何，链路本地/未指定/组播地址（含云厂商元数据服务）"
+            "永远被拒绝。仅在服务对外暴露、需要把「管理员填错地址」的风险压到最低时开启。"
+        ),
+    )
     bootstrap_provider_from_env: bool = Field(
         default=True,
         description=(

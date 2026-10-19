@@ -133,7 +133,17 @@ LiteLLM 网关、官方 API、自建 vLLM……），每个端点有自己的 Ba
 没有任何可自助的接口能让用户把自己提升为管理员。
 
 ```bash
-SUPERUSER_EMAILS=ops@example.com uv run python main.py --web
+SUPERUSER_EMAILS=ops@example.com REGISTRATION_INVITE_CODE=换一个只有你知道的字符串 uv run python main.py --web
+```
+
+**出站地址策略**：管理后台保存 Base URL 时，出站请求带着库里存的明文 API Key，因此
+换地址被视为换凭据——**改 Base URL 必须同时重填 API Key**（只改名字或开关不用）。
+链路本地、未指定与组播地址（含云厂商元数据服务 169.254.169.254）**任何情况下都不允许**；
+环回与私网地址默认放行，因为本机 LiteLLM 网关与内网自建 vLLM 正是文档里的常规用法。
+服务对外暴露时可以设 `PROVIDER_BLOCK_PRIVATE_TARGETS=true` 收紧为「只允许公网地址」。
+
+```bash
+SUPERUSER_EMAILS=ops@example.com REGISTRATION_INVITE_CODE=... PROVIDER_BLOCK_PRIVATE_TARGETS=true uv run python main.py --web
 ```
 
 管理后台包含两块：
