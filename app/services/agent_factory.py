@@ -67,7 +67,7 @@ def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
     """归一化思考等级。
 
     返回 `None` 表示不向上游传该参数（让网关用默认值）。这是思考等级归一化的
-    唯一权威实现；前端侧的对应收敛见 CODE_REVIEW.md R-7。
+    唯一权威实现；前端侧的对应收敛见 `frontend/src/lib/reasoning-effort.ts`。
 
     不在别名表里的取值（例如 `xhigh` / `max` / `minimal` 这类网关自定义等级）原样
     透传：等级词表由各网关决定，这里只做大小写与空白的收敛。

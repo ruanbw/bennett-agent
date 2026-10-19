@@ -130,7 +130,7 @@ export type ErrorCode = 'context_overflow';
 
 export interface StreamErrorEvent {
   type: 'error';
-  /** 只含可以外泄的文案（校验原文或错误编号），见 CODE_REVIEW.md C-4。 */
+  /** 只含可以外泄的文案（校验原文或错误编号）；内部异常只给关联 ID。 */
   message: string;
   /**
    * 是否值得让用户手动重试（决定是否显示「重试」按钮）。

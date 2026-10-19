@@ -1,6 +1,6 @@
-"""C-1 的回归锁：APP_ENV 的选择必须同时支持 shell 与 dotenv 文件。
+"""回归锁：APP_ENV 的选择必须同时支持 shell 与 dotenv 文件。
 
-修复前的行为（已在 CODE_REVIEW.md C-1 记录）：
+修复前的行为：
 `get_env_files()` 用 `os.getenv("APP_ENV", "development")` 判定环境，而此时
 pydantic-settings 尚未加载任何 dotenv 文件。后果有两层——
 

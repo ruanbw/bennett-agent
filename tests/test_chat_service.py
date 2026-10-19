@@ -6,8 +6,7 @@
 用户，因此错误文案本身也是契约的一部分。
 
 注：`"system"` 分支目前从客户端不可达（`db/index.js` 只写 user/assistant），
-且它允许调用方往历史里注入 `SystemPromptPart`。此处锁住现状以便后续改动可见，
-该分支的去留见 CODE_REVIEW.md R-6 / O-3。
+且它允许调用方往历史里注入 `SystemPromptPart`。此处锁住现状以便后续改动可见，该分支的去留尚未定论。
 """
 
 import asyncio

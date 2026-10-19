@@ -11,7 +11,7 @@ import type { PendingClarification } from '../lib/chat-message';
  * 而且只有 Thread 真正用到。
  *
  * 与 `theme-context.ts` 一致：context 与 hook 同文件，不再拆出一个纯转发的
- * `use-xxx.js`（那只是 Middle Man，见 CODE_REVIEW.md O-3）。
+ * `use-xxx.js`（纯转发的中间层没有价值）。
  */
 
 export interface ClarificationContextValue {
