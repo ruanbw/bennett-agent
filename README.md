@@ -27,19 +27,29 @@ npm install
 npm run dev                        # 前端（http://127.0.0.1:5173）
 ```
 
-首次使用点「去注册」：邮箱 + 至少 8 位密码 + 邀请码。**注册默认关闭**——部署者需先在 `.env`
-里设 `REGISTRATION_INVITE_CODE`，未配置时注册接口一律 403；超管账号由 `SUPERUSER_EMAILS` 指定。
+首次使用点「去注册」：邮箱 + 至少 8 位密码即可，注册完全开放。新账号是普通用户，
+不能进管理后台。
+
+初始超管用播种脚本创建（幂等，可重复执行）：
+
+```bash
+uv run python scripts/seed_admin.py --email admin@example.com --password '改成你的密码'
+```
+
+之后由超管在管理后台把别的账号设为管理员。三个角色的权限见 `app/roles.py`：
+`user` 只能对话，`admin` 能进后台维护提供商与封禁用户，`superadmin` 额外能调整角色。
 
 ## API
 
 | 端点 | 说明 |
 |---|---|
-| `POST /api/auth/register` | 注册（JSON：`email` / `password` / `invite_code`，按 IP 限流） |
+| `POST /api/auth/register` | 注册（JSON：`email` / `password`，公开，建出的账号为普通用户） |
 | `POST /api/auth/login` | 登录（**表单编码**，字段名 `username` = 邮箱，成功 204） |
-| `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户 |
+| `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户（含 `role`） |
 | `GET /api/models` | 可用模型列表（含思考链、上下文窗口等元数据） |
 | `POST /api/chat` · `POST /api/chat/title` | 对话（SSE 流式）/ 生成会话标题 |
-| `/api/admin/*` | 提供商与模型管理、用户封禁（仅超级管理员） |
+| `/api/admin/*` | 提供商与模型管理、用户封禁（`admin` 及以上） |
+| `PATCH /api/admin/users/{id}/role` | 设置用户角色（仅 `superadmin`） |
 
 除注册与登录外所有 `/api/*` 都要求登录：凭据错误 → 400，未登录 → 401。接口文档默认只在非
 production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。
@@ -50,6 +60,7 @@ production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。
 app/          FastAPI：api / config / prompts / schemas / services / tools / db.py
 frontend/     React 19 + Vite + Tailwind 4 + assistant-ui（components/admin = 管理后台）
 prompts/      Jinja2 提示词模板
+scripts/      seed_admin.py（播种初始超管）
 main.py       CLI 与 --web 入口
 ```
 
