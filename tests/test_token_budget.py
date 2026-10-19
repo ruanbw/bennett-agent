@@ -392,6 +392,36 @@ def test_usable_anchor_passes_through_when_absent():
     assert usable_anchor([msg("user", "问")], None) is None
 
 
+def test_usable_anchor_rejects_a_token_count_below_the_structural_overhead(caplog):
+    """锚点会顶替整份历史的估算，所以荒谬的小值不能放行。
+
+    `{message_index: 5, context_tokens: 1}` 声称覆盖 6 条消息却只占 1 token，
+    连这 6 条消息的结构性开销都装不下。
+    """
+    messages = [msg("user", "问"), msg("assistant", "答")] * 3
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        assert usable_anchor(messages, anchor(5, 1)) is None
+    assert "index=5" in caplog.text and "context_tokens=1" in caplog.text
+
+
+def test_usable_anchor_rejects_a_token_count_exactly_at_the_floor(caplog):
+    """边界取严格大于：恰好等于结构性开销的锚点连自己的消息都装不下。"""
+    messages = [msg("user", "问"), msg("assistant", "答")]
+    floor = MESSAGE_OVERHEAD_TOKENS * 2
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        assert usable_anchor(messages, anchor(1, floor)) is None
+    assert f"context_tokens={floor}" in caplog.text
+
+
+def test_usable_anchor_accepts_a_token_count_just_above_the_floor():
+    """略大过下限的锚点照常生效：下限只用来拦荒谬值，不是重新估算前缀。"""
+    messages = [msg("user", "问"), msg("assistant", "答")]
+
+    assert usable_anchor(messages, anchor(1, MESSAGE_OVERHEAD_TOKENS * 2 + 1)) is not None
+
+
 async def test_anchor_counts_the_anchor_reply_and_the_messages_after_it(monkeypatch):
     """锚点值是产生那条助手消息的**那次请求**的 prompt，不含它自己。
 

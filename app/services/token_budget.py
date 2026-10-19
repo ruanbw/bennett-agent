@@ -209,11 +209,20 @@ def build_budget(
 def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> ContextAnchor | None:
     """判断这个锚点能不能用；不能用返回 None（退回到从零估算）。
 
-    两个条件都必需：
+    三个条件都必需：
 
     1. 下标在范围内，且指向一条 **assistant** 消息——用量是那一轮回答产生的，指向
        user 消息说明客户端算错了位置，此时「锚点之后的增量」根本不对应任何真实区间；
-    2. `context_tokens` 为正（schema 已经拦了，但本函数是公开的，这里自己再保一道）。
+    2. `context_tokens` 为正（schema 已经拦了，但本函数是公开的，这里自己再保一道）；
+    3. `context_tokens` 大过它声称覆盖的 `message_index + 1` 条消息的结构性开销
+       （`MESSAGE_OVERHEAD_TOKENS * (message_index + 1)`）——锚点会顶替整份历史的
+       估算，所以它至少得像一份真实 prompt；否则填一个小值就能让任意长历史跳过判定。
+
+    第 3 条是 O(1) 的，能力边界必须说清：它只拿消息条数当参照，因此**只能拦住荒谬值**
+    （例如 `{message_index: 5, context_tokens: 1}`）。客户端精心构造一个「大过下限、
+    却远小于真实前缀」的偏小值仍然拦不住——要拦住它就得重算前缀估算，那会把锚点
+    省下的开销全部赔回去。这类输入是自伤：它只会让用户自己那一轮的请求带着超窗的
+    prompt 发上去，被上游以 400 顶回来。
 
     不能用时**不报错**：锚点只是精度提升，客户端版本错位/历史被裁剪都不该让对话
     失败——退回估算即可。但要留一条日志，否则「锚点没生效」会静默变成「预算怎么
@@ -226,6 +235,15 @@ def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> 
         return None
     if messages[anchor.message_index].role != "assistant":
         logger.warning("上下文锚点指向的不是 assistant 消息，退回估算 (index=%d)", anchor.message_index)
+        return None
+    floor_tokens = MESSAGE_OVERHEAD_TOKENS * (anchor.message_index + 1)
+    if anchor.context_tokens <= floor_tokens:
+        logger.warning(
+            "上下文锚点低于其覆盖消息的结构性开销，退回估算 (index=%d, context_tokens=%d, 下限=%d)",
+            anchor.message_index,
+            anchor.context_tokens,
+            floor_tokens,
+        )
         return None
     return anchor
 
