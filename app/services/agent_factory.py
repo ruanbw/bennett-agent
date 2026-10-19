@@ -27,6 +27,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
 
 from app.config import settings
+from app.config.proxy_env import sanitize_no_proxy_env
 from app.prompts import prompt_manager
 from app.services.fallback_tracker import record_fallback
 from app.services.upstream_errors import is_fallback_eligible
@@ -107,6 +108,9 @@ def build_provider() -> LiteLLMProvider:
     2.31.1 的 `LiteLLMProvider` 没有 `max_retries` 参数，只能自己构造 `AsyncOpenAI`
     再通过官方支持的 `openai_client=` 传入（见其 `__init__` 重载）。
     """
+    # AsyncOpenAI 内部会自建 httpx 客户端并继承环境里的代理设置；坏 no_proxy 会让它
+    # 在构造阶段就抛 InvalidURL（见 app/config/proxy_env.py），因此先清理再构造。
+    sanitize_no_proxy_env()
     client = AsyncOpenAI(
         base_url=settings.litellm_api_base,
         api_key=settings.litellm_api_key or "sk-no-key",

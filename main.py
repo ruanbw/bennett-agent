@@ -14,6 +14,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
 
 from app.config import settings
+from app.config.proxy_env import sanitize_no_proxy_env
 from app.services.agent_factory import build_agent
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
     )
+    # 越早清理越好：坏 no_proxy 会让所有 trust_env 的 HTTP 客户端在构造阶段就失败
+    # （见 app/config/proxy_env.py）。放在参数解析之前，配置有问题时先留下清晰日志。
+    sanitize_no_proxy_env()
     parser = build_arg_parser()
     args = parser.parse_args()
 

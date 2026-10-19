@@ -13,6 +13,8 @@ import logging
 
 import httpx
 
+from app.config.proxy_env import sanitize_no_proxy_env
+
 logger = logging.getLogger(__name__)
 
 #: 兜底超时。调用点应显式传更贴合的值。
@@ -42,6 +44,10 @@ def get_http_client() -> httpx.AsyncClient:
 
     loop = _running_loop()
     if _client is None or _client.is_closed or _client_loop is not loop:
+        # 构造之前清理 no_proxy：坏值会让 httpx 的代理白名单非法，客户端一建就抛
+        # InvalidURL（见 app/config/proxy_env.py）。放在这里而不是只在启动时清理，
+        # 是因为库的调用方（测试、脚本）未必经过 main()。
+        sanitize_no_proxy_env()
         _client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
         _client_loop = loop
     return _client
