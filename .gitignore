@@ -32,6 +32,3 @@ wheels/
 .pi
 .agents
 skills-lock.json
-
-# 本地审查产物
-CODE_REVIEW.md
