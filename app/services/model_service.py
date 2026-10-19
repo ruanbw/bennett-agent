@@ -320,11 +320,7 @@ async def provider_config_exists() -> bool:
 
 
 async def _load_provider(session, provider_id: uuid.UUID) -> ModelProvider | None:  # noqa: ANN001
-    stmt = (
-        select(ModelProvider)
-        .where(ModelProvider.id == provider_id)
-        .options(selectinload(ModelProvider.models))
-    )
+    stmt = select(ModelProvider).where(ModelProvider.id == provider_id).options(selectinload(ModelProvider.models))
     return await session.scalar(stmt)
 
 
@@ -583,9 +579,7 @@ async def update_provider_model(
                 if not model.enabled:
                     raise InvalidModelStateError("停用的模型不能设为默认模型")
                 await session.execute(
-                    update(ProviderModel)
-                    .where(ProviderModel.id != model.id)
-                    .values(is_default=False)
+                    update(ProviderModel).where(ProviderModel.id != model.id).values(is_default=False)
                 )
                 model.is_default = True
             else:
@@ -679,11 +673,7 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
 
     async with async_session_maker() as session:
         existing_rows = list(
-            (
-                await session.scalars(
-                    select(ProviderModel).where(ProviderModel.provider_id == provider_id)
-                )
-            ).all()
+            (await session.scalars(select(ProviderModel).where(ProviderModel.provider_id == provider_id))).all()
         )
         existing = {row.model_id: row for row in existing_rows}
         created = 0

@@ -78,9 +78,7 @@ async def test_disabled_fallback_is_not_used(monkeypatch):
     monkeypatch.setattr(settings, "fallback_model_name", "secondary-model")
     await model_service.update_provider_model(secondary.id, enabled=False)
 
-    target = await model_service.resolve_model_target(
-        model_service.make_model_key(provider.slug, "primary-model")
-    )
+    target = await model_service.resolve_model_target(model_service.make_model_key(provider.slug, "primary-model"))
 
     assert target is not None
     assert target.fallback is None
@@ -100,20 +98,14 @@ async def test_disabled_provider_makes_its_models_unresolvable(monkeypatch):
 async def test_default_key_prefers_explicit_default_then_first_enabled(monkeypatch):
     provider, primary, secondary = await _seed_provider(monkeypatch)
 
-    assert await model_service.get_default_model_key() == model_service.make_model_key(
-        provider.slug, "primary-model"
-    )
+    assert await model_service.get_default_model_key() == model_service.make_model_key(provider.slug, "primary-model")
 
     await model_service.update_provider_model(secondary.id, is_default=True)
-    assert await model_service.get_default_model_key() == model_service.make_model_key(
-        provider.slug, "secondary-model"
-    )
+    assert await model_service.get_default_model_key() == model_service.make_model_key(provider.slug, "secondary-model")
 
     # 停用默认模型后自动取消默认，回落到第一个启用模型
     await model_service.update_provider_model(secondary.id, enabled=False)
-    assert await model_service.get_default_model_key() == model_service.make_model_key(
-        provider.slug, "primary-model"
-    )
+    assert await model_service.get_default_model_key() == model_service.make_model_key(provider.slug, "primary-model")
 
 
 async def test_registry_marker_keeps_database_authoritative_after_deleting_everything(monkeypatch):
