@@ -18,7 +18,15 @@
 `create_update_dict()`，该方法显式排除这三个字段（以及 `id`、`oauth_accounts`）。
 因此**客户端无法通过注册接口自封管理员**。该结论已核对
 `fastapi_users/schemas.py` 与 `fastapi_users/manager.py` 的实现，不是来自文档。
-`tests/test_auth.py::test_register_cannot_self_promote_to_superuser` 是这条链路的回归锁。
+
+这条链路的回归锁是 `tests/test_user_create.py`：它在 schema 层断言 `role` 根本不是
+`UserCreate` 的字段、`safe=True` 的 `create_update_dict()` 不携带那三个布尔位、以及
+`UserRead.role` 默认为 `user`。
+
+**HTTP 路由层已经没有覆盖**（注册/登录/cookie/会话失效那批用例随提交 2f48724 的
+「移除全量/端到端测试层」决定一起删掉了，那是刻意的取舍，不是遗漏）。也就是说，
+「路由确实传了 `safe=True`」这一环目前没有自动化用例盯着，只能靠
+`app/api/auth.py` 保持原样：改动注册路由时必须回来确认这一点。
 """
 
 import uuid
@@ -38,7 +46,12 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
 
 
 class UserCreate(schemas.BaseUserCreate):
-    """注册入参：`email` + `password`。**刻意不含 `role`**（见模块文档）。"""
+    """注册入参：`email` + `password`。**刻意不含 `role`**（见模块文档）。
+
+    基类自带的 `is_active` / `is_superuser` / `is_verified` 不是本类声明的，也不该由
+    本类剔除——它们由 `safe=True` 的 `create_update_dict()` 在落库前排除（见模块文档），
+    这样别人误用 `create_update_dict_superuser()` 时行为是显式的。
+    """
 
 
 class UserUpdate(schemas.BaseUserUpdate):

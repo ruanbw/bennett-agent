@@ -1,8 +1,9 @@
 """上下文窗口预算的估算口径与判定契约。
 
 这个模块的价值全在「估算偏高是安全方向、拿不到数据就放行」两条约定上，因此用例分成
-三组：估算口径（含中文与全角的宽字符判定）、预留与安全系数怎么扣、以及三种必须
-**放行**的未知情形。数字本身不是契约（换分词器就该变），量级与方向才是。
+四组：估算口径（含中文与全角的宽字符判定）、预留与安全系数怎么扣、三种必须**放行**
+的未知情形、以及长输入要不要挪出事件循环。数字本身不是契约（换分词器就该变），
+量级与方向才是。
 """
 
 from dataclasses import FrozenInstanceError
@@ -10,14 +11,17 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from app.config import settings
-from app.schemas.chat import MAX_HISTORY_CHARS, ChatMessage
+from app.schemas.chat import MAX_HISTORY_CHARS, MAX_MESSAGE_CHARS, ChatMessage
 from app.services import token_budget
 from app.services.token_budget import (
     ASCII_CHARS_PER_TOKEN,
     MESSAGE_OVERHEAD_TOKENS,
+    THREAD_ESTIMATE_CHARS_THRESHOLD,
     TOOL_SCHEMA_OVERHEAD_TOKENS,
     ContextBudget,
     build_budget,
+    estimate_agent_messages_tokens,
+    estimate_agent_messages_tokens_async,
     estimate_messages_tokens,
     estimate_tokens,
     overflow_message,
@@ -509,3 +513,193 @@ def test_unknown_window_warning_is_deduplicated(monkeypatch):
     token_budget._warn_unknown_window_once("m")
 
     assert list(token_budget._WARNED_UNKNOWN_WINDOWS) == ["m"]
+
+
+# ---------------------------------------------------------------------
+# 长文本估算挪出事件循环
+#
+# `resolve_context_budget` 是每个 /api/chat 请求的必经路径，而逐字符估算在 40 万字符
+# 下是 300~500ms 的同步阻塞——单进程服务里这会把所有在飞的 SSE 一起卡住。这里锁的是
+# 「大输入走线程、小输入不走」这个分流本身，不是耗时（墙钟阈值在共享 runner 上会抖）。
+# ---------------------------------------------------------------------
+
+
+def spy_on_to_thread(monkeypatch):
+    """把 `asyncio.to_thread` 换成记录调用并立即同步执行的替身。
+
+    替换的是 `token_budget.asyncio.to_thread`（模块对象与被测代码共享同一个 asyncio，
+    所以等同替换全局入口），这样才真的证明走的是那个调度点。替身在协程里直接执行
+    `func`，测试因此不需要额外的线程同步，结果也与同步路径可比。
+    """
+    calls = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        calls.append((func, args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(token_budget.asyncio, "to_thread", fake_to_thread)
+    return calls
+
+
+def history_with_chars(total_chars, pattern="中"):
+    """造一段合计 `total_chars` 字符的合法历史。
+
+    单条 `content` 上限是 `MAX_MESSAGE_CHARS`，所以大输入必须摊到多条消息上——
+    这也正是真实场景：长历史是很多轮拼起来的，不是一条巨消息。
+    """
+    messages = []
+    remaining = total_chars
+    while remaining > 0:
+        chunk = min(remaining, MAX_MESSAGE_CHARS)
+        repeats = chunk // len(pattern) + 1
+        messages.append(msg("user", (pattern * repeats)[:chunk]))
+        remaining -= chunk
+    return messages
+
+
+async def test_large_history_is_estimated_in_a_thread(monkeypatch):
+    """超过阈值的非 ASCII 历史必须走线程，且结果与同步估算逐位相同。"""
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD + 1)
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert len(calls) == 1
+    assert calls[0][0] is estimate_messages_tokens
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_the_real_thread_path_produces_the_same_budget(monkeypatch):
+    """不替换 `to_thread` 的一次真实执行：线程里跑同一个函数不会改变结果。
+
+    上面的替身证明「分流点在哪」，这条证明「真的交给线程池也能正常返回」——
+    pydantic 消息对象跨线程只读访问，不需要额外的序列化。
+    """
+    patch_limits(monkeypatch, context_window=10_000_000, max_output_tokens=8_000)
+    messages = history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD + 1)
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_small_history_is_estimated_without_a_thread(monkeypatch):
+    """常规小请求不值得付一次线程调度：它们走同步快路径。"""
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = [msg("user", "你好"), msg("assistant", "答")]
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert calls == []
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_the_threshold_is_exclusive(monkeypatch):
+    """恰好等于阈值时不走线程：判据是「超过」，边界写反会让边界大小的请求都白付一次线程池。"""
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+
+    await resolve_context_budget("m", history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD))
+    assert calls == []
+
+    await resolve_context_budget("m", history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD + 1))
+    assert len(calls) == 1
+
+
+async def test_thinking_counts_toward_the_thread_threshold(monkeypatch):
+    """阈值必须按 content + thinking 一起量：`thinking` 同样要逐字符估算。
+
+    只看 `content` 时，一条「短文 + 超长思考链」的历史会走同步路径，而它恰恰是
+    最慢的那种输入。
+    """
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = [msg("assistant", "答", thinking="思考" * (THREAD_ESTIMATE_CHARS_THRESHOLD // 2 + 1))]
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert len(calls) == 1
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+def long_assistant_turn():
+    """一条字符数超过阈值的 assistant 消息（正文 + 思考链一起算）。
+
+    单条 `content` 上限 32k、`thinking` 64k，合起来才够越过 50k 的阈值——真实的
+    长回答也确实大多长这样：正文与思考链并存。
+    """
+    return msg(
+        "assistant",
+        "答" * MAX_MESSAGE_CHARS,
+        thinking="思" * (THREAD_ESTIMATE_CHARS_THRESHOLD - MAX_MESSAGE_CHARS + 1),
+    )
+
+
+async def test_the_anchor_slice_is_estimated_in_a_thread_when_long(monkeypatch):
+    """锚点路径只估算 `messages[anchor.message_index:]`，阈值也按那段算。"""
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = [*history_with_chars(10), long_assistant_turn(), msg("user", "新问题")]
+    anchor_index = len(messages) - 2
+
+    budget = await resolve_context_budget("m", messages, anchor(anchor_index, 40_000))
+
+    assert budget is not None and budget.basis == "anchor"
+    assert len(calls) == 1
+    assert budget.used_tokens == 40_000 + estimate_messages_tokens(messages[anchor_index:])
+
+
+async def test_a_short_anchor_slice_stays_synchronous(monkeypatch):
+    """锚点之前再长也不影响分流：真正被估算的切片短就走同步路径。
+
+    写成「锚点前 10 万字符 + 短的锚点回答」才能区分两种实现：按整份历史量的阈值
+    会把这里推进线程，而按切片量的不会。
+    """
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = [*history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD * 2), msg("assistant", "答"), msg("user", "新问题")]
+    anchor_index = len(messages) - 2
+
+    await resolve_context_budget("m", messages, anchor(anchor_index, 40_000))
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["中", "hello 中文 mixed text ", "a"],
+    ids=["chinese", "mixed", "ascii"],
+)
+async def test_off_loop_and_synchronous_estimates_agree(monkeypatch, pattern):
+    """分流不能改变结果：同一份历史必须得出同一个预算，与调度方式无关。"""
+    patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
+    spy_on_to_thread(monkeypatch)
+    messages = history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD + 1, pattern=pattern)
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_agent_messages_async_wrapper_matches_the_sync_estimate(monkeypatch):
+    """CLI 路径的异步包装与同步函数口径一致，且同样按量分流。"""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    calls = spy_on_to_thread(monkeypatch)
+    short = [ModelRequest(parts=[UserPromptPart(content="问题" * 100)])]
+    # pydantic-ai 的部件没有长度上限，一条就能超过阈值
+    long = [ModelRequest(parts=[UserPromptPart(content="你" * (THREAD_ESTIMATE_CHARS_THRESHOLD + 1))])]
+
+    assert await estimate_agent_messages_tokens_async(short) == estimate_agent_messages_tokens(short)
+    assert calls == []
+
+    assert await estimate_agent_messages_tokens_async(long) == estimate_agent_messages_tokens(long)
+    assert len(calls) == 1
+    assert calls[0][0] is estimate_agent_messages_tokens
