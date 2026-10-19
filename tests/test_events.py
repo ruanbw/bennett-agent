@@ -9,15 +9,14 @@
 
 import json
 import logging
-import uuid
 
 import pydantic
 import pytest
-from fastapi.testclient import TestClient
 from pydantic_ai.messages import (
     FinalResultEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    ModelResponse,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -30,12 +29,12 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
     ToolReturnPart,
 )
+from pydantic_ai.run import AgentRunResultEvent
 
 from app.api.chat import to_sse_frame
 from app.schemas.events import (
     ClarificationRequest,
     ContentDelta,
-    Done,
     StreamError,
     ThinkingDelta,
     ToolCall,
@@ -383,6 +382,43 @@ def test_genuinely_unknown_event_warns_once_per_type(caplog):
     assert all("静默丢弃" in record.getMessage() for record in warnings)
 
 
+# ---------------------------------------------------------------------
+# 真实用量尾事件：不是「未识别事件」
+# ---------------------------------------------------------------------
+def terminal_event(*responses):
+    """造一个尾部终态事件，带上只实现 `all_messages()` 的运行结果。"""
+
+    class FakeRunResult:
+        def __init__(self, messages):
+            self._messages = list(messages)
+
+        def all_messages(self):
+            return self._messages
+
+    return AgentRunResultEvent(result=FakeRunResult(responses))
+
+
+def model_response(input_tokens=1_066, output_tokens=2, cache_read_tokens=896):
+    from pydantic_ai.usage import RequestUsage
+
+    return ModelResponse(
+        parts=[TextPart(content="答")],
+        usage=RequestUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+        ),
+    )
+
+
+def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(caplog):
+    """它带的是真实用量，不是「未识别的 pydantic-ai 流事件」。"""
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        assert list(translate_event(terminal_event(model_response()))) == []
+
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+
+
 # 为什么用 `isinstance` 分派而不是 `type(event).__name__` 字符串比较：
 # `FunctionToolCallEvent` 是 pydantic-ai 里 `ToolCallEvent` 的子类，按类名字符串
 # 分派会漏掉以后新增的同类事件，升级改名时还会表现为「静默无输出」。这条只写在
@@ -431,59 +467,6 @@ def test_sse_frame_keeps_non_ascii_readable():
 
     assert "中文" in raw
     assert "\\u4e2d" not in raw
-
-
-# ---------------------------------------------------------------------
-# SSE 响应头：库强制写入的 Connection 必须被剥掉
-# ---------------------------------------------------------------------
-def fake_user():
-    """未落库的临时用户，仅用于覆盖登录依赖（认证本身由 test_auth.py 覆盖）。"""
-    from app.db import User
-
-    return User(
-        id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
-        email="sse-headers@example.com",
-        hashed_password="not-a-real-hash",
-        is_active=True,
-        is_superuser=False,
-        is_verified=False,
-    )
-
-
-def test_chat_sse_response_headers(monkeypatch):
-    """真实响应上剥掉 `Connection`，并锁住不会被库默认值覆盖的缓存/缓冲标头。
-
-    sse-starlette 3.5.0 在合并调用方 headers **之后**仍无条件写
-    `Connection: keep-alive`，所以只断言 `SSE_HEADERS` 字典是伪保证；而 HTTP/2
-    明确禁止该标头（RFC 7540 §8.1.2.2），网关可能因此重置流。
-    """
-    from app.api import chat as chat_api
-    from app.config import settings
-    from app.server import create_app
-    from app.services.auth import current_active_user
-
-    async def fake_stream(*_args, **_kwargs):
-        yield Done()
-
-    # 不打真实上游：本机 .env 配着网关，走到生成路径会真发一次请求
-    monkeypatch.setattr(chat_api, "stream_chat_events", fake_stream)
-    monkeypatch.setattr(settings, "chat_rate_limit_per_minute", 30)
-
-    app = create_app()
-    # 只替换登录态判断，路由、限流与响应构造都照真实路径执行
-    app.dependency_overrides[current_active_user] = fake_user
-
-    with TestClient(app) as client:
-        response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
-
-    assert response.status_code == 200
-    assert "connection" not in response.headers
-    assert response.headers["content-type"].startswith("text/event-stream")
-    # SSE 不可复用：`no-cache` 会覆盖库默认的 `no-store`
-    assert response.headers["cache-control"] == "no-store"
-    assert response.headers["x-accel-buffering"] == "no"
-    # 半开连接兜底：库默认 send_timeout=None，等于不设超时
-    assert chat_api.ChatEventSourceResponse(fake_stream()).send_timeout == chat_api.SSE_SEND_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------

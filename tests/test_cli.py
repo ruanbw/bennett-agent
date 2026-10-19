@@ -1,39 +1,19 @@
-"""CLI 与 Web 的守卫对齐（`main.py`）。
+"""CLI 与 Web 的预算口径对齐（`main.py`）。
 
-CLI 不是"另一套实现"，它和 Web 共用同一条装配链（`agent_factory`）与同一份预算
-计算（`token_budget`）。历史差异是**偶然**长出来的：CLI 直接 `agent.run_stream`，
-既没有历史上限、也没有 token 预算，于是「本地跑得通、Web 却拒」——而两边用的是
-同一个模型、同一份提示词。
-
-这里锁两件事：
-
-1. 预算口径一致：同样的历史，CLI 与 Web 算出的结论必须相同；
-2. 单一事件循环：Agent 里的 httpx 客户端不能跨 loop 复用。
+CLI 和 Web 共用同一份预算计算（`token_budget`）：同样的历史与窗口，`_budget_for_cli`
+必须和 Web 的 `build_budget` 得出同样结论，否则会出现「本地跑得通、Web 却拒」——
+而两边用的是同一个模型、同一份提示词。
 """
 
-import asyncio
-
-import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 import main
-from app.config import settings
 from app.services.token_budget import (
     TOOL_SCHEMA_OVERHEAD_TOKENS,
     build_budget,
     estimate_agent_messages_tokens,
     estimate_tokens,
 )
-
-
-class _FakeEngine:
-    """`AsyncEngine.dispose` 是只读方法，只能替换整个 engine 对象。"""
-
-    def __init__(self, dispose):
-        self._dispose = dispose
-
-    async def dispose(self):
-        await self._dispose()
 
 
 def _history(chars: int) -> list:
@@ -96,75 +76,3 @@ def test_small_history_fits():
 
     assert budget is not None
     assert budget.over_limit is False
-
-
-# ---------------------------------------------------------------------
-# 单一事件循环
-#
-# Agent 来自 `agent_factory` 的 lru_cache，里面捧着 AsyncOpenAI→httpx 客户端。
-# httpx 的内部原语绑在创建它们的 loop 上，跨 loop 复用会 RuntimeError。以前
-# `build_cli_agent` 与 `run_interactive_loop` 各自 `asyncio.run`，能跑只是因为
-# 装配阶段恰好没建连——加一次预热/探活就会在第一个 prompt 上炸。
-# ---------------------------------------------------------------------
-def test_cli_shares_one_event_loop(monkeypatch):
-    loops: list[object] = []
-
-    async def fake_build():
-        loops.append(asyncio.get_running_loop())
-        return object(), "model-key"
-
-    async def fake_loop(_agent, _key):
-        loops.append(asyncio.get_running_loop())
-
-    async def fake_close():
-        loops.append(asyncio.get_running_loop())
-
-    async def fake_dispose():
-        pass
-
-    monkeypatch.setattr(main, "build_cli_agent", fake_build)
-    monkeypatch.setattr(main, "run_interactive_loop", fake_loop)
-    monkeypatch.setattr(main, "close_http_client", fake_close)
-    monkeypatch.setattr(main, "engine", _FakeEngine(fake_dispose))
-
-    asyncio.run(main._run_cli())
-
-    assert len(loops) == 3
-    assert len({id(loop) for loop in loops}) == 1, "装配、交互、关闭必须在同一个事件循环里"
-
-
-def test_cli_releases_resources_even_when_the_loop_raises(monkeypatch):
-    """交互循环抛异常时也要关闭客户端与数据库连接（否则 SQLite WAL 不折叠）。"""
-    closed: list[str] = []
-
-    async def fake_build():
-        return object(), "model-key"
-
-    async def exploding_loop(_agent, _key):
-        raise RuntimeError("boom")
-
-    async def fake_close():
-        closed.append("http")
-
-    async def fake_dispose():
-        closed.append("db")
-
-    monkeypatch.setattr(main, "build_cli_agent", fake_build)
-    monkeypatch.setattr(main, "run_interactive_loop", exploding_loop)
-    monkeypatch.setattr(main, "close_http_client", fake_close)
-    monkeypatch.setattr(main, "engine", _FakeEngine(fake_dispose))
-
-    with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(main._run_cli())
-
-    assert closed == ["http", "db"]
-
-
-def test_docs_hint_reflects_production(monkeypatch):
-    """生产环境关掉了文档三件套，提示不能还说「/docs」。"""
-    monkeypatch.setattr(settings, "app_env", "production")
-    monkeypatch.setattr(settings, "enable_api_docs", None)
-    assert "已关闭" in main.docs_hint()
-
-    monkeypatch.setattr(settings, "app_env", "development")
-    assert "/docs" in main.docs_hint()

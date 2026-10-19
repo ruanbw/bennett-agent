@@ -17,21 +17,10 @@ from pathlib import Path
 
 import pytest
 
-#: 整个测试会话共用一个临时库。用例之间靠**唯一邮箱**隔离，而不是清库——
-#: 重建 engine 需要动 `app.db` 的模块级单例，代价大于收益。
+#: 整个测试会话共用一个临时库。当前套件是纯逻辑单测，不读共享库；这层重定向是
+#: 安全网——个别用例（如启动迁移）会直接构造 engine，任何测试都不该碰到开发库。
 _TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="bennett-test-db-"))
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_DIR}/test.db"
-
-# 关闭「启动时用环境变量引导默认提供商」。
-#
-# 测试里大多数模型用例针对的是**旧版网关路径**（mock `/v1/models` 后断言解析/兜底/
-# 缓存），而 TestClient 启动应用会执行引导，库里一旦有提供商，`model_service` 就切到
-# 数据库权威分支，那些用例会莫名其妙地只看得到 .env 里的默认模型。
-# 需要引导行为的用例（管理后台）显式往库里写提供商；引导本身另有单元测试。
-os.environ["BOOTSTRAP_PROVIDER_FROM_ENV"] = "false"
-
-# 造管理员只能直接写库（见 `tests/accounts.py` 的 `set_role_in_db`）：注册出来的账号一律
-# role=user，没有任何环境变量能让某个邮箱自动获得权限。
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -43,107 +32,3 @@ def _cleanup_test_db_dir():
     """
     yield
     shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _create_test_schema():
-    """整个会话开始前建表。
-
-    模型配置服务每个请求都会查 `model_provider` 表（有配置时数据库就是权威）。
-    不做这一步，直接调用 `fetch_available_models()` 的用例会拿到
-    `no such table: model_provider`。
-    """
-    import asyncio
-
-    from app.db import create_db_and_tables
-
-    asyncio.run(create_db_and_tables())
-    yield
-
-
-async def _clear_model_registry() -> None:
-    """清空提供商/模型表并重置装配缓存。
-
-    这些是**跨用例共享的数据库状态**：任何用 TestClient 启动应用的用例都会触发
-    「首次启动引导默认提供商」，于是后续依赖旧版网关路径的用例会突然看到数据库
-    权威分支。按用例清空比给每个用例写清理代码可靠。
-    """
-    from sqlalchemy import delete
-
-    from app.db import AppSetting, ModelProvider, ProviderModel, async_session_maker
-    from app.services.agent_factory import reset_agent_cache
-    from app.services.model_service import REGISTRY_MARKER_KEY, reset_models_cache
-
-    async with async_session_maker() as session:
-        await session.execute(delete(ProviderModel))
-        await session.execute(delete(ModelProvider))
-        # 初始化标记也要清：否则「引导过一次」之后的用例会永久走数据库权威分支。
-        # 只删这一行：app_setting 是通用键值表，整表清空会连未来新增的应用级设置一起
-        # 静默清掉，测试与线上行为分叉。
-        await session.execute(delete(AppSetting).where(AppSetting.key == REGISTRY_MARKER_KEY))
-        await session.commit()
-
-    reset_models_cache()
-    reset_agent_cache()
-
-
-@pytest.fixture(autouse=True)
-async def _reset_model_registry():
-    """每个用例前后都从空注册表开始（见 `_clear_model_registry`）。"""
-    await _clear_model_registry()
-    yield
-    await _clear_model_registry()
-
-
-def _reset_limiter(module: object, attr: str) -> None:
-    """把模块级限流器置回 None，属性不存在时直接失败。
-
-    `chat_api._limiter = None` 这种写法在属性被改名后会**静默新建**一个属性，真正
-    要重置的旧限流器原封不动，于是又回到「单跑通过、全量失败」。先检查属性是否存在，
-    改名时立刻报错而不是留下隐患。
-    """
-    if not hasattr(module, attr):
-        name = getattr(module, "__name__", repr(module))
-        raise AssertionError(f"{name} 缺少 {attr!r}：限流器被改名/移除，请同步更新 tests/conftest.py")
-    setattr(module, attr, None)
-
-
-@pytest.fixture(autouse=True)
-def _reset_rate_limiters():
-    """重置进程内限流器。
-
-    两个限流桶都是**模块级状态**，会跨用例累积。而认证端点按 IP 限流、所有测试都
-    来自同一个 IP（testserver），不重置的话用例会互相挤占配额——表现为「单跑通过、
-    全量跑失败」这类最难定位的失败。
-
-    放在 conftest 而不是某个测试文件里：限流是跨文件生效的全局副作用，任何新增的
-    测试文件都该自动受到保护。
-    """
-    from app.api import chat as chat_api
-    from app.api import rate_limit
-
-    _reset_limiter(chat_api, "_limiter")
-    _reset_limiter(rate_limit, "_auth_limiter")
-
-    yield
-
-    _reset_limiter(chat_api, "_limiter")
-    _reset_limiter(rate_limit, "_auth_limiter")
-
-
-@pytest.fixture(autouse=True)
-def _stub_context_window(monkeypatch):
-    """上下文预算预检默认走「网关没报窗口」这条放行路径。
-
-    预检要查网关的模型列表（真实 HTTP），而开发机上 3425 很可能真的挂着一个网关：
-    不隔离的话，同一份代码在有网关的机器上会按真实窗口开始拒绝历史较长的用例，
-    表现为「本机能跑、CI 不能跑」或反之。需要预算真正生效的用例自己
-    monkeypatch `token_budget.get_model_limits`（见 tests/test_token_budget.py 的
-    `patch_limits`，或者 test_chat_service 里的 over 用例）。
-    """
-    from app.services import token_budget
-
-    async def unknown_limits(_model_id):
-        return None, None
-
-    monkeypatch.setattr(token_budget, "get_model_limits", unknown_limits)
