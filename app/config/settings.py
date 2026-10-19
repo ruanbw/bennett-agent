@@ -243,9 +243,11 @@ class Settings(BaseSettings):
     bootstrap_provider_from_env: bool = Field(
         default=True,
         description=(
-            "首次启动（model_provider 表为空）时是否用 LITELLM_API_BASE / MODEL_NAME "
-            "创建一条「默认网关」提供商。关闭后管理后台从空白开始配置；"
-            "注意删光提供商后重启会再次引导，要临时停用请把提供商设为禁用而不是删除。"
+            "首次启动（全新库）时是否用 LITELLM_API_BASE / MODEL_NAME 创建一条「默认网关」"
+            "提供商。关闭后管理后台从空白开始配置。首次引导或首次在后台创建提供商时会写入"
+            "初始化标记，该标记写入后永不清除，因此**删光提供商后重启不会再次引导**——"
+            "需要撤回配置后重新开始时，只能在管理后台手动重新添加；"
+            "要临时停用某个提供商请设为「禁用」，而不是删除。"
         ),
     )
 
