@@ -116,26 +116,12 @@ def test_build_agent_registers_configured_tools():
     assert set(agent._function_toolset.tools) == {tool.__name__ for tool in build_tools()}
 
 
-def test_build_tools_always_contains_clarification(monkeypatch):
-    """意图确认不依赖任何外部服务，是交互协议的一部分，必须始终可用。"""
-    from app.tools import build_tools
-
-    for key in (None, "tvly-test-key"):
-        monkeypatch.setattr(settings, "tavily_api_key", key)
-        assert "ask_user_clarification" in {tool.__name__ for tool in build_tools()}
-
-
-def test_build_tools_always_contains_current_time(monkeypatch):
-    """时间工具是纯本地计算，不依赖任何配置——否则「今天几号」只能靠模型猜。"""
-    from app.tools import build_tools
-
-    for key in (None, "tvly-test-key"):
-        monkeypatch.setattr(settings, "tavily_api_key", key)
-        assert "get_current_time" in {tool.__name__ for tool in build_tools()}
-
-
 def test_build_tools_adds_tavily_only_with_a_key(monkeypatch):
-    """没有 key 时挂 tavily 只是给模型一个必然失败的工具，白烧一轮 token。"""
+    """没有 key 时挂 tavily 只是给模型一个必然失败的工具，白烧一轮 token。
+
+    精确断言整份列表，同时锁住另外两条约定：意图确认（交互协议的一部分）与当前
+    时间（纯本地计算）在任何配置下都必须可用。
+    """
     from app.tools import build_tools
 
     monkeypatch.setattr(settings, "tavily_api_key", None)

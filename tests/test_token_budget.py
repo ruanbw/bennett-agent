@@ -5,7 +5,6 @@
 **放行**的未知情形。数字本身不是契约（换分词器就该变），量级与方向才是。
 """
 
-import time
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -96,18 +95,28 @@ def _reference_estimate_tokens(text: str) -> int:
     return wide + -(-narrow // ASCII_CHARS_PER_TOKEN)
 
 
-# 本机（CPython 3.10）实测基线，不是阈值：400k 纯 ASCII 约 0.01ms（isascii 快路径），
-# 400k 中文约 330ms、中英混排约 520ms（逐字符循环）。非 ASCII 只锁结果、不锁时间。
-def test_max_size_ascii_history_is_estimated_without_a_per_char_loop():
-    text = "a" * MAX_HISTORY_CHARS
+# 快路径要**锁机制**而不是锁耗时：墙钟阈值在覆盖率工具、共享 CI runner 上会偶发
+# 变红，而且只能发现数量级退化。这里直接断言「一次逐字符判定都没发生」——删掉
+# `isascii()` 分支时立刻失败，且与机器快慢无关。
+def test_max_size_ascii_history_is_estimated_without_a_per_char_loop(monkeypatch):
+    calls: list[str] = []
+    original = token_budget._is_wide_char
 
-    start = time.perf_counter()
+    def counting(char: str) -> bool:
+        calls.append(char)
+        return original(char)
+
+    monkeypatch.setattr(token_budget, "_is_wide_char", counting)
+
+    text = "a" * MAX_HISTORY_CHARS
     tokens = estimate_tokens(text)
-    elapsed_ms = (time.perf_counter() - start) * 1000
+    # 先取计数再算参考值：`_reference_estimate_tokens` 自己也走 `_is_wide_char`
+    # （它刻意逐字符复算），放在断言之后会把计数污染掉。
+    per_char_calls = list(calls)
 
     assert tokens == MAX_HISTORY_CHARS // ASCII_CHARS_PER_TOKEN
     assert tokens == _reference_estimate_tokens(text)
-    assert elapsed_ms < 50, f"{MAX_HISTORY_CHARS} 字符 ASCII 估算耗时 {elapsed_ms:.1f}ms，快路径失效了"
+    assert per_char_calls == [], "纯 ASCII 必须走 isascii() 快路径，不能退化成逐字符判定"
 
 
 @pytest.mark.parametrize(

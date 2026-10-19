@@ -117,6 +117,7 @@ def test_admin_can_reach_the_console_once_its_role_is_set(client):
     # is_superuser 是 role 的派生镜像（apply_role 保持同步），admin 即为 True
     assert me.json()["is_superuser"] is True
     assert client.get("/api/admin/providers").status_code == 200
+    assert client.get("/api/admin/users").status_code == 200
 
 
 def test_startup_never_promotes_anyone(client):

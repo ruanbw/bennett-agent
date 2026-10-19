@@ -93,35 +93,11 @@ def test_duplicate_registration_is_still_rejected(client):
 
 
 # ---------------------------------------------------------------------
-# 权限门：401 / 403 的分工
-# ---------------------------------------------------------------------
-def test_plain_user_cannot_reach_admin_endpoints(client):
-    email = unique_email()
-    register(client, email)
-    login(client, email)
-
-    assert client.get("/api/admin/providers").status_code == 403
-    assert client.get("/api/admin/users").status_code == 403
-
-
-def test_anonymous_gets_401_not_403(client):
-    assert client.get("/api/admin/providers").status_code == 401
-
-
-def test_admin_can_reach_admin_endpoints(client):
-    make_admin(client)
-
-    assert client.get("/api/admin/providers").status_code == 200
-    assert client.get("/api/admin/users").status_code == 200
-
-
-def test_superadmin_can_reach_admin_endpoints(client):
-    make_superadmin(client)
-    assert client.get("/api/admin/providers").status_code == 200
-
-
-# ---------------------------------------------------------------------
 # 角色变更：只有 superadmin 能做
+#
+# 权限门本身（匿名 401、user 403、admin 放行）在 `tests/test_admin.py` 的「权限」
+# 一节，这里不再重复；superadmin 能进后台由下面每条用例隐式覆盖——它们全都要先
+# 到达 `/api/admin/users/{id}/role` 才会拿到 200/403/400。
 # ---------------------------------------------------------------------
 def test_admin_cannot_change_roles(client):
     """admin 能进后台，但改角色是最高一档的专属动作。"""
@@ -290,35 +266,10 @@ def test_superadmin_can_demote_another_superadmin_when_more_remain(client):
 
 # ---------------------------------------------------------------------
 # 封禁与角色的关系
+#
+# 封禁/解封的等级守卫（自己、同级、超管）在 `tests/test_admin.py` 的「用户封禁」
+# 一节，那里对同一个 actor 把三种情况都测了。本文件只关心角色链路。
 # ---------------------------------------------------------------------
-def test_admin_cannot_ban_a_peer_or_a_superadmin(client):
-    """`admin` 只能动普通用户：同级互封会让后台失去可预期性（谁先动手谁赢）。"""
-    make_admin(client, "ban-admin")
-
-    peer_email = unique_email("peer")
-    peer_id = register(client, peer_email)
-    asyncio.run(set_role_in_db(peer_email, Role.ADMIN))
-
-    peer_ban = client.post(f"/api/admin/users/{peer_id}/ban")
-    assert peer_ban.status_code == 400
-    assert "同级" in peer_ban.json()["detail"]
-
-    root_email = unique_email("root")
-    root_id = register(client, root_email)
-    asyncio.run(set_role_in_db(root_email, Role.SUPERADMIN))
-
-    root_ban = client.post(f"/api/admin/users/{root_id}/ban")
-    assert root_ban.status_code == 400
-    assert "超级管理员" in root_ban.json()["detail"]
-
-
-def test_superadmin_cannot_ban_itself(client):
-    _, own_id = make_superadmin(client)
-
-    response = client.post(f"/api/admin/users/{own_id}/ban")
-
-    assert response.status_code == 400
-    assert "当前登录" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------

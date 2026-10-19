@@ -41,15 +41,20 @@ from app.schemas.events import (
     ToolCall,
     ToolResult,
 )
+from app.services import chat_service
 from app.services.chat_service import CLARIFICATION_TOOL_NAME, translate_event
+
+
+@pytest.fixture(autouse=True)
+def _reset_unknown_event_warnings():
+    """未识别事件的告警按类型**全局**去重，不隔离就会跨用例互相吞掉日志。"""
+    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
+    yield
+    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
 
 
 def translate(event):
     return list(translate_event(event))
-
-
-def describe(events):
-    return [(event.type, vars(event)) for event in events]
 
 
 # ---------------------------------------------------------------------
@@ -97,6 +102,8 @@ def test_tool_call_delta_is_intentionally_ignored(caplog):
 
     assert events == []
     assert "ToolCallPartDelta" in caplog.text
+    # 有意忽略的事件不能混进「未识别」的 WARNING，否则唯一的渲染停摆信号会被淹没
+    assert [record.levelno for record in caplog.records if record.levelno >= logging.WARNING] == []
 
 
 # ---------------------------------------------------------------------
@@ -160,18 +167,26 @@ def test_retry_prompt_result_is_translated():
 
 # ---------------------------------------------------------------------
 # 意图确认提问（R-6 的接缝）
+#
+# `translate_event` 消费的是 `FunctionToolCallEvent`（工具**开始执行**），它比工具
+# 返回早一步——服务端那时还不知道工具会拒绝。校验规则因此必须与工具**完全一致**：
+# 模型传 600 字问题 → 工具返回「超限」错误 → 但弹窗已经发出去了 → 模型重试带新的
+# tool_call_id → 去重拦不住 → 用户看到第二个弹窗。两边共用 `normalize_clarification`。
 # ---------------------------------------------------------------------
+def clarification_call(args, tool_call_id="ask-1"):
+    return tool_call_event(CLARIFICATION_TOOL_NAME, args, tool_call_id)
+
+
 def test_clarification_becomes_typed_event_not_tool_call():
     """提问必须是一等公民事件，前端不再比对 tool_name 字符串。"""
     events = translate(
-        tool_call_event(
-            CLARIFICATION_TOOL_NAME,
+        clarification_call(
             {
                 "question": "生成 React 还是 Vue？",
                 "options": ["React", "Vue"],
                 "allow_custom_input": True,
             },
-            tool_call_id="ask-1",
+            "ask-1",
         )
     )
 
@@ -187,34 +202,25 @@ def test_clarification_becomes_typed_event_not_tool_call():
 
 def test_clarification_accepts_json_string_args():
     """部分网关把入参作为 JSON 字符串给出。"""
-    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, '{"question":"选哪个？","options":["A","B"]}'))
+    events = translate(clarification_call('{"question":"选哪个？","options":["A","B"]}'))
 
     assert isinstance(events[0], ClarificationRequest)
     assert events[0].options == ["A", "B"]
 
 
-def test_clarification_defaults_allow_custom_input_to_true():
-    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选哪个？", "options": ["A", "B"]}))
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # strip + 去重，保持原顺序
+        (["  React  ", "React", "Vue", "   ", "", "Vue"], ["React", "Vue"]),
+        # 模型偶尔会传数字/None/dict：丢弃它们而不是整条拒绝
+        (["A", 1, None, "B", {"x": 1}], ["A", "B"]),
+    ],
+)
+def test_clarification_options_are_cleaned(raw, expected):
+    events = translate(clarification_call({"question": "选哪个？", "options": raw}))
 
-    assert events[0].allow_custom_input is True
-    assert events[0].options == ["A", "B"]
-
-
-def test_clarification_honours_explicit_false():
-    events = translate(
-        tool_call_event(
-            CLARIFICATION_TOOL_NAME,
-            {"question": "选哪个？", "options": ["A", "B"], "allow_custom_input": False},
-        )
-    )
-
-    assert events[0].allow_custom_input is False
-
-
-def test_clarification_filters_non_string_options():
-    events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, {"question": "选？", "options": ["A", 1, None, "B"]}))
-
-    assert events[0].options == ["A", "B"]
+    assert events[0].options == expected
 
 
 @pytest.mark.parametrize(
@@ -228,34 +234,102 @@ def test_clarification_filters_non_string_options():
 def test_unparseable_clarification_warns_and_yields_nothing(caplog, bad_args):
     """入参根本不是 dict 时不能静默：既不发 ToolCall（前端会当成普通工具），也要留警告。"""
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, bad_args))
+        events = translate(clarification_call(bad_args))
 
     assert events == []
     assert "意图确认工具入参无法解析" in caplog.text
 
 
 @pytest.mark.parametrize(
-    "bad_args",
+    "bad_args,offending",
     [
-        {},
-        {"question": ""},
-        {"question": "   "},
-        {"question": 123},
+        # question 侧
+        ({}, "question"),
+        ({"question": ""}, "question"),
+        ({"question": "   "}, "question"),
+        ({"question": 123}, "question"),
+        ({"question": "问" * 501, "options": ["A", "B"]}, "question"),  # 超长
+        # options 侧：至少 2 个**去重后非空**的选项，否则用户看到一个点不出结果的弹窗。
+        # 期望词用 "option" 而不是 "options"：工具的文案有「候选项列表 (options)」与
+        # 「单个候选项 (option)」两种，前者是后者的子串。
+        ({"question": "选哪个？"}, "option"),
+        ({"question": "选哪个？", "options": []}, "option"),
+        ({"question": "选哪个？", "options": ["只有一个"]}, "option"),
+        ({"question": "选哪个？", "options": ["A", "  ", ""]}, "option"),
+        ({"question": "选哪个？", "options": ["A", "  A  "]}, "option"),
+        ({"question": "选哪个？", "options": "A,B"}, "option"),  # 不是列表
+        ({"question": "选哪个？", "options": [f"选项{i}" for i in range(11)]}, "option"),  # 超额
+        ({"question": "选哪个？", "options": ["A" * 101, "B"]}, "option"),  # 单项超长
     ],
 )
-def test_invalid_clarification_args_are_refused_with_the_tool_reason(caplog, bad_args):
-    """能解析但过不了校验：同样不发弹窗，但日志里记的是工具那份具体原因。
+def test_invalid_clarification_args_are_refused_with_the_tool_reason(caplog, bad_args, offending):
+    """能解析但过不了校验：不发弹窗，日志里记的是工具那份具体原因。
 
-    两种情况分开测是因为它们的排障含义不同：「无法解析」说明模型的 JSON 坏了，
-    「未通过校验」说明模型给的参数越界——后者靠 reason 能直接看出是哪个参数。
+    与「无法解析」分开测是因为排障含义不同：前者说明模型的 JSON 坏了，后者说明
+    参数越界——靠 reason 能直接看出是哪个参数。超限入参（问题过长、选项过多、
+    单项过长）尤其必须在**翻译层**提前拒绝，不能先弹窗再让工具报错。
     """
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, bad_args))
+        events = translate(clarification_call(bad_args))
 
     assert events == []
     assert "未通过校验" in caplog.text
     # reason 用的是工具原文，能定位到具体参数
-    assert "question" in caplog.text
+    assert offending in caplog.text
+
+
+def test_translate_and_tool_agree_on_the_same_rules():
+    """同一个入参，工具与翻译层必须给出**一致**的通过/拒绝结论。"""
+    from app.services.chat_service import _clarification_from
+    from app.tools.ask_user_clarification import normalize_clarification
+
+    cases = [
+        ({"question": "选哪个？", "options": ["A", "B"]}, True),
+        ({"question": "", "options": ["A", "B"]}, False),
+        ({"question": "问" * 501, "options": ["A", "B"]}, False),
+        ({"question": "选哪个？", "options": ["A"]}, False),
+        ({"question": "选哪个？", "options": ["A", "B", "A"]}, True),  # 去重后 2 个
+        ({"question": "选哪个？", "options": ["A" * 101, "B"]}, False),
+        ({"question": "问", "options": ["  A  ", "", "B"]}, True),
+    ]
+
+    for args, should_pass in cases:
+        tool_result = normalize_clarification(args["question"], args["options"])
+        tool_passes = not isinstance(tool_result, str)
+        event = _clarification_from(args, "call-1")
+        translate_passes = event is not None
+
+        assert tool_passes is should_pass, args
+        assert translate_passes is should_pass, args
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # None = 客户端没传，默认允许自定义输入
+        (None, True),
+        (True, True),
+        (False, False),
+        # 回归 `bool("false") is True`：网关把布尔值当字符串回传时输入框会错误地打开
+        ("true", True),
+        ("1", True),
+        ("false", False),
+        ("FALSE", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+        (" off ", False),
+        ("", False),
+    ],
+)
+def test_allow_custom_input_is_parsed_explicitly(raw, expected):
+    args = {"question": "选哪个？", "options": ["A", "B"]}
+    if raw is not None:
+        args["allow_custom_input"] = raw
+
+    events = translate(clarification_call(args))
+
+    assert events[0].allow_custom_input is expected
 
 
 # ---------------------------------------------------------------------
@@ -283,30 +357,36 @@ def test_routine_events_are_not_warned_about(caplog, event):
     assert warnings == [], f"{type(event).__name__} 是常规事件，不该报警"
 
 
-def test_genuinely_unknown_event_still_warns(caplog):
-    """真正的未知类型必须继续告警——否则「渲染悄悄停摆」无从发现。"""
+def test_genuinely_unknown_event_warns_once_per_type(caplog):
+    """真正的未知类型必须继续告警——否则「渲染悄悄停摆」无从发现。
 
-    class TotallyUnknownEvent:
+    生产日志级别是 INFO：原来的 DEBUG 等于没记，正文会静默丢光。按类型去重是为了
+    让它可被发现，又不至于每个事件刷一行。
+    """
+
+    class UnknownEventA:
+        pass
+
+    class UnknownEventB:
         pass
 
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        events = translate(TotallyUnknownEvent())
+        assert translate(UnknownEventA()) == []
+        assert translate(UnknownEventA()) == []
+        assert translate(UnknownEventB()) == []
 
-    assert events == []
-    assert "未处理的 pydantic-ai 流事件" in caplog.text
-    assert "静默丢弃" in caplog.text
+    warnings = [record for record in caplog.records if "未处理的 pydantic-ai 流事件" in record.getMessage()]
+    # 每种类型只告一次（去重），但不同类型都要告
+    assert len(warnings) == 2
+    assert all(record.levelno == logging.WARNING for record in warnings)
+    # 文案要说明后果，否则看日志的人不知道该不该在意
+    assert all("静默丢弃" in record.getMessage() for record in warnings)
 
 
-def test_str_name_dispatch_would_have_missed_subclasses():
-    """说明为何不能用 type(event).__name__。
-
-    FunctionToolCallEvent 是 ToolCallEvent 的子类；按类名字符串分派会漏掉
-    以后新增的同类事件，而 isinstance 会自动接住。
-    """
-    from pydantic_ai.messages import ToolCallEvent
-
-    assert issubclass(FunctionToolCallEvent, ToolCallEvent)
-    assert type(FunctionToolCallEvent(part=ToolCallPart(tool_name="x", args={}))).__name__ != "ToolCallEvent"
+# 为什么用 `isinstance` 分派而不是 `type(event).__name__` 字符串比较：
+# `FunctionToolCallEvent` 是 pydantic-ai 里 `ToolCallEvent` 的子类，按类名字符串
+# 分派会漏掉以后新增的同类事件，升级改名时还会表现为「静默无输出」。这条只写在
+# 注释里而不写成断言——它锁的是第三方库的继承关系，不是本项目的行为。
 
 
 # ---------------------------------------------------------------------

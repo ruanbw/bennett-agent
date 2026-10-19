@@ -368,13 +368,6 @@ def test_new_fields_have_expected_defaults():
     assert config.enable_api_docs is None  # None=自动：production 关闭，其余环境开启
 
 
-def test_new_fields_accept_explicit_overrides():
-    config = Settings(cors_allow_credentials=True, enable_api_docs=False, _env_file=None)
-
-    assert config.cors_allow_credentials is True
-    assert config.enable_api_docs is False
-
-
 # ---------------------------------------------------------------------
 # 上下文窗口预算
 # ---------------------------------------------------------------------

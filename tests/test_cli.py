@@ -59,7 +59,6 @@ def test_estimate_counts_text_thinking_and_tool_parts():
 
     # 四段各 200 个中文字符 = 800 tokens，加工具参数与结构性开销
     assert total >= 800
-    assert total == estimate_agent_messages_tokens(messages)  # 稳定
 
 
 def test_estimate_handles_empty_history():

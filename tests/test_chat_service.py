@@ -19,16 +19,12 @@ import pydantic
 import pytest
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
-    FinalResultEvent,
     FunctionToolCallEvent,
     ModelRequest,
     ModelResponse,
-    PartDeltaEvent,
-    PartEndEvent,
     PartStartEvent,
     TextPart,
     ToolCallPart,
-    ToolCallPartDelta,
 )
 from pydantic_ai.run import AgentRunResultEvent
 from sqlalchemy.exc import OperationalError
@@ -37,14 +33,6 @@ from app.schemas.chat import ChatMessage
 from app.services import chat_service
 from app.services.chat_service import CLARIFICATION_TOOL_NAME, InvalidChatHistory, convert_chat_history
 from app.services.fallback_tracker import record_fallback
-
-
-@pytest.fixture(autouse=True)
-def _reset_unknown_event_warnings():
-    """未识别事件的告警按类型**全局**去重，不隔离就会跨用例互相吞掉日志。"""
-    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
-    yield
-    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
 
 
 def msg(role, content="", thinking=None):
@@ -682,133 +670,11 @@ def test_fallback_from_a_failed_attempt_is_not_reported(monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# 意图确认事件（P1）
-# ---------------------------------------------------------------------
-def test_clarification_options_are_stripped_and_deduped():
-    events = list(
-        chat_service.translate_event(
-            clarification_call(
-                {
-                    "question": "选哪个？",
-                    "options": ["  React  ", "React", "Vue", "   ", "", "Vue"],
-                }
-            )
-        )
-    )
-
-    assert events[0].options == ["React", "Vue"]
-
-
-@pytest.mark.parametrize(
-    "raw_options",
-    [
-        None,
-        [],
-        ["只有一个"],
-        ["A", "  ", ""],
-        ["A", "  A  "],  # strip + 去重后只剩一个
-        "A,B",  # 不是列表
-    ],
-)
-def test_clarification_needs_two_effective_options(caplog, raw_options):
-    """与 `ask_user_clarification` 的「≥ 2 个不同非空选项」保持一致。
-
-    否则模型传错参数时，用户会先看到一个只有 0/1 个选项、点不出结果的弹窗，
-    而工具其实已经把「参数不合法」返回给了模型。
-
-    两边现在共用 `normalize_clarification`（同一个纯函数），日志里的 `reason` 就是
-    工具的原文文案——所以这里断言的是「拒绝且原因指向 options」，而不是某一个具体措辞。
-    """
-    args = {"question": "选哪个？"}
-    if raw_options is not None:
-        args["options"] = raw_options
-
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        events = list(chat_service.translate_event(clarification_call(args)))
-
-    assert events == []
-    assert "options" in caplog.text
-
-
-# ---------------------------------------------------------------------
-# 校验规则只有一份（消除双弹窗）
+# 意图确认：单轮去重（流级别）
 #
-# `translate_event` 消费的是 `FunctionToolCallEvent`（工具**开始执行**），它比工具
-# 返回早一步——服务端那时还不知道工具会拒绝。两边规则不一致时：模型传 600 字问题
-# → 工具返回「超限」错误 → **但弹窗已经发出去了** → 模型重试带新 tool_call_id →
-# 去重拦不住 → 用户看到第二个弹窗。
+# 翻译层的入参校验/清洗/`allow_custom_input` 解析在 `tests/test_events.py`，
+# 这里只测需要整条流才能验证的部分：同一轮里跨事件的去重状态。
 # ---------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"question": "问" * 501},  # 超长问题
-        {"options": [f"选项{i}" for i in range(11)]},  # 超额选项
-        {"options": ["A" * 101, "B"]},  # 单项超长
-    ],
-)
-def test_oversized_clarification_args_never_reach_the_client(overrides, caplog):
-    """工具会拒绝的参数，翻译层必须**提前**拒绝——不能先弹出窗口再报错。"""
-    args = {"question": "选哪个？", "options": ["A", "B"], **overrides}
-
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        events = list(chat_service.translate_event(clarification_call(args)))
-
-    assert events == [], "超限入参不该产生 clarification 事件"
-    assert "未通过校验" in caplog.text
-
-
-def test_translate_and_tool_agree_on_the_same_rules():
-    """同一个入参，工具与翻译层必须给出**一致**的通过/拒绝结论。"""
-    from app.tools.ask_user_clarification import normalize_clarification
-
-    cases = [
-        ({"question": "选哪个？", "options": ["A", "B"]}, True),
-        ({"question": "", "options": ["A", "B"]}, False),
-        ({"question": "问" * 501, "options": ["A", "B"]}, False),
-        ({"question": "选哪个？", "options": ["A"]}, False),
-        ({"question": "选哪个？", "options": ["A", "B", "A"]}, True),  # 去重后 2 个
-        ({"question": "选哪个？", "options": ["A" * 101, "B"]}, False),
-        ({"question": "问", "options": ["  A  ", "", "B"]}, True),
-    ]
-
-    for args, should_pass in cases:
-        tool_result = normalize_clarification(args["question"], args["options"])
-        tool_passes = not isinstance(tool_result, str)
-        event = chat_service._clarification_from(args, "call-1")
-        translate_passes = event is not None
-
-        assert tool_passes is should_pass, args
-        assert translate_passes is should_pass, args
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        (None, True),
-        (True, True),
-        (False, False),
-        ("true", True),
-        ("1", True),
-        ("false", False),
-        ("FALSE", False),
-        ("0", False),
-        ("no", False),
-        ("off", False),
-        (" off ", False),
-        ("", False),
-    ],
-)
-def test_allow_custom_input_is_parsed_explicitly(raw, expected):
-    """回归 `bool("false") is True`：网关把布尔值当字符串回传时输入框会错误地打开。"""
-    args = {"question": "选哪个？", "options": ["A", "B"]}
-    if raw is not None:
-        args["allow_custom_input"] = raw
-
-    events = list(chat_service.translate_event(clarification_call(args)))
-
-    assert events[0].allow_custom_input is expected
-
-
 def test_duplicate_clarification_in_one_round_is_ignored_after_the_first(monkeypatch):
     """同一轮里模型可能对同一次提问重复发工具调用，前端弹窗只该出现一次。"""
     args = {"question": "选哪个？", "options": ["A", "B"]}
@@ -854,61 +720,8 @@ def test_failed_clarification_does_not_block_a_later_valid_one(monkeypatch):
     assert events[0].options == ["A", "B"]
 
 
-# ---------------------------------------------------------------------
-# 未识别事件的告警降级（P2）
-#
-# 这里用的是**真正的未知类型**（一个不继承任何 pydantic-ai 事件的普通类），而不是
-# `PartEndEvent`——后者是每次流式响应的固定成分，把它当未知会让告警在 100% 的正常
-# 流量上触发，反而使唯一的「渲染停摆」信号失去意义（见 `app/services/chat_service.py`
-# 里对应的「有意忽略」分支）。
-# ---------------------------------------------------------------------
-def test_unknown_event_warns_at_warning_level_once_per_type(caplog):
-    """生产日志级别是 INFO：原来的 DEBUG 等于没记，正文会静默丢光。"""
-
-    class UnknownEventA:
-        pass
-
-    class UnknownEventB:
-        pass
-
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        assert list(chat_service.translate_event(UnknownEventA())) == []
-        assert list(chat_service.translate_event(UnknownEventA())) == []
-        assert list(chat_service.translate_event(UnknownEventB())) == []
-
-    warnings = [record for record in caplog.records if "未处理的 pydantic-ai 流事件" in record.getMessage()]
-    # 每种类型只告一次（去重），但不同类型都要告
-    assert len(warnings) == 2
-    assert all(record.levelno == logging.WARNING for record in warnings)
-
-
-def test_unknown_event_message_explains_the_consequence(caplog):
-    class UnknownEvent:
-        pass
-
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        list(chat_service.translate_event(UnknownEvent()))
-
-    assert "静默丢弃" in caplog.text
-
-
-def test_routine_stream_events_do_not_warn(caplog):
-    """`PartEndEvent` / `FinalResultEvent` 是正常流量的固定成分，不能进告警。"""
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        list(chat_service.translate_event(PartEndEvent(index=0, part=TextPart(content="x"))))
-        list(chat_service.translate_event(FinalResultEvent(tool_name="t", tool_call_id="c")))
-
-    assert "未处理的 pydantic-ai 流事件" not in caplog.text
-
-
-def test_tool_call_delta_stays_a_deliberate_debug_ignore(caplog):
-    """工具入参增量是有意忽略的常见事件，不该被当成「未识别」发 WARNING。"""
-    with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
-        events = list(chat_service.translate_event(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta="{"))))
-
-    assert events == []
-    assert "ToolCallPartDelta" in caplog.text
-    assert [record.levelno for record in caplog.records if record.levelno >= logging.WARNING] == []
+#: 翻译层的「未知事件告警 / 常规事件不告警 / `ToolCallPartDelta` 有意忽略」都在
+#: `tests/test_events.py`，本文件不再重复——它们是同一个纯函数的分支。
 
 
 # ---------------------------------------------------------------------

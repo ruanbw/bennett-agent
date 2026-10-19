@@ -27,15 +27,14 @@ def render_system_prompt(**overrides):
 # ---------------------------------------------------------------------
 # StrictUndefined
 # ---------------------------------------------------------------------
-def test_missing_variable_raises_instead_of_rendering_empty():
-    with pytest.raises(UndefinedError):
-        prompt_manager.render(SYSTEM_PROMPT_TEMPLATE, assistant_name="Bennett")  # 漏了 app_env
+def test_missing_variable_raises_and_names_it():
+    """漏传变量必须报错而不是渲染成空串；报错信息要能直接指出漏了哪个变量。
 
-
-def test_undefined_error_names_the_variable():
-    """报错信息要能直接指出漏了哪个变量，否则排障还得去读模板。"""
+    空串会让系统提示词悄悄少掉一整段（例如「当前环境: 」），模型行为随之变化却
+    没有任何痕迹；而报错里不带变量名，排障还得回去读模板。
+    """
     with pytest.raises(UndefinedError, match="app_env"):
-        prompt_manager.render(SYSTEM_PROMPT_TEMPLATE)
+        prompt_manager.render(SYSTEM_PROMPT_TEMPLATE, assistant_name="Bennett")  # 漏了 app_env
 
 
 def test_default_filter_still_works_with_strict_undefined():

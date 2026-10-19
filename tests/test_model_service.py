@@ -565,6 +565,7 @@ async def test_model_limits_tolerate_a_malformed_window(fake_http):
 
 async def test_chat_endpoint_accepts_whitelisted_model(monkeypatch):
     from app.api import chat as chat_api
+    from app.api.chat import ChatEventSourceResponse
     from app.schemas.chat import ChatMessage, ChatRequest
 
     async def known_ids():
@@ -574,7 +575,11 @@ async def test_chat_endpoint_accepts_whitelisted_model(monkeypatch):
     request = ChatRequest(model="a/one", messages=[ChatMessage(role="user", content="你好")])
 
     # 只构造响应对象，不迭代生成器（迭代会去真的调模型）
-    assert await chat_api.chat_stream(request) is not None
+    response = await chat_api.chat_stream(request)
+
+    # 放行必须走到真实响应构造，而不是「没抛异常」——后者对返回值无约束
+    assert isinstance(response, ChatEventSourceResponse)
+    assert response.media_type == "text/event-stream"
 
 
 async def test_title_endpoint_checks_whitelist(monkeypatch):

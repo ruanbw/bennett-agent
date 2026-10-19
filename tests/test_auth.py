@@ -185,25 +185,9 @@ def test_each_login_gets_a_distinct_session(client):
 # ---------------------------------------------------------------------
 # 安全断言
 # ---------------------------------------------------------------------
-def test_register_cannot_self_promote_to_superuser(client):
-    """注册接口必须忽略客户端传来的 `is_superuser` / `is_active` / `is_verified`。
-
-    `BaseUserCreate` 里带着这三个字段，但注册路由调用 `user_manager.create(..., safe=True)`，
-    而 `safe=True` 会走 `create_update_dict()`，该方法显式排除它们。
-    """
-    response = client.post(
-        "/api/auth/register",
-        json={
-            **register_body(unique_email()),
-            "is_superuser": True,
-            "is_active": True,
-            "is_verified": True,
-        },
-    )
-
-    assert response.status_code == 201
-    assert response.json()["is_superuser"] is False
-    assert response.json()["is_verified"] is False
+#: 注册接口忽略客户端自带的 `is_superuser` / `role`  —— 见
+#: `tests/test_roles.py::test_register_ignores_client_supplied_role_and_flags`。
+#: 那条用例覆盖的字段是这里的超集，此处不再重复一遍。
 
 
 def test_login_failure_is_400_not_401(client):
@@ -234,11 +218,8 @@ def test_login_requires_form_encoding(client):
     assert response.status_code == 422
 
 
-def test_duplicate_registration_is_rejected(client):
-    email = unique_email()
-
-    assert register(client, email).status_code == 201
-    assert register(client, email).status_code == 400
+#: 重复注册返回 400 且 detail 为 `REGISTER_USER_ALREADY_EXISTS` —— 见
+#: `tests/test_roles.py::test_duplicate_registration_is_still_rejected`。
 
 
 def test_register_rejects_short_password(client):

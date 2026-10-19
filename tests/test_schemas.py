@@ -54,10 +54,6 @@ def test_message_thinking_over_limit_is_rejected():
     assert reject(ChatRequest, messages=[user("hi", thinking=over)]) == "string_too_long"
 
 
-def test_message_thinking_is_optional():
-    assert ChatMessage(**user("hi")).thinking is None
-
-
 def test_only_user_and_assistant_roles_are_accepted():
     """`system` 角色曾被转成 SystemPromptPart 插进历史，等于允许客户端注入系统提示词。"""
     assert ChatMessage(role="user", content="hi").role == "user"
@@ -219,18 +215,20 @@ def test_stream_field_is_gone():
     assert not hasattr(ChatRequest(messages=[user()], stream=False), "stream")
 
 
-def test_defaults_are_unchanged():
-    request = ChatRequest(messages=[user()])
-    assert request.model is None
-    assert request.reasoning_effort is None
-
-
 # ---------------------------------------------------------------------
 # 上下文锚点（可选的精度提升）
 # ---------------------------------------------------------------------
-def test_context_anchor_is_optional():
-    """老客户端不发它，行为必须完全不变（预检退回估算）。"""
-    assert ChatRequest(messages=[user()]).context_anchor is None
+def test_optional_fields_default_to_none():
+    """所有可选项缺省为 None：老客户端的请求形状必须完全不变。
+
+    `model` 缺省时用默认模型、`reasoning_effort` 缺省时不发该参数、`context_anchor`
+    缺省时预检退回估算——三者任一被改成有默认值的字段，老客户端的行为都会悄悄变化。
+    """
+    request = ChatRequest(messages=[user()])
+    assert request.model is None
+    assert request.reasoning_effort is None
+    assert request.context_anchor is None
+    assert ChatMessage(**user("hi")).thinking is None
 
 
 def test_context_anchor_is_accepted():

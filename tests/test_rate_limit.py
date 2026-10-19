@@ -385,9 +385,10 @@ def test_title_endpoint_is_limited_too(monkeypatch, fake_upstream):
         assert client.post("/api/chat/title", json={"prompt": "你好"}).status_code == 429
 
 
-def test_chat_stream_headers_omit_connection_keep_alive():
-    """遵循 RFC 7540 HTTP/2，SSE_HEADERS 中已显式移除 Connection: keep-alive。"""
-    assert "Connection" not in chat_api.SSE_HEADERS
+#: `SSE_HEADERS` 里没有 `Connection` 这件事不在字典上断言：
+#: sse-starlette 会在合并调用方 headers **之后**无条件写入 `Connection: keep-alive`，
+#: 只断言字典是伪保证。真正剥掉它的是 `ChatEventSourceResponse`，断言在
+#: `tests/test_events.py::test_chat_sse_response_headers` 的真实响应上。
 
 
 def test_invalid_body_still_consumes_quota(monkeypatch):

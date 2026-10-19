@@ -18,7 +18,6 @@
 
 import uuid
 
-import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import _migrate_user_role_column
@@ -135,10 +134,8 @@ async def test_migration_is_idempotent_on_a_clean_db(tmp_path):
         await engine.dispose()
 
 
-@pytest.mark.parametrize("missing_role_column", [False])
-async def test_missing_table_is_a_noop(tmp_path, missing_role_column):
+async def test_missing_table_is_a_noop(tmp_path):
     """表还不存在时不能抛——全新库由 `create_all` 带上 role，这里只该直接返回。"""
-    assert missing_role_column is False
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'empty.db'}")
     try:
         await _run_migration(engine)  # 不建任何表
