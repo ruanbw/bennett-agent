@@ -219,7 +219,8 @@ const ThreadScrollToBottom: FC<{ onClick?: () => void }> = ({ onClick }) => {
         tooltip="滚动到底部"
         variant="outline"
         onClick={onClick}
-        className="absolute -top-12 z-10 self-center rounded-full p-2.5 bg-background shadow-md border hover:bg-muted disabled:invisible"
+        // 靠右对齐输入框右边缘：之前是 self-center（居中），会盖在消息正文中轴线上
+        className="absolute -top-12 right-4 z-10 rounded-full p-2.5 bg-background shadow-md border hover:bg-muted disabled:invisible"
       >
         <ArrowDownIcon size={14} />
       </TooltipIconButton>
