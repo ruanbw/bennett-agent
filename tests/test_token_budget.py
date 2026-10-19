@@ -133,16 +133,37 @@ def test_limit_applies_the_safety_ratio():
         max_output_tokens=20_000,
         used_tokens=0,
         overhead_tokens=1_000,
+        used_tokens_include_overhead=False,
     )
 
     assert budget.reserve_tokens == 20_000
     assert budget.limit_tokens == int((100_000 - 20_000 - 1_000) * 0.9)
 
+    at_limit = build_budget(
+        model="m",
+        context_window=100_000,
+        max_output_tokens=20_000,
+        used_tokens=budget.limit_tokens,
+        overhead_tokens=1_000,
+        used_tokens_include_overhead=False,
+    )
+    # 恰好等于上限不拒绝：判据是「超过」而不是「达到」
+    assert not at_limit.over_limit and at_limit.remaining_tokens == 0
+
+
+def test_overhead_is_only_deducted_when_used_excludes_it():
+    """`used_tokens` 已含固定开销时不能再从上限里扣一次，否则同一笔开销被扣两次。"""
+    excluded = build_budget("m", 100_000, 8_000, 10_000, 1_000, used_tokens_include_overhead=False)
+    included = build_budget("m", 100_000, 8_000, 10_000, 1_000, used_tokens_include_overhead=True)
+
+    assert included.limit_tokens == int((100_000 - 8_000) * 0.9)
+    assert excluded.limit_tokens == int((100_000 - 8_000 - 1_000) * 0.9)
+
 
 def test_safety_ratio_is_configurable(monkeypatch):
     monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
     monkeypatch.setattr(settings, "context_reserve_tokens", 0)
-    budget = build_budget("m", 100_000, 0, 0, 0)
+    budget = build_budget("m", 100_000, 0, 0, 0, used_tokens_include_overhead=False)
 
     assert budget.limit_tokens == 50_000
 
@@ -153,14 +174,14 @@ def test_limit_never_goes_negative():
     负数会让 `remaining_tokens` 的语义反转（超限判定依旧成立，但所有基于
     「还剩多少」的裁剪规划都会算错）。
     """
-    budget = build_budget("m", 1_000, 0, 0, overhead_tokens=999_999)
+    budget = build_budget("m", 1_000, 0, 0, overhead_tokens=999_999, used_tokens_include_overhead=False)
 
     assert budget.limit_tokens == 0
 
 
 def test_over_limit_and_remaining_tokens():
-    over = build_budget("m", 100_000, 0, used_tokens=100_000, overhead_tokens=0)
-    under = build_budget("m", 100_000, 0, used_tokens=10, overhead_tokens=0)
+    over = build_budget("m", 100_000, 0, used_tokens=100_000, overhead_tokens=0, used_tokens_include_overhead=False)
+    under = build_budget("m", 100_000, 0, used_tokens=10, overhead_tokens=0, used_tokens_include_overhead=False)
 
     assert over.over_limit and over.remaining_tokens < 0
     assert not under.over_limit and under.remaining_tokens > 0
@@ -168,8 +189,8 @@ def test_over_limit_and_remaining_tokens():
 
 def test_budget_is_frozen_and_compares_by_value():
     """预算对象是纯数据：两个消费方（拒绝判定、裁剪规划）必须看到同一份数字。"""
-    budget = build_budget("m", 100_000, 0, 0, 0)
-    assert budget == build_budget("m", 100_000, 0, 0, 0)
+    budget = build_budget("m", 100_000, 0, 0, 0, used_tokens_include_overhead=False)
+    assert budget == build_budget("m", 100_000, 0, 0, 0, used_tokens_include_overhead=False)
 
     with pytest.raises(FrozenInstanceError):
         budget.limit_tokens = 1  # type: ignore[misc]
@@ -300,8 +321,12 @@ def test_usable_anchor_passes_through_when_absent():
     assert usable_anchor([msg("user", "问")], None) is None
 
 
-async def test_anchor_only_estimates_the_delta(monkeypatch):
-    """锚点之后只有一条新提问：估算范围从「整份历史」缩到「一条消息」。"""
+async def test_anchor_counts_the_anchor_reply_and_the_messages_after_it(monkeypatch):
+    """锚点值是产生那条助手消息的**那次请求**的 prompt，不含它自己。
+
+    估算若从 `message_index + 1` 起，锚点那轮回答既不在真实值里也没被估算，
+    一条长回答就会让预算少算一整轮输出。
+    """
     patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
     messages = [msg("user", "很长的历史" * 100), msg("assistant", "很长的回答" * 100), msg("user", "新问题")]
 
@@ -311,10 +336,27 @@ async def test_anchor_only_estimates_the_delta(monkeypatch):
     assert blind is not None and anchored is not None
     assert blind.basis == "estimate"
     assert anchored.basis == "anchor"
-    # 锚点值 + 只估算最后一条
-    assert anchored.used_tokens == 40_000 + MESSAGE_OVERHEAD_TOKENS + estimate_tokens("新问题")
-    # 盲估把整份历史都算进去了，而锚点那条路径只动了最后一条
+    # 锚点值 + 锚点那条回答 + 之后的消息
+    assert anchored.used_tokens == 40_000 + estimate_messages_tokens(messages[1:])
+    # 盲估把整份历史都估算了一遍
     assert blind.used_tokens == estimate_messages_tokens(messages)
+    # 锚点值已含固定开销，上限不再扣；盲估只估算 messages，上限要扣
+    assert anchored.limit_tokens == int((100_000 - 8_000) * 0.9)
+    assert blind.limit_tokens == int((100_000 - 8_000 - blind.overhead_tokens) * 0.9)
+
+
+async def test_a_longer_anchor_reply_costs_more_budget(monkeypatch):
+    """把锚点那条回答加长，用量必须跟着变大——它真的占着窗口。"""
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    short = [msg("user", "问"), msg("assistant", "答"), msg("user", "新问题")]
+    longer = [msg("user", "问"), msg("assistant", "答" * 1_000), msg("user", "新问题")]
+
+    short_budget = await resolve_context_budget("m", short, anchor(1, 40_000))
+    longer_budget = await resolve_context_budget("m", longer, anchor(1, 40_000))
+
+    assert short_budget is not None and longer_budget is not None
+    assert short_budget.basis == longer_budget.basis == "anchor"
+    assert longer_budget.used_tokens - short_budget.used_tokens == estimate_tokens("答" * 1_000) - estimate_tokens("答")
 
 
 async def test_unusable_anchor_falls_back_to_the_blind_estimate(monkeypatch):

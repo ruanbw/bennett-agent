@@ -123,7 +123,9 @@ class ContextBudget:
 
     纯数据（不在属性里读 settings）：它的三个消费方——拒绝判定、裁剪规划、测试——
     需要的是同一份数字，把计算塞进属性会让「同一个对象读两次得到两个值」。
-    `limit_tokens` 已经含了安全系数，因此直接与 `used_tokens` 比较即可。
+    `limit_tokens` 已经含了安全系数，因此直接与 `used_tokens` 比较即可；它按
+    `used_tokens` 的口径算出：`used_tokens` 不含固定开销时，这部分已从可用空间里扣掉
+    （见 `build_budget`），否则两边会各算一次。
 
     `basis` 说明 `used_tokens` 是怎么来的：`estimate`（从零估算整份历史）还是
     `anchor`（沿用上一轮的真实用量 + 只估算新增消息）。两者相差可能很大，所以它
@@ -156,10 +158,23 @@ def build_budget(
     used_tokens: int,
     overhead_tokens: int,
     basis: Literal["estimate", "anchor"] = "estimate",
+    *,
+    used_tokens_include_overhead: bool,
 ) -> ContextBudget:
-    """把各项凑成一个预算快照。单列成函数是为了让「上限怎么算的」只有一处。"""
+    """把各项凑成一个预算快照。单列成函数是为了让「上限怎么算的」只有一处。
+
+    `used_tokens_include_overhead` 说明 `used_tokens` 里有没有系统提示词与工具 schema
+    这部分固定开销，并据此决定它还要不要再从可用空间里扣一次：
+
+    - `False`：`used_tokens` 只是 messages 的估算，固定开销还没算进去，从可用空间扣；
+    - `True`：`used_tokens` 已经是整份真实 prompt 的规模（锚点值），再扣就是扣两次。
+
+    两条路径的 `used_tokens` 因此都对得上「下一次真实 prompt 有多大」，与同一个窗口
+    比较的才是同一件事。
+    """
     reserve_tokens = resolve_reserve_tokens(context_window, max_output_tokens)
-    available = context_window - reserve_tokens - overhead_tokens
+    overhead_outside_used = 0 if used_tokens_include_overhead else overhead_tokens
+    available = context_window - reserve_tokens - overhead_outside_used
     limit_tokens = max(int(available * settings.context_safety_ratio), 0)
     return ContextBudget(
         model=model,
@@ -210,8 +225,15 @@ async def resolve_context_budget(
     2. 网关没报这个模型的 `context_window`（没数据就不猜）；
     3. 模型不在网关列表里（白名单已放行过未知 id，这里不应反悔）。
 
-    给了可用的锚点就只估算锚点之后的消息：上游上一轮已经告诉我们真实值，没必要
-    把整份历史重新猜一遍。
+    给了可用的锚点就不再从零估算历史，但两条 basis 的 `used_tokens` 口径不同，
+    `build_budget` 会据此对齐上限：
+
+    - `anchor`：`context_tokens` 是**产生锚点那条助手消息的那次请求**的 prompt，已含
+      系统提示词与工具 schema，但不含那条助手消息本身（它是那次请求的输出）。因此估算
+      从 `message_index` 起，把锚点那条回答也补进来——否则一整轮输出既不在真实值里、
+      也没被估算。这个 used 就是真实 prompt 的规模，**不再**扣固定开销。
+    - `estimate`：从零估算的 messages 用量，**不含**固定开销，由 `build_budget` 从
+      可用空间里扣掉。
     """
     if settings.context_guard_mode == "off":
         return None
@@ -221,16 +243,19 @@ async def resolve_context_budget(
         _warn_unknown_window_once(model_name)
         return None
 
-    # 系统提示词 + 工具 schema 也要占窗口，且它们是每轮都发的固定开销：
-    # 不扣掉这部分，预算会在长会话里刚好偏小一截。
+    # 系统提示词 + 工具 schema 也要占窗口，且它们是每轮都发的固定开销。它算不算在
+    # `used_tokens` 里由下面两条路径决定，不在这里一刀切地扣掉（见 build_budget）。
     overhead_tokens = estimate_tokens(render_system_prompt()) + TOOL_SCHEMA_OVERHEAD_TOKENS
 
     anchor = usable_anchor(messages, anchor)
     if anchor is not None:
-        used_tokens = anchor.context_tokens + estimate_messages_tokens(messages[anchor.message_index + 1 :])
+        # 从锚点那条（assistant）起算：锚点值是产生它的那次请求的 prompt，不含它自己。
+        used_tokens = anchor.context_tokens + estimate_messages_tokens(messages[anchor.message_index :])
+        used_tokens_include_overhead = True
         basis: Literal["estimate", "anchor"] = "anchor"
     else:
         used_tokens = estimate_messages_tokens(messages)
+        used_tokens_include_overhead = False
         basis = "estimate"
 
     return build_budget(
@@ -240,6 +265,7 @@ async def resolve_context_budget(
         used_tokens=used_tokens,
         overhead_tokens=overhead_tokens,
         basis=basis,
+        used_tokens_include_overhead=used_tokens_include_overhead,
     )
 
 
