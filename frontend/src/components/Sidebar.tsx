@@ -36,22 +36,17 @@ export interface SidebarProps {
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
   /** 超级管理员才渲染管理后台入口；普通用户可不传。 */
-  isSuperuser?: boolean;
+  canOpenAdmin?: boolean;
   onOpenAdmin?: () => void;
 }
 
 /**
  * 历史会话侧边栏（DeepSeek 风格）。
  *
- * 布局：
- *   顶部   —— 品牌名 + 搜索图标 + 收起图标
- *   操作区 —— 全圆角胶囊「开启新对话」
- *   列表   —— 按时间分组（今天 / 昨天 / 7 天内 / 30 天内 / 更早），
- *             分组标题右侧放多选管理入口；条目本身只有文字 + hover 三点菜单
- *   底部   —— 头像 + 昵称 + 三点（无分割线）
+ * 顶部是品牌名与图标，中间是胶囊「开启新对话」+ 按时间分组的会话列表，底部是账号区。
  *
  * 收起时整个 aside 不渲染（不是把宽度设成 0）：入口转移到 ChatContainer 顶栏的
- * 胶囊工具栏，避免留下一块不可见但仍然参与布局 / 聚焦的空白区域。
+ * 胶囊工具栏，避免留下一块不可见但仍参与布局 / 聚焦的空白区域。
  */
 export function Sidebar({
   sessions,
@@ -68,7 +63,7 @@ export function Sidebar({
   onToggleOpen,
   userEmail,
   onLogout,
-  isSuperuser = false,
+  canOpenAdmin = false,
   onOpenAdmin,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -101,7 +96,7 @@ export function Sidebar({
     return sessions.filter((session) => (session.title || '').toLowerCase().includes(query));
   }, [sessions, searchQuery]);
 
-  // 按时间分组：列表从「一整条平铺」变成有节奏的分段，长列表更好扫读
+  // 按时间分组，长列表更好扫读
   const sessionGroups = useMemo(() => groupSessionsByDate(filteredSessions), [filteredSessions]);
 
   // 批量操作只作用于「可见且被选中」的集合：搜索藏起来的选中项不会被顺带删除，
@@ -259,9 +254,8 @@ export function Sidebar({
     void runAction(() => onCreateSession(), '新建会话失败，请重试');
   }, [onCreateSession, runAction]);
 
-  // 收起后整块不渲染：入口由 ChatContainer 顶栏的胶囊工具栏接替，
-  // 不留「宽度 0 但仍可聚焦」的死区。确认弹窗仍要挂载——
-  // 收起前发起、收起后才确认的删除不能因为侧边栏隐了而丢。
+  // 收起后整块不渲染，入口由 ChatContainer 顶栏的胶囊工具栏接替。
+  // 确认弹窗仍要挂载——收起前发起、收起后才确认的删除不能因侧边栏隐了而丢。
   const confirmDialog = (
     <ConfirmDialog
       open={Boolean(confirmRequest)}
@@ -419,7 +413,7 @@ export function Sidebar({
                 <h3 className="text-[11px] font-medium text-muted-foreground/70 select-none">
                   {group.label}
                 </h3>
-                {/* 多选管理入口挂在第一个分组标题右侧，与 DeepSeek 的位置一致 */}
+                {/* 多选管理入口挂在第一个分组标题右侧 */}
                 {groupIndex === 0 && !searchOpen && (
                   <button
                     type="button"
@@ -470,7 +464,7 @@ export function Sidebar({
       <AccountBar
         email={userEmail}
         onLogout={onLogout}
-        isSuperuser={isSuperuser}
+        canOpenAdmin={canOpenAdmin}
         onOpenAdmin={onOpenAdmin}
       />
 

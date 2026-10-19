@@ -1,9 +1,5 @@
 /**
- * 侧边栏底部账号区 — 参照 DeepSeek 官方 UI：
- *
- * 完全没有 border-top 分割线，视觉上与上方列表融为一体。
- * 左侧圆形头像，中间用户昵称，右侧三点按钮。
- * 点击整行或三点按钮弹出下拉菜单（设置入口、外观主题、退出登录）。
+ * 侧边栏底部账号区，参照 DeepSeek 官方 UI：与上方列表之间没有分割线，视觉上融为一体。
  */
 
 import { useCallback, useState } from 'react';
@@ -28,7 +24,7 @@ export interface AccountBarProps {
   onLogout: () => void | Promise<unknown>;
   collapsed?: boolean;
   /** 是否渲染管理后台入口：只有超级管理员能拿到。 */
-  isSuperuser?: boolean;
+  canOpenAdmin?: boolean;
   onOpenAdmin?: () => void;
 }
 
@@ -36,7 +32,7 @@ export function AccountBar({
   email,
   onLogout,
   collapsed = false,
-  isSuperuser = false,
+  canOpenAdmin = false,
   onOpenAdmin,
 }: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
@@ -110,8 +106,8 @@ export function AccountBar({
             <span>设置</span>
           </DropdownMenuItem>
 
-          {/* 入口只对超级管理员可见；直接访问接口的权限仍由后端裁决 */}
-          {isSuperuser && onOpenAdmin && (
+          {/* 入口只对超级管理员可见；权限本身仍由后端裁决 */}
+          {canOpenAdmin && onOpenAdmin && (
             <DropdownMenuItem onClick={() => onOpenAdmin()}>
               <ShieldCheck className="size-4 text-muted-foreground" />
               <span>管理后台</span>

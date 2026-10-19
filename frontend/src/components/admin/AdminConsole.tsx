@@ -15,17 +15,23 @@ type AdminTab = (typeof TABS)[number]['id'];
 
 export interface AdminConsoleProps {
   userEmail: string | null;
+  /**
+   * 当前账号是否 superadmin。
+   *
+   * 决定「用户管理」里是否出现角色设置按钮：`admin` 能进后台、能封普通用户，
+   * 但改角色是最高一档的专属动作（后端同样会拦）。
+   */
+  canManageRoles: boolean;
   onClose: () => void;
 }
 
 /**
  * 管理后台全屏覆盖层。
  *
- * 挂载在已登录主界面之上而不是替换它：关闭覆盖层后对话状态还在原处，
- * 不需要重新拉会话。权限由后端裁决——这里的入口只对超级管理员显示，但普通用户
- * 若通过其他途径打开，各面板会把 403 渲染成错误条，而不是白屏。
+ * 挂在已登录主界面之上而不是替换它：关闭后对话状态还在原处，不需要重新拉会话。
+ * 权限由后端裁决——普通用户若通过其他途径打开，各面板会把 403 渲染成错误条。
  */
-export function AdminConsole({ userEmail, onClose }: AdminConsoleProps) {
+export function AdminConsole({ userEmail, canManageRoles, onClose }: AdminConsoleProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('providers');
 
   return (
@@ -93,7 +99,7 @@ export function AdminConsole({ userEmail, onClose }: AdminConsoleProps) {
           {activeTab === 'providers' ? (
             <ProvidersPanel />
           ) : (
-            <UsersPanel currentUserEmail={userEmail} />
+            <UsersPanel currentUserEmail={userEmail} canManageRoles={canManageRoles} />
           )}
         </div>
       </main>

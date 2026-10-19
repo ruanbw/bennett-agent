@@ -46,7 +46,23 @@ export interface AdminUser {
   is_active: boolean;
   is_superuser: boolean;
   is_verified: boolean;
+  /** 角色：`user` / `admin` / `superadmin`。展示徒标与按钮可用性靠它。 */
+  role: string;
 }
+
+/**
+ * 可以通过管理端接口设置的角色。
+ *
+ * `superadmin` 刻意不在里面：最高一档只能经运维通道（`scripts/seed_admin.py`）授予，
+ * 不能通过 HTTP 互相提权。后端 `RoleUpdate` 里的 `Literal` 与这个类型必须一致。
+ */
+export type SettableRole = 'user' | 'admin';
+
+export const ROLE_LABELS: Record<string, string> = {
+  user: '普通用户',
+  admin: '管理员',
+  superadmin: '超级管理员',
+};
 
 export interface AdminUserPage {
   items: AdminUser[];
@@ -119,9 +135,8 @@ export interface ProviderDraft {
 /**
  * 表单草稿 → 请求体。
  *
- * 关键约定：编辑时**不带** `api_key` 字段表示「不修改」。后端用
- * `exclude_unset` 区分「没传」与「显式传空串」，所以这里不能把空串当成
- * 「清空」偷偷发出去——那会让用户只改个名字就把密钥弄丢。
+ * 关键约定：编辑时**不带** `api_key` 字段表示「不修改」。后端用 `exclude_unset`
+ * 区分「没传」与「显式传空串」，所以这里不能把空串当成「清空」偷偷发出去。
  */
 export function buildProviderPayload(
   draft: ProviderDraft,
@@ -232,6 +247,18 @@ export function unbanUser(userId: string): Promise<AdminUser> {
   return request<AdminUser>(`/api/admin/users/${userId}/unban`, { method: 'POST' });
 }
 
+/**
+ * 设置用户角色（仅 superadmin）。
+ *
+ * 成功后后端会删掉该用户的全部会话，因此对方下一次请求就是 401，需要重新登录。
+ */
+export function setUserRole(userId: string, role: SettableRole): Promise<AdminUser> {
+  return request<AdminUser>(`/api/admin/users/${userId}/role`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role }),
+  });
+}
+
 // ---------------------------------------------------------------------
 // 展示辅助
 // ---------------------------------------------------------------------
@@ -252,7 +279,7 @@ export function describeAdminError(error: { status?: number; detail?: string } |
     case 401:
       return '登录已失效，请重新登录';
     case 403:
-      return '需要超级管理员权限';
+      return '权限不足（需要管理员或超级管理员）';
     case 404:
       return '目标不存在，可能已被其他管理员删除';
     default:
@@ -263,9 +290,8 @@ export function describeAdminError(error: { status?: number; detail?: string } |
 /**
  * 组件层的统一错误文案。
  *
- * `AdminApiError.message` 已经过 `describeAdminError` 翻译（后端的中文 detail 被原样
- * 保留），直接用它；网络故障没有状态码也没有 detail，走兜底文案——不要把
- * "Failed to fetch" 这种英文底层异常甩给用户。
+ * `AdminApiError.message` 已经过 `describeAdminError` 翻译，直接用它；网络故障没有
+ * 状态码也没有 detail，走兜底文案——不要把 "Failed to fetch" 这种英文甩给用户。
  */
 export function describeFailure(error: unknown): string {
   if (error instanceof AdminApiError) return error.message;

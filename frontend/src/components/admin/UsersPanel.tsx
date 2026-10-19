@@ -1,33 +1,48 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, Search, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, Search, ShieldCheck, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
 import {
+  ROLE_LABELS,
   banUser,
   describeFailure,
   listUsers,
+  setUserRole,
   unbanUser,
   type AdminUser,
   type AdminUserPage,
+  type SettableRole,
 } from '../../lib/admin';
 
 /** 每页条数：与后端的 limit 上限无关，纯展示选择。 */
 const PAGE_SIZE = 20;
 
 export interface UsersPanelProps {
-  /** 当前登录邮箱：自己不能被自己封禁。 */
+  /** 当前登录邮箱：自己不能被自己封禁，也不能改自己的角色。 */
   currentUserEmail: string | null;
+  /**
+   * 当前登录账号是否是 superadmin。
+   *
+   * 只有最高一档能改别人角色；后端同样会拦，这里只是不让按钮点了才报错。
+   */
+  canManageRoles: boolean;
 }
 
 function isSelf(user: AdminUser, currentUserEmail: string | null): boolean {
   if (!currentUserEmail) return false;
-  // 后端不会给出同一邮箱的不同大小写形式，但比较时统一小写不会有副作用
+  // 统一小写比较：后端不会给同一邮箱的不同大小写形式，但这样不会有副作用
   return user.email.toLowerCase() === currentUserEmail.toLowerCase();
 }
 
-export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
+/** 角色 → 徒标颜色。`superadmin` 用主色，`admin` 用中性，普通用户不显示徒标。 */
+const ROLE_TONE: Record<string, 'primary' | 'muted'> = {
+  superadmin: 'primary',
+  admin: 'muted',
+};
+
+export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps) {
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [offset, setOffset] = useState(0);
@@ -38,6 +53,7 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingBan, setPendingBan] = useState<AdminUser | null>(null);
+  const [pendingRole, setPendingRole] = useState<{ user: AdminUser; role: SettableRole } | null>(null);
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
@@ -115,6 +131,20 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
     [run, reload],
   );
 
+  /** 提交角色变更。角色变更是破坏性的：会踢掉对方现有会话。 */
+  const handleSetRole = useCallback(
+    (user: AdminUser, role: SettableRole) => {
+      setPendingRole(null);
+      void (async () => {
+        const ok = await run(`role:${user.id}`, async () => {
+          await setUserRole(user.id, role);
+        });
+        if (ok) reload();
+      })();
+    },
+    [run, reload],
+  );
+
   const total = page?.total ?? 0;
   const pageIndex = Math.floor(offset / PAGE_SIZE);
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -127,7 +157,10 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
           用户管理
         </h2>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          按邮箱检索账号，封禁会立即断开该用户的所有会话。
+          按邮箱检索账号。封禁会立即断开该用户的所有会话；
+          {canManageRoles
+            ? '修改角色同样会立即生效（对方需重新登录）。'
+            : '角色设置仅超级管理员可用。'}
         </p>
       </div>
 
@@ -215,12 +248,29 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
         <ul className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border/70 bg-card/50">
           {page.items.map((user) => {
             const self = isSelf(user, currentUserEmail);
-            const banBlocked = user.is_superuser || self;
-            const blockedReason = user.is_superuser
-              ? '超级管理员不能被封禁'
+            // 封禁：不能封自己，也不能封同级或更高等级（这里只是提前禁用，后端也会拦）
+            const banBlocked = self || (canManageRoles ? false : user.role !== 'user');
+            const blockedReason = self
+              ? '不能封禁当前登录的账号'
+              : canManageRoles
+                ? undefined
+                : // admin 只能动普通用户：同级之间互封会让后台失去可预期性
+                  user.role === 'superadmin' || user.role === 'admin'
+                  ? '只有超级管理员可以管理管理员账号'
+                  : undefined;
+
+            // 角色按钮：只有 superadmin 能看到；自己、超管、已封禁账号不可改
+            const roleEditable = canManageRoles && !self && user.is_active && user.role !== 'superadmin';
+            const roleBlockedReason = !canManageRoles
+              ? '只有超级管理员可以调整角色'
               : self
-                ? '不能封禁当前登录的账号'
-                : undefined;
+                ? '不能修改自己的角色'
+                : user.role === 'superadmin'
+                  ? '超级管理员只能经运维通道（seed_admin.py）调整'
+                  : !user.is_active
+                    ? '该账号已被封禁，请先解封再修改角色'
+                    : undefined;
+            const nextRole: SettableRole = user.role === 'admin' ? 'user' : 'admin';
 
             return (
               <li
@@ -233,7 +283,12 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
                     <Badge tone={user.is_active ? 'ok' : 'danger'}>
                       {user.is_active ? '正常' : '已封禁'}
                     </Badge>
-                    {user.is_superuser && <Badge tone="primary">超级管理员</Badge>}
+                    {/* 普通用户不戴角色徒标：徒标太多时“正常”两个字才是重点 */}
+                    {user.role !== 'user' && (
+                      <Badge tone={ROLE_TONE[user.role] ?? 'muted'}>
+                        {ROLE_LABELS[user.role] ?? user.role}
+                      </Badge>
+                    )}
                   </div>
                   {!user.is_verified && (
                     <p className="text-[11px] text-muted-foreground">邮箱未验证</p>
@@ -241,6 +296,21 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
                 </div>
 
                 <div className="flex items-center gap-1.5">
+                  {canManageRoles && user.role !== 'superadmin' && (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={isBusy || !roleEditable}
+                      title={roleBlockedReason}
+                      onClick={() => setPendingRole({ user, role: nextRole })}
+                      aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
+                      className="cursor-pointer gap-1"
+                    >
+                      <ShieldCheck className="size-3.5" aria-hidden="true" />
+                      {nextRole === 'admin' ? '设为管理员' : '取消管理员'}
+                    </Button>
+                  )}
+
                   {user.is_active ? (
                     <Button
                       variant="destructive"
@@ -320,12 +390,32 @@ export function UsersPanel({ currentUserEmail }: UsersPanelProps) {
           if (pendingBan) void handleBan(pendingBan);
         }}
       />
+
+      <ConfirmDialog
+        open={pendingRole !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRole(null);
+        }}
+        title={pendingRole?.role === 'admin' ? '设为管理员' : '取消管理员'}
+        description={
+          pendingRole
+            ? pendingRole.role === 'admin'
+              ? `${pendingRole.user.email} 将能进入管理后台、维护模型提供商与封禁普通用户。该用户当前的登录会话会立即失效，需要重新登录。`
+              : `${pendingRole.user.email} 将失去管理后台的全部权限，当前会话会立即失效，需要重新登录。`
+            : undefined
+        }
+        confirmLabel={pendingRole?.role === 'admin' ? '设为管理员' : '取消管理员'}
+        destructive={pendingRole?.role === 'user'}
+        onConfirm={() => {
+          if (pendingRole) handleSetRole(pendingRole.user, pendingRole.role);
+        }}
+      />
     </section>
   );
 }
 
 interface BadgeProps {
-  tone: 'ok' | 'danger' | 'primary';
+  tone: 'ok' | 'danger' | 'primary' | 'muted';
   children: ReactNode;
 }
 
@@ -333,6 +423,7 @@ const badgeToneClass: Record<BadgeProps['tone'], string> = {
   ok: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
   danger: 'bg-destructive/10 text-destructive',
   primary: 'bg-primary/10 text-primary',
+  muted: 'bg-muted text-muted-foreground',
 };
 
 function Badge({ tone, children }: BadgeProps) {

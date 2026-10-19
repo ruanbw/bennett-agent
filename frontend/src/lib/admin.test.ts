@@ -68,12 +68,14 @@ describe('buildProviderPayload', () => {
 });
 
 describe('describeAdminError', () => {
-  it('403 翻译成超级管理员权限提示', () => {
-    expect(describeAdminError({ status: 403 })).toBe('需要超级管理员权限');
+  it('403 翻译成权限提示（不再只提「超级管理员」：admin 也能进后台，但部分动作不行）', () => {
+    expect(describeAdminError({ status: 403 })).toBe('权限不足（需要管理员或超级管理员）');
   });
 
   it('框架自带的 "Forbidden" 不算业务说明，同样翻译成权限提示', () => {
-    expect(describeAdminError({ status: 403, detail: 'Forbidden' })).toBe('需要超级管理员权限');
+    expect(describeAdminError({ status: 403, detail: 'Forbidden' })).toBe(
+      '权限不足（需要管理员或超级管理员）'
+    );
   });
 
   it('后端中文 detail 原样返回', () => {

@@ -2,8 +2,7 @@
  * 认证接口客户端与认证动作编排。
  *
  * 只做「调用 + 归一化结果 + 时序编排」，不持有 React 状态——状态在 `use-auth.ts`。
- * 这样表单编码、错误码翻译、以及「登录 POST 之后还有一次 /me 探测」「注册成功但自动
- * 登录失败」这类分支都能在 node 环境下直接测（本仓库的 vitest 没有 DOM，hook 测不了）。
+ * 放在 lib 层是为了能直接测：本仓库的 vitest 跑在 node 环境，没有 DOM。
  *
  * 后端对应实现：`app/api/auth.py`。
  */
@@ -19,6 +18,29 @@ export interface AuthUser {
   is_active: boolean;
   is_superuser: boolean;
   is_verified: boolean;
+  /**
+   * 角色：`user` / `admin` / `superadmin`（见后端 `app/roles.py`），是能否进管理后台的
+   * 唯一依据；`is_superuser` 只是它 `>= admin` 的派生镜像，后端鉴权也只读 role。
+   */
+  role: string;
+}
+
+/**
+ * 进管理后台的最低角色。与后端 `ADMIN_LEVEL` 对齐。
+ *
+ * 用集合而不是 `role === 'admin'`：`superadmin` 权限严格包含 `admin` 的全部能力，
+ * 写成等号会把最高一档漏掉（表现为「超管看不到后台入口」）。
+ */
+const ADMIN_ROLES = new Set(['admin', 'superadmin']);
+
+/** 能否显示管理后台入口。权限的最终裁决在后端（403），这里只决定入口可见性。 */
+export function canAccessAdmin(user: AuthUser | null): boolean {
+  return user !== null && ADMIN_ROLES.has(user.role);
+}
+
+/** 是否是最高一档（只有它能看到角色设置按钮）。 */
+export function isSuperadmin(user: AuthUser | null): boolean {
+  return user?.role === 'superadmin';
 }
 
 export type AuthResult = { ok: true } | { ok: false; message: string };
@@ -27,8 +49,7 @@ export type AuthResult = { ok: true } | { ok: false; message: string };
  * 认证请求超时。
  *
  * 没有超时的话：启动探测挂在半路会让登录页永远停在 loading，登录请求挂起会让按钮
- * 永远禁用（用户连重试的入口都没有）。15s 足够慢网络下的表单提交，又不至于让人以为
- * 页面卡死。
+ * 永远禁用（连重试的入口都没有）。15s 够慢网络下的表单提交，又不至于像卡死。
  */
 export const AUTH_TIMEOUT_MS = 15_000;
 
@@ -111,14 +132,14 @@ export async function login(email: string, password: string): Promise<AuthResult
 
 /** 注册。成功返回 201，但**不会自动登录**——调用方需要再走一次 `login`。
  *
- * 必须带邀请码：后端未配置 `REGISTRATION_INVITE_CODE` 时注册是关闭的（403），
- * 配置了也要码对才建号。邀请码错误/注册关闭的 403 文案由后端给中文，直接展示。
+ * 注册完全开放，只需邮箱 + 密码；建出来的账号是普通用户（`role=user`）。
+ * 权限只能由超管在管理后台授予，不存在自助提权的路径。
  */
-export async function register(email: string, password: string, inviteCode: string): Promise<AuthResult> {
+export async function register(email: string, password: string): Promise<AuthResult> {
   const response = await apiFetch('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, invite_code: inviteCode }),
+    body: JSON.stringify({ email, password }),
     notifyUnauthorized: false,
     timeoutMs: AUTH_TIMEOUT_MS,
   });
@@ -162,7 +183,7 @@ async function requestLogout(): Promise<void> {
     timeoutMs: AUTH_TIMEOUT_MS,
   });
 
-  // 非 2xx 也算失败：这里此前完全不看状态码，服务端 500（会话没删）会被当成登出成功
+  // 非 2xx 也算失败：服务端 500（会话没删）被当成登出成功，用户会以为已经退出
   if (!response.ok) {
     throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
   }
@@ -184,9 +205,8 @@ export type LoginAttempt =
 /**
  * 登录的完整流程：POST 之后还要探测一次 `/me`。
  *
- * 两步必须在一起：登录接口只回 204（凭据是 cookie 本身），不探测就无法知道「登录
- * 到底有没有生效」。调用方（`useAuth`）要用同一个 pending 窗口包住整个流程，否则
- * 探测期间提交按钮会复活，用户连点就会发出第二次登录（后端每次新建一条会话）。
+ * 登录接口只回 204（凭据是 cookie 本身），不探测就不知道「登录到底有没有生效」。
+ * 两步必须包在同一个 pending 窗口里（见 `use-auth.ts` 的 `login`）。
  */
 export async function loginWithSession(email: string, password: string): Promise<LoginAttempt> {
   let result: AuthResult;
@@ -223,8 +243,7 @@ export type RegisterOutcome = 'ok' | 'login-failed' | 'failed';
  * 注册结果 → 表单接下来停在哪个模式（`LoginPage` 用）。
  *
  * 只有 `login-failed` 要换模式：账号已建好，留在注册模式再点一次只会拿到「该邮箱已
- * 注册」，看起来像永远注册不上。其余情况留在原地（失败可以改邮箱重试；成功时表单
- * 已经被主界面换掉，不走这里）。抽成纯函数是为了能在 node 环境测住这个分支。
+ * 注册」。抽成纯函数是为了能在 node 环境测住这个分支。
  */
 export function modeAfterRegister(outcome: RegisterOutcome): 'login' | 'register' {
   return outcome === 'login-failed' ? 'login' : 'register';
@@ -237,18 +256,16 @@ export type RegisterAttempt =
 /**
  * 注册并自动登录。
  *
- * 「注册成功但自动登录失败」必须与「注册失败」区分开：前者账号已经建好了，让用户
- * 停留在注册模式再点一次只会拿到「该邮箱已注册」——看起来像永远注册不上。前者要把
- * 用户带回登录模式直接登录。
+ * 「注册成功但自动登录失败」必须与「注册失败」区分开：前者账号已经存在，要把用户
+ * 带回登录模式直接登录（模式切换见 `modeAfterRegister`）。
  */
 export async function registerWithSession(
   email: string,
-  password: string,
-  inviteCode: string
+  password: string
 ): Promise<RegisterAttempt> {
   let result: AuthResult;
   try {
-    result = await register(email, password, inviteCode);
+    result = await register(email, password);
   } catch (err) {
     console.error('注册请求失败:', err);
     return { ok: false, outcome: 'failed', message: describeConnectionError(err) };
@@ -272,16 +289,11 @@ export interface LogoutResult {
 }
 
 /**
- * 登出编排：在途生成 + 服务端会话 + 本地数据。
+ * 登出编排：在途生成 + 服务端会话 + 本地数据，顺序是掐生成 → 失效会话 → 清本地库。
  *
- * 顺序与「失败也要退」的理由：
- *   1. 先掐掉在途生成——旧账号的流不该继续往库里写；
- *   2. 再让服务端会话失效（失败重试一次，见 `logout`）；
- *   3. 最后清本地库。
- *
- * 三步互不阻塞：中止失败、清库失败都只记日志，绝不把用户卡在「登出不了」的状态；
- * 服务端没确认时把这件事**明确告知**——cookie 还在，刷新就会恢复登录，共享设备上
- * 用户必须知道要关掉浏览器。本地数据则无论如何都清：留着就是跨账号泄漏。
+ * 三步互不阻塞：任一步失败都只记日志，绝不把用户卡在「登出不了」的状态。服务端没确认
+ * 时要把这件事**明确告知**——cookie 还在，刷新就会恢复登录，共享设备上用户必须知道
+ * 要关掉浏览器。本地数据无论如何都清：留着就是跨账号泄漏。
  */
 export async function logoutAndClearLocalData(): Promise<LogoutResult> {
   try {
@@ -311,12 +323,10 @@ export async function logoutAndClearLocalData(): Promise<LogoutResult> {
 }
 
 /**
- * 把一次异步动作包进「占用中」窗口：动作开始前置 `true`，**整个动作**结束后才置
- * `false`。
+ * 把一次异步动作包进「占用中」窗口：动作开始前置 `true`，**整个动作**结束后才置 `false`。
  *
- * 抽到 lib 层的唯一目的是可测：登录的 pending 必须覆盖 `/me` 探测，否则探测期间提交
- * 按钮会复活，用户连点就会发出第二次登录（后端每次新建一条会话）。hook 的渲染测试在
- * 本仓库没有环境（vitest 是 node，没有 jsdom），时序不变量只能在这里锁住。
+ * 抽到 lib 层的唯一目的是可测：hook 的渲染测试在本仓库没有环境（vitest 是 node，
+ * 没有 jsdom），时序不变量只能在这里锁住。
  */
 export async function withPending<T>(
   setPending: (pending: boolean) => void,
