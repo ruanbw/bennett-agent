@@ -20,8 +20,11 @@
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
+
+from pydantic_ai.messages import ModelMessage
 
 from app.config import settings
 from app.schemas.chat import ChatMessage, ContextAnchor
@@ -307,13 +310,22 @@ async def resolve_context_budget(
 
 #: 已告警过的「网关没报窗口」的模型 id。按 id 去重：这类告警每个请求都会触发，
 #: 不去重会把日志刷满，反而盖住真正的问题（与 `chat_service._warn_unknown_once` 同理）。
-_WARNED_UNKNOWN_WINDOWS: set[str] = set()
+#:
+#: **必须是有界的**：key 来自 `model_name`，而网关列表不可用时任意字符串都会被
+#: 放行（`model_service.get_known_model_ids` 返回 None 的分支），长度上限是 300 字符。
+#: 用 set 会让单个账号把进程内存持续灌大——它永不清空。这里用固定容量的 dict 当
+#: LRU：重复告警的价值很低，丢掉最旧的记录只会让一个已在告警的模型再告一次。
+_WARNED_UNKNOWN_WINDOWS_MAX = 256
+_WARNED_UNKNOWN_WINDOWS: dict[str, None] = {}
 
 
 def _warn_unknown_window_once(model_name: str) -> None:
     if model_name in _WARNED_UNKNOWN_WINDOWS:
         return
-    _WARNED_UNKNOWN_WINDOWS.add(model_name)
+    if len(_WARNED_UNKNOWN_WINDOWS) >= _WARNED_UNKNOWN_WINDOWS_MAX:
+        # dict 保插入顺序：弹出的就是最早那条
+        _WARNED_UNKNOWN_WINDOWS.pop(next(iter(_WARNED_UNKNOWN_WINDOWS)))
+    _WARNED_UNKNOWN_WINDOWS[model_name] = None
     logger.warning(
         "网关未提供模型 %s 的 context_window，跳过上下文预算判定（本轮及后续都不拦）",
         model_name,
@@ -345,3 +357,36 @@ __all__ = [
     "resolve_reserve_tokens",
     "usable_anchor",
 ]
+
+
+def estimate_agent_messages_tokens(messages: Sequence[ModelMessage]) -> int:
+    """估算 **pydantic-ai 原生消息**的 token 数。
+
+    为什么需要单独一个函数：`estimate_messages_tokens` 吃的是线上契约
+    `ChatMessage`（Web 路径，客户端全量回放），而 CLI 手里是
+    `AgentRunResult.all_messages()` 的 pydantic-ai 对象。两者形状不同，但**预算
+    口径必须是同一个**——否则 CLI 能用而 Web 会拒的请求会长得越来越不一样。
+
+    覆盖所有会占窗口的部件：正文、思考链、工具调用参数、工具返回内容。工具 schema
+    那部分固定开销由调用的 `build_budget(overhead_tokens=...)` 负责，不在这里算。
+    """
+    total = 0
+    for message in messages:
+        total += MESSAGE_OVERHEAD_TOKENS
+        for part in getattr(message, "parts", ()):
+            content = getattr(part, "content", None)
+            if isinstance(content, str):
+                total += estimate_tokens(content)
+            args = getattr(part, "args", None)
+            if args is not None:
+                # 工具调用参数是 JSON，模型确实要读它
+                total += estimate_tokens(args if isinstance(args, str) else _safe_str(args))
+    return total
+
+
+def _safe_str(value: object) -> str:
+    """`str()` 兜底：估算不该因为某个部件的 `__str__` 抛错而让请求失败。"""
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001 - 估算是尽力而为
+        return ""

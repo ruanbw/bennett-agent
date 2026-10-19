@@ -469,3 +469,34 @@ async def test_unusable_anchor_falls_back_to_the_blind_estimate(monkeypatch):
     assert budget is not None
     assert budget.basis == "estimate"
     assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+# ---------------------------------------------------------------------
+# 「网关没报窗口」的告警去重表必须有界
+#
+# key 来自 `model_name`，而网关列表不可用时任意字符串都会被放行（最长 300 字符）。
+# 用 set 的话单个账号能把它持续灌大且永不清空——这是未认证输入驱动进程内存增长的
+# 一条路径。
+# ---------------------------------------------------------------------
+def test_unknown_window_warning_table_is_bounded(monkeypatch):
+    from app.services import token_budget
+
+    monkeypatch.setattr(token_budget, "_WARNED_UNKNOWN_WINDOWS", {})
+    limit = token_budget._WARNED_UNKNOWN_WINDOWS_MAX
+    assert limit > 0
+
+    for index in range(limit * 3):
+        token_budget._warn_unknown_window_once(f"user-supplied-model-{index}")
+
+    assert len(token_budget._WARNED_UNKNOWN_WINDOWS) == limit
+
+
+def test_unknown_window_warning_is_deduplicated(monkeypatch):
+    from app.services import token_budget
+
+    monkeypatch.setattr(token_budget, "_WARNED_UNKNOWN_WINDOWS", {})
+
+    token_budget._warn_unknown_window_once("m")
+    token_budget._warn_unknown_window_once("m")
+
+    assert list(token_budget._WARNED_UNKNOWN_WINDOWS) == ["m"]

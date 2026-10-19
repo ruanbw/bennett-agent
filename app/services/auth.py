@@ -90,9 +90,7 @@ def apply_role(user: User, role: Role) -> None:
 async def count_superadmins() -> int:
     """当前 superadmin 数量。用于「不能降级最后一个超管」的前置检查。"""
     async with async_session_maker() as session:
-        return await session.scalar(
-            select(func.count()).select_from(User).where(User.role == ROLE_SUPERADMIN)
-        ) or 0
+        return await session.scalar(select(func.count()).select_from(User).where(User.role == ROLE_SUPERADMIN)) or 0
 
 
 cookie_transport = CookieTransport(
