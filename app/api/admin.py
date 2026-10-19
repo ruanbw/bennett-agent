@@ -127,6 +127,14 @@ async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
         if fields.get(key) is None:
             fields.pop(key, None)
 
+    provider = await _require_provider(provider_id)
+
+    # 换地址等于换凭据：新地址的主人能在下次「测试连接」里收到库里那份明文 key，
+    # 所以没重新填 key 就不许改地址。只改名字/启用状态时仍然可以不填（前端每次保存
+    # 都会原样回传 base_url，因此这里比的是**是否变化**，不是「有没有传」）。
+    if "base_url" in fields and fields["base_url"] != provider.base_url and "api_key" not in fields:
+        raise HTTPException(status_code=400, detail="更换 Base URL 时必须重新填写 API Key")
+
     provider = await model_service.update_provider(provider_id, **fields)
     if provider is None:
         raise HTTPException(status_code=404, detail="提供商不存在")

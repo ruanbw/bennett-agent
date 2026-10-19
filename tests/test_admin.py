@@ -9,6 +9,7 @@
 - 封禁会立刻删掉会话（不是等 cookie 过期），且不能封自己/其他管理员。
 """
 
+import socket
 import uuid
 
 import pytest
@@ -57,10 +58,21 @@ def make_admin(client: TestClient, monkeypatch) -> str:
     return email
 
 
-def create_provider(client: TestClient, *, name: str = "测试提供商", api_key: str | None = "sk-test-1234567890"):
+#: 提供商出站目标必须是公网地址（内网地址会被 `_fetch_remote_models` 拒绝）。用 IP
+#: 字面量而不是域名：守卫会解析主机名，用例不该依赖 DNS。
+PROVIDER_BASE_URL = "http://93.184.216.34:9999/v1"
+
+
+def create_provider(
+    client: TestClient,
+    *,
+    name: str = "测试提供商",
+    base_url: str = PROVIDER_BASE_URL,
+    api_key: str | None = "sk-test-1234567890",
+):
     response = client.post(
         "/api/admin/providers",
-        json={"name": name, "base_url": "http://127.0.0.1:9999/v1", "api_key": api_key},
+        json={"name": name, "base_url": base_url, "api_key": api_key},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -296,7 +308,7 @@ def test_sync_upserts_and_preserves_enabled_state(client, monkeypatch):
     first = client.post(f"/api/admin/providers/{provider['id']}/sync")
     assert first.status_code == 200, first.text
     assert first.json() == {"fetched": 2, "created": 2, "updated": 0}
-    assert fake.calls[0]["url"] == "http://127.0.0.1:9999/v1/models"
+    assert fake.calls[0]["url"] == f"{PROVIDER_BASE_URL}/models"
 
     models = client.get(f"/api/admin/providers/{provider['id']}/models").json()
     disabled = next(item for item in models if item["model_id"] == "vendor/model-b")
@@ -324,6 +336,134 @@ def test_test_connection_reports_failure_without_5xx(client, monkeypatch):
 
     sync = client.post(f"/api/admin/providers/{provider['id']}/sync")
     assert sync.status_code == 502
+
+
+# ---------------------------------------------------------------------
+# 换地址即换凭据：PATCH base_url 必须重填 API Key
+# ---------------------------------------------------------------------
+def test_changing_base_url_without_a_new_api_key_is_rejected(client, monkeypatch):
+    make_admin(client, monkeypatch)
+    provider = create_provider(client, api_key="sk-super-secret-value")
+
+    rejected = client.patch(
+        f"/api/admin/providers/{provider['id']}",
+        json={"base_url": "https://api.deepseek.com/v1"},
+    )
+    assert rejected.status_code == 400
+    assert "API Key" in rejected.json()["detail"]
+
+    # 被拒的更新不能留下半截状态：地址与密钥都没变
+    unchanged = client.get("/api/admin/providers").json()[0]
+    assert unchanged["base_url"] == PROVIDER_BASE_URL
+    assert unchanged["api_key_hint"] == provider["api_key_hint"]
+
+    # 重填了 key 就放行
+    accepted = client.patch(
+        f"/api/admin/providers/{provider['id']}",
+        json={"base_url": "https://api.deepseek.com/v1", "api_key": "sk-brand-new-1234"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["base_url"] == "https://api.deepseek.com/v1"
+    assert accepted.json()["api_key_hint"] == "sk-…1234"
+
+
+def test_resubmitting_the_same_base_url_still_allows_an_empty_api_key(client, monkeypatch):
+    """前端每次保存都回传 base_url：地址没变时不能把 key 变成必填。"""
+    make_admin(client, monkeypatch)
+    provider = create_provider(client, api_key="sk-super-secret-value")
+
+    updated = client.patch(
+        f"/api/admin/providers/{provider['id']}",
+        json={"name": "改名", "base_url": PROVIDER_BASE_URL, "enabled": False},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "改名"
+    assert updated.json()["enabled"] is False
+    assert updated.json()["api_key_hint"] == "sk-…alue"
+
+
+def test_clearing_the_api_key_while_changing_base_url_leaves_nothing_to_leak(client, monkeypatch):
+    """显式清空 = 没有凭据可外带，因此不必强制重填。"""
+    make_admin(client, monkeypatch)
+    provider = create_provider(client, api_key="sk-super-secret-value")
+
+    updated = client.patch(
+        f"/api/admin/providers/{provider['id']}",
+        json={"base_url": "https://api.deepseek.com/v1", "api_key": ""},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["api_key_hint"] is None
+
+
+# ---------------------------------------------------------------------
+# 出站前拒绝内网目标（API Key 不能送到任意主机）
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:9999/v1",
+        "http://localhost:9999/v1",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.0.0.1:8000/v1",
+        "http://172.16.5.4/v1",
+        "http://192.168.1.10/v1",
+        "http://0.0.0.0:9999/v1",
+        "http://[::1]:9999/v1",
+    ],
+)
+async def test_private_targets_are_rejected(base_url):
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service._reject_private_target(base_url)
+    assert "内网" in str(excinfo.value)
+
+
+def _public_getaddrinfo(host, port):  # noqa: ANN001, ARG001
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://api.deepseek.com/v1", "http://8.8.8.8:9999/v1", "http://93.184.216.34/v1"],
+)
+async def test_public_targets_are_allowed(monkeypatch, base_url):
+    # 公网域名不该真的去解析：用例只关心这条规则是否放行
+    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    await model_service._reject_private_target(base_url)
+
+
+async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
+    def _unresolvable(host, port):  # noqa: ANN001, ARG001
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(model_service.socket, "getaddrinfo", _unresolvable)
+    # 不抛：解析失败交给后面的连接错误，而不是在这里报「内网」
+    await model_service._reject_private_target("https://provider.invalid/v1")
+
+
+def test_internal_target_never_gets_the_stored_key(client, monkeypatch):
+    """端到端：库里存着明文 key，但目标是内网时「测试连接/同步」不发出请求。"""
+    make_admin(client, monkeypatch)
+    provider = create_provider(client, base_url="http://127.0.0.1:9999/v1", api_key="sk-super-secret-value")
+
+    result = client.post(f"/api/admin/providers/{provider['id']}/test")
+    assert result.status_code == 200
+    assert result.json()["ok"] is False
+    assert "内网" in result.json()["error"]
+
+    sync = client.post(f"/api/admin/providers/{provider['id']}/sync")
+    assert sync.status_code == 502
+    assert "内网" in sync.json()["detail"]
+
+
+def test_public_target_reaches_the_provider(client, monkeypatch):
+    make_admin(client, monkeypatch)
+    provider = create_provider(client)
+    fake = FakeProviderClient(FakeProviderResponse(payload=_gateway_payload()))
+    monkeypatch.setattr(model_service, "get_http_client", lambda: fake)
+
+    result = client.post(f"/api/admin/providers/{provider['id']}/test")
+    assert result.status_code == 200
+    assert result.json() == {"ok": True, "model_count": 2, "error": None}
 
 
 # ---------------------------------------------------------------------

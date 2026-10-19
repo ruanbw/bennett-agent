@@ -28,11 +28,14 @@
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 import time
 import uuid
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
@@ -602,12 +605,61 @@ async def delete_provider_model(model_uuid: uuid.UUID) -> bool:
         return True
 
 
+def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """环回 / 私有 / 链路本地 / 未指定 / 保留段：都不该作为出站目标。
+
+    `is_global` 正好是这些类别的并集（还覆盖 100.64/10 这类运营商内网段），比逐个写
+    `is_private` / `is_loopback` / `is_link_local` 更难漏掉一种。
+    """
+    return not address.is_global
+
+
+async def _reject_private_target(base_url: str) -> None:
+    """出站前拒绝指向内网的目标地址，抛 `ProviderFetchError`。
+
+    后台配置的提供商共用这一条出站路径（「测试连接」与「同步模型」），而请求里带着
+    库里存的明文 API Key：允许指向 127.0.0.1 / 10.x / 169.254.169.254 就等于把凭据
+    交给内网任意一台机器（盲 SSRF）。
+
+    主机名交给 `getaddrinfo` 解析而不是只认字面量：十进制写法（`http://2130706433/`）
+    在解析层等价于 127.0.0.1，只看字面量会漏。解析是阻塞调用，放进线程执行。
+    解析失败（域名不存在等）不是内网信号，这里不拒绝——交给后面的连接错误去报。
+    """
+    host = urlsplit(base_url).hostname
+    if not host:
+        # 缺主机名/畸形地址：让 httpx 报它自己的错，不在这里编一个网络错误
+        return
+
+    try:
+        candidates = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+        except OSError:
+            return
+        candidates = []
+        for info in infos:
+            # 带 scope id 的 IPv6（fe80::1%en0）不是 ip_address 能直接吃的写法
+            literal = str(info[4][0]).split("%", 1)[0]
+            try:
+                candidates.append(ipaddress.ip_address(literal))
+            except ValueError:
+                continue
+
+    for address in candidates:
+        if _is_internal_address(address):
+            raise ProviderFetchError(f"Base URL 不允许指向内网地址（{address}）")
+
+
 async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
     """向单个提供商请求模型列表并解析。失败抛 `ProviderFetchError`。
 
     错误文案只给管理员看，因此不包含上游响应体（可能含有内部信息），只保留状态码
     与异常类型；完整异常写日志。
     """
+    # 先确认目标不是内网，再组装 Authorization 头——这个请求带着明文 API Key
+    await _reject_private_target(provider.base_url)
+
     headers: dict[str, str] = {}
     if provider.api_key:
         headers["Authorization"] = f"Bearer {provider.api_key}"
