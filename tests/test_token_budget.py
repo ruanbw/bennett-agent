@@ -235,6 +235,29 @@ def test_over_limit_and_remaining_tokens():
     assert not under.over_limit and under.remaining_tokens > 0
 
 
+def test_exactly_at_the_limit_is_allowed_but_one_token_over_is_not():
+    """边界锁死：判据是「超过」而不是「达到」。
+
+    `used == limit` 一旦被判成超限，每个贴着上限的请求都会被弹回，前端还会跟着锁住
+    输入框；而 `>` 被写成 `>=` 的回归只会正好在这一格露头，所以两边都要断言。
+    """
+    params = {
+        "model": "m",
+        "context_window": 100_000,
+        "max_output_tokens": 20_000,
+        "overhead_tokens": 1_000,
+        "used_tokens_include_overhead": False,
+    }
+    limit_tokens = build_budget(used_tokens=0, **params).limit_tokens
+    assert limit_tokens > 0
+
+    at_limit = build_budget(used_tokens=limit_tokens, **params)
+    one_over = build_budget(used_tokens=limit_tokens + 1, **params)
+
+    assert at_limit.over_limit is False
+    assert one_over.over_limit is True
+
+
 def test_budget_is_frozen_and_compares_by_value():
     """预算对象是纯数据：两个消费方（拒绝判定、裁剪规划）必须看到同一份数字。"""
     budget = build_budget("m", 100_000, 0, 0, 0, used_tokens_include_overhead=False)
