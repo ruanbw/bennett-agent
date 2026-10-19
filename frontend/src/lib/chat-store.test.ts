@@ -256,6 +256,43 @@ describe('事件折叠', () => {
     expect(run.error?.code).toBeNull()
   })
 
+  it('usage 事件记录真实用量，且不写进正文', () => {
+    start('a')
+    expect(
+      applyEvent('a', {
+        type: 'usage',
+        context_tokens: 1066,
+        context_window: 1048000,
+        output_tokens: 2,
+        cache_read_tokens: 896,
+      }),
+    ).toBe(true)
+    applyEvent('a', { type: 'content', delta: '答' })
+
+    const run = getRun('a')!
+    expect(run.usage).toEqual({
+      contextTokens: 1066,
+      contextWindow: 1048000,
+      outputTokens: 2,
+      cacheReadTokens: 896,
+    })
+    // 与 fallback 同一条约束：这一行是元信息，不属于回答正文
+    expect(run.content).toBe('答')
+  })
+
+  it('用量里的窗口缺失（网关没报）时按 null 记，而不是编一个数', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'usage',
+      context_tokens: 1066,
+      context_window: null,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+    })
+
+    expect(getRun('a')!.usage?.contextWindow).toBeNull()
+  })
+
   it('INCOMPLETE 追加中断提示并标记不完整', () => {
     start('a')
     applyEvent('a', { type: TRANSPORT_INCOMPLETE, damaged: false })

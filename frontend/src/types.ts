@@ -105,6 +105,21 @@ export interface DoneEvent {
 }
 
 /**
+ * 本轮的**真实** token 用量（服务端从上游响应里取，不是估算）。
+ *
+ * `contextTokens` 是「这次请求占了多少上下文」，也就是上下文长度的唯一准确值；
+ * `contextWindow` 是那个模型的窗口（网关没报时为 null），两者相除就是进度条的含义。
+ * 上游没回用量时这个事件不发，因此字段全是必需而非可选。
+ */
+export interface UsageEvent {
+  type: 'usage';
+  context_tokens: number;
+  context_window?: number | null;
+  output_tokens: number;
+  cache_read_tokens: number;
+}
+
+/**
  * 失败分类。
  *
  * `context_overflow`：上下文超出模型窗口。重试必然同样失败（历史只会更长），
@@ -140,6 +155,7 @@ export type ChatEvent =
   | ToolResultEvent
   | ClarificationEvent
   | FallbackEvent
+  | UsageEvent
   | DoneEvent
   | StreamErrorEvent
   | TransportIncompleteEvent;
@@ -191,6 +207,23 @@ export interface FallbackState {
   toModel: string;
 }
 
+/**
+ * 本轮的真实用量（落库形状 `MessageRecord.usage`）。
+ *
+ * 独立字段而不是拼进 `content`，与 `FallbackState` 同一个理由：写进正文会被当成
+ * 助手历史再次发给模型，也会被复制/导出当成回答的一部分。
+ */
+export interface UsageState {
+  /** 本轮最后一次请求的 prompt token 数 = 当前上下文长度。 */
+  contextTokens: number;
+  /** 该模型的上下文窗口；网关没报时为 null（此时只展示用量，不展示占比）。 */
+  contextWindow: number | null;
+  /** 本轮生成的总输出 token。 */
+  outputTokens: number;
+  /** 上下文里命中上游提示缓存的部分（`contextTokens` 的子集）。 */
+  cacheReadTokens: number;
+}
+
 /** 本轮失败的结构化记录；`retryable` 决定消息下方是否显示「重试」按钮。 */
 export interface RunError {
   message: string;
@@ -219,6 +252,8 @@ export interface MessageRecord {
   incomplete?: boolean;
   clarification?: ClarificationState | null;
   fallback?: FallbackState | null;
+  /** 本轮的真实 token 用量；上游没报时为 null（老记录同样为 null）。 */
+  usage?: UsageState | null;
   error?: RunError | null;
   /**
    * 内容块到达顺序。老记录没有这个字段，`buildParts` 会退回默认顺序，
@@ -261,6 +296,7 @@ export interface Run {
   partOrder?: PartKind[];
   clarification: ClarificationState | null;
   fallback: FallbackState | null;
+  usage: UsageState | null;
   error: RunError | null;
   sawDone: boolean;
   stopped: boolean;
@@ -283,6 +319,8 @@ export interface MessageCustomMetadata {
   clarification: ClarificationState | null;
   /** 本轮回答是否由备用模型完成；`thread.aui.tsx` 据此渲染一行提示。 */
   fallback?: FallbackState | null;
+  /** 本轮的真实 token 用量（`MessageRecord.usage` 的运行时镜像）。 */
+  usage?: UsageState | null;
   /** 本轮失败的结构化记录；可重试时消息下方渲染「重试」按钮。 */
   error?: RunError | null;
   /**

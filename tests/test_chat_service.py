@@ -22,6 +22,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     ModelRequest,
+    ModelResponse,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -29,6 +30,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
+from pydantic_ai.run import AgentRunResultEvent
 
 from app.schemas.chat import ChatMessage
 from app.services import chat_service
@@ -1017,3 +1019,123 @@ def test_context_overflow_reaches_the_client_over_sse(monkeypatch):
     assert [payload["type"] for payload in payloads] == ["error"]
     assert payloads[0]["code"] == "context_overflow"
     assert payloads[0]["retryable"] is False
+
+
+# ---------------------------------------------------------------------
+# 真实用量（上游字段，不是估算）
+#
+# 这份数据一直在流里（`run_stream_events` 尾部的 AgentRunResultEvent），此前被丢掉，
+# 还被打成「未识别的 pydantic-ai 流事件」告警。用例锁三件事：数字取对（最后一次请求
+# 而不是累加）、事件位置对（正文之后、done 之前）、拿不到就不发。
+# ---------------------------------------------------------------------
+def terminal_event(*responses):
+    """造一个尾部终态事件，带上只实现 `all_messages()` 的运行结果。"""
+
+    class FakeRunResult:
+        def __init__(self, messages):
+            self._messages = list(messages)
+
+        def all_messages(self):
+            return self._messages
+
+    return AgentRunResultEvent(result=FakeRunResult(responses))
+
+
+def model_response(input_tokens=1_066, output_tokens=2, cache_read_tokens=896):
+    from pydantic_ai.usage import RequestUsage
+
+    return ModelResponse(
+        parts=[TextPart(content="答")],
+        usage=RequestUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+        ),
+    )
+
+
+@pytest.fixture
+def known_window(monkeypatch):
+    """把模型窗口固定下来，让用量事件里的 context_window 可断言。"""
+    from app.services import token_budget
+
+    async def limits(model_id):
+        return (1_048_000, 328_000) if model_id == "openai/gpt-4o" else (2_000, 256)
+
+    monkeypatch.setattr(token_budget, "get_model_limits", limits)
+    monkeypatch.setattr(chat_service, "get_model_limits", limits)
+
+
+def test_usage_event_carries_real_numbers_between_content_and_done(monkeypatch, known_window):
+    events = [PartStartEvent(index=0, part=TextPart(content="你好"))]
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([*events, terminal_event(model_response())]),
+    )
+
+    result = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in result] == ["content", "usage", "done"]
+    usage = result[1]
+    assert usage.context_tokens == 1_066
+    assert usage.output_tokens == 2
+    assert usage.cache_read_tokens == 896
+    assert usage.context_window == 1_048_000
+
+
+def test_usage_takes_the_last_request_not_the_sum(monkeypatch, known_window):
+    """有工具调用时历史被重发两次：上下文是最后一次的 1400，不是 1000+1400。"""
+    from pydantic_ai.messages import ToolCallPart
+
+    tool_turn = ModelResponse(
+        parts=[ToolCallPart(tool_name="tavily_search", args={})],
+        usage=model_response(input_tokens=1_000, output_tokens=20).usage,
+    )
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([terminal_event(tool_turn, model_response(input_tokens=1_400, output_tokens=30))]),
+    )
+
+    result = collect_events([msg("user", "你好")])
+
+    assert result[-2].context_tokens == 1_400
+    assert result[-2].output_tokens == 50
+
+
+def test_usage_window_follows_the_model_that_actually_answered(monkeypatch, known_window):
+    """备用模型接了手：窗口要取备用模型的，不能把两个模型的数字混在一起。"""
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent(
+            [terminal_event(model_response())], on_enter=lambda: record_fallback("openai/gpt-4o", "openai/gpt-4o-mini")
+        ),
+    )
+
+    result = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in result] == ["fallback", "usage", "done"]
+    assert result[1].context_window == 2_000  # 备用模型的窗口
+
+
+def test_no_usage_event_when_the_upstream_reports_nothing(monkeypatch, known_window):
+    """上游没回用量时事件缺席：报 0 会被读成「上下文是空的」。"""
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: fake_agent([terminal_event(model_response(input_tokens=0))]),
+    )
+
+    result = collect_events([msg("user", "你好")])
+
+    assert [event.type for event in result] == ["done"]
+
+
+def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(monkeypatch, caplog):
+    """它带的是真实用量，不是「未识别的 pydantic-ai 流事件」。"""
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        assert list(chat_service.translate_event(terminal_event(model_response()))) == []
+
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []

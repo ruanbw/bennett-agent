@@ -27,6 +27,7 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
     UserPromptPart,
 )
+from pydantic_ai.run import AgentRunResultEvent
 
 from app.schemas.chat import ChatMessage
 from app.schemas.events import (
@@ -39,15 +40,18 @@ from app.schemas.events import (
     ThinkingDelta,
     ToolCall,
     ToolResult,
+    Usage,
 )
 from app.services.agent_factory import build_agent, build_title_agent
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
+from app.services.model_service import get_model_limits
 from app.services.token_budget import overflow_message, resolve_context_budget
 from app.services.upstream_errors import (
     is_retryable_for_user,
     is_retryable_upstream_error,
     upstream_error_message,
 )
+from app.services.usage import extract_turn_usage
 
 logger = logging.getLogger(__name__)
 
@@ -264,11 +268,18 @@ def translate_event(
     pydantic-ai 升级后唯一能发现「渲染悄悄停摆」的地方，而这些事件的正文/思考增量
     会被静默丢弃。`ToolCallPartDelta`（工具入参增量）属于**有意**忽略：入参在
     `FunctionToolCallEvent` 到达时一次性给出即可，所以它仍然只记 DEBUG。
+    `AgentRunResultEvent`（`run_stream_events` 尾部的终态事件）同样是有意忽略：
+    它带的是运行结果与**真实用量**，而用量要附上模型窗口才能发给客户端，那是
+    `stream_chat_events`（有 IO）的活，不是这个纯翻译层的。
 
     `seen_clarification_ids` 是**单轮**的去重集合：同一轮里模型可能对同一次提问重复
     发出工具调用事件，后到的应被忽略，否则前端会弹出两个一样的提问框。传 `None`
     表示不做去重（直接单测 `translate_event` 时就是这个语义）。
     """
+    if isinstance(event, AgentRunResultEvent):
+        logger.debug("忽略的终态事件: %s（真实用量由 stream_chat_events 单独产出）", type(event).__name__)
+        return
+
     if isinstance(event, PartStartEvent):
         part = event.part
         if isinstance(part, TextPart):
@@ -484,6 +495,9 @@ async def stream_chat_events(
             attempt += 1
             # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。
             emitted = False
+            # 本轮最终是谁答的：备用模型接了手就用它——用量事件里的 context_window
+            # 必须取自真正回答的那个模型，否则两个模型的窗口会被混在一起。
+            answered_by = model_name
             # 上一次尝试可能记录了切换却没走到事件阶段（随后整体失败）。重试成功后
             # 用户看到的是这一轮的结果，不能把上一轮的切换误报成「本轮已切换」。
             fallbacks.clear()
@@ -493,15 +507,35 @@ async def stream_chat_events(
                 if remaining <= 0:
                     raise StreamTimeoutError(f"超出总时长预算 {TOTAL_STREAM_BUDGET_SECONDS}s")
 
+                # 运行结果只从末尾那个 AgentRunResultEvent 上取（真实用量在里面）。
+                run_result = None
                 async with agent.run_stream_events(current_prompt, message_history=history) as stream:
                     async for event in _iterate_with_total_budget(stream, remaining):
                         # 切换发生在流打开阶段，先于任何模型事件：在第一条事件之前告诉用户。
+                        # 这个刷新必须在终态事件之前：终态事件被下面 continue 掉，若它排在
+                        # 最前面（一轮没有别的模型事件），切换就会漏报、窗口也会取错模型。
                         for fallback in _take_fallback_events(fallbacks):
                             emitted = True
+                            answered_by = fallback.to_model
                             yield fallback
+                        if isinstance(event, AgentRunResultEvent):
+                            run_result = event.result
+                            continue
                         for chat_event in translate_event(event, seen_clarification_ids):
                             emitted = True
                             yield chat_event
+
+                # 真实用量在流结束这一刻才齐：放在正文之后、Done 之前。
+                usage = extract_turn_usage(run_result.all_messages() if run_result is not None else None)
+                if usage is not None:
+                    context_window, _ = await get_model_limits(answered_by)
+                    emitted = True
+                    yield Usage(
+                        context_tokens=usage.context_tokens,
+                        context_window=context_window,
+                        output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                    )
                 break
             except asyncio.CancelledError:
                 # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，

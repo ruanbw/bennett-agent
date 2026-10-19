@@ -26,6 +26,8 @@ function runFields(run: Run): MessageChanges {
     partOrder: run.partOrder ?? [],
     // 备用模型信息：刷新后提示行仍然要显示，否则用户会以为还是主模型答的
     fallback: run.fallback ?? null,
+    // 真实用量：刷新后「上下文用了多少」依旧可见（它也是估算器下一轮的锚点）
+    usage: run.usage ?? null,
     // 失败信息：刷新后「重试」按钮仍然可用（是否可重试由服务端判定并持久化）
     error: run.error ?? null,
   };

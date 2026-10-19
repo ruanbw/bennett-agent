@@ -198,8 +198,9 @@ describe('toRuntimeMessage', () => {
       clarification: null,
       fallback: null,
       error: null,
-      // 老记录没有 model：呈现为零值而不是 undefined，否则 metadata 形状随记录而变
+      // 老记录没有 model / usage：呈现为零值而不是 undefined，否则 metadata 形状随记录而变
       model: null,
+      usage: null,
       incomplete: false,
     })
   })

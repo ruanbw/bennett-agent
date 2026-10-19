@@ -167,6 +167,8 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         clarification: record.clarification ?? null,
         // 备用模型信息：老记录没有该字段 → null，呈现与修复前一致
         fallback: record.fallback ?? null,
+        // 真实用量：刷新后「上下文用了多少」仍然可见
+        usage: record.usage ?? null,
         // 失败信息：刷新后「重试」按钮仍按服务端当初的判定显示
         error: record.error ?? null,
         // 本轮用的模型：刷新后「上下文已满」的锁仍然只对那个模型成立
@@ -208,6 +210,8 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
         incomplete: Boolean(run.incomplete),
         // 与落库记录保持一致：切换提示在生成中就显示，不必等本轮结束
         fallback: run.fallback ?? null,
+        // 真实用量在本轮收尾前到达（done 之前），覆盖层与落库记录给出同一个数字
+        usage: run.usage ?? null,
         // 失败信息：错误到达后立即映射，生成结束时按钮已可点
         error: run.error ?? null,
         // 与落库记录同一条契约：锁在哪个模型上，覆盖层与刷新后必须给出同一个答案

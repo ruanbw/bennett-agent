@@ -218,6 +218,7 @@ export function createRun({
     partOrder: [],
     clarification: null,
     fallback: null,
+    usage: null,
     error: null,
     sawDone: false,
     sawError: false,
@@ -410,6 +411,16 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
     case 'fallback':
       // 独立字段而不是拼进正文：正文会作为助手历史再次发给模型，也会被复制/导出
       run.fallback = { fromModel: event.from_model, toModel: event.to_model };
+      break;
+
+    case 'usage':
+      // 真实用量（不是估算）：上下文用了多少、窗口多大、本轮生成多少
+      run.usage = {
+        contextTokens: event.context_tokens,
+        contextWindow: event.context_window ?? null,
+        outputTokens: event.output_tokens,
+        cacheReadTokens: event.cache_read_tokens,
+      };
       break;
 
     case 'error': {

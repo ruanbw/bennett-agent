@@ -92,6 +92,28 @@ class Done(BaseModel):
     type: Literal["done"] = "done"
 
 
+class Usage(BaseModel):
+    """本轮的**真实** token 用量（来自上游响应，不是估算）。
+
+    `type` 只能说明「这是一个用量事件」，所以这里把口径写在字段名里：
+
+    - `context_tokens` 是**本轮最后一次**模型请求的 prompt token 数，也就是当前
+      上下文的长度。一轮里如有工具调用会有多次请求，累加值会把上下文算大
+      （每次请求都重发一遍历史），所以此处不提供累加值。
+    - `output_tokens` 是本轮生成的总输出（含工具调用之间的中间输出）。
+    - `cache_read_tokens` 是上下文里命中上游缓存的部分，是 `context_tokens` 的
+      子集，不是额外开销。
+
+    上游没在流式响应里回用量时**不发这个事件**，不发一个 0。
+    """
+
+    type: Literal["usage"] = "usage"
+    context_tokens: int
+    context_window: int | None = None
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+
+
 class StreamError(BaseModel):
     """本轮失败。
 
@@ -123,6 +145,7 @@ ChatEvent = Annotated[
     | ToolResult
     | ClarificationRequest
     | FallbackUsed
+    | Usage
     | Done
     | StreamError,
     Field(discriminator="type"),
@@ -138,4 +161,5 @@ __all__ = [
     "ThinkingDelta",
     "ToolCall",
     "ToolResult",
+    "Usage",
 ]
