@@ -258,13 +258,26 @@ async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnec
     改。而 `bennett.db` 里已经有账号了，不加这一步，升级后每次查询都会撞上
     `no such column: user.role`——表现为「整个站点 500」。
 
-    三步，全部可重复执行：
+    四步，**顺序不可换**，且每一步都要让后续步骤不再命中它：
 
     1. 列不存在 → `ALTER TABLE user ADD COLUMN role`（SQLite 允许带 DEFAULT 的 NOT NULL
        加列，已有行自动取默认值 `'user'`）；
-    2. 回填：历史 `is_superuser=1` 的账号升级为 `superadmin`，否则老管理员的入口会
-       在升级瞬间消失，而服务里**没有任何自助恢复路径**；
-    3. 规范化：把手工改库写进去的非法值收敛到 `'user'`，避免它们一路飘到鉴权层。
+    2. **归一化大小写与空白**（`lower(trim(role))`）：手工改库写成 `'ADMIN'` / `' admin '`
+       的行先变成 `'admin'`，否则第 4 步会把它们当成非法值丢掉；
+    3. **回填**：仍是 `'user'` 且 `is_superuser=1` 的账号是角色列出现之前的历史超管，
+       升级为 `superadmin`——否则老管理员会在升级瞬间失去入口，而服务里**没有**任何
+       自助恢复路径；
+    4. **规范化非法值**：认不出的值降为 `'user'`，**同时清掉 `is_superuser`**。
+
+    第 4 步那个「同时清掉」是幂等的关键：不清的话该行变成 `role='user'` 但
+    `is_superuser` 仍是 1，下次启动第 3 步就会把一枚写错的 role 值提成 `superadmin`
+    ——正是 HTTP 层刻意禁止授予的档位（`app/api/admin.py` 的 `set_user_role` 只能
+    由超管调用且不能改自己）。清理之后结果与启动次数无关，且失败方向是**降权**
+    而不是提权。
+
+    归一化口径必须与 `app/roles.py::Role.parse` 一致（`strip().lower()`）：两处不一致
+    时，`Role.parse('ADMIN')` 说是管理员、而这里把它降成普通用户，运维手改库的行为
+    就成了看运气。
     """
     columns = {row[1] for row in (await conn.execute(text("PRAGMA table_info(user)"))).fetchall()}
     if not columns:
@@ -272,11 +285,18 @@ async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnec
         return
 
     if "role" not in columns:
-        await conn.execute(
-            text(f"ALTER TABLE user ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT '{ROLE_USER}'")
-        )
+        await conn.execute(text(f"ALTER TABLE user ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT '{ROLE_USER}'"))
         logger.info("已为 user 表添加 role 列（默认 %s）", ROLE_USER)
 
+    # 2. 归一化：只动需要动的行，重复执行时 rowcount 为 0。
+    #    SQLite 的 lower() 只处理 ASCII，而 role 的全部取值都是 ASCII，够用。
+    normalized_case = await conn.execute(
+        text("UPDATE user SET role = lower(trim(role)) WHERE role <> lower(trim(role))")
+    )
+    if normalized_case.rowcount:
+        logger.info("已归一化 %d 个 role 值的大小写/空白", normalized_case.rowcount)
+
+    # 3. 回填：必须在归一化之后，否则 'ADMIN' 会先被第 4 步降成 'user' 再被这里提权。
     backfilled = await conn.execute(
         text("UPDATE user SET role = :admin WHERE is_superuser = 1 AND role = :user").bindparams(
             admin=ROLE_SUPERADMIN, user=ROLE_USER
@@ -285,16 +305,29 @@ async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnec
     if backfilled.rowcount:
         logger.info("已把 %d 个历史超级管理员回填为 role=%s", backfilled.rowcount, ROLE_SUPERADMIN)
 
-    # 规范化非法值：占位符显式展开，不拼字符串（role 值来自本模块常量，非常不可信输入，
-    # 但仍不把变量名拼进 SQL）。
+    # 4. 规范化非法值。占位符显式展开，不拼字符串（role 值来自本模块常量，非常不可信
+    #    输入，但仍不把变量名拼进 SQL）。
     placeholders = ", ".join(f":r{index}" for index in range(len(ALL_ROLES)))
-    params: dict[str, str] = {f"r{index}": value for index, value in enumerate(ALL_ROLES)}
-    params["user"] = ROLE_USER
-    normalized = await conn.execute(
-        text(f"UPDATE user SET role = :user WHERE role NOT IN ({placeholders})").bindparams(**params)
+    role_params: dict[str, str] = {f"r{index}": value for index, value in enumerate(ALL_ROLES)}
+    invalid = await conn.execute(
+        text(f"SELECT DISTINCT role FROM user WHERE role NOT IN ({placeholders})").bindparams(**role_params)
     )
-    if normalized.rowcount:
-        logger.warning("已把 %d 个非法 role 值规范化为 %s", normalized.rowcount, ROLE_USER)
+    bad_values = [row[0] for row in invalid.fetchall()]
+    if not bad_values:
+        return
+
+    # is_superuser 一并清零：否则下次启动会被第 3 步当成历史超管提权（见 docstring）。
+    dropped = await conn.execute(
+        text(f"UPDATE user SET role = :user, is_superuser = 0 WHERE role NOT IN ({placeholders})").bindparams(
+            **role_params, user=ROLE_USER
+        )
+    )
+    logger.warning(
+        "已把 %d 个非法 role 值降为 %s 并清除 is_superuser（非法取值: %s）",
+        dropped.rowcount,
+        ROLE_USER,
+        ", ".join(repr(value) for value in bad_values),
+    )
 
 
 async def create_db_and_tables() -> None:
