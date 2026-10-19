@@ -19,6 +19,7 @@ import pydantic
 import pytest
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
+    FinalResultEvent,
     FunctionToolCallEvent,
     ModelRequest,
     ModelResponse,
@@ -30,6 +31,7 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
 )
 from pydantic_ai.run import AgentRunResultEvent
+from sqlalchemy.exc import OperationalError
 
 from app.schemas.chat import ChatMessage
 from app.services import chat_service
@@ -713,6 +715,9 @@ def test_clarification_needs_two_effective_options(caplog, raw_options):
 
     否则模型传错参数时，用户会先看到一个只有 0/1 个选项、点不出结果的弹窗，
     而工具其实已经把「参数不合法」返回给了模型。
+
+    两边现在共用 `normalize_clarification`（同一个纯函数），日志里的 `reason` 就是
+    工具的原文文案——所以这里断言的是「拒绝且原因指向 options」，而不是某一个具体措辞。
     """
     args = {"question": "选哪个？"}
     if raw_options is not None:
@@ -722,7 +727,58 @@ def test_clarification_needs_two_effective_options(caplog, raw_options):
         events = list(chat_service.translate_event(clarification_call(args)))
 
     assert events == []
-    assert "意图确认选项不足 2 个有效值" in caplog.text
+    assert "options" in caplog.text
+
+
+# ---------------------------------------------------------------------
+# 校验规则只有一份（消除双弹窗）
+#
+# `translate_event` 消费的是 `FunctionToolCallEvent`（工具**开始执行**），它比工具
+# 返回早一步——服务端那时还不知道工具会拒绝。两边规则不一致时：模型传 600 字问题
+# → 工具返回「超限」错误 → **但弹窗已经发出去了** → 模型重试带新 tool_call_id →
+# 去重拦不住 → 用户看到第二个弹窗。
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"question": "问" * 501},  # 超长问题
+        {"options": [f"选项{i}" for i in range(11)]},  # 超额选项
+        {"options": ["A" * 101, "B"]},  # 单项超长
+    ],
+)
+def test_oversized_clarification_args_never_reach_the_client(overrides, caplog):
+    """工具会拒绝的参数，翻译层必须**提前**拒绝——不能先弹出窗口再报错。"""
+    args = {"question": "选哪个？", "options": ["A", "B"], **overrides}
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        events = list(chat_service.translate_event(clarification_call(args)))
+
+    assert events == [], "超限入参不该产生 clarification 事件"
+    assert "未通过校验" in caplog.text
+
+
+def test_translate_and_tool_agree_on_the_same_rules():
+    """同一个入参，工具与翻译层必须给出**一致**的通过/拒绝结论。"""
+    from app.tools.ask_user_clarification import normalize_clarification
+
+    cases = [
+        ({"question": "选哪个？", "options": ["A", "B"]}, True),
+        ({"question": "", "options": ["A", "B"]}, False),
+        ({"question": "问" * 501, "options": ["A", "B"]}, False),
+        ({"question": "选哪个？", "options": ["A"]}, False),
+        ({"question": "选哪个？", "options": ["A", "B", "A"]}, True),  # 去重后 2 个
+        ({"question": "选哪个？", "options": ["A" * 101, "B"]}, False),
+        ({"question": "问", "options": ["  A  ", "", "B"]}, True),
+    ]
+
+    for args, should_pass in cases:
+        tool_result = normalize_clarification(args["question"], args["options"])
+        tool_passes = not isinstance(tool_result, str)
+        event = chat_service._clarification_from(args, "call-1")
+        translate_passes = event is not None
+
+        assert tool_passes is should_pass, args
+        assert translate_passes is should_pass, args
 
 
 @pytest.mark.parametrize(
@@ -800,26 +856,49 @@ def test_failed_clarification_does_not_block_a_later_valid_one(monkeypatch):
 
 # ---------------------------------------------------------------------
 # 未识别事件的告警降级（P2）
+#
+# 这里用的是**真正的未知类型**（一个不继承任何 pydantic-ai 事件的普通类），而不是
+# `PartEndEvent`——后者是每次流式响应的固定成分，把它当未知会让告警在 100% 的正常
+# 流量上触发，反而使唯一的「渲染停摆」信号失去意义（见 `app/services/chat_service.py`
+# 里对应的「有意忽略」分支）。
 # ---------------------------------------------------------------------
 def test_unknown_event_warns_at_warning_level_once_per_type(caplog):
     """生产日志级别是 INFO：原来的 DEBUG 等于没记，正文会静默丢光。"""
-    unknown = PartEndEvent(index=0, part=TextPart(content="x"))
+
+    class UnknownEventA:
+        pass
+
+    class UnknownEventB:
+        pass
 
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        assert list(chat_service.translate_event(unknown)) == []
-        assert list(chat_service.translate_event(unknown)) == []
-        assert list(chat_service.translate_event(PartEndEvent(index=1, part=TextPart(content="y")))) == []
+        assert list(chat_service.translate_event(UnknownEventA())) == []
+        assert list(chat_service.translate_event(UnknownEventA())) == []
+        assert list(chat_service.translate_event(UnknownEventB())) == []
 
     warnings = [record for record in caplog.records if "未处理的 pydantic-ai 流事件" in record.getMessage()]
-    assert len(warnings) == 1
-    assert warnings[0].levelno == logging.WARNING
+    # 每种类型只告一次（去重），但不同类型都要告
+    assert len(warnings) == 2
+    assert all(record.levelno == logging.WARNING for record in warnings)
 
 
 def test_unknown_event_message_explains_the_consequence(caplog):
+    class UnknownEvent:
+        pass
+
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-        list(chat_service.translate_event(PartEndEvent(index=0, part=TextPart(content="x"))))
+        list(chat_service.translate_event(UnknownEvent()))
 
     assert "静默丢弃" in caplog.text
+
+
+def test_routine_stream_events_do_not_warn(caplog):
+    """`PartEndEvent` / `FinalResultEvent` 是正常流量的固定成分，不能进告警。"""
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        list(chat_service.translate_event(PartEndEvent(index=0, part=TextPart(content="x"))))
+        list(chat_service.translate_event(FinalResultEvent(tool_name="t", tool_call_id="c")))
+
+    assert "未处理的 pydantic-ai 流事件" not in caplog.text
 
 
 def test_tool_call_delta_stays_a_deliberate_debug_ignore(caplog):
@@ -851,7 +930,9 @@ def small_window(monkeypatch):
 
     monkeypatch.setattr(settings, "context_guard_mode", "reject")
     monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
-    monkeypatch.setattr(token_budget, "_WARNED_UNKNOWN_WINDOWS", set())
+    # 告警去重表换成 dict（容量有界的 LRU），但清空方式仍是 clear；这里换成一个
+    # 独立实例，避免写进全局表影响别的用例
+    monkeypatch.setattr(token_budget, "_WARNED_UNKNOWN_WINDOWS", {})
 
     async def limits(_model_id):
         return 8_192, 0
@@ -1050,6 +1131,44 @@ async def test_disabled_model_is_rejected_with_a_typed_code(monkeypatch):
     # 文案要是人能读懂的原因与动作，不是内部错误编号
     assert "模型已停用或不存在" in error.message
     assert "错误编号" not in error.message
+
+
+# ---------------------------------------------------------------------
+# 预检阶段抛异常（而不是返回 None）
+#
+# 上一个用例锁的是「解析出一个确定结论」：模型不存在。这里是「根本查不出来」：
+# 数据库锁超时、模板缺失。这两者在传输层上完全不是一个样子——`resolve_*` 抛异常时
+# 生成器会直接突破，而 sse-starlette **先发响应头再拉第一个事件**，200 已经不可撤回，
+# 客户端只能看到断流，服务端连可回查的 error_id 都没留下。
+#
+# 所以这里断言的是「无论预检怎么坏，流都有一条终止事件」。
+# ---------------------------------------------------------------------
+async def test_preflight_failure_still_emits_a_terminal_error(monkeypatch):
+    async def exploding(_key):
+        # SQLite 写锁超时抛的正是这个（app/db.py 只给了 busy_timeout=5000）
+        raise OperationalError("SELECT user", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(chat_service, "resolve_model_target", exploding)
+    monkeypatch.setattr(
+        chat_service,
+        "build_agent",
+        lambda *_a, **_k: pytest.fail("预检失败后不该走到装配"),
+    )
+
+    events = await collect_async([msg("user", "你好")])
+
+    # 有且只有一条终止事件：既不能空流，也不能既 error 又 done
+    assert [event.type for event in events] == ["error"]
+    error = events[0]
+    # 内部故障而不是「模型不存在」：不能被归成 model_unavailable，否则会误导用户去刷新列表
+    assert error.code != "model_unavailable"
+    assert error.code == "internal_error"
+    # 查库失败可能是抖一下就好，允许重试
+    assert error.retryable is True
+    # 必须留下可回查的编号：这条路径以前在服务端什么都不留
+    assert "错误编号" in error.message
+    # 异常原文（可能含 SQL 与表名）不得外泄
+    assert "database is locked" not in error.message
 
 
 # ---------------------------------------------------------------------

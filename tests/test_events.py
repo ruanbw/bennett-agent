@@ -221,16 +221,12 @@ def test_clarification_filters_non_string_options():
     "bad_args",
     [
         "not json at all",
-        "{}",
-        {"question": ""},
-        {"question": "   "},
-        {"question": 123},
         [],
         None,
     ],
 )
 def test_unparseable_clarification_warns_and_yields_nothing(caplog, bad_args):
-    """入参坏掉时不能静默：既不发 ToolCall（前端会当成普通工具），也要留下警告。"""
+    """入参根本不是 dict 时不能静默：既不发 ToolCall（前端会当成普通工具），也要留警告。"""
     with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
         events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, bad_args))
 
@@ -238,8 +234,37 @@ def test_unparseable_clarification_warns_and_yields_nothing(caplog, bad_args):
     assert "意图确认工具入参无法解析" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        {},
+        {"question": ""},
+        {"question": "   "},
+        {"question": 123},
+    ],
+)
+def test_invalid_clarification_args_are_refused_with_the_tool_reason(caplog, bad_args):
+    """能解析但过不了校验：同样不发弹窗，但日志里记的是工具那份具体原因。
+
+    两种情况分开测是因为它们的排障含义不同：「无法解析」说明模型的 JSON 坏了，
+    「未通过校验」说明模型给的参数越界——后者靠 reason 能直接看出是哪个参数。
+    """
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        events = translate(tool_call_event(CLARIFICATION_TOOL_NAME, bad_args))
+
+    assert events == []
+    assert "未通过校验" in caplog.text
+    # reason 用的是工具原文，能定位到具体参数
+    assert "question" in caplog.text
+
+
 # ---------------------------------------------------------------------
 # 未知事件：R-2 的可观测性
+#
+# 这两类事件曾经落进兜底告警：`PartEndEvent` 与 `FinalResultEvent` 是**每次流式响应**
+# 的固定成分（每个 part 结束时一条 / 每个正常回答至少一条），于是 `_warn_unknown_once`
+# 在 100% 的正常流量上各打一行 WARNING。运维只会得出「这条告警没意义」的结论，而它
+# 恰恰是发现「pydantic-ai 升级后渲染悄悄停摆」的唯一信号。
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize(
     "event",
@@ -248,13 +273,28 @@ def test_unparseable_clarification_warns_and_yields_nothing(caplog, bad_args):
         FinalResultEvent(tool_name="t", tool_call_id="c"),
     ],
 )
-def test_unknown_events_are_logged_not_silently_dropped(caplog, event):
-    """pydantic-ai 升级后的「渲染悄悄停摆」必须能从日志里发现。"""
-    with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
+def test_routine_events_are_not_warned_about(caplog, event):
+    """正常流量的固定成分不能被当成「未识别事件」。"""
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
         events = translate(event)
 
     assert events == []
+    warnings = [record for record in caplog.records if "未处理的 pydantic-ai 流事件" in record.getMessage()]
+    assert warnings == [], f"{type(event).__name__} 是常规事件，不该报警"
+
+
+def test_genuinely_unknown_event_still_warns(caplog):
+    """真正的未知类型必须继续告警——否则「渲染悄悄停摆」无从发现。"""
+
+    class TotallyUnknownEvent:
+        pass
+
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        events = translate(TotallyUnknownEvent())
+
+    assert events == []
     assert "未处理的 pydantic-ai 流事件" in caplog.text
+    assert "静默丢弃" in caplog.text
 
 
 def test_str_name_dispatch_would_have_missed_subclasses():

@@ -135,3 +135,63 @@ async def test_option_over_limit_is_rejected():
     result = await ask_user_clarification(None, "问题？", ["选" * (MAX_OPTION_CHARS + 1), "B"])
 
     assert result == f"错误: 单个候选项 (option) 不能超过 {MAX_OPTION_CHARS} 字符。"
+
+
+# ---------------------------------------------------------------------
+# allow_custom_input 必须如实反映在回灌给模型的文案里
+#
+# 文案不分情况地说「可以选择或输入」时，模型会以为用户仍能自由补充，于是把问题写得
+# 更开放；而前端在 allow_custom_input=False 时只显示选项。模型对交互形态的判断与
+# 用户实际看到的不一致，后续轮次它会基于错误前提继续。
+# ---------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_custom_input_allowed_is_stated():
+    result = await ask_user_clarification(None, "问题？", ["A", "B"], allow_custom_input=True)
+
+    assert "自行输入" in result
+
+
+@pytest.mark.asyncio
+async def test_custom_input_disallowed_is_stated():
+    result = await ask_user_clarification(None, "问题？", ["A", "B"], allow_custom_input=False)
+
+    assert "不允许自定义输入" in result
+    assert "自行输入" not in result
+
+
+# ---------------------------------------------------------------------
+# normalize_clarification 是唯一实现（chat_service 的翻译层直接复用它）
+# ---------------------------------------------------------------------
+def test_normalize_returns_cleaned_args():
+    from app.tools.ask_user_clarification import normalize_clarification
+
+    normalized = normalize_clarification("  选哪个？  ", ["  React  ", "React", "Vue", "  ", ""])
+
+    assert not isinstance(normalized, str)
+    assert normalized.question == "选哪个？"
+    # strip + 去重并保持原顺序
+    assert normalized.options == ["React", "Vue"]
+
+
+def test_normalize_drops_non_string_options():
+    """模型偶尔会传数字/None；丢弃它们而不是整条拒绝，否则一次手误就废掉一个可用提问。"""
+    from app.tools.ask_user_clarification import normalize_clarification
+
+    normalized = normalize_clarification("问题？", ["A", 1, None, "B", {"x": 1}])
+
+    assert not isinstance(normalized, str)
+    assert normalized.options == ["A", "B"]
+
+
+def test_normalize_is_frozen():
+    """返回值不可变：翻译层与工具共享同一个对象时，任何一方都改不动。"""
+    import dataclasses
+
+    from app.tools.ask_user_clarification import normalize_clarification
+
+    normalized = normalize_clarification("问题？", ["A", "B"])
+
+    assert not isinstance(normalized, str)
+    assert dataclasses.is_dataclass(normalized)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        normalized.question = "改掉"

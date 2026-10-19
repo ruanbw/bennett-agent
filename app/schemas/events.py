@@ -126,12 +126,15 @@ class StreamError(BaseModel):
     标 false——同一个请求再发一次结果不会变。
 
     `code` 是给机器看的失败分类，`type` 只能区分「哪一类事件」而区分不了「哪一种
-    失败」。目前有两个取值：
+    失败」。取值如下：
 
     - `context_overflow`：上下文超出模型窗口，重试必然同样失败，用户只能新建会话/
       换更大的模型；
     - `model_unavailable`：数据库配置里这个模型已停用或不存在（典型是管理员在
-      请求途中改配置），刷新模型列表就能看到真实清单，重试同一个模型同样失败。
+      请求途中改配置），刷新模型列表就能看到真实清单，重试同一个模型同样失败；
+    - `internal_error`：服务端自己出错了（查库失败、模板渲染失败等），**没有**给出
+      任何关于模型的确定结论——所以不能归成上面两类，否则会把一次数据库抖动报成
+      「模型已下架」，让用户去刷新一个本来正常的列表。已附关联 ID，可重试。
 
     客户端不该去猜 `message` 里的中文，也不该把「重试按钮」当作万能出路。
     """
@@ -139,7 +142,7 @@ class StreamError(BaseModel):
     type: Literal["error"] = "error"
     message: str
     retryable: bool = False
-    code: Literal["context_overflow", "model_unavailable"] | None = None
+    code: Literal["context_overflow", "model_unavailable", "internal_error"] | None = None
 
 
 #: SSE 事件载荷。判别键是 `type`，客户端可以直接按它 switch。

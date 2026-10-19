@@ -12,19 +12,21 @@ from typing import Any
 from uuid import uuid4
 
 from pydantic_ai.messages import (
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
+    FinalResultEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
     PartDeltaEvent,
+    PartEndEvent,
     PartStartEvent,
     TextPart,
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
+    ToolCallEvent,
     ToolCallPart,
     ToolCallPartDelta,
+    ToolResultEvent,
     UserPromptPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
@@ -56,6 +58,7 @@ from app.services.upstream_errors import (
     upstream_error_message,
 )
 from app.services.usage import extract_turn_usage
+from app.tools.ask_user_clarification import normalize_clarification
 
 logger = logging.getLogger(__name__)
 
@@ -217,20 +220,19 @@ def _parse_allow_custom_input(value: Any) -> bool:  # noqa: ANN401
     return bool(value)
 
 
-def _clean_options(raw_options: Any) -> list[str]:  # noqa: ANN401
-    """清洗候选项：strip、去重、过滤空串（顺序保持原样）。"""
-    if not isinstance(raw_options, list):
-        return []
-    cleaned = [option.strip() for option in raw_options if isinstance(option, str)]
-    return [option for option in dict.fromkeys(cleaned) if option]
-
-
 def _clarification_from(args: Any, tool_call_id: str) -> ClarificationRequest | None:  # noqa: ANN401
     """从 `ask_user_clarification` 的原始入参解出提问。
 
-    返回 `None` 表示本轮不该展示提问（原因已记日志）：入参坏掉，或清洗后不足 2 个
-    有效选项。后者与 `ask_user_clarification` 工具自身的规则一致——工具按「至少 2 个
-    不同的非空选项」拒绝，两边不一致时用户会先看到一个只有 0/1 个选项的弹窗。
+    返回 `None` 表示本轮**不该**展示提问（原因已记日志）：入参根本不是可解析的
+    dict，或校验未通过。
+
+    校验规则直接复用工具自己的 `normalize_clarification`——两边各写一份时，超长问题
+    或超额选项会被工具拒绝、**但前端已经收到了弹窗**，模型重试后又带新的
+    `tool_call_id` 过来，去重拦不住，用户看到第二个弹窗。
+
+    为什么必须在翻译层就拦住而不是等工具返回错误：`translate_event` 消费的是
+    `FunctionToolCallEvent`（工具**开始执行**），它比工具返回早一步，服务端那时还
+    不知道工具会拒绝。所以只能靠同一份规则预判。
     """
     if isinstance(args, str):
         try:
@@ -240,24 +242,24 @@ def _clarification_from(args: Any, tool_call_id: str) -> ClarificationRequest | 
     else:
         parsed = args
 
-    question = parsed.get("question") if isinstance(parsed, dict) else None
-    if not isinstance(question, str) or not question.strip():
+    if not isinstance(parsed, dict):
         logger.warning("意图确认工具入参无法解析，本轮不会展示提问 (tool_call_id=%s, args=%r)", tool_call_id, args)
         return None
 
-    options = _clean_options(parsed.get("options"))
-    if len(options) < 2:
+    normalized = normalize_clarification(parsed.get("question"), parsed.get("options"))
+    if isinstance(normalized, str):
+        # 工具的文案已经写清了是哪个参数越界，直接用它记日志，排障时不必再对照两份规则。
         logger.warning(
-            "意图确认选项不足 2 个有效值，本轮不会展示提问 (tool_call_id=%s, options=%r)",
+            "意图确认入参未通过校验，本轮不会展示提问 (tool_call_id=%s, reason=%s)",
             tool_call_id,
-            parsed.get("options"),
+            normalized,
         )
         return None
 
     return ClarificationRequest(
         tool_call_id=tool_call_id,
-        question=question.strip(),
-        options=options,
+        question=normalized.question,
+        options=normalized.options,
         allow_custom_input=_parse_allow_custom_input(parsed.get("allow_custom_input")),
     )
 
@@ -327,10 +329,14 @@ def translate_event(
             )
         return
 
-    if isinstance(event, FunctionToolCallEvent):
+    # 用**基类** `ToolCallEvent` 判断而不是子类 `FunctionToolCallEvent`：
+    # pydantic-ai 同级还有 `OutputToolCallEvent`（结构化输出时出现）。用子类判断会
+    # 让兄弟类落进下面的兜底告警——工具调用整体消失，而提示只是一行被正常流量
+    # 淹没的 WARNING。当前 Agent 没传 `output_type`，所以还走不到，但这是埋着的。
+    if isinstance(event, ToolCallEvent):
         part = event.part
-        tool_call_id = part.tool_call_id or ""
-        tool_name = part.tool_name or ""
+        tool_call_id = getattr(part, "tool_call_id", "") or ""
+        tool_name = getattr(part, "tool_name", "") or ""
 
         if tool_name == CLARIFICATION_TOOL_NAME:
             if tool_call_id and seen_clarification_ids is not None and tool_call_id in seen_clarification_ids:
@@ -353,7 +359,7 @@ def translate_event(
         )
         return
 
-    if isinstance(event, FunctionToolResultEvent):
+    if isinstance(event, ToolResultEvent):
         # 注意用的是 part.content（工具结果本体），不是 event.content——
         # 后者是「结果之后追加给模型的额外内容」，语义不同。
         part = event.part
@@ -370,6 +376,18 @@ def translate_event(
             tool_name=tool_name,
             result=_stringify(part.content),
         )
+        return
+
+    # 以下两类是**每次流式响应**的固定成分，不是异常事件：
+    # - `PartEndEvent`：每个 TextPart/ThinkingPart/ToolCallPart 结束时补的一条；
+    # - `FinalResultEvent`：本项目的 Agent 没传 `output_type`（默认 str），
+    #   所以每个正常回答至少一条。
+    # 它们的内容已经通过增量发过了，再发一次就是重复。归入「有意忽略」而不是落进
+    # 下面的兜底告警：否则 `_warn_unknown_once` 会在 100% 的正常流量上各打一行
+    # WARNING，运维只会得出「这条告警没意义」的结论——而它恰恰是发现「渲染悄悄
+    # 停摆」的唯一信号。
+    if isinstance(event, (PartEndEvent, FinalResultEvent)):
+        logger.debug("忽略的流事件: %s", type(event).__name__)
         return
 
     _warn_unknown_once(
@@ -451,20 +469,41 @@ async def stream_chat_events(
     """
     seen_clarification_ids: set[str] = set()
 
-    # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（并发下
-    # 管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关——用户会以为
-    # 自己在用一个已被停用的模型。
-    target = await resolve_model_target(model_name)
-    if target is None and await provider_config_exists():
+    # 预检阶段的异常必须在这里兜住，不能让它突破生成器。传输层（sse-starlette）
+    # **先发响应头再拉第一个事件**，也就是说走到这一步时 200 已经不可撤回；生成器
+    # 抛异常只会把连接掐断，客户端看到「HTTP 200 + 断流」，既没有 `done` 也没有
+    # `error`，服务端连一个可回查的 error_id 都没留下。
+    #
+    # 这三步都会碰 SQLite（`resolve_*` 查库）与 Jinja（预算里算 system prompt 开销），
+    # 不是边角分支：数据库锁超时抛 `OperationalError`、模板缺失抛 `TemplateError`
+    # 都会走到这里。
+    try:
+        # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（并发下
+        # 管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关——用户会以为
+        # 自己在用一个已被停用的模型。
+        target = await resolve_model_target(model_name)
+        if target is None and await provider_config_exists():
+            yield StreamError(
+                message="模型已停用或不存在，请刷新模型列表后重试",
+                retryable=False,
+                code="model_unavailable",
+            )
+            return
+
+        # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
+        budget = await resolve_context_budget(model_name, messages, context_anchor)
+    except Exception:
+        # 注意与上面的 `model_unavailable` 区分：那是「模型真的不存在」的**确定结论**，
+        # 这里是「查不出来」的内部故障。混在一起会把一次数据库抖动报成「模型已下架」。
+        error_id = _new_error_id()
+        logger.exception("模型预检失败 (error_id=%s, model=%s)", error_id, model_name)
         yield StreamError(
-            message="模型已停用或不存在，请刷新模型列表后重试",
-            retryable=False,
-            code="model_unavailable",
+            message=f"请求处理失败，请重试（错误编号 {error_id}）",
+            retryable=True,
+            code="internal_error",
         )
         return
 
-    # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
-    budget = await resolve_context_budget(model_name, messages, context_anchor)
     if budget is not None and budget.over_limit:
         logger.warning(
             "上下文超出模型预算，已拒绝本轮 (model=%s, basis=%s, used=%d, limit=%d, window=%d, messages=%d)",
