@@ -31,6 +31,19 @@ MAX_TITLE_PROMPT_CHARS = 8_000
 REASONING_EFFORT_PATTERN = rf"^[A-Za-z0-9._-]{{1,{MAX_REASONING_EFFORT_CHARS}}}$"
 
 
+def _strip_optional_model(value: object) -> object:
+    """`model` 的通用归一化：去首尾空白，全空白视为「未指定」。
+
+    两个请求模型（对话与标题生成）共用这一份实现：留空表示「用后台默认模型」，而
+    空白串与缺省必须落成同一个 None，否则 `model="   "` 会带着三个空格去查白名单，
+    用户看到的是「模型   不在可用模型列表中」。
+    """
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return value
+
+
 class ChatMessage(BaseModel):
     # 只允许 user/assistant。此前还接受 "system"，而 convert_chat_history 会把它
     # 转成 SystemPromptPart 插进历史——那等于让调用方注入系统提示词，而系统提示词
@@ -97,26 +110,37 @@ class ChatRequest(BaseModel):
         ),
     )
 
-    @field_validator("model", mode="before")
-    @classmethod
-    def _strip_model(cls, v: object) -> object:
-        if isinstance(v, str):
-            cleaned = v.strip()
-            return cleaned or None
-        return v
+    _strip_model = field_validator("model", mode="before")(_strip_optional_model)
 
     @model_validator(mode="after")
     def _check_message_order(self) -> "ChatRequest":
-        """历史必须以 user 开头、以 user 结尾。
+        """历史必须以 user 开头、严格 user/assistant 交替、以 user 结尾。
 
         上游按对话结构解析：Anthropic Messages API 要求首条为 user，`[assistant,
         user]` 会直接 400；末条不是 user 则根本不是一次新的提问。此前这两类要走到
         服务层才被拒，客户端拿到的是 200 + SSE error——监控会把它记成成功。
         服务层保留等价检查作为防御（`convert_chat_history` 也可能被别处直接调用）。
         末条「非空白」由 ChatMessage 的校验保证。
+
+        交替同理：`convert_chat_history` 把历史装配成 request/response 交替的序列，
+        连续两条同角色会被合并或丢弃，模型看到的上下文与用户以为的不一致，而请求本身
+        却「成功」了。判定顺序按「首条 → 交替 → 末条」：先定位到最早出错的位置，用户
+        照着第一条报错改完再看下一条。
+
+        注意这里刻意不拦「末条是 assistant」以外的连续同角色组合——交替校验已经覆盖
+        了它们，两处各写一份只会有两份文案不一致的风险。
         """
-        if self.messages[0].role != "user":
+        first = self.messages[0]
+        if first.role != "user":
             raise ValueError("第一条消息必须是 user 消息")
+
+        for index in range(1, len(self.messages)):
+            previous, current = self.messages[index - 1], self.messages[index]
+            if current.role == previous.role:
+                raise ValueError(
+                    f"消息必须以 user 与 assistant 交替出现：第 {index} 条与第 {index + 1} 条都是 {current.role} 消息"
+                )
+
         if self.messages[-1].role != "user":
             raise ValueError("最后一条消息必须是 user 消息")
         return self
@@ -156,13 +180,7 @@ class TitleGenerateRequest(BaseModel):
     model: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS, description="使用的模型名称")
     prompt: str = Field(..., min_length=1, max_length=MAX_TITLE_PROMPT_CHARS, description="首条提示词内容")
 
-    @field_validator("model", mode="before")
-    @classmethod
-    def _strip_model(cls, v: object) -> object:
-        if isinstance(v, str):
-            cleaned = v.strip()
-            return cleaned or None
-        return v
+    _strip_model = field_validator("model", mode="before")(_strip_optional_model)
 
     @field_validator("prompt")
     @classmethod

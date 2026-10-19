@@ -1,6 +1,6 @@
-"""模型清单服务：管理后台维护的提供商配置 + 旧版网关兜底。
+"""管理后台维护的模型注册表：提供商 / 模型 CRUD、同步、以及对话请求的模型解析。
 
-## 两个数据源，一个对外接口
+## 数据库是唯一权威（一旦有配置）
 
 管理后台把「提供商 -> 模型 -> 是否启用」存进数据库（`model_provider` /
 `provider_model`）。一旦库里存在**任意**提供商，数据库就是唯一权威：
@@ -11,8 +11,9 @@
 - 禁用一个模型会立刻从列表消失，对话请求也会被白名单拒绝。
 
 库里一条提供商都没有时（旧部署、测试、尚未引导）才退回原有的「直接读
-`LITELLM_API_BASE` 的 `/v1/models`」路径。这条兜底只为了升级不中断，不是第二套
-配置入口：首次启动会用环境变量**引导**出一条「默认网关」提供商，之后由后台接管。
+`LITELLM_API_BASE` 的 `/v1/models`」路径（见 `gateway`）。这条兜底只为了升级不中断，
+不是第二套配置入口：首次启动会用环境变量**引导**出一条「默认网关」提供商
+（`seed_default_provider`），之后由后台接管。
 
 ## 路由键
 
@@ -24,18 +25,20 @@
 
 模型启停是管理员刚点完就要生效的操作。管理后台的写操作与对话请求不在同一个进程
 生命周期里没有通知机制，任何 TTL 缓存都会造成「明明禁用了还能用」。两张表都很小，
-每次请求多两条查询比缓存失效逻辑便宜得多。旧版网关路径的缓存保持原样。
+每次请求多两条查询比缓存失效逻辑便宜得多。旧版网关路径的缓存保持原样（在 `gateway`）。
+
+## 一次查询解析一轮对话
+
+`resolve_chat_model` 把「白名单校验 + 目标解析 + 窗口/输出上限」合并成**一次**读库：
+此前 `/api/chat` 一次请求要重复全量查一遍启用模型四次（API 层白名单、服务层解析、
+`token_budget` 的预算、流尾的用量窗口）。快照把前三者的数据一次取齐，`token_budget`
+内部那次查询按约定保留（它不归本模块管），于是每请求只剩两次。
 """
 
-import asyncio
-import ipaddress
 import logging
 import re
-import socket
-import time
 import uuid
-from dataclasses import replace
-from urllib.parse import urlsplit
+from dataclasses import dataclass, replace
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
@@ -45,226 +48,25 @@ from app.config import settings
 from app.db import AppSetting, ModelProvider, ProviderModel, async_session_maker
 from app.schemas.chat import ModelItem, ModelListResponse
 from app.services.http_client import get_http_client
+from app.services.model_service import gateway, outbound_guard
+from app.services.model_service.errors import (
+    ApiKeyRequiredError,
+    DuplicateModelError,
+    InvalidModelStateError,
+    ProviderFetchError,
+    ProviderNotFoundError,
+)
 from app.services.model_target import ModelTarget
 
 logger = logging.getLogger(__name__)
 
-#: 拉取模型列表是页面加载路径上的一步，3 秒没结果就该走兜底。
-MODELS_TIMEOUT_SECONDS = 3.0
-
 #: 管理后台的「测试连接 / 同步模型」是显式动作，可以等久一点；但也不能无限挂住。
 PROVIDER_SYNC_TIMEOUT_SECONDS = 15.0
-
-#: 缓存有效期。网关的模型列表变化很慢，而每次页面加载都打上游既慢又浪费。
-MODELS_CACHE_TTL_SECONDS = 300.0
-
-#: 兜底结果缓存有效期（负缓存）。避免上游瞬时抖动造成过长时间锁定，同时防止频繁超时。
-FALLBACK_CACHE_TTL_SECONDS = 10.0
-
-#: 成功结果的缓存：(写入时刻, 响应)。只有成功结果会写进这一格。
-_success_cache: tuple[float, ModelListResponse] | None = None
-#: 负缓存：最近一次「上游不可用」产生的兜底响应。刻意与成功缓存分开存——失败永远
-#: 顶不掉已有的成功结果（共用一格时，慢失败的兜底会覆盖刚拿到的成功列表）。
-_fallback_cache: tuple[float, ModelListResponse] | None = None
-
-#: single-flight 锁，以及它绑定的 loop。锁按事件循环惰性重建：asyncio.Lock 会绑定
-#: 首次使用它的 loop，模块级常量锁在「每个用例一个 loop」的测试环境里会 RuntimeError。
-_lock: asyncio.Lock | None = None
-_lock_loop: asyncio.AbstractEventLoop | None = None
-
-
-def _build_models_url(base_url: str) -> str:
-    """根据提供商的 base_url 拼出模型列表地址。
-
-    兼容两种常见写法：`http://host:4000`（OpenAI SDK 的 base_url 习惯）与
-    `http://host:4000/v1`（很多自建网关/官方文档直接给到 /v1）。重复拼 `/v1`
-    会让提供商返回 404，而 404 又很容易被误读成「提供商不可用」。
-    """
-    base = base_url.strip().rstrip("/")
-    return f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-
-
-def _build_url() -> str:
-    return _build_models_url(settings.litellm_api_base)
-
-
-def _parse_int_field(value: object) -> int | None:
-    """宽松解析 int 型字段：int 或数字串；其它（None、'128k'、浮点……）一律 None。
-
-    刻意不做单位换算：把 '128k' 猜成 128000 是伪造数据，前端会拿着编出来的上下文
-    窗口做判断。
-    """
-    if isinstance(value, bool):
-        # bool 是 int 的子类，但 True/False 在这两个字段上没有语义
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_reasoning_flag(item: dict[str, object]) -> bool | None:
-    """reasoning 三态：只有网关给出的 bool 才算表态，其余（缺字段、类型不符）为 None。
-
-    None 与 False 必须分开：False 是「网关明确说不支持」，前端据此隐藏思考等级选择器；
-    None 是「网关没说」，按未知处理。此前 `bool(item.get("reasoning", False))` 把两者
-    压成了同一个 False。
-    """
-    value = item.get("reasoning")
-    return value if isinstance(value, bool) else None
-
-
-def _parse_reasoning_levels(raw: object) -> list[str]:
-    """解析模型支持的思考等级。
-
-    网关的返回有两种形状：`[{"effort": "high"}]` 或 `["high"]`。两种都接受，其它
-    形状忽略——伪造等级会让用户选了之后请求失败（`{"effort": null}` 经 `str()` 会
-    变成等级 "None"）。空白串不是等级，照样丢掉。
-    """
-    if not isinstance(raw, list):
-        return []
-
-    levels: list[str] = []
-    for item in raw:
-        value = item.get("effort") if isinstance(item, dict) else item
-        if not isinstance(value, str):
-            continue
-        cleaned = value.strip()
-        if cleaned and cleaned not in levels:
-            levels.append(cleaned)
-    return levels
-
-
-def _parse_models(
-    payload: object,
-    default_model_id: str,
-    description_field: str,
-    *,
-    mark_default: bool = True,
-) -> ModelListResponse | None:
-    """把上游响应转成 `ModelListResponse`；无可用模型时返回 None。
-
-    `description_field` 由配置传入：上游网关可以提供一个比 'provider name' 更友好
-    的展示标签，但字段名属于网关细节，不该硬编码在这里。
-
-    `mark_default=False` 用于管理后台的同步：默认模型由数据库行决定，这里不该把
-    上游列表的第一项强行标成默认（也不该为「配置的默认模型」打一条误导性日志）。
-
-    容错做在**条目级**：某个模型的字段类型不符（`id` 是数字、`display_name` 是数字……）
-    只跳过那一条。此前任何一条抛 ValidationError 都会被外层 except 捕获、整份作废，
-    列表于是只剩兜底的那一个模型。
-    """
-    if not isinstance(payload, dict):
-        return None
-
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return None
-
-    models: list[ModelItem] = []
-    found_default = False
-
-    for index, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
-
-        try:
-            model_id = item.get("id")
-            if not model_id:
-                continue
-
-            display_name = item.get("display_name") or model_id
-            owned_by = item.get("owned_by") or (model_id.split("/")[0] if "/" in model_id else "Custom")
-            is_default = model_id == default_model_id
-            found_default = found_default or is_default
-
-            models.append(
-                ModelItem(
-                    id=model_id,
-                    name=display_name,
-                    provider=owned_by,
-                    description=item.get(description_field) or f"{owned_by} {display_name}",
-                    reasoning=_parse_reasoning_flag(item),
-                    supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
-                    context_window=_parse_int_field(item.get("context_window")),
-                    max_output_tokens=_parse_int_field(item.get("max_output_tokens")),
-                    is_default=is_default,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - 单条坏数据不能作废整份列表
-            logger.warning("跳过无法解析的模型条目 (index=%d, id=%r): %s", index, item.get("id"), exc)
-
-    if not models:
-        return None
-
-    if not found_default and mark_default:
-        # 没有匹配到配置的默认模型时，把第一个标为默认，避免前端没有可选项
-        logger.info(
-            "配置的默认模型 %s 不在网关返回的列表中，回退为列表首个模型 %s",
-            default_model_id,
-            models[0].id,
-        )
-        models[0].is_default = True
-        default_model_id = models[0].id
-
-    return ModelListResponse(models=models, default_model=default_model_id)
-
-
-def _fallback(default_model_id: str) -> ModelListResponse:
-    """兜底：只报配置里的那个模型。
-
-    刻意不伪造思考能力与支持等级——`reasoning=False` + 空等级会让前端不展示
-    思考等级选择器，从而避免「用户选了却请求失败」。
-    """
-    provider, _, name = default_model_id.partition("/")
-    if not name:
-        provider, name = "Custom", default_model_id
-
-    return ModelListResponse(
-        models=[
-            ModelItem(
-                id=default_model_id,
-                name=name,
-                provider=provider,
-                description=f"{provider} {name}",
-                reasoning=False,
-                supported_reasoning_levels=[],
-                is_default=True,
-            )
-        ],
-        default_model=default_model_id,
-    )
-
-
-# =====================================================================
-# 管理后台维护的提供商 / 模型清单
-# =====================================================================
 
 DEFAULT_PROVIDER_NAME = "默认网关"
 
 #: 模型注册表初始化标记。写入后永不清除：删光提供商仍然维持「数据库是权威」。
 REGISTRY_MARKER_KEY = "model_registry_initialized"
-
-
-class ProviderNotFoundError(LookupError):
-    """提供商不存在（管理接口据此返回 404）。"""
-
-
-class DuplicateModelError(ValueError):
-    """同一提供商下已经存在同名模型。"""
-
-
-class InvalidModelStateError(ValueError):
-    """模型状态组合不合法，例如把已停用的模型设为默认。"""
-
-
-class ProviderFetchError(RuntimeError):
-    """无法从提供商读取模型列表。消息是给管理员看的，不包含上游响应原文。"""
-
 
 #: 更新接口的「未提供」哨兵。不能拿 None 表示不改：管理员需要能把 API key 清空。
 _UNSET = object()
@@ -354,9 +156,8 @@ async def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelT
     """组装一次调用的目标，并在**所有出站之前**校验地址。
 
     为什么把守卫放在这里：这是唯一构造带 `base_url` 的 `ModelTarget` 的地方
-    （`resolve_model_target` 主模型与备用模型都走它），也就卡住了 `build_provider`
-    的出站。放在 CRUD 层不够——库里可能有守卫上线前就存在的行，或者写入时
-    严格模式还是关的。
+    （主模型与备用模型都走它），也就卡住了 `build_provider` 的出站。放在 CRUD 层
+    不够——库里可能有守卫上线前就存在的行，或者写入时严格模式还是关的。
 
     校验失败会抛 `ProviderFetchError` 而不是返回 None：`None` 的语义是「模型不存在」，
     会变成用户侧的「模型已停用或不存在，请刷新模型列表」——而真实原因是服务端配置
@@ -368,7 +169,7 @@ async def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelT
     结果：缓存会把「先解析公网、后重绑内网」的窗口从单次请求拉到整个进程生命周期，
     等于用一点延迟换掉 DNS rebinding 的防线。
     """
-    await _reject_private_target(provider.base_url)
+    await outbound_guard._reject_private_target(provider.base_url)
     return ModelTarget(
         key=make_model_key(provider.slug, model.model_id),
         upstream_model=model.model_id,
@@ -379,6 +180,160 @@ async def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelT
         max_output_tokens=model.max_output_tokens,
         reasoning=model.reasoning,
     )
+
+
+def _configured_fallback_name(primary_name: str) -> str | None:
+    """旧版网关路径的备用模型名；空值、与主模型相同都视为「不启用」。
+
+    与 `agent_factory._configured_fallback_name` 同一口径：那边决定是否真的包一层
+    `FallbackModel`，这边只用它给用量事件找窗口，两处不一致会让窗口取自一个根本
+    没被调用的模型。
+    """
+    fallback_name = (settings.fallback_model_name or "").strip()
+    if not fallback_name or fallback_name == primary_name:
+        return None
+    return fallback_name
+
+
+@dataclass(frozen=True, slots=True)
+class ChatModelSnapshot:
+    """一轮对话的模型解析结果：路由键、调用目标、窗口/输出上限、白名单。
+
+    一次读库取齐这些数据，让 API 层、服务层与流尾的用量事件共用同一份取值。
+    `context_window` / `max_output_tokens` 与 `fallback_*` 分开存而不是查库：备用模型
+    接手时用量事件必须报**真正回答的那个模型**的窗口，否则两个模型的窗口会混在一起。
+
+    `known_ids is None` 表示无法校验（旧版网关上游故障/兜底），此时白名单**放行**；
+    `key` 为空串表示「数据库已接管但一个模型都没启用」，调用方必须明确拒绝而不是
+    退回环境变量。
+    """
+
+    key: str
+    target: ModelTarget | None
+    context_window: int | None
+    max_output_tokens: int | None
+    fallback_key: str | None
+    fallback_context_window: int | None
+    known_ids: frozenset[str] | None
+    registry_managed: bool
+
+    def context_window_for(self, answered_by: str) -> int | None:
+        """本轮实际回答的模型对应的上下文窗口。"""
+        if self.fallback_key is not None and answered_by == self.fallback_key:
+            return self.fallback_context_window
+        return self.context_window
+
+
+async def resolve_chat_model(requested_key: str | None) -> ChatModelSnapshot:
+    """解析本轮对话使用的模型：白名单 + 目标 + 窗口/输出上限，一次读库。
+
+    `requested_key` 为 None 时取后台默认模型。数据库路径下按启用状态查找：未知或已
+    停用的模型解析结果为 `target=None`，调用方必须明确拒绝（不能顺手退回环境变量里的
+    旧网关，用户会以为自己在用一个已被停用的模型）。
+
+    备用模型只在**同一个提供商**内查找：`FallbackModel` 会让备用模型接受与主模型
+    相同的调用参数，跨提供商的参数兼容性无法保证（例如思考等级词表不同）。
+    """
+    async with async_session_maker() as session:
+        if not await _provider_config_exists(session):
+            rows: list[tuple[ProviderModel, ModelProvider]] = []
+            registry_managed = False
+        else:
+            rows = await _enabled_rows(session)
+            registry_managed = True
+
+    if not registry_managed:
+        return await _resolve_from_gateway(requested_key)
+
+    by_key = {make_model_key(provider.slug, model.model_id): (model, provider) for model, provider in rows}
+    key = requested_key or _default_key_of(rows) or ""
+    match = by_key.get(key)
+    if match is None:
+        return ChatModelSnapshot(
+            key=key,
+            target=None,
+            context_window=None,
+            max_output_tokens=None,
+            fallback_key=None,
+            fallback_context_window=None,
+            known_ids=frozenset(by_key),
+            registry_managed=True,
+        )
+
+    model, provider = match
+    target = await _build_target(model, provider)
+    fallback_key: str | None = None
+    fallback_context_window: int | None = None
+
+    fallback_name = _configured_fallback_name(target.upstream_model)
+    if fallback_name is not None:
+        for candidate_model, candidate_provider in rows:
+            if candidate_provider.id == provider.id and candidate_model.model_id == fallback_name:
+                fallback = await _build_target(candidate_model, candidate_provider)
+                target = replace(target, fallback=fallback)
+                fallback_key = fallback.key
+                fallback_context_window = fallback.context_window
+                break
+
+    return ChatModelSnapshot(
+        key=key,
+        target=target,
+        context_window=model.context_window,
+        max_output_tokens=model.max_output_tokens,
+        fallback_key=fallback_key,
+        fallback_context_window=fallback_context_window,
+        known_ids=frozenset(by_key),
+        registry_managed=True,
+    )
+
+
+async def _resolve_from_gateway(requested_key: str | None) -> ChatModelSnapshot:
+    """旧版网关路径的解析：列表来自缓存，不碰数据库。
+
+    这里没有 per-provider 的 `ModelTarget`（凭据与地址来自环境变量，由
+    `agent_factory.build_provider` 兜底），上限从网关列表里按 id 取。
+
+    白名单保持原语义：网关列表不可用时 `known_ids=None`（放行），而不是空集合
+    （那会把「上游故障」判成「所有模型都不可用」）。
+    """
+    result, is_fallback = await gateway._load_models(use_cache=True)
+    key = requested_key or settings.model_name
+    known_ids = None if is_fallback else frozenset(model.id for model in result.models)
+
+    def limits_of(model_id: str) -> tuple[int | None, int | None]:
+        if is_fallback:
+            # 兜底条目刻意不伪造窗口
+            return None, None
+        for model in result.models:
+            if model.id == model_id:
+                return model.context_window, model.max_output_tokens
+        return None, None
+
+    context_window, max_output_tokens = limits_of(key)
+    fallback_key = _configured_fallback_name(key)
+    fallback_context_window = limits_of(fallback_key)[0] if fallback_key is not None else None
+
+    return ChatModelSnapshot(
+        key=key,
+        target=None,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
+        fallback_key=fallback_key,
+        fallback_context_window=fallback_context_window,
+        known_ids=known_ids,
+        registry_managed=False,
+    )
+
+
+def _default_key_of(rows: list[tuple[ProviderModel, ModelProvider]]) -> str | None:
+    """启用模型里的默认路由键：优先 `is_default`，否则取展示顺序第一条。"""
+    for model, provider in rows:
+        if model.is_default:
+            return make_model_key(provider.slug, model.model_id)
+    if rows:
+        model, provider = rows[0]
+        return make_model_key(provider.slug, model.model_id)
+    return None
 
 
 async def seed_default_provider() -> bool:
@@ -451,8 +406,12 @@ async def create_provider(
 
     地址在这里就校验（而非等到第一次「测试连接」）：管理员填错内网/元数据地址时
     应当当场看到 400 与原因，而不是存进去之后某次对话才静默失败。
+
+    并发建同名提供商时 `_unique_provider_slug` 的「先查后插」会双双落空，第二个请求
+    撞 `slug` 唯一约束。裸 `IntegrityError` 是 500，管理员只会看到「服务器错误」；
+    这里翻译成可读的重试提示（路由层映射为 400）。
     """
-    await _reject_private_target(base_url.strip())
+    await outbound_guard._reject_private_target(base_url.strip())
     async with async_session_maker() as session:
         provider = ModelProvider(
             name=name.strip(),
@@ -462,15 +421,30 @@ async def create_provider(
             enabled=enabled,
         )
         session.add(provider)
-        # 首次创建提供商即视为「后台已经接管」：之后即使删光提供商，也不回退到环境变量
-        await _mark_registry_initialized(session)
-        await session.commit()
+        try:
+            # 首次创建提供商即视为「后台已经接管」：之后即使删光提供商，也不回退到环境变量。
+            # 它必须和 `commit` 在同一个 try 里：`_mark_registry_initialized` 里的
+            # `session.get` 会触发 autoflush，slug 撞唯一约束**就在那一刻**抛出来，
+            # 而不是等到 commit。
+            await _mark_registry_initialized(session)
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            logger.warning("创建提供商撞唯一约束（可能是并发创建同名提供商）: name=%s", name)
+            raise ProviderFetchError("提供商名称与另一个正在创建的提供商冲突，请重试") from exc
+
         loaded = await _load_provider(session, provider.id)
         if loaded is None:
             # 理论上不可能（刚提交完），但用 `assert` 的话 `python -O` 会把它删掉，
             # 返回 None 而类型标注仍写着 ModelProvider，错误点被推到调用方。
             raise ProviderFetchError("创建提供商后无法重新读取，请重试")
-        return loaded
+
+    await outbound_guard._warn_plaintext_key_over_public_http(
+        loaded.base_url,
+        provider_name=loaded.name,
+        has_api_key=bool(loaded.api_key),
+    )
+    return loaded
 
 
 async def update_provider(
@@ -481,7 +455,14 @@ async def update_provider(
     api_key: object = _UNSET,
     enabled: object = _UNSET,
 ) -> ModelProvider | None:
-    """更新提供商；`api_key` 传 `None` 表示清空，不传则保持不变。"""
+    """更新提供商；`api_key` 传 `None` 表示清空，不传则保持不变。
+
+    换地址等于换凭据：新地址的主人能在下次「测试连接」里收到库里那份明文 key，
+    所以**有 key 的**提供商改地址时必须同时重新填写 key。只改名字/启用状态时仍然
+    可以不填（前端每次保存都会原样回传 base_url，因此这里比的是**是否变化**，不是
+    「有没有传」）。没有 key 的提供商本来就没有可泄露的凭据，不拦——此前那条规则
+    不看有没有 key，导致明明配的是无凭据内网网关却改不动地址。
+    """
     async with async_session_maker() as session:
         provider = await _load_provider(session, provider_id)
         if provider is None:
@@ -494,8 +475,10 @@ async def update_provider(
             # `_build_target` 在真正出站时拦住）。
             next_base_url = str(base_url).strip().rstrip("/")
             if next_base_url != provider.base_url:
-                await _reject_private_target(next_base_url)
-            provider.base_url = next_base_url
+                if provider.api_key and api_key is _UNSET:
+                    raise ApiKeyRequiredError("更换 Base URL 时必须重新填写 API Key")
+                await outbound_guard._reject_private_target(next_base_url)
+                provider.base_url = next_base_url
         if api_key is not _UNSET:
             # `str(None)` 会写出字符串 "None" 并被当成真实 key 发给上游。
             provider.api_key = (str(api_key).strip() or None) if api_key else None
@@ -507,7 +490,15 @@ async def update_provider(
         # 重启会被环境变量重新引导出一条「默认网关」，与 settings 的承诺相反。
         await _mark_registry_initialized(session)
         await session.commit()
-        return await _load_provider(session, provider_id)
+        loaded = await _load_provider(session, provider_id)
+
+    if loaded is not None and base_url is not _UNSET:
+        await outbound_guard._warn_plaintext_key_over_public_http(
+            loaded.base_url,
+            provider_name=loaded.name,
+            has_api_key=bool(loaded.api_key),
+        )
+    return loaded
 
 
 async def delete_provider(provider_id: uuid.UUID) -> bool:
@@ -543,6 +534,20 @@ async def list_provider_models(provider_id: uuid.UUID) -> list[ProviderModel]:
         return list((await session.scalars(stmt)).all())
 
 
+async def _find_duplicate_model_id(session, provider_id: uuid.UUID, model_id: str) -> uuid.UUID | None:  # noqa: ANN001
+    """预检同一提供商下是否已有同名模型。
+
+    单列成函数是为了让「先查」这一步可以被测试替换成「查不到」——并发写入时它必然
+    查不到（另一边的插入还没提交），唯一约束才是真正的裁决者，那条路径必须能单独验证。
+    """
+    return await session.scalar(
+        select(ProviderModel.id).where(
+            ProviderModel.provider_id == provider_id,
+            ProviderModel.model_id == model_id,
+        )
+    )
+
+
 async def create_provider_model(
     provider_id: uuid.UUID,
     *,
@@ -556,17 +561,17 @@ async def create_provider_model(
     enabled: bool = True,
     is_default: bool = False,
 ) -> ProviderModel:
-    """手动添加一个模型（同步上游之外的补充途径）。"""
+    """手动添加一个模型（同步上游之外的补充途径）。
+
+    并发添加同一个 `model_id` 时「先查后插」同样会双双落空，第二个请求撞
+    `uq_provider_model`。翻译成 `DuplicateModelError`（路由层已映射为 409），
+    而不是让裸 `IntegrityError` 变成 500。
+    """
     cleaned = model_id.strip()
     async with async_session_maker() as session:
         if await session.get(ModelProvider, provider_id) is None:
             raise ProviderNotFoundError(str(provider_id))
-        duplicate = await session.scalar(
-            select(ProviderModel.id).where(
-                ProviderModel.provider_id == provider_id,
-                ProviderModel.model_id == cleaned,
-            )
-        )
+        duplicate = await _find_duplicate_model_id(session, provider_id, cleaned)
         if duplicate is not None:
             raise DuplicateModelError(cleaned)
         if is_default and not enabled:
@@ -587,7 +592,12 @@ async def create_provider_model(
             is_default=is_default,
         )
         session.add(model)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            logger.warning("添加模型撞唯一约束（可能是并发添加同一模型）: provider=%s model=%s", provider_id, cleaned)
+            raise DuplicateModelError(cleaned) from exc
         return model
 
 
@@ -652,83 +662,6 @@ async def delete_provider_model(model_uuid: uuid.UUID) -> bool:
         return True
 
 
-def _is_metadata_range(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """链路本地 / 未指定 / 组播：**任何配置下**都不接受的出站目标。
-
-    这一族没有任何「合法的模型网关」用途，却正好覆盖云厂商的实例元数据服务
-    （169.254.169.254、fe80:: 链路本地），是最该堵死的那一类。
-    """
-    return address.is_link_local or address.is_unspecified or address.is_multicast
-
-
-def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """环回 / 私有 / 保留段：只有开启严格模式时才拒绝。
-
-    `is_global` 是这些类别的并集（还覆盖 100.64/10 这类运营商内网段），比逐个写
-    `is_private` / `is_loopback` 更难漏掉一种。**但默认不启用**：本机 LiteLLM 网关
-    （`LITELLM_API_BASE` 的默认值就是 `http://localhost:4000`）与自建 vLLM 常在同一台
-    机器或内网，一刀切会把项目文档里最主要的用法拦掉。
-    """
-    return not address.is_global
-
-
-async def _reject_private_target(base_url: str) -> None:
-    """出站前检查目标地址，命中则抛 `ProviderFetchError`。
-
-    调用点有三处，覆盖全部出站路径（之前只在前两处）：
-
-    - `create_provider` / `update_provider`：管理员写入时就拒，当场看到 400 与原因，
-      而不是等到下一次「测试连接」才发现；
-    - `_fetch_remote_models`：「测试连接」与「同步模型」，这两个请求里带明文 API Key；
-    - `_build_target`：真正跑对话的出站（`agent_factory.build_provider` 用它构造
-      `AsyncOpenAI`）。这一处是必须的——之前只检查了前两处，于是把
-      `provider_block_private_targets` 打开后，管理员只要「建提供商 → 建模型 → 发一条
-      对话」就能绕过，配置项名不副实。
-
-    两种拒绝强度：
-
-    - 元数据族（链路本地 / 未指定 / 组播）**永远拒绝**——盲 SSRF 打元数据服务是
-      这条路径上唯一「不需要先拿到凭据」就能换到新凭据的攻击；
-    - 环回与私网**默认放行**（`settings.provider_block_private_targets = true` 才拒绝）。
-      它是纵深防御而不是主防线：真正让 key 不外流的是「改 Base URL 必须重输 API Key」，
-      那条规则让攻击者没法把**别人**的 key 送到自己的地址上。
-
-    主机名交给 `getaddrinfo` 解析而不是只认字面量：十进制写法（`http://2130706433/`）
-    在解析层等价于 127.0.0.1，只看字面量会漏。解析是阻塞调用，放进线程执行。
-    解析失败（域名不存在等）不是内网信号，这里不拒绝——交给后面的连接错误去报。
-
-    已知边界：解析与连接是两次独立的 DNS 查询，中间域名可以变（TOCTOU）。这里不做
-    钉 IP 连接，因为那需要绕过 httpx 的 URL 解析、把 TLS SNI 自己接回来，代价远大于
-    收益——能利用它必须先控制管理员填写的域名。
-    """
-    host = urlsplit(base_url).hostname
-    if not host:
-        # 缺主机名/畸形地址：让 httpx 报它自己的错，不在这里编一个网络错误
-        return
-
-    try:
-        candidates = [ipaddress.ip_address(host)]
-    except ValueError:
-        try:
-            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
-        except OSError:
-            return
-        candidates = []
-        for info in infos:
-            # 带 scope id 的 IPv6（fe80::1%en0）不是 ip_address 能直接吃的写法
-            literal = str(info[4][0]).split("%", 1)[0]
-            try:
-                candidates.append(ipaddress.ip_address(literal))
-            except ValueError:
-                continue
-
-    for address in candidates:
-        if _is_metadata_range(address):
-            raise ProviderFetchError(f"Base URL 不允许指向链路本地或未指定地址（{address}）")
-        if settings.provider_block_private_targets and _is_internal_address(address):
-            raise ProviderFetchError(f"Base URL 不允许指向内网地址（{address}）")
-
-
 async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
     """向单个提供商请求模型列表并解析。失败抛 `ProviderFetchError`。
 
@@ -736,7 +669,7 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
     与异常类型；完整异常写日志。
     """
     # 先检查目标地址，再组装 Authorization 头——这个请求带着明文 API Key
-    await _reject_private_target(provider.base_url)
+    await outbound_guard._reject_private_target(provider.base_url)
 
     headers: dict[str, str] = {}
     if provider.api_key:
@@ -744,7 +677,7 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
 
     try:
         response = await get_http_client().get(
-            _build_models_url(provider.base_url),
+            gateway._build_models_url(provider.base_url),
             headers=headers,
             timeout=PROVIDER_SYNC_TIMEOUT_SECONDS,
         )
@@ -769,7 +702,7 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
     if not payload["data"]:
         return []
 
-    parsed = _parse_models(payload, "", settings.model_description_field, mark_default=False)
+    parsed = gateway._parse_models(payload, "", settings.model_description_field, mark_default=False)
     if parsed is None:
         return []
 
@@ -915,6 +848,18 @@ async def _public_models() -> ModelListResponse:
     return ModelListResponse(models=items, default_model=default_key)
 
 
+async def fetch_available_models(*, use_cache: bool = True) -> ModelListResponse:
+    """获取可用模型列表。
+
+    数据库配置已经接管时只看后台开关（不看旧网关、也不缓存）；否则才走旧版网关。
+    """
+    if await provider_config_exists():
+        return await _public_models()
+
+    result, _ = await gateway._load_models(use_cache=use_cache)
+    return result
+
+
 async def get_default_model_key() -> str | None:
     """当前默认模型的路由键。
 
@@ -927,111 +872,7 @@ async def get_default_model_key() -> str | None:
 
         rows = await _enabled_rows(session)
 
-    if not rows:
-        return None
-
-    for model, provider in rows:
-        if model.is_default:
-            return make_model_key(provider.slug, model.model_id)
-
-    model, provider = rows[0]
-    return make_model_key(provider.slug, model.model_id)
-
-
-async def resolve_model_target(key: str) -> ModelTarget | None:
-    """把对外路由键解析成一次调用的完整目标；不存在/已停用时返回 None。
-
-    备用模型只在**同一个提供商**内查找：`FallbackModel` 会让备用模型接受与主模型
-    相同的调用参数，跨提供商的参数兼容性无法保证（例如思考等级词表不同）。
-    """
-    async with async_session_maker() as session:
-        rows = await _enabled_rows(session)
-
-    match: tuple[ProviderModel, ModelProvider] | None = None
-    for model, provider in rows:
-        if make_model_key(provider.slug, model.model_id) == key:
-            match = (model, provider)
-            break
-
-    if match is None:
-        return None
-
-    target = await _build_target(*match)
-    fallback_name = (settings.fallback_model_name or "").strip()
-    if not fallback_name or fallback_name == target.upstream_model:
-        return target
-
-    for model, provider in rows:
-        if provider.id == match[1].id and model.model_id == fallback_name:
-            return replace(target, fallback=await _build_target(model, provider))
-
-    return target
-
-
-def reset_models_cache() -> None:
-    """清空缓存。供测试与「改了配置想立刻生效」的场景使用。"""
-    global _success_cache, _fallback_cache
-    _success_cache = None
-    _fallback_cache = None
-
-
-def _get_lock() -> asyncio.Lock:
-    """取当前事件循环的 single-flight 锁；loop 变了就换一把新的。"""
-    global _lock, _lock_loop
-    loop = asyncio.get_running_loop()
-    if _lock is None or _lock_loop is not loop:
-        _lock = asyncio.Lock()
-        _lock_loop = loop
-    return _lock
-
-
-def _read_fresh_cache() -> tuple[ModelListResponse, bool] | None:
-    """命中未过期的缓存时返回 (响应, 是否兜底)。"""
-    now = time.monotonic()
-    if _success_cache is not None and now - _success_cache[0] < MODELS_CACHE_TTL_SECONDS:
-        return _success_cache[1], False
-    if _fallback_cache is not None and now - _fallback_cache[0] < FALLBACK_CACHE_TTL_SECONDS:
-        return _fallback_cache[1], True
-    return None
-
-
-async def _load_models(*, use_cache: bool) -> tuple[ModelListResponse, bool]:
-    """取模型列表（含 single-flight 与缓存写入）。"""
-    global _success_cache, _fallback_cache
-
-    if use_cache:
-        cached = _read_fresh_cache()
-        if cached is not None:
-            return cached
-
-    async with _get_lock():
-        # 双检：等锁期间先到的请求可能已经把结果写进缓存了，此时不该再打一次上游
-        if use_cache:
-            cached = _read_fresh_cache()
-            if cached is not None:
-                return cached
-
-        result, is_fallback = await _fetch_from_gateway(settings.model_name)
-        if is_fallback:
-            # 失败只进负缓存，绝不覆盖成功缓存：否则上游刚恢复又抖了一下，
-            # 用户会在一分钟内看到兜底模型
-            _fallback_cache = (time.monotonic(), result)
-        else:
-            _success_cache = (time.monotonic(), result)
-            _fallback_cache = None
-        return result, is_fallback
-
-
-async def fetch_available_models(*, use_cache: bool = True) -> ModelListResponse:
-    """获取可用模型列表。
-
-    数据库配置已经接管时只看后台开关（不看旧网关、也不缓存）；否则才走旧版网关。
-    """
-    if await provider_config_exists():
-        return await _public_models()
-
-    result, _ = await _load_models(use_cache=use_cache)
-    return result
+    return _default_key_of(rows)
 
 
 async def get_known_model_ids() -> set[str] | None:
@@ -1046,7 +887,7 @@ async def get_known_model_ids() -> set[str] | None:
             rows = await _enabled_rows(session)
         return {make_model_key(provider.slug, model.model_id) for model, provider in rows}
 
-    result, is_fallback = await _load_models(use_cache=True)
+    result, is_fallback = await gateway._load_models(use_cache=True)
     if is_fallback:
         return None
     return {model.id for model in result.models}
@@ -1063,6 +904,9 @@ async def get_model_limits(model_id: str) -> tuple[int | None, int | None]:
 
     单个字段缺失时只返回 `None` 的那一项（例如只报了窗口、没报最大输出）。
     数据库路径按**启用状态**查找：管理员停用模型后它也不该再参与预算判定。
+
+    对话路径不再逐帧调它（改用 `resolve_chat_model` 的一次查询快照，
+    见 `ChatModelSnapshot`）；本函数保留给 `token_budget` 等按名字取窗口的调用方。
     """
     if await provider_config_exists():
         async with async_session_maker() as session:
@@ -1072,7 +916,7 @@ async def get_model_limits(model_id: str) -> tuple[int | None, int | None]:
                 return model.context_window, model.max_output_tokens
         return None, None
 
-    result, is_fallback = await _load_models(use_cache=True)
+    result, is_fallback = await gateway._load_models(use_cache=True)
     if is_fallback:
         return None, None
 
@@ -1082,39 +926,32 @@ async def get_model_limits(model_id: str) -> tuple[int | None, int | None]:
     return None, None
 
 
-async def _fetch_from_gateway(default_model_id: str) -> tuple[ModelListResponse, bool]:
-    headers = {}
-    if settings.litellm_api_key:
-        headers["Authorization"] = f"Bearer {settings.litellm_api_key}"
+async def resolve_model_target(key: str) -> ModelTarget | None:
+    """把对外路由键解析成一次调用的完整目标；不存在/已停用时返回 None。
 
-    try:
-        response = await get_http_client().get(
-            _build_url(),
-            headers=headers,
-            timeout=MODELS_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.warning("从上游网关拉取模型列表失败，将使用默认兜底配置: %s", exc)
-        return _fallback(default_model_id), True
+    与 `resolve_chat_model` 的差别只有「不带白名单、默认键与窗口上限」，语义与拆分前
+    一致：单独需要 target 的调用方（标题生成、CLI 装配）可以继续用它，但它每次都要
+    自己查一遍库——一个请求里既解析目标又算预算时应该用 `resolve_chat_model`。
+    """
+    async with async_session_maker() as session:
+        rows = await _enabled_rows(session)
 
-    if response.status_code != 200:
-        logger.warning("上游 /v1/models 响应非 200: %s", response.status_code)
-        return _fallback(default_model_id), True
+    match: tuple[ProviderModel, ModelProvider] | None = None
+    for model, provider in rows:
+        if make_model_key(provider.slug, model.model_id) == key:
+            match = (model, provider)
+            break
 
-    try:
-        payload = response.json()
-    except ValueError:
-        logger.warning("上游 /v1/models 返回的不是 JSON")
-        return _fallback(default_model_id), True
+    if match is None:
+        return None
 
-    try:
-        parsed = _parse_models(payload, default_model_id, settings.model_description_field)
-    except Exception as exc:
-        logger.warning("解析上游 /v1/models 响应失败，将使用默认兜底配置: %s", exc)
-        return _fallback(default_model_id), True
+    target = await _build_target(*match)
+    fallback_name = _configured_fallback_name(target.upstream_model)
+    if fallback_name is None:
+        return target
 
-    if parsed is None:
-        logger.warning("上游 /v1/models 未返回可用模型，将使用默认兜底配置")
-        return _fallback(default_model_id), True
+    for model, provider in rows:
+        if provider.id == match[1].id and model.model_id == fallback_name:
+            return replace(target, fallback=await _build_target(model, provider))
 
-    return parsed, False
+    return target

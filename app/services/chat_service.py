@@ -46,11 +46,7 @@ from app.schemas.events import (
 )
 from app.services.agent_factory import build_agent, build_title_agent
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
-from app.services.model_service import (
-    get_model_limits,
-    provider_config_exists,
-    resolve_model_target,
-)
+from app.services.model_service import ChatModelSnapshot
 from app.services.token_budget import overflow_message, resolve_context_budget
 from app.services.upstream_errors import (
     is_retryable_for_user,
@@ -141,6 +137,9 @@ def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMe
 
     只处理 user/assistant：schema 已不允许 `system` 角色。此前那个分支会把调用方
     提供的文本变成 `SystemPromptPart` 插进历史，等于把系统提示词的控制权交给客户端。
+
+    顺序与 schema 的 `ChatRequest._check_message_order` 一致（首条 → 交替 → 末条）：
+    两处文案不同但判定相同，谁先发现就谁报，用户看到的永远是最靠近根因的那一条。
     """
     if not messages:
         raise InvalidChatHistory("消息列表不能为空")
@@ -150,6 +149,16 @@ def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMe
     # 也会拦一道，这里是服务层自己的兜底——`convert_chat_history` 是公开函数。
     if messages[0].role != "user":
         raise InvalidChatHistory("首条消息必须是 user 消息")
+
+    # 严格交替：pydantic-ai 会把这些消息装配成 request/response 交替的序列，连续两条
+    # 同角色在装配层会被合并/丢弃，模型看到的上下文与用户以为的不一致。schema 层
+    # 同样拦一道，这里保留兜底的原因同上。
+    for index in range(1, len(messages)):
+        if messages[index].role == messages[index - 1].role:
+            raise InvalidChatHistory(
+                f"消息必须以 user 与 assistant 交替出现：第 {index} 条与第 {index + 1} 条都是 "
+                f"{messages[index].role} 消息"
+            )
 
     # 取最后一条消息作为当前轮 prompt
     last_msg = messages[-1]
@@ -442,7 +451,7 @@ def _take_fallback_events(occurrences: list[FallbackOccurrence]) -> Iterator[Fal
 
 
 async def stream_chat_events(
-    model_name: str,
+    snapshot: ChatModelSnapshot,
     messages: list[ChatMessage],
     reasoning_effort: str | None = None,
     context_anchor: ContextAnchor | None = None,
@@ -451,6 +460,10 @@ async def stream_chat_events(
 
     以 `Done` 或 `StreamError` 收尾；调用方不需要自己判断「流断了没有」。
     整轮受 `TOTAL_STREAM_BUDGET_SECONDS` 约束，超预算同样以 `StreamError` 收尾。
+
+    `snapshot` 由调用方（`app/api/chat.py`）用 `model_service.resolve_chat_model` 解析
+    后传入：白名单校验、目标解析与窗口上限共用**同一次**读库结果。此前这里还要自己
+    再查一遍目标与「数据库是否已接管」，一次请求因此要全量扫四遍启用模型。
 
     上下文预算预检（`app/services/token_budget.py`）排在最前面：历史是按字符上限
     全量回放上来的，而字符与 token 不是一个量纲——超限的请求以前会一路走到上游，
@@ -468,21 +481,22 @@ async def stream_chat_events(
     模型的能力差异误判成「这个模型变差了」。
     """
     seen_clarification_ids: set[str] = set()
+    model_name = snapshot.key
+    target = snapshot.target
 
     # 预检阶段的异常必须在这里兜住，不能让它突破生成器。传输层（sse-starlette）
     # **先发响应头再拉第一个事件**，也就是说走到这一步时 200 已经不可撤回；生成器
     # 抛异常只会把连接掐断，客户端看到「HTTP 200 + 断流」，既没有 `done` 也没有
     # `error`，服务端连一个可回查的 error_id 都没留下。
     #
-    # 这三步都会碰 SQLite（`resolve_*` 查库）与 Jinja（预算里算 system prompt 开销），
-    # 不是边角分支：数据库锁超时抛 `OperationalError`、模板缺失抛 `TemplateError`
-    # 都会走到这里。
+    # 预算仍然要碰 SQLite 与 Jinja（`token_budget` 按名字取窗口、算 system prompt
+    # 开销），不是边角分支：数据库锁超时抛 `OperationalError`、模板缺失抛
+    # `TemplateError` 都会走到这里。
     try:
-        # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（并发下
-        # 管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关——用户会以为
-        # 自己在用一个已被停用的模型。
-        target = await resolve_model_target(model_name)
-        if target is None and await provider_config_exists():
+        # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（解析与
+        # 到达这里之间管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关
+        # ——用户会以为自己在用一个已被停用的模型。旧版网关路径没有 target，按设计放行。
+        if target is None and snapshot.registry_managed:
             yield StreamError(
                 message="模型已停用或不存在，请刷新模型列表后重试",
                 retryable=False,
@@ -585,11 +599,12 @@ async def stream_chat_events(
                 # 真实用量在流结束这一刻才齐：放在正文之后、Done 之前。
                 usage = extract_turn_usage(run_result.all_messages() if run_result is not None else None)
                 if usage is not None:
-                    context_window, _ = await get_model_limits(answered_by)
                     emitted = True
                     yield Usage(
                         context_tokens=usage.context_tokens,
-                        context_window=context_window,
+                        # 窗口取自已解析的快照，不重新查库：同一请求里解析与用量必须是
+                        # 同一份配置，否则管理员中途改配置会让两个数字互相矛盾。
+                        context_window=snapshot.context_window_for(answered_by),
                         output_tokens=usage.output_tokens,
                         cache_read_tokens=usage.cache_read_tokens,
                     )
@@ -632,16 +647,19 @@ async def stream_chat_events(
     yield Done()
 
 
-async def generate_title_from_prompt(model_name: str, prompt: str) -> str:
+async def generate_title_from_prompt(snapshot: ChatModelSnapshot, prompt: str) -> str:
     """根据用户输入的提示词意向，利用 LLM 快速生成简短概括的会话标题。
 
     失败时回退到「首行截断」——标题只是装饰，不该让用户看到报错。
+
+    与对话流共用同一份 `ChatModelSnapshot`：标题接口原本在 API 层解析一次模型，进到
+    这里又查一遍库，同样是重复的全量扫描。
     """
+    model_name = snapshot.key
     try:
-        target = await resolve_model_target(model_name)
-        if target is None and await provider_config_exists():
+        if snapshot.target is None and snapshot.registry_managed:
             raise RuntimeError(f"模型不可用: {model_name}")
-        agent = build_title_agent(model_name, target=target)
+        agent = build_title_agent(model_name, target=snapshot.target)
         result = await agent.run(f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}")
         title = result.output.strip().strip(_TITLE_QUOTE_CHARS)
         return title[:MAX_TITLE_CHARS] if title else DEFAULT_TITLE
