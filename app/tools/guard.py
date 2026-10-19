@@ -8,6 +8,21 @@ pydantic-ai 的默认语义是：工具函数抛出非 `ModelRetry` 异常时，
 **工具结果**：模型看到「工具失败」后可以换工具、换参数或如实向用户说明，整轮继续。
 异常原文只进日志（可能含上游 URL、密钥上下文），不回灌给模型。
 
+## 哪些异常不归这里管
+
+`ModelRetry` 是 **控制流**，不是错误：它携带给模型看的「你哪里做错了、该怎么改」
+文案，由 pydantic-ai 自己的重试计数管理。把它也降级成固定文案会同时造成两件事：
+
+1. 模型再也看不到真实原因（参数校验失败的具体字段、工具超时了多久）；
+2. 收到一句「不要原样重复调用同一个工具」——对参数校验失败来说正好是反向指导，
+   而正确做法恰恰是按提示改正参数再调一次。
+
+pydantic-ai 的 `on_tool_execute_error` 在实现上**已经**把 `ModelRetry` 排除在外
+（`tool_manager.py` 在 `except (ToolFailed, ModelRetry): raise` 分支就上抛了，不会走到
+本钩子）。这里的显式早退是**第二道保险**：它是一个只依赖公开 API 的断言，不依赖
+某个版本的内部 except 顺序。以后升级 pydantic-ai 时若那个分支被重排，我们有测试
+会当场变红，而不是工具重试语义静默消失。
+
 边界：`asyncio.CancelledError` 是 `BaseException`，不会进入本钩子，客户端断开仍按
 取消语义处理（见 `app/services/chat_service.py`）。工具自己捕获并返回错误文案的路径
 （如 `tavily_search`）也不受影响——这里只兜「漏网抛出来」的那一类。
@@ -18,6 +33,7 @@ from typing import Any
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
@@ -45,6 +61,10 @@ class ToolErrorIsolation(AbstractCapability[None]):
         args: Any,  # noqa: ANN401
         error: Exception,
     ) -> Any:  # noqa: ANN401
+        # 控制流原样上抛（详见模块 docstring）：这是重试语义的第二道保险。
+        if isinstance(error, ModelRetry):
+            raise error
+
         # 参数可能是用户数据（搜索词、提问内容），只记工具名与异常。
         # traceback 必须留全，否则工具 bug 会从此变成一条「静默的失败结果」。
         logger.error(

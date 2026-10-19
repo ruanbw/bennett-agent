@@ -469,3 +469,45 @@ async def test_html_response_on_200_handled_gracefully(fake_http):
     assert "响应解析失败" in result
     assert "502 Bad Gateway" in result
     assert "上游错误信息" in result
+
+
+# ---------------------------------------------------------------------
+# 超时预算的自洽性（跨文件不变式）
+#
+# 这是本次修复的核心：外层工具超时与内部重试预算**必须**保持「外层 > 内部最坏」。
+# 曾经外层是 25s、内部最坏是 40.5s（20s × 2 次 + 退避），于是外层先触发 →
+# pydantic-ai 抛 ModelRetry → 工具自写的所有中文错误文案（429 带 Retry-After、
+# 5xx 带状态码）全部不可达，还额外消耗一次模型重试预算。
+#
+# 这两个数字以前写在不同文件里，改一个就把关系弄断了，且没有任何东西会报错。
+# 这里把不变式本身钉住。
+# ---------------------------------------------------------------------
+def test_internal_worst_case_matches_configured_attempts():
+    """内部最坏耗时必须是可从常量算出来的，而不是手写的估计值。"""
+    expected = (
+        module.MAX_ATTEMPTS * module.TAVILY_TIMEOUT_SECONDS + (module.MAX_ATTEMPTS - 1) * module.RETRY_BACKOFF_SECONDS
+    )
+
+    assert expected == module.TAVILY_WORST_CASE_SECONDS
+
+
+def test_outer_timeout_is_strictly_larger_than_internal_worst_case():
+    """外层工具超时必须留出余量，否则工具自己的错误处理后置全部失效。"""
+    assert module.TAVILY_TOOL_TIMEOUT_SECONDS > module.TAVILY_WORST_CASE_SECONDS
+
+
+def test_registered_tool_timeout_uses_the_derived_value():
+    """注册给 pydantic-ai 的超时必须是派生值，不能是另写的常数。"""
+    from app.tools import registry
+
+    managed = next(tool for tool in registry.all_tools() if tool.name == "tavily_search")
+
+    assert managed.timeout == module.TAVILY_TOOL_TIMEOUT_SECONDS
+
+
+def test_single_attempt_timeout_fits_the_retry_budget():
+    """单次超时不能大到让「重试」在体验上等于不存在。
+
+    如果单次就允许拖 20 秒，第一次超时时用户已经等了 20 秒，再重试只是把等待翻倍。
+    """
+    assert module.TAVILY_TIMEOUT_SECONDS <= 10.0

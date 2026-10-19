@@ -327,6 +327,32 @@ def test_client_key_falls_back_for_missing_host():
     assert client_key("1.2.3.4") == "1.2.3.4"
 
 
+def test_client_key_scope_splits_buckets_per_endpoint():
+    """同一 IP 的 login / register 是两个独立桶。
+
+    共用一个月会造出一个很难解释的失败模式：有人在一个 NAT 出口后面猛试密码，把
+    10 次/分钟打满之后，同一出口的**正常注册**也做不了（反之亦然）。
+    """
+    assert client_key("1.2.3.4", "login") != client_key("1.2.3.4", "register")
+    assert client_key("1.2.3.4", "login") == "login:1.2.3.4"
+    # 无 scope 时保持旧行为（对话端点等调用点不受影响）
+    assert client_key("1.2.3.4") == "1.2.3.4"
+
+
+def test_register_is_not_blocked_by_exhausted_login_bucket(monkeypatch):
+    """端到端：把一个 IP 的登录额度打满，它仍然能注册。"""
+    with auth_client(monkeypatch, auth_rate_limit=2) as client:
+        bad_login = login_body()
+        assert client.post("/api/auth/login", data=bad_login).status_code == 400
+        assert client.post("/api/auth/login", data=bad_login).status_code == 400
+        # 第三次登录被限流
+        assert client.post("/api/auth/login", data=bad_login).status_code == 429
+
+        # 关键断言：同一 IP 注册**未**被牵连（修复前这里是 429）
+        registered = client.post("/api/auth/register", json=register_body())
+        assert registered.status_code == 201, registered.text
+
+
 # ---------------------------------------------------------------------
 # 接线到 HTTP 层
 # ---------------------------------------------------------------------

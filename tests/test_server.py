@@ -175,3 +175,61 @@ async def test_shutdown_runs_when_lifespan_body_raises(monkeypatch):
 
     close_mock.assert_awaited_once()
     dispose_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------
+# 反代部署下的认证限流退化告警
+#
+# `request.client.host` 在反代后面恒为代理地址，于是认证限流从「每 IP 10 次/分钟」
+# 退化成「全站共享 10 次/分钟」。代码侧判断不出部署形态，只能在启动日志里说清楚。
+# 同一个坑对话端点已经绕开了（改成按账号计数），认证端点没有可替代的键。
+# ---------------------------------------------------------------------
+def test_warns_when_auth_rate_limit_is_global(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10)
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "")
+
+    with caplog.at_level(logging.WARNING, logger="app.server"):
+        server._warn_if_auth_rate_limit_is_global()
+
+    warning = " ".join(record.getMessage() for record in caplog.records)
+    assert "TRUSTED_PROXY_HEADERS" in warning
+    assert "10" in warning
+
+
+def test_no_warning_when_trusted_proxy_headers_configured(monkeypatch, caplog):
+    """配了受信头就说明知道自己在反代后面，不必再提醒。"""
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10)
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
+
+    with caplog.at_level(logging.WARNING, logger="app.server"):
+        server._warn_if_auth_rate_limit_is_global()
+
+    assert not [record for record in caplog.records if "TRUSTED_PROXY_HEADERS" in record.getMessage()]
+
+
+def test_no_warning_when_auth_rate_limit_disabled(monkeypatch, caplog):
+    """限流关掉时不存在「退化成单桶」这回事。"""
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 0)
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "")
+
+    with caplog.at_level(logging.WARNING, logger="app.server"):
+        server._warn_if_auth_rate_limit_is_global()
+
+    assert not caplog.records
+
+
+def test_rate_limit_headers_are_exposed_to_cross_origin_clients(monkeypatch):
+    """429 的配额头要能被跨域前端读到，否则用户不知道还要等几秒。
+
+    `Access-Control-Expose-Headers` 只出现在**实际响应**上（不在预检响应里）， 所以这里
+    发一次真实请求：未登录访问 `/api/auth/me` 拿到 401，顺便看头。
+    """
+    monkeypatch.setattr(settings, "cors_allowed_origins", "http://localhost:5173")
+    monkeypatch.setattr(settings, "cors_allow_credentials", False)
+
+    with TestClient(server.create_app()) as client:
+        response = client.get("/api/auth/me", headers={"Origin": "http://localhost:5173"})
+
+    exposed = response.headers.get("access-control-expose-headers", "")
+    assert "Retry-After" in exposed
+    assert "X-RateLimit-Limit" in exposed

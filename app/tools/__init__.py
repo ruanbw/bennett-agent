@@ -2,6 +2,14 @@
 
 基于 PydanticAI 原生 Tool 体系进行扩展与治理，提供集中编目、元数据管理
 （分类、风险等级、标签）、超时配置以及按环境动态裁剪装配能力。
+
+## 工具级超时是**外层防线**，必须大于工具内部自己的最坏耗时
+
+pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 包裹工具，
+超时时抛 `ModelRetry`（不是普通异常，也不是工具能捕获的错误结果）。所以它一旦先于
+工具内部收尾触发，工具里精心写的错误文案全部不可达，还会额外消耗一次模型重试预算。
+具体数字由 `app/tools/tavily_search.py` 的 `TAVILY_TOOL_TIMEOUT_SECONDS` 单点派生——
+不要把常数直接写在这里，那正是之前「外层 25s < 内层最坏 40.5s」的成因。
 """
 
 from app.config import settings
@@ -15,7 +23,7 @@ from app.tools.registry import (
     ToolRegistry,
 )
 from app.tools.tavily_search import (
-    TAVILY_TIMEOUT_SECONDS,
+    TAVILY_TOOL_TIMEOUT_SECONDS,
 )
 from app.tools.tavily_search import (
     tavily_search as _raw_tavily_search,
@@ -59,7 +67,7 @@ tavily_tool: ManagedTool = registry.register(
     risk_level=RiskLevel.READ_ONLY,
     tags=["search", "web"],
     description="使用 Tavily 搜索引擎在互联网上实时搜索最新信息、新闻、网页资料等。",
-    timeout=TAVILY_TIMEOUT_SECONDS + 5.0,  # 给网络层留出外层防御余量
+    timeout=TAVILY_TOOL_TIMEOUT_SECONDS,
     enabled_checker=lambda: bool(settings.tavily_api_key),
 )(_raw_tavily_search)
 

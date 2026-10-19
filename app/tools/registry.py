@@ -17,7 +17,15 @@ from pydantic_ai.tools import (
 
 
 class RiskLevel(str, Enum):
-    """工具风险等级。用于安全审计、HITL 人工介入判定与权限裁剪。"""
+    """工具风险等级。
+
+    **当前只是预留元数据，没有任何强制力**：全仓没有任何代码读 `risk_level` 做拦截或
+    审批，`build_tools()` 只看 `is_enabled`。写在这里是为了让以后接 HITL 时不必重新
+    给每个工具归类。
+
+    不要根据这个字段推断「危险工具已被拦」：要加限制应在 `ToolRegistry.build_tools`
+    或工具自身的 `enabled_checker` 里做，而不是指望这个字段生效。
+    """
 
     READ_ONLY = "read_only"
     """只读操作，无外部副作用（如联网检索、数据查询）。"""
@@ -33,7 +41,7 @@ class RiskLevel(str, Enum):
 
 
 class ToolCategory(str, Enum):
-    """工具分类。用于分层路由、上下文预算裁剪与按需检索。"""
+    """工具分类。**当前只是预留元数据，没有任何强制力**（同上）。"""
 
     SEARCH = "search"
     """外部检索与信息抓取。"""

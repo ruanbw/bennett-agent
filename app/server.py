@@ -40,6 +40,29 @@ async def _cleanup_expired_sessions_on_startup() -> None:
         logger.info("启动清理过期会话: 删除=%d", removed)
 
 
+def _warn_if_auth_rate_limit_is_global() -> None:
+    """反代部署 + 未配 `trusted_proxy_headers` 时告警：认证限流会退化成全站单桶。
+
+    为什么只告警不报错：单进程直连部署（本机开发、反代直连后端）下
+    `request.client.host` 就是真实客户端地址，限流工作正常。只有「中间还隔着一个反代」
+    时才会把所有请求看成一个来源。这里无法从代码侧判断部署形态，只能在启动日志里
+    明确说出这个组合与后果——否则运维只会看到「登录莫名 429，等一分钟就好」。
+
+    同一个坑在对话端点已经被绕开了（改成按账号计数，见 `app/api/chat.py`），
+    认证端点不行：登录/注册本来就没有账号身份可用。
+    """
+    if settings.auth_rate_limit_per_minute <= 0:
+        return
+    if settings.trusted_proxy_headers.strip():
+        return
+    logger.warning(
+        "认证限流按 client.host 计数，而 TRUSTED_PROXY_HEADERS 为空：若本服务部署在反向代理之后，"
+        "所有请求会被算作同一个来源（全站共享 %d 次/分钟）。请在代理上设置 X-Forwarded-For 并配置"
+        " TRUSTED_PROXY_HEADERS=X-Forwarded-For，或直连后端。",
+        settings.auth_rate_limit_per_minute,
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
@@ -55,6 +78,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.warning("模型提供商引导失败（不影响启动）", exc_info=True)
 
     await _cleanup_expired_sessions_on_startup()
+    _warn_if_auth_rate_limit_is_global()
 
     try:
         yield
@@ -111,6 +135,9 @@ def create_app() -> FastAPI:
         allow_credentials=settings.cors_allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 跨域前端要能读到限流的配额信息。不写这一行的话浏览器只放行 6 个简单响应头，
+        # `fetch` 拿到的是 `null`——前端没法告诉用户「还要等几秒」。
+        expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
     app.include_router(auth_router)

@@ -144,9 +144,15 @@ def resolve_client_ip(
     return direct_host or "unknown"
 
 
-def client_key(host: str | None) -> str:
-    """限流键：来源 IP。缺失时归入同一个桶，宁可保守也不要放过。"""
-    return host or "unknown"
+def client_key(host: str | None, scope: str = "") -> str:
+    """限流键：`[scope:]来源 IP`。缺失时归入同一个桶，宁可保守也不要放过。
+
+    `scope` 把同一 IP 的**不同端点**分到不同的桶里。共用同一个桶会造出一个很难
+    解释的失败模式：有人在一个 NAT 出口后面猛试密码，把 10 次/分钟打满之后，
+    同一出口的**正常注册**也做不了（反之亦然）。两者要挡的攻击面不一样，配额
+    不该互相挤占。
+    """
+    return f"{scope}:{host or 'unknown'}" if scope else (host or "unknown")
 
 
 # ---------------------------------------------------------------------
@@ -202,12 +208,15 @@ def get_trusted_proxy_headers() -> list[str]:
 
 
 async def enforce_auth_rate_limit(request: Request) -> None:
-    """认证端点限流：按 **IP** 计数。
+    """认证端点限流：按 **IP** 计数（login / register 各自一个桶）。
 
     挡的是两件事：对某个账号的密码暴力破解，以及批量注册。这两个场景里攻击者
     换的是账号（或来源）、目标是常量，所以必须按 IP 而不是按账号计数。
 
     在这之前认证端点**完全没有限流**，密码可以被无限次尝试。
+
+    端点作用域从 `request.url.path` 的最后一段取（`/api/auth/login` → `login`），
+    这样同一份依赖挂在两个路由上仍然分桶，不需要调用方传参。
     """
     if settings.auth_rate_limit_per_minute <= 0:
         return
@@ -216,7 +225,8 @@ async def enforce_auth_rate_limit(request: Request) -> None:
     trusted_headers = get_trusted_proxy_headers()
     ip = resolve_client_ip(direct_host, headers=dict(request.headers), trusted_headers=trusted_headers)
 
+    scope = request.url.path.rstrip("/").rsplit("/", 1)[-1] or "auth"
     limiter = get_auth_limiter()
-    allowed, retry_after = limiter.check(client_key(ip))
+    allowed, retry_after = limiter.check(client_key(ip, scope))
     if not allowed:
         raise too_many(retry_after, limit=limiter.limit)

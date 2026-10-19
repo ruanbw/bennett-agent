@@ -13,8 +13,15 @@ from app.services.http_client import get_http_client
 logger = logging.getLogger(__name__)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
-#: 搜索是交互路径上的一步，20 秒足够；再久不如让模型换个关键词。
-TAVILY_TIMEOUT_SECONDS = 20.0
+
+#: 单次尝试的超时。搜索是交互路径上的一步——用户正等着这一轮回答，所以这个数字
+#: 不是「上游最多能拖多久」，而是「拖过这么久，不如让模型换个关键词重来」。
+#:
+#: 为什么是 8 秒而不是 20 秒：下面 `MAX_ATTEMPTS = 2` 的意义是吸收瞬时抖动。若单次
+#: 就允许拖 20 秒，第一次超时时用户已经等了 20 秒，再重试一次只是把等待翻倍——重试
+#: 在体验上等于不存在。8 秒既覆盖 Tavily 的常态延迟（实测通常在 2 秒内），也给
+#: 「抖动一下就通」留出重试空间。
+TAVILY_TIMEOUT_SECONDS = 8.0
 
 MAX_RESULTS_FLOOR = 1
 MAX_RESULTS_CEILING = 10
@@ -31,6 +38,26 @@ ERROR_BODY_CHARS = 200
 #: 重试不会有不同结果，白等。
 MAX_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS = 0.5
+
+#: 工具内部用完 `MAX_ATTEMPTS` 次尝试的**最坏**耗时。
+TAVILY_WORST_CASE_SECONDS = MAX_ATTEMPTS * TAVILY_TIMEOUT_SECONDS + (MAX_ATTEMPTS - 1) * RETRY_BACKOFF_SECONDS
+
+#: 注册给 pydantic-ai 的工具级超时（外层防御）。
+#:
+#: 必须 **严格大于** `TAVILY_WORST_CASE_SECONDS`，否则外层先触发，后果不是「早一点
+#: 停下」而是三层语义同时错位：
+#:
+#: 1. pydantic-ai 的 `anyio.fail_after` 把超时抛成 `ModelRetry`（`toolsets/function.py`
+#:    的 `call_tool`），模型看到的是「Timed out after N seconds」而不是本工具精心写的
+#:    中文文案——`tavily_search` 里所有错误处理（429 带 Retry-After、5xx 带状态码）
+#:    全部不可达；
+#: 2. 它会消耗一次模型重试预算去重跑工具，而不是让工具自己收尾；
+#: 3. 内层第 2 次尝试总是在半途被切掉，`MAX_ATTEMPTS = 2` 实际只生效约 1.5 次，
+#:    与「有界重试吸收抖动」的设计意图不符。
+#:
+#: 这两个数字以前写在不同文件里（这里 20 秒，`app/tools/__init__.py` 里另加 5 秒），
+#: 改动其中一个就把关系弄断了，且没有任何东西会报错。现在由本模块单点派生。
+TAVILY_TOOL_TIMEOUT_SECONDS = TAVILY_WORST_CASE_SECONDS + 3.5
 
 #: 外部内容边界声明。网页正文与上游错误信息都是**不可信**输入，模型可能把它们
 #: 当成指令执行或原样复述；这一行是给模型看的定界符，把「资料」和「指令」分开。
