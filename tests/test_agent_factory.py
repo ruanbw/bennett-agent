@@ -1,6 +1,8 @@
 """Agent 装配点：R-3（唯一工厂）与 O-2（装配缓存）。"""
 
 import pytest
+from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.models.openai import OpenAIChatModel
 
 from app.config import settings
 from app.services import agent_factory
@@ -190,6 +192,7 @@ def test_cache_is_bounded():
         ("app_env", "staging"),
         ("assistant_name", "小贝"),
         ("model_upstream_timeout", 5.0),
+        ("fallback_model_name", "openai/gpt-4o-mini"),
     ],
 )
 def test_settings_derived_values_are_part_of_the_cache_key(monkeypatch, field, value):
@@ -199,6 +202,38 @@ def test_settings_derived_values_are_part_of_the_cache_key(monkeypatch, field, v
     monkeypatch.setattr(settings, field, value)
 
     assert build_agent("openai/gpt-4o") is not first
+
+
+# ---------------------------------------------------------------------
+# 备用模型（P1）
+# ---------------------------------------------------------------------
+def test_no_fallback_keeps_the_single_model(monkeypatch):
+    # 显式清空：开发者本地 .env.local 若配了备用模型，不该让这条用例变红。
+    monkeypatch.setattr(settings, "fallback_model_name", None)
+
+    assert isinstance(build_agent("openai/gpt-4o").model, OpenAIChatModel)
+
+
+def test_configured_fallback_wraps_the_primary_model(monkeypatch):
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/gpt-4o-mini")
+
+    model = build_agent("openai/gpt-4o").model
+
+    assert isinstance(model, FallbackModel)
+    assert [inner.model_name for inner in model.models] == ["openai/gpt-4o", "openai/gpt-4o-mini"]
+
+
+def test_fallback_is_skipped_when_it_names_the_primary_model(monkeypatch):
+    """同名兜底只会对同一个模型再打一次，还让错误变成异常组，没有必要。"""
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/gpt-4o")
+
+    assert isinstance(build_agent("openai/gpt-4o").model, OpenAIChatModel)
+
+
+def test_blank_fallback_is_treated_as_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "fallback_model_name", "   ")
+
+    assert isinstance(build_agent("openai/gpt-4o").model, OpenAIChatModel)
 
 
 def test_assistant_name_change_reaches_the_system_prompt(monkeypatch):

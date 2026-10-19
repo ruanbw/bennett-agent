@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     litellm_api_base: str = Field(default="http://localhost:4000", description="LiteLLM Proxy API 基础地址")
     litellm_api_key: str | None = Field(default=None, description="LiteLLM API 密钥")
     model_name: str = Field(default="openai/gpt-4o", description="模型标识符（LiteLLM 路由格式）")
+    fallback_model_name: str | None = Field(
+        default=None,
+        description=(
+            "备用模型标识符（LiteLLM 路由格式）。主模型返回 5xx/429、超时或连接失败时"
+            "自动切换一次；留空表示不启用。备用模型必须接受与主模型相同的调用参数"
+            "（如 reasoning_effort 与上游超时），否则切换会以 400 失败。"
+        ),
+    )
     model_description_field: str = Field(
         default="magpie_label",
         description=(

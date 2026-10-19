@@ -15,16 +15,20 @@ O-2：装配结果按参数缓存。pydantic-ai 的 `Agent` 设计上就是可�
 """
 
 import logging
+from collections.abc import Callable
 from functools import lru_cache
 
 import httpx
 from openai import AsyncOpenAI
 from pydantic_ai import Agent
+from pydantic_ai.models import Model
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
 
 from app.config import settings
 from app.prompts import prompt_manager
+from app.services.upstream_errors import is_fallback_eligible
 from app.tools import build_tools
 from app.tools.guard import ToolErrorIsolation
 
@@ -86,6 +90,8 @@ def _settings_cache_key() -> tuple[object, ...]:
         settings.app_env,
         settings.assistant_name,
         settings.model_upstream_timeout,
+        # 备用模型会影响装配结果；只在键里放名字（不含密钥）。
+        settings.fallback_model_name,
         bool(settings.tavily_api_key),
     )
 
@@ -130,6 +136,70 @@ def build_upstream_timeout() -> httpx.Timeout | None:
     )
 
 
+def _configured_fallback_name(primary_name: str) -> str | None:
+    """取配置里的备用模型名；空值、与主模型相同都视为「不启用」。
+
+    同名时没有必要包 `FallbackModel`：它只会对同一个模型再打一次，还让错误变成
+    异常组（分类文案反而更绕）。大小写不归一：模型 id 由网关定义，后端不做猜测。
+    """
+    fallback_name = (settings.fallback_model_name or "").strip()
+    if not fallback_name or fallback_name == primary_name:
+        return None
+    return fallback_name
+
+
+def _build_fallback_handler(primary_name: str, fallback_name: str) -> Callable[[Exception], bool]:
+    """`FallbackModel` 的切换判定：复用上游错误分类，只切「换模型可能救回来」的失败。
+
+    不切的情况：401/403（同一套网关凭据，备用模型也会失败）、400/404（请求或模型
+    本身的问题）——这些按分类文案直接告诉用户，避免无意义地多打一次上游。
+
+    日志放在这里而不是最终异常处：`FallbackExceptionGroup` 只说「都失败了」，
+    不会告诉你主模型当时是因为什么失败。
+    """
+
+    def should_fallback(error: Exception) -> bool:
+        if not is_fallback_eligible(error):
+            return False
+        logger.warning(
+            "模型调用失败，尝试备用模型 (primary=%s, fallback=%s)",
+            primary_name,
+            fallback_name,
+            exc_info=True,
+        )
+        return True
+
+    return should_fallback
+
+
+def _build_chat_model(model_name: str, model_settings: dict[str, object]) -> Model:
+    """构造主对话模型，配置了备用模型时包一层 `FallbackModel`。
+
+    兜底顺序：`FallbackModel` 先在**流打开阶段**切备用模型（pydantic-ai 的
+    `request_stream` 语义：中途失败不接管，因此不会出现「正文已流出又重来一遍」）；
+    备用模型也失败后，`chat_service` 的瞬时错误重试再整轮试一次。
+
+    备用模型与主模型共用同样的 `model_settings`（思考等级、超时）——它必须能接受
+    这些参数，否则切换本身就会 400。这条约束写进了 `Settings.fallback_model_name`。
+    """
+    primary = OpenAIChatModel(
+        model_name=model_name,
+        provider=build_provider(),
+        settings=model_settings or None,
+    )
+
+    fallback_name = _configured_fallback_name(model_name)
+    if fallback_name is None:
+        return primary
+
+    fallback = OpenAIChatModel(
+        model_name=fallback_name,
+        provider=build_provider(),
+        settings=model_settings or None,
+    )
+    return FallbackModel(primary, fallback, fallback_on=_build_fallback_handler(model_name, fallback_name))
+
+
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
 def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[object, ...]) -> Agent:  # noqa: ANN401
     """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
@@ -152,11 +222,7 @@ def _build_agent_cached(model_name: str, effort: str | None, cache_key: tuple[ob
     if timeout is not None:
         model_settings["timeout"] = timeout
 
-    model = OpenAIChatModel(
-        model_name=model_name,
-        provider=build_provider(),
-        settings=model_settings or None,
-    )
+    model = _build_chat_model(model_name, model_settings)
 
     return Agent(
         model=model,

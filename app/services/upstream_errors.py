@@ -105,6 +105,20 @@ def is_retryable_upstream_error(exc: BaseException) -> bool:
     return False
 
 
+def is_fallback_eligible(exc: BaseException) -> bool:
+    """判断一次失败是否值得**换备用模型**再试一次。
+
+    比同模型重试宽一档：除了 5xx / 超时 / 连接错误，429 也可以切换——限流可能只
+    作用于当前模型（或当前模型的上游配额），备用模型往往还有额度。
+
+    401/403 不切换：同一套网关凭据下备用模型也会失败，只是白打一次请求；
+    400/404 也不切换：那是请求或模型本身的问题，该把分类后的文案直接告诉用户。
+    """
+    if any(_status_code(item) == 429 for item in iter_exception_chain(exc)):
+        return True
+    return is_retryable_upstream_error(exc)
+
+
 def upstream_error_message(exc: BaseException) -> str:
     """把上游异常映射成可以推给用户的中文文案。
 
