@@ -68,6 +68,59 @@ export function previewToolText(
   return { preview: `${text.slice(0, limit)}…`, truncated: true };
 }
 
+/**
+ * 参数一览：折叠状态下也让人看懂「这次工具调用在干什么」。
+ *
+ * 优先取常见的主参数（`query` / `q` / `url` / `question` …）——模型生成的参数对象往往
+ * 带一堆可选字段，直接展示 JSON 既长又全是噪音。取不到主参数时退回原始 argsText
+ * （非 JSON 的纯文本也走这条路）。结果按字符（码点）截断，避免劈开 emoji。
+ *
+ * 返回值只用于**展示**：不参与任何判断，空字符串表示没有可展示的内容。
+ */
+const PREVIEW_ARG_KEYS = ['query', 'q', 'question', 'url', 'path', 'command', 'text', 'prompt', 'name', 'id'] as const;
+
+export function toolArgsPreview(argsText: string | null | undefined, limit = 48): string {
+  if (!argsText) return '';
+
+  let value = argsText;
+  try {
+    const parsed: unknown = JSON.parse(argsText);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      // `{}` / 全空参数没有可展示的内容：显示一个 `{}` 只是噪音
+      if (Object.keys(record).length === 0) return '';
+
+      const preferred = PREVIEW_ARG_KEYS
+        .map((key) => record[key])
+        .find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
+      if (preferred) {
+        value = preferred;
+      } else {
+        // 没有约定字段时，取第一个非空字符串，仍比整段 JSON 好读
+        const firstString = Object.values(record).find(
+          (candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0,
+        );
+        if (firstString) value = firstString;
+      }
+    } else if (Array.isArray(parsed)) {
+      const firstString = parsed.find(
+        (candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0,
+      );
+      if (firstString === undefined) return '';
+      value = firstString;
+    } else if (typeof parsed === 'string') {
+      value = parsed;
+    }
+  } catch {
+    // 非 JSON：原样展示（流式过程中 argsText 可能还没拼成合法 JSON）
+  }
+
+  const flat = value.replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  const chars = Array.from(flat);
+  return chars.length <= limit ? flat : `${chars.slice(0, limit).join('')}…`;
+}
+
 /** 工具耗时文案：与 ToolFallbackDuration 共用，抽出来便于单测。 */
 export const formatToolDuration = (ms: number): string => {
   if (ms < 1000) return '<1s';

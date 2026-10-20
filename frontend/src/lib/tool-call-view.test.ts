@@ -6,6 +6,7 @@ import {
   previewToolText,
   resolveToolCallViewStatus,
   TOOL_TEXT_PREVIEW_LIMIT,
+  toolArgsPreview,
 } from './tool-call-view'
 
 describe('resolveToolCallViewStatus', () => {
@@ -111,5 +112,62 @@ describe('formatToolDuration', () => {
   it('超过一分钟显示分秒', () => {
     expect(formatToolDuration(60_000)).toBe('1m 0s')
     expect(formatToolDuration(65_400)).toBe('1m 5s')
+  })
+})
+
+
+describe('toolArgsPreview', () => {
+  it('优先展示约定字段（query / q / question…）', () => {
+    expect(toolArgsPreview(JSON.stringify({ query: '今天的 AI 新闻', max_results: 5 }))).toBe(
+      '今天的 AI 新闻',
+    )
+    expect(toolArgsPreview(JSON.stringify({ q: 'HNSW', depth: 'basic' }))).toBe('HNSW')
+    expect(
+      toolArgsPreview(JSON.stringify({ question: '要 A 还是 B？', options: ['A', 'B'] })),
+    ).toBe('要 A 还是 B？')
+  })
+
+  it('没有约定字段时取第一个非空字符串', () => {
+    expect(toolArgsPreview(JSON.stringify({ city: '上海', unit: 'celsius' }))).toBe('上海')
+  })
+
+  it('非 JSON（流式拼接到一半）按原文展示', () => {
+    expect(toolArgsPreview('今天是 2026-10-21，天气如何')).toBe('今天是 2026-10-21，天气如何')
+    expect(toolArgsPreview('{"query": "还没闭合')).toBe('{"query": "还没闭合')
+  })
+
+  it('JSON 字符串直接取内容', () => {
+    expect(toolArgsPreview('"hello world"')).toBe('hello world')
+  })
+
+  it('没有字符串字段时退回原始 JSON（总比什么都不显示好）', () => {
+    expect(toolArgsPreview('{"max": 5}')).toBe('{"max": 5}')
+  })
+
+  it('空对象/空数组没有可展示内容（不要显示一个 {}）', () => {
+    expect(toolArgsPreview('{}')).toBe('')
+    expect(toolArgsPreview('[]')).toBe('')
+  })
+
+  it('数组参数取第一个非空字符串', () => {
+    expect(toolArgsPreview('["第一步","第二步"]')).toBe('第一步')
+    expect(toolArgsPreview('[1, 2]')).toBe('')
+  })
+
+  it('折叠空白，并按码点截断（不劈开 emoji）', () => {
+    expect(toolArgsPreview(JSON.stringify({ text: 'a\n\n  b' }))).toBe('a b')
+
+    const emojis = '😀'.repeat(60)
+    const preview = toolArgsPreview(JSON.stringify({ text: emojis }), 10)
+    expect(Array.from(preview)).toHaveLength(11) // 10 个码点 + 省略号
+    expect(preview.endsWith('…')).toBe(true)
+    expect(preview.startsWith('😀😀😀😀😀😀😀😀😀😀')).toBe(true)
+  })
+
+  it('空输入返回空串（调用方据此不渲染）', () => {
+    expect(toolArgsPreview('')).toBe('')
+    expect(toolArgsPreview('   ')).toBe('')
+    expect(toolArgsPreview(null)).toBe('')
+    expect(toolArgsPreview(undefined)).toBe('')
   })
 })

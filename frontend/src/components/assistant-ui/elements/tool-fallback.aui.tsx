@@ -26,6 +26,7 @@ import {
   formatUnknownValue,
   previewToolText,
   resolveToolCallViewStatus,
+  toolArgsPreview,
   type ToolCallViewStatus,
 } from "@/lib/tool-call-view";
 
@@ -129,16 +130,21 @@ function ToolFallbackDuration({
 
 function ToolFallbackTrigger({
   toolName,
+  argsText,
   status,
   result,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
+  /** 原始参数文本；只用来生成折叠态的一行预览。 */
+  argsText?: string;
   status?: ToolCallMessagePartStatus;
   result?: unknown;
 }) {
   const viewStatus = resolveToolCallViewStatus(status, result);
+  // 大参数对象在这里只解析一次；折叠态展示主参数，展开后仍看完整 args
+  const preview = useMemo(() => toolArgsPreview(argsText), [argsText]);
   const isRunning = viewStatus === "running";
   const isInterrupted = viewStatus === "interrupted";
   const isCancelled =
@@ -149,7 +155,7 @@ function ToolFallbackTrigger({
   return (
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
-      aria-label={`${toolName}：${STATUS_ARIA_LABEL[viewStatus]}`}
+      aria-label={`${toolName}${preview ? `（${preview}）` : ""}：${STATUS_ARIA_LABEL[viewStatus]}`}
       className={cn(
         "aui-tool-fallback-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
         className,
@@ -176,6 +182,15 @@ function ToolFallbackTrigger({
       >
         <b>{toolName}</b>
       </span>
+      {/* 折叠时也看得懂在干什么：只展示主参数，完整 args 展开后看 */}
+      {preview && (
+        <span
+          data-slot="tool-fallback-trigger-preview"
+          className="aui-tool-fallback-trigger-preview max-w-[45vw] truncate text-xs text-muted-foreground/70 sm:max-w-xs"
+        >
+          {preview}
+        </span>
+      )}
       {isInterrupted && (
         <span
           data-slot="tool-fallback-trigger-status"
@@ -351,7 +366,12 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 
   return (
     <ToolFallbackRoot open={open} onOpenChange={setOpen}>
-      <ToolFallbackTrigger toolName={toolName} status={status} result={result} />
+      <ToolFallbackTrigger
+        toolName={toolName}
+        argsText={argsText}
+        status={status}
+        result={result}
+      />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
         <ToolFallbackArgs
