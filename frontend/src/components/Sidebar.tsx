@@ -110,10 +110,33 @@ export function Sidebar({
   // 搜索框的 autoFocus 只在挂载那一次生效：搜索已经打开时再按 ⌘K，需要把焦点从
   // 消息输入框抢回来，否则快捷键看上去「什么都没发生」。
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 关闭搜索后输入框会卸载，焦点必须交给一个仍然存在的控件，否则会掉到 <body> 上
+  const searchToggleRef = useRef<HTMLButtonElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
   useEffect(() => {
     if (searchRequest === 0) return;
     searchInputRef.current?.focus();
   }, [searchRequest]);
+
+  /** 搜索结果里当前可聚焦的行按钮（DOM 顺序 = 渲染顺序）。 */
+  const resultRowButtons = useCallback((): HTMLElement[] => {
+    const root = asideRef.current;
+    if (!root) return [];
+    return [...root.querySelectorAll<HTMLElement>('[data-session-id] > button[aria-label]')];
+  }, []);
+
+  /** 把焦点放到某条会话行上（搜索框按 ↓ 时用）。 */
+  const focusSessionRow = useCallback(
+    (sessionId: string): void => {
+      const root = asideRef.current;
+      if (!root) return;
+      const row = [...root.querySelectorAll<HTMLElement>('[data-session-id]')].find(
+        (element) => element.dataset.sessionId === sessionId,
+      );
+      row?.querySelector<HTMLElement>(':scope > button')?.focus();
+    },
+    [],
+  );
 
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -334,6 +357,7 @@ export function Sidebar({
 
   return (
     <aside
+      ref={asideRef}
       aria-label="历史对话侧边栏"
       className="w-64 shrink-0 flex flex-col h-full select-none bg-sidebar absolute md:relative inset-y-0 left-0 z-30"
     >
@@ -346,6 +370,7 @@ export function Sidebar({
           <div className="flex items-center gap-0.5">
             <SyncStatusButton />
             <button
+              ref={searchToggleRef}
               type="button"
               onClick={() => {
                 setSearchOpen((open) => !open);
@@ -407,6 +432,23 @@ export function Sidebar({
                     event.preventDefault();
                     setSearchQuery('');
                     setSearchOpen(false);
+                    searchToggleRef.current?.focus();
+                    return;
+                  }
+                  // Enter 打开第一条结果：搜索时手不用离开键盘。
+                  if (event.key === 'Enter') {
+                    const first = filteredSessions[0];
+                    if (!first) return;
+                    event.preventDefault();
+                    onSelectSession(first.id);
+                    return;
+                  }
+                  // ↓ 把焦点交进结果列表，之后用原生按钮的键盘行为继续操作。
+                  if (event.key === 'ArrowDown') {
+                    const first = filteredSessions[0];
+                    if (!first) return;
+                    event.preventDefault();
+                    focusSessionRow(first.id);
                   }
                 }}
                 placeholder="搜索标题与对话内容..."
@@ -426,6 +468,7 @@ export function Sidebar({
                 onClick={() => {
                   setSearchQuery('');
                   setSearchOpen(false);
+                  searchToggleRef.current?.focus();
                 }}
                 className="absolute right-2.5 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
                 title="关闭搜索"
@@ -492,7 +535,29 @@ export function Sidebar({
         />
       )}
 
-      <div className="flex-1 overflow-y-auto pb-2">
+      <div
+        className="flex-1 overflow-y-auto pb-2"
+        onKeyDown={(event) => {
+          // 只在「搜索中」接管方向键：普通列表里 ↑↓ 应该滚动，而不是劫持焦点
+          if (!searchOpen) return;
+          const buttons = resultRowButtons();
+          const index = buttons.indexOf(document.activeElement as HTMLElement);
+
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            if (index === -1) return; // 焦点还在搜索框：由输入框自己处理 ↓
+            event.preventDefault();
+            buttons[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
+            return;
+          }
+
+          // 在结果里按 Esc：先退回搜索框（搜索仍然开着），再按一次才关闭搜索。
+          // 直接关闭会让输入框立刻卸载，焦点掉到 body 上——两段式 Esc 更符合预期。
+          if (event.key === 'Escape' && index >= 0) {
+            event.preventDefault();
+            searchInputRef.current?.focus();
+          }
+        }}
+      >
         {filteredSessions.length === 0 ? (
           <div className="text-xs text-muted-foreground text-center py-12">
             {search.pending

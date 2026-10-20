@@ -132,6 +132,8 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
 
   return (
     <div
+      /* 搜索结果的键盘导航靠它定位行（`[data-session-id] > button`）；顺带方便 E2E 选择 */
+      data-session-id={session.id}
       className={`group relative flex items-center gap-2 px-3 py-2.5 rounded-xl text-[13px] transition-colors ${
         isSelected
           ? 'bg-accent/80 text-accent-foreground font-medium'
