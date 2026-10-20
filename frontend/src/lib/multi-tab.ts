@@ -18,6 +18,8 @@
 import { newId } from './constants';
 
 const SESSIONS_CHANNEL = 'bennett:sessions';
+/** 账号切换频道：别的标签页因为换账号清了本地库时广播。 */
+const AUTH_CHANNEL = 'bennett:auth';
 const RUN_LOCK_PREFIX = 'bennett:chat-run:';
 
 /**
@@ -68,6 +70,7 @@ function unrefChannel(channel: BroadcastChannel): void {
  * 为键是为了测试——把全局换成假实现后必须用新实例，不能被上一个用例的通道串味。
  */
 let postChannel: { ctor: BroadcastChannelCtor; channel: BroadcastChannel } | null = null;
+let authPostChannel: { ctor: BroadcastChannelCtor; channel: BroadcastChannel } | null = null;
 
 function postToOtherTabs(message: SessionsChangedMessage): void {
   const ctor = channelCtor();
@@ -91,6 +94,91 @@ export function notifySessionsChanged(sessionId: string): void {
   postToOtherTabs({ sessionId, sourceId: TAB_ID });
 }
 
+/**
+ * 广播「本页换了账号，本地库已被清空」。
+ *
+ * 订阅方必须重新探测登录态并认领本地缓存：否则旧标签页会继续以旧账号的身份持有
+ * 内存状态，甚至把旧账号待推送的行借新账号的 cookie 推上去。
+ */
+export function notifyAccountSwitched(): void {
+  const ctor = channelCtor();
+  if (!ctor) return;
+
+  try {
+    if (!authPostChannel || authPostChannel.ctor !== ctor) {
+      const channel = new ctor(AUTH_CHANNEL);
+      unrefChannel(channel);
+      authPostChannel = { ctor, channel };
+    }
+    authPostChannel.channel.postMessage({ sourceId: TAB_ID });
+  } catch (err) {
+    console.warn('跨标签账号切换通知发送失败:', err);
+  }
+}
+
+export type AccountSwitchedListener = () => void;
+
+/** 账号切换消息的形状。 */
+export interface AccountSwitchedMessage {
+  sourceId: string;
+}
+
+/** 订阅其他标签页的「换账号」通知，返回解绑函数。自己发的不回调。 */
+export function subscribeAccountSwitched(listener: AccountSwitchedListener): () => void {
+  return subscribeChannel(
+    AUTH_CHANNEL,
+    (data) => {
+      if (!isFromOtherTab(data)) return;
+      try {
+        listener();
+      } catch (err) {
+        console.error('处理跨标签账号切换失败:', err);
+      }
+    },
+    '跨标签账号切换',
+  );
+}
+
+/** 消息形状对且不是本页自己发的 → 真的该处理。 */
+function isFromOtherTab(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const { sourceId } = data as Partial<AccountSwitchedMessage>;
+  return typeof sourceId === 'string' && sourceId !== '' && sourceId !== TAB_ID;
+}
+
+/**
+ * 建一个频道的订阅，成功后返回解绑函数。
+ *
+ * 建通道/挂监听都可能抛错（隐私模式、策略禁用），以及没有 BroadcastChannel 时的
+ * 降级——两种情况都返回空解绑函数，调用方不需要分支判断。
+ */
+function subscribeChannel(
+  name: string,
+  onData: (data: unknown) => void,
+  label: string,
+): () => void {
+  const ctor = channelCtor();
+  if (!ctor) return () => {};
+
+  let channel: BroadcastChannel;
+  try {
+    channel = new ctor(name);
+    unrefChannel(channel);
+    channel.onmessage = (event: MessageEvent) => onData(event.data);
+  } catch (err) {
+    console.warn(`${label}订阅失败:`, err);
+    return () => {};
+  }
+
+  return () => {
+    try {
+      channel.close();
+    } catch (err) {
+      console.warn(`关闭${label}通道失败:`, err);
+    }
+  };
+}
+
 export type SessionsChangedListener = (message: SessionsChangedMessage) => void;
 
 /**
@@ -100,15 +188,10 @@ export type SessionsChangedListener = (message: SessionsChangedMessage) => void;
  * 没有 BroadcastChannel 时返回空解绑函数，调用方不需要分支判断。
  */
 export function subscribeSessionsChanged(listener: SessionsChangedListener): () => void {
-  const ctor = channelCtor();
-  if (!ctor) return () => {};
-
-  let channel: BroadcastChannel;
-  try {
-    channel = new ctor(SESSIONS_CHANNEL);
-    unrefChannel(channel);
-    channel.onmessage = (event: MessageEvent) => {
-      const message = parseSessionsChanged(event.data);
+  return subscribeChannel(
+    SESSIONS_CHANNEL,
+    (data) => {
+      const message = parseSessionsChanged(data);
       if (!message || message.sourceId === TAB_ID) return;
       try {
         listener(message);
@@ -116,19 +199,9 @@ export function subscribeSessionsChanged(listener: SessionsChangedListener): () 
         // 订阅方的异常不能反过来打断通道
         console.error('处理跨标签会话变更失败:', err);
       }
-    };
-  } catch (err) {
-    console.warn('跨标签会话通知订阅失败:', err);
-    return () => {};
-  }
-
-  return () => {
-    try {
-      channel.close();
-    } catch (err) {
-      console.warn('关闭跨标签会话通道失败:', err);
-    }
-  };
+    },
+    '跨标签会话通知',
+  );
 }
 
 /**

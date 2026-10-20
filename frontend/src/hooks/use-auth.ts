@@ -27,6 +27,9 @@ import {
   type LogoutResult,
   type RegisterOutcome,
 } from '../lib/auth';
+import { LOCAL_CACHE_UNAVAILABLE_MESSAGE, claimLocalData } from '../lib/local-owner';
+import { subscribeAccountSwitched } from '../lib/multi-tab';
+import { stopSync } from '../lib/sync/engine';
 
 export type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
@@ -52,6 +55,23 @@ export function useAuth(): UseAuthResult {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * 认领本地缓存，返回「失败原因」或 `null`。
+   *
+   * 必须在把状态切成已登录（以及启动同步引擎）**之前**完成：本地库可能属于上一个
+   * 账号，不先清空的话，新账号会看到别人的会话，同步引擎还会把别人待推送的行借新
+   * cookie 推上去。失败时宁可不进主界面，让用户重试（通常是另一个标签页占着库）。
+   */
+  const claimSession = useCallback(async (userId: string): Promise<string | null> => {
+    try {
+      await claimLocalData(userId);
+      return null;
+    } catch (err) {
+      console.error('无法确认本地缓存归属:', err);
+      return LOCAL_CACHE_UNAVAILABLE_MESSAGE;
+    }
+  }, []);
+
   // 启动时探测登录态
   useEffect(() => {
     let active = true;
@@ -60,8 +80,22 @@ export function useAuth(): UseAuthResult {
       try {
         const current = await fetchCurrentUser();
         if (!active) return;
+
+        if (!current) {
+          setStatus('anonymous');
+          return;
+        }
+
+        const claimError = await claimSession(current.id);
+        if (!active) return;
+        if (claimError) {
+          setError(claimError);
+          setStatus('anonymous');
+          return;
+        }
+
         setUser(current);
-        setStatus(current ? 'authenticated' : 'anonymous');
+        setStatus('authenticated');
       } catch (err) {
         if (!active) return;
         console.error('探测登录态失败:', err);
@@ -75,7 +109,7 @@ export function useAuth(): UseAuthResult {
     return () => {
       active = false;
     };
-  }, []);
+  }, [claimSession]);
 
   // 任何请求拿到 401 都退回登录页
   useEffect(() => {
@@ -83,6 +117,9 @@ export function useAuth(): UseAuthResult {
       // apiFetch 已按世代过滤过；这里再确认一次，防止那层过滤将来被挪走后，
       // 登录前发出的过期 401 把刚建立的登录态又打回登录页
       if (epoch !== getAuthEpoch()) return;
+      // 同步循环必须立刻停：cookie 已经失效，继续重试只会刷日志；而本地待推送的行
+      // 要原样留着（同一个人重新登录后还能继续同步，换账号则由 claimLocalData 清空）。
+      stopSync();
       setUser(null);
       setStatus('anonymous');
     };
@@ -91,6 +128,44 @@ export function useAuth(): UseAuthResult {
     // 注销必须传同一个函数引用，否则别的挂载点注册的监听会被一起清掉
     return () => removeUnauthorizedListener(handleUnauthorized);
   }, []);
+
+  /*
+    其他标签页换了账号（本地库已被它清空）：本页必须重新探测身份。
+
+    否则本页还以旧账号自居，而 cookie 是共享的——下一个同步请求会拿着新账号的 cookie
+    去推旧账号的内容。收到通知先停同步，再按启动流程重走一遍「探测 + 认领」。
+  */
+  useEffect(() => {
+    return subscribeAccountSwitched(() => {
+      // 先停同步、退回加载态：加载态会让整个主界面卸载，所有按会话维护的内存状态
+      // （会话列表、消息、当前选中）跟着丢掉，重新探测完就必然从库里重读。只换
+      // `user` 是不够的——旧的 `useChatSessions` 状态还挂着，会继续显示别人的会话。
+      stopSync();
+      setUser(null);
+      setStatus('loading');
+      void (async () => {
+        try {
+          const current = await fetchCurrentUser();
+          if (!current) {
+            setUser(null);
+            setStatus('anonymous');
+            return;
+          }
+          const claimError = await claimSession(current.id);
+          if (claimError) {
+            setUser(null);
+            setError(claimError);
+            setStatus('anonymous');
+            return;
+          }
+          setUser(current);
+          setStatus('authenticated');
+        } catch (err) {
+          console.error('账号切换后重新探测登录态失败:', err);
+        }
+      })();
+    });
+  }, [claimSession]);
 
   /**
    * 登录。pending 必须覆盖整个流程（POST + `/me` 探测）：只包 POST 的话，探测期间提
@@ -103,6 +178,11 @@ export function useAuth(): UseAuthResult {
 
         const attempt = await loginWithSession(email, password);
         if (attempt.ok) {
+          const claimError = await claimSession(attempt.user.id);
+          if (claimError) {
+            setError(claimError);
+            return false;
+          }
           setUser(attempt.user);
           setStatus('authenticated');
           return true;
@@ -115,7 +195,7 @@ export function useAuth(): UseAuthResult {
         return false;
       });
     },
-    []
+    [claimSession]
   );
 
   const register = useCallback(
@@ -125,6 +205,13 @@ export function useAuth(): UseAuthResult {
 
         const attempt = await registerWithSession(email, password);
         if (attempt.ok) {
+          const claimError = await claimSession(attempt.user.id);
+          if (claimError) {
+            // 账号已经建好了，留在注册模式再点一次只会拿到「该邮箱已注册」。
+            // 按「注册成功但自动登录失败」处理：切回登录模式，错误文案说明原因。
+            setError(claimError);
+            return 'login-failed';
+          }
           setUser(attempt.user);
           setStatus('authenticated');
           return 'ok';
@@ -135,7 +222,7 @@ export function useAuth(): UseAuthResult {
         return attempt.outcome;
       });
     },
-    []
+    [claimSession]
   );
 
   const logout = useCallback(async () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { TAB_ID, acquireRunLock, notifySessionsChanged, subscribeSessionsChanged } from './multi-tab'
+import { TAB_ID, acquireRunLock, notifyAccountSwitched, notifySessionsChanged, subscribeAccountSwitched, subscribeSessionsChanged } from './multi-tab'
 import type { SessionsChangedMessage } from './multi-tab'
 
 interface FakeEvent {
@@ -150,6 +150,43 @@ describe('跨标签失效通知', () => {
       throw new Error('不该被调用')
     })
     expect(() => unsubscribe()).not.toThrow()
+  })
+})
+
+describe('跨标签账号切换通知', () => {
+  it('其他标签页换账号时通知订阅者', () => {
+    const seen: number[] = []
+    const unsubscribe = subscribeAccountSwitched(() => seen.push(1))
+    try {
+      new FakeBroadcastChannel('bennett:auth').postMessage({ sourceId: 'tab_other' })
+
+      expect(seen).toHaveLength(1)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('自己发的不回调，形状不对的消息被丢弃', () => {
+    const seen: number[] = []
+    const unsubscribe = subscribeAccountSwitched(() => seen.push(1))
+    try {
+      const channel = new FakeBroadcastChannel('bennett:auth')
+      notifyAccountSwitched()
+      channel.postMessage('not-an-object')
+      channel.postMessage({ sourceId: '' })
+      channel.postMessage({})
+
+      expect(seen).toEqual([])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('没有 BroadcastChannel 时是空操作', () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+
+    expect(() => notifyAccountSwitched()).not.toThrow()
+    expect(() => subscribeAccountSwitched(() => {})()).not.toThrow()
   })
 })
 

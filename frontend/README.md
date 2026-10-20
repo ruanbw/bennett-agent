@@ -52,6 +52,7 @@ src/
 │   ├── chat-message.ts      # 记录/run → assistant-ui runtime 消息
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
+│   ├── local-owner.ts       # 本地缓存归属：换账号先清库
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
@@ -114,6 +115,14 @@ src/
   **不搜 `thinking`**：思考链默认折叠且体积不可控，命中它等于给用户一个点开也找不到关键词
   的会话。输入过程中保留上一次结果（仅同一串词的前后缀变化），否则每敲一个字列表都会
   先塌掉再弹回来；旧扫描用 `AbortSignal` 中止，慢查询不会覆盖新查询的结果。
+- **本地缓存只属于一个账号。** IndexedDB 按 origin 隔离，不跟账号走。登录/注册/启动
+  探测确认身份后都要先 `claimLocalData(userId)`（`lib/local-owner.ts`）：归属一致保留
+  历史，换了账号先清空再写新归属，然后才允许把状态切成已登录、启动同步引擎——顺序
+  反过来，新账号的同步会拿新 cookie 把旧账号待推送的行推上去。归属确认失败时**不进
+  主界面**（宁可不登录，也不要在别人的缓存上继续读写）。
+  会话**过期（401）不清库**：401 不代表用户想换账号，清掉会把没同步的内容直接删了。
+  本地库的清空会通过 `bennett:auth` 频道广播，其他标签页收到后重新探测身份并退回加载态
+  （整个主界面卸载再重挂，否则旧的会话列表还会挂在内存里）。
 - **契约在 `types.ts` 里，与后端逐字段对齐。** 后端对应
   `app/schemas/chat.py` 与 `app/schemas/events.py`。改字段名要两端同时改。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，
