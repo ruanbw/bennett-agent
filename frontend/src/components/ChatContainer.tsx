@@ -1,6 +1,12 @@
 import { useCallback, useRef, useState } from 'react';
 import { Check, Pencil, Plus, Search, Settings, X } from 'lucide-react';
 
+import {
+  SEARCH_SHORTCUT_KEYS,
+  SETTINGS_SHORTCUT_KEYS,
+  searchShortcutLabel,
+  settingsShortcutLabel,
+} from '../lib/keyboard-shortcuts';
 import { Thread } from './assistant-ui/elements/thread.aui';
 import { ChatSessionNotices } from './ChatProvider';
 import { SyncStatusButton } from './SyncStatusButton';
@@ -133,8 +139,9 @@ export function ChatContainer({
                   type="button"
                   onClick={onOpenSearch}
                   className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
-                  title="搜索对话"
+                  title={`搜索对话（${searchShortcutLabel()}）`}
                   aria-label="搜索对话"
+                  aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
                 >
                   <Search size={16} aria-hidden="true" />
                 </button>
@@ -144,8 +151,9 @@ export function ChatContainer({
                   type="button"
                   onClick={onOpenSettings}
                   className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
-                  title="设置"
+                  title={`设置（${settingsShortcutLabel()}）`}
                   aria-label="设置"
+                  aria-keyshortcuts={SETTINGS_SHORTCUT_KEYS}
                 >
                   <Settings size={16} aria-hidden="true" />
                 </button>

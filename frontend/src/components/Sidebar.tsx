@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Loader2, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
+import { SEARCH_SHORTCUT_KEYS, searchShortcutLabel } from '../lib/keyboard-shortcuts';
 import { matchText } from '../lib/session-search';
 import { visibleSelection } from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
@@ -102,6 +103,14 @@ export function Sidebar({
     setSeenSearchRequest(searchRequest);
     if (searchRequest > 0) setSearchOpen(true);
   }
+
+  // 搜索框的 autoFocus 只在挂载那一次生效：搜索已经打开时再按 ⌘K，需要把焦点从
+  // 消息输入框抢回来，否则快捷键看上去「什么都没发生」。
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (searchRequest === 0) return;
+    searchInputRef.current?.focus();
+  }, [searchRequest]);
 
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -333,8 +342,9 @@ export function Sidebar({
                 if (searchOpen) setSearchQuery('');
               }}
               className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition cursor-pointer"
-              title="搜索对话"
+              title={`搜索对话（${searchShortcutLabel()}）`}
               aria-label="搜索对话"
+              aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
               aria-expanded={searchOpen}
             >
               <Search size={16} aria-hidden="true" />
@@ -378,6 +388,7 @@ export function Sidebar({
                 aria-hidden="true"
               />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}

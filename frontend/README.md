@@ -55,12 +55,14 @@ src/
 │   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
 │   ├── local-stats.ts       # 本机数据统计 + 字节格式化
+│   ├── keyboard-shortcuts.ts # 快捷键判定与平台化提示文案
 │   ├── app-info.ts          # 版本号（构建注入的单一来源）
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
 │   ├── use-session-search.ts # 搜索防抖/中止/保留旧结果
 │   ├── use-local-stats.ts   # 设置面板打开时读一次本机数据
+│   ├── use-global-shortcuts.ts # 全局快捷键挂载（判定在 lib）
 │   └── use-media-query.ts   # 响应式媒体查询
 ├── context/                 # theme / clarification
 ├── components/
@@ -125,6 +127,12 @@ src/
   **不搜 `thinking`**：思考链默认折叠且体积不可控，命中它等于给用户一个点开也找不到关键词
   的会话。输入过程中保留上一次结果（仅同一串词的前后缀变化），否则每敲一个字列表都会
   先塌掉再弹回来；旧扫描用 `AbortSignal` 中止，慢查询不会覆盖新查询的结果。
+- **快捷键只认修饰键 + 物理键位，并且必须可发现。** `⌘K` / `Ctrl+K` 打开搜索，
+  `⌘,` / `Ctrl+,` 打开设置，判定统一在 `lib/keyboard-shortcuts.ts`：Meta 与 Ctrl 都认、
+  不认 Alt/Shift、输入法组合中不抢键、优先看 `event.code`（俄文等非 Latin 布局下
+  `event.key` 不是 `k`）。入口按钮同时挂 `title`（平台化提示）与 `aria-keyshortcuts`，
+  否则快捷键只有作者知道。搜索已经打开时再按 `⌘K` 要主动聚焦输入框——`autoFocus`
+  只在挂载那一次生效。
 - **设置面板里的每个数字都要有出处。** 版本号来自 package.json（`vite.config.js` 的
   `define` 注入 `__APP_VERSION__`，唯一读取点是 `lib/app-info.ts`）——此前写死 `v0.1.0`
   而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑

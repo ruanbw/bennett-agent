@@ -11,6 +11,7 @@ import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
 import { useAuth } from './hooks/use-auth';
 import { useChatSessions } from './hooks/use-chat-sessions';
+import { useGlobalShortcuts } from './hooks/use-global-shortcuts';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
@@ -259,6 +260,9 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
     setSidebarOverride(true);
     setSearchRequest((request) => request + 1);
   }, []);
+
+  // ⌘K / Ctrl+K 打开搜索；⌘, / Ctrl+, 打开设置（与胶囊工具栏的两个入口共用动作）
+  useGlobalShortcuts({ onOpenSearch: handleOpenSearch, onOpenSettings: handleOpenSettings });
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
