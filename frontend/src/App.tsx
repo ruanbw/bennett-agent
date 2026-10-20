@@ -156,8 +156,16 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
     if (!isMobile || !isOpen) return undefined;
 
     const drawer = document.querySelector<HTMLElement>(SIDEBAR_DRAWER_SELECTOR);
-    // preventScroll：抽屉是 fixed 定位，聚焦不该带着页面滚一下
-    (drawer?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? drawer)?.focus({ preventScroll: true });
+    // 焦点已经在抽屉里就不动它：搜索框的 autoFocus 比本 effect 先执行，胶囊工具栏的
+    // 「搜索」就是靠它把光标直接放进入口；无条件聚焦第一个控件会把这个位置抢回去。
+    const active = document.activeElement;
+    const focusInside = drawer !== null && active !== null && drawer.contains(active);
+    if (!focusInside) {
+      // preventScroll：抽屉是 fixed 定位，聚焦不该带着页面滚一下
+      (drawer?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? drawer)?.focus({
+        preventScroll: true,
+      });
+    }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -226,9 +234,23 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
   const isSidebarOpen = sidebarOverride ?? !isMobile;
   const setIsSidebarOpen = setSidebarOverride;
 
+  /**
+   * 「搜索」请求：收起态没有搜索框，所以由顶栏胶囊工具栏发起「展开侧边栏 + 打开搜索」。
+   *
+   * 用递增计数器而不是布尔值：布尔值重复置 true 不会触发重渲染，用户关掉搜索后
+   * 再点一次就打不开了。计数器的每次变化都是一次独立请求。
+   */
+  const [searchRequest, setSearchRequest] = useState(0);
+
   const handleToggleSidebar = useCallback(() => {
     setSidebarOverride(!isSidebarOpen);
   }, [isSidebarOpen]);
+
+  const handleOpenSearch = useCallback(() => {
+    // 移动端上「展开侧边栏」就是打开抽屉，搜索框在抽屉里。
+    setSidebarOverride(true);
+    setSearchRequest((request) => request + 1);
+  }, []);
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -267,6 +289,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
         onClearAllSessions={clearAllSessions}
         isOpen={isSidebarOpen}
         onToggleOpen={handleToggleSidebar}
+        searchRequest={searchRequest}
         userEmail={userEmail}
         canOpenAdmin={canOpenAdmin}
         onOpenAdmin={handleOpenAdmin}
@@ -309,6 +332,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
                 onSelectReasoningEffort={selectReasoningEffort}
                 onRefreshModels={refreshModels}
                 onToggleSidebar={handleToggleSidebar}
+                onOpenSearch={handleOpenSearch}
                 onCreateSession={handleCreateSession}
                 isSidebarOpen={isSidebarOpen}
               />

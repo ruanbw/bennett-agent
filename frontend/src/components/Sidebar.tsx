@@ -36,6 +36,13 @@ export interface SidebarProps {
   isOpen: boolean;
   /** 收起侧边栏。桌面端收起后由 ChatContainer 顶栏的胶囊工具栏负责重新展开。 */
   onToggleOpen?: () => void;
+  /**
+   * 「打开搜索」请求：每次递增代表一次新请求（收起态没有搜索框，入口在顶栏胶囊工具栏）。
+   *
+   * 用计数器而不是布尔值：布尔值重复设为 true 不会产生新值，用户关掉搜索后再点一次
+   * 就打不开了。
+   */
+  searchRequest?: number;
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
   /** 超级管理员才渲染管理后台入口；普通用户可不传。 */
@@ -64,6 +71,7 @@ export function Sidebar({
   onClearAllSessions,
   isOpen,
   onToggleOpen,
+  searchRequest = 0,
   userEmail,
   onLogout,
   canOpenAdmin = false,
@@ -79,6 +87,15 @@ export function Sidebar({
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+
+  // 顶栏胶囊工具栏发起的搜索请求。用「渲染期校正 props → state」而不是 effect：
+  // effect 里同步 setState 会多跑一轮渲染（而且这正是 oxlint 拦的写法）。
+  // seen 的初值是 0：首次挂载时如果已经攒了一个请求（>0），也应该打开搜索。
+  const [seenSearchRequest, setSeenSearchRequest] = useState(0);
+  if (seenSearchRequest !== searchRequest) {
+    setSeenSearchRequest(searchRequest);
+    if (searchRequest > 0) setSearchOpen(true);
+  }
 
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
