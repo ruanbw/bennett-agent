@@ -9,6 +9,7 @@
 
 import { clearAllLocalData } from '../db';
 import { apiFetch, bumpAuthEpoch, readErrorDetail } from './api';
+import { MIN_PASSWORD_LENGTH } from './constants';
 import { abortAllRuns } from './chat-runs';
 import { flushPending, stopSync } from './sync/engine';
 
@@ -68,12 +69,12 @@ export const LOGOUT_UNCONFIRMED_MESSAGE =
 export const REGISTER_LOGIN_FAILED_MESSAGE = '账号已创建，请直接登录';
 
 /**
- * 密码最小长度，与后端 `app/services/auth.py:MIN_PASSWORD_LENGTH` 保持一致。
+ * 密码最小长度（定义在 constants，这里再导出以保持既有 import 路径）。
  *
  * 前端校验只是为了**即时反馈**，不是安全边界——真正的校验必须在服务端，因为
  * 客户端的一切都可以绕过。两边都留着是有意的：前端给体验，后端给保证。
  */
-export const MIN_PASSWORD_LENGTH = 8;
+export { MIN_PASSWORD_LENGTH };
 
 /** 判断一个错误是不是「中断/超时」：AbortSignal.timeout 抛的 name 是 TimeoutError。 */
 function isAbortError(err: unknown): boolean {
@@ -125,6 +126,42 @@ export async function login(email: string, password: string): Promise<AuthResult
     notifyUnauthorized: false,
     timeoutMs: AUTH_TIMEOUT_MS,
   });
+
+  if (response.ok) return { ok: true };
+
+  return { ok: false, message: describeAuthError(await readErrorDetail(response), response.status) };
+}
+
+export interface ChangePasswordInput {
+  currentPassword: string;
+  newPassword: string;
+}
+
+/**
+ * 修改**当前账号**的密码。
+ *
+ * 成功返回 204，同时服务端会让该账号的**全部会话**立即失效（包括发起请求的这一个），
+ * 所以调用方随后必须把 UI 退回登录页——继续用旧会话只会拿到 401。
+ *
+ * 401 不在这里处理：那是「会话已失效」的全局路径（`apiFetch` 会通知 `useAuth`）；
+ * 表单填错当前密码返回的是 400，留在原地重试。
+ */
+export async function changePassword(input: ChangePasswordInput): Promise<AuthResult> {
+  let response: Response;
+  try {
+    response = await apiFetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        current_password: input.currentPassword,
+        new_password: input.newPassword,
+      }),
+      timeoutMs: AUTH_TIMEOUT_MS,
+    });
+  } catch (err) {
+    console.error('修改密码请求失败:', err);
+    return { ok: false, message: describeConnectionError(err) };
+  }
 
   if (response.ok) return { ok: true };
 
@@ -363,6 +400,8 @@ const AUTH_ERROR_MESSAGES: Record<string, string> = {
   LOGIN_BAD_CREDENTIALS: '邮箱或密码错误',
   REGISTER_USER_ALREADY_EXISTS: '该邮箱已注册',
   REGISTER_INVALID_PASSWORD: `密码不符合要求（至少 ${MIN_PASSWORD_LENGTH} 个字符）`,
+  CHANGE_PASSWORD_BAD_CREDENTIALS: '当前密码不正确',
+  CHANGE_PASSWORD_SAME: '新密码不能与当前密码相同',
 };
 
 /** 字段路径里常见的字段名 → 中文。取不到就保留英文路径，至少能定位。 */
@@ -407,6 +446,11 @@ export function describeAuthError(detail: string, status?: number): string {
 
   const known = AUTH_ERROR_MESSAGES[detail];
   if (known) return known;
+
+  // 改密的密码策略错误带了前缀（`CHANGE_PASSWORD_INVALID: <reason>`）：
+  // 把 reason 原样交给用户，别把机器码一起显示
+  const invalidNewPassword = /^CHANGE_PASSWORD_INVALID:\s*(.+)$/.exec(detail);
+  if (invalidNewPassword) return invalidNewPassword[1];
 
   const { field, message } = splitFieldPath(detail);
   const mapped = mapValidationMessage(message);

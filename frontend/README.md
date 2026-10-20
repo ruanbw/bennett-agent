@@ -162,6 +162,12 @@ src/
   `navigator.storage.estimate()`，是**整个 origin** 的估算值，文案必须说清这一点，
   否则用户会拿它精确对账。设置面板挂在 `App` 而不是 `AccountBar`：侧边栏收起时
   AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
+- **改密 = 踢掉所有会话。** 设置面板的「修改密码」调用 `POST /api/auth/change-password`
+  （验当前密码 → 新密码走与注册同一条 `validate_password` → `UserManager.update` 触发
+  `on_after_update` 删掉该账号全部 access_token）。成功后客户端**不能**再假装已登录：
+  `useAuth.expireSession()` 停同步、退回登录页并说明原因；本地会话数据不清（同一账号
+  重新登录后历史还在，跨账号隔离由 `claimLocalData` 负责）。表单错误用 400 而不是 401——
+  401 会被全局处理当成会话过期直接登出，用户就失去了原地重试的机会。
 - **本地缓存只属于一个账号。** IndexedDB 按 origin 隔离，不跟账号走。登录/注册/启动
   探测确认身份后都要先 `claimLocalData(userId)`（`lib/local-owner.ts`）：归属一致保留
   历史，换了账号先清空再写新归属，然后才允许把状态切成已登录、启动同步引擎——顺序

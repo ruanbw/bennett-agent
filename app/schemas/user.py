@@ -32,7 +32,7 @@
 import uuid
 
 from fastapi_users import schemas
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from app.roles import ROLE_USER
 
@@ -61,3 +61,17 @@ class UserUpdate(schemas.BaseUserUpdate):
     传入敏感字段——调用点只传 `password`。这里保留独立类型而不是裸 dict，是为了让
     `UserManager.update()` 的密码校验（`validate_password`）与线上登录走同一条路。
     """
+
+
+class PasswordChangeRequest(BaseModel):
+    """改密入参。
+
+    **不带 user_id**：改的永远是「当前会话对应的账号」，由服务端从 cookie 解析。
+    接受 user_id 等于把「改别人密码」变成一个参数问题。
+
+    长度下限刻意只在 `UserManager.validate_password` 里校验一次（与注册共用），
+    这里只挡住空串——两处各写一个 8 会让规则有一天悄悄分叉。
+    """
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)

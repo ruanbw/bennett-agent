@@ -1,4 +1,4 @@
-import { Check, Laptop, Moon, Sun, User, Info, HardDrive } from 'lucide-react';
+import { Check, Laptop, Moon, Sun, User, Info, HardDrive, KeyRound } from 'lucide-react';
 
 import {
   Dialog,
@@ -12,6 +12,7 @@ import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useLocalDataStats } from '../hooks/use-local-stats';
+import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
 import { formatBytes } from '../lib/local-stats';
@@ -22,11 +23,14 @@ export interface SettingsDialogProps {
   userEmail: string | null;
   /** 当前账号角色（`user` / `admin` / `superadmin`）。未知/未传时不显示徽标。 */
   userRole?: string | null;
+  /** 密码修改成功后调用：服务端已失效所有会话，App 负责退回登录页。 */
+  onPasswordChanged?: () => void;
 }
 
 export interface SettingsPanelProps {
   userEmail: string | null;
   userRole?: string | null;
+  onPasswordChanged?: () => void;
   /**
    * 面板是否可见。默认 true（直接渲染 `SettingsPanel` 的场景）。
    * 本机数据只在打开时读一次，不是实时监控。
@@ -63,7 +67,12 @@ const THEME_OPTIONS: Array<{
 /**
  * 设置面板内容组件：支持独立复用与服务端渲染测试。
  */
-export function SettingsPanel({ userEmail, userRole = null, open = true }: SettingsPanelProps) {
+export function SettingsPanel({
+  userEmail,
+  userRole = null,
+  open = true,
+  onPasswordChanged,
+}: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
   const stats = useLocalDataStats(open);
 
@@ -149,6 +158,15 @@ export function SettingsPanel({ userEmail, userRole = null, open = true }: Setti
         </div>
       </div>
 
+      {/* 修改密码：成功会让所有设备下线，由 App 统一退回登录页 */}
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <KeyRound className="size-3.5" />
+          <span>修改密码</span>
+        </h4>
+        <PasswordChangeForm onPasswordChanged={onPasswordChanged} />
+      </div>
+
       {/* 本机数据区块：数据默认只存浏览器，用户应该能知道自己存了多少 */}
       <div className="space-y-2">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
@@ -205,7 +223,13 @@ export function SettingsPanel({ userEmail, userRole = null, open = true }: Setti
   );
 }
 
-export function SettingsDialog({ open, onOpenChange, userEmail, userRole = null }: SettingsDialogProps) {
+export function SettingsDialog({
+  open,
+  onOpenChange,
+  userEmail,
+  userRole = null,
+  onPasswordChanged,
+}: SettingsDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto">
@@ -214,7 +238,12 @@ export function SettingsDialog({ open, onOpenChange, userEmail, userRole = null 
           <DialogDescription>管理你的外观偏好与账号信息</DialogDescription>
         </DialogHeader>
 
-        <SettingsPanel userEmail={userEmail} userRole={userRole} open={open} />
+        <SettingsPanel
+          userEmail={userEmail}
+          userRole={userRole}
+          open={open}
+          onPasswordChanged={onPasswordChanged}
+        />
 
         <DialogFooter>
           <Button variant="default" size="sm" onClick={() => onOpenChange(false)}>

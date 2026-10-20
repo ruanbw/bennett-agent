@@ -46,6 +46,13 @@ export interface UseAuthResult {
    */
   register: (email: string, password: string) => Promise<RegisterOutcome>;
   logout: () => Promise<void>;
+  /**
+   * 服务端已让本会话失效（例如刚改完密码）：停同步、退回登录页并说明原因。
+   *
+   * 与登出的区别是**不清空本地数据**：同一个账号重新登录后历史还在，而登出是
+   * 「把设备交出去」的语义。真正的跨账号隔离由 `claimLocalData` 负责。
+   */
+  expireSession: (message: string) => void;
   clearError: () => void;
 }
 
@@ -241,7 +248,15 @@ export function useAuth(): UseAuthResult {
     setError(result.error);
   }, []);
 
+  const expireSession = useCallback((message: string) => {
+    // 服务端已经删掉了会话行，同步循环继续跑只会不断 401
+    stopSync();
+    setUser(null);
+    setStatus('anonymous');
+    setError(message);
+  }, []);
+
   const clearError = useCallback(() => setError(null), []);
 
-  return { status, user, pending, error, login, register, logout, clearError };
+  return { status, user, pending, error, login, register, logout, expireSession, clearError };
 }

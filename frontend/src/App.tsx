@@ -141,6 +141,8 @@ export interface AuthenticatedShellProps {
   userEmail: string | null;
   /** 当前账号角色（`user` / `admin` / `superadmin`），设置面板里展示。 */
   userRole: string | null;
+  /** 服务端已使本会话失效（改密）：切回未登录并说明原因。 */
+  onSessionExpired: (message: string) => void;
   canOpenAdmin: boolean;
   /** 是否 superadmin：决定管理后台「用户管理」里能不能改角色。 */
   canManageRoles: boolean;
@@ -194,7 +196,14 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
  * 已登录才该跑的副作用，只有整个组件按登录态挂载/卸载才能自然做到，而 hook 不能
  * 条件调用。
  */
-function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles, onLogout }: AuthenticatedShellProps) {
+function AuthenticatedShell({
+  userEmail,
+  userRole,
+  onSessionExpired,
+  canOpenAdmin,
+  canManageRoles,
+  onLogout,
+}: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
   const {
     sessions,
@@ -403,6 +412,7 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
         onOpenChange={setSettingsOpen}
         userEmail={userEmail}
         userRole={userRole}
+        onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
       />
 
       {adminOpen && (
@@ -428,7 +438,8 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
  * 自身渲染期抛出的错误。这里只保留「对话区域」那层按会话重建的边界。
  */
 export function App() {
-  const { status, user, pending, error, login, register, logout, clearError } = useAuth();
+  const { status, user, pending, error, login, register, logout, expireSession, clearError } =
+    useAuth();
   const userId = user?.id ?? null;
 
   /*
@@ -464,6 +475,7 @@ export function App() {
         <AuthenticatedShell
           userEmail={user?.email ?? null}
           userRole={user?.role ?? null}
+          onSessionExpired={expireSession}
           canOpenAdmin={canAccessAdmin(user)}
           canManageRoles={isSuperadmin(user)}
           onLogout={logout}

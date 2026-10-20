@@ -26,12 +26,19 @@
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi_users.exceptions import InvalidPasswordException
 
 from app.api.rate_limit import enforce_auth_rate_limit
 from app.db import User
-from app.schemas.user import UserCreate, UserRead
-from app.services.auth import auth_backend, current_active_user, fastapi_users
+from app.schemas.user import PasswordChangeRequest, UserCreate, UserRead, UserUpdate
+from app.services.auth import (
+    UserManager,
+    auth_backend,
+    current_active_user,
+    fastapi_users,
+    get_user_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,65 @@ for _route in _register_router.routes:
         # 注册是**未认证**入口，同样要按 IP 挡批量建号
         _route.dependencies.append(Depends(enforce_auth_rate_limit))
 router.include_router(_register_router)
+
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="修改当前账号密码",
+)
+async def change_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    user: User = Depends(current_active_user),  # noqa: B008
+    user_manager: UserManager = Depends(get_user_manager),  # noqa: B008
+) -> Response:
+    """修改**当前会话所属账号**的密码，成功后该账号的全部会话立即失效。
+
+    三条规则：
+
+    1. **必须验证当前密码**。会话 cookie 可能是别人临时用过的设备；只知道「已登录」
+       不足以改密码，否则拾到一台未锁屏的机器就能永久接管账号。
+    2. **新密码走与注册同一条校验**（`user_manager.update` → `validate_password`），
+       不在路由里复制一份长度规则。
+    3. **成功后踢掉所有会话**（`UserManager.on_after_update` 里的
+       `delete_user_access_tokens`），包括发起请求的这一个：改密的语义就是「之前所有
+       登录态都不再可信」。客户端随后会拿到 401 并回到登录页。
+
+    不额外挂 IP 限流：这是已认证端点，且验证的是 8 位以上的真实密码——暴力破解不成立，
+    而共用登录的限流桶反而会让「登录 + 改密」在 NAT 后面误伤。
+    """
+    # verify_and_update 是框架自带的校验入口：bcrypt 升级时它还会返回重算后的哈希，
+    # 但本路由马上会整行重写密码，不需要在这里落库。
+    valid, _ = user_manager.password_helper.verify_and_update(
+        payload.current_password, user.hashed_password
+    )
+    if not valid:
+        # 400 而不是 401：401 会被前端的全局处理当成「会话过期」直接登出，
+        # 而这里只是表单里填错了当前密码，用户应当留在原地重试。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="CHANGE_PASSWORD_BAD_CREDENTIALS",
+        )
+
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="CHANGE_PASSWORD_SAME",
+        )
+
+    try:
+        await user_manager.update(
+            UserUpdate(password=payload.new_password), user, request=request
+        )
+    except InvalidPasswordException as exc:
+        # 与注册保持同一个错误形状：前端把 reason 直接展示给用户
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"CHANGE_PASSWORD_INVALID: {exc.reason}",
+        ) from exc
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me", response_model=UserRead, summary="获取当前登录用户")
