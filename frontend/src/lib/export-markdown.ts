@@ -150,41 +150,56 @@ function renderToolCall(toolCall: ToolCallRecord): string[] {
   return lines;
 }
 
-/**
- * 生成整段会话的 Markdown。
- *
- * 纯函数：不读库、不碰 DOM、不依赖当前时间（除非调用方不传 `exportedAt`），因此可以直接
- * 用固定时间戳做快照断言。消息顺序就是传入顺序（调用方按 `createdAt` 排序）。
- */
-export function buildConversationMarkdown(
+/** 单个会话的渲染参数（内部；对外只有两个构建函数）。 */
+interface RenderConversationOptions {
+  /** 标题层级：单会话文件用 1，归档里每个会话用 2（角色标题固定深一级）。 */
+  titleLevel?: number;
+  /**
+   * 元信息形状。
+   * - `full`：品牌 + 创建/更新时间 + 消息数（单会话文件）
+   * - `compact`：一行「最后更新 + 消息数」（归档里每个会话一段，重复品牌信息只是噪音）
+   */
+  meta?: 'full' | 'compact';
+  exportedAt?: number;
+}
+
+function renderConversation(
   session: Pick<SessionRecord, 'title' | 'createdAt' | 'updatedAt'>,
   messages: readonly MessageRecord[],
-  { exportedAt = Date.now() }: ExportConversationOptions = {},
-): string {
+  { titleLevel = 1, meta = 'full', exportedAt = Date.now() }: RenderConversationOptions = {},
+): string[] {
   const renderable = messages.filter(hasRenderableContent);
   const title = session.title?.trim() || '未命名对话';
+  const heading = (level: number): string => '#'.repeat(level);
 
-  const lines: string[] = [
-    `# ${title}`,
-    '',
-    '> 导出自 Bennett Agent',
-    `> 创建时间：${formatTimestamp(session.createdAt)}`,
-    `> 最后更新：${formatTimestamp(session.updatedAt)}`,
-    `> 导出时间：${formatTimestamp(exportedAt)}`,
-    `> 消息数：${renderable.length}`,
-    '',
-    '---',
-    '',
-  ];
+  const lines: string[] = [`${heading(titleLevel)} ${title}`, ''];
+
+  if (meta === 'full') {
+    lines.push(
+      '> 导出自 Bennett Agent',
+      `> 创建时间：${formatTimestamp(session.createdAt)}`,
+      `> 最后更新：${formatTimestamp(session.updatedAt)}`,
+      `> 导出时间：${formatTimestamp(exportedAt)}`,
+      `> 消息数：${renderable.length}`,
+      '',
+      '---',
+      '',
+    );
+  } else {
+    lines.push(
+      `> 最后更新：${formatTimestamp(session.updatedAt)} · 消息数：${renderable.length}`,
+      '',
+    );
+  }
 
   if (renderable.length === 0) {
     lines.push('（这条会话还没有可导出的消息。）', '');
-    return lines.join('\n');
+    return lines;
   }
 
   for (const message of renderable) {
     const role = message.role === 'user' ? '你' : '助手';
-    lines.push(`## ${role} · ${formatTimestamp(message.createdAt)}`, '');
+    lines.push(`${heading(titleLevel + 1)} ${role} · ${formatTimestamp(message.createdAt)}`, '');
 
     const content = message.content.trim();
     if (content) lines.push(content, '');
@@ -201,6 +216,74 @@ export function buildConversationMarkdown(
     }
 
     lines.push('---', '');
+  }
+
+  return lines;
+}
+
+/**
+ * 生成整段会话的 Markdown（单会话文件）。
+ *
+ * 纯函数：不读库、不碰 DOM、不依赖当前时间（除非调用方不传 `exportedAt`），因此可以直接
+ * 用固定时间戳做快照断言。消息顺序就是传入顺序（调用方按 `createdAt` 排序）。
+ */
+export function buildConversationMarkdown(
+  session: Pick<SessionRecord, 'title' | 'createdAt' | 'updatedAt'>,
+  messages: readonly MessageRecord[],
+  { exportedAt = Date.now() }: ExportConversationOptions = {},
+): string {
+  return renderConversation(session, messages, { exportedAt }).join('\n');
+}
+
+/** 归档里的一段会话。 */
+export interface ArchiveEntry {
+  session: Pick<SessionRecord, 'title' | 'createdAt' | 'updatedAt'>;
+  messages: readonly MessageRecord[];
+}
+
+/** 归档文件名：`Bennett-对话导出-YYYYMMDD-HHmm.md`（可排序、无空格）。 */
+export function archiveFileName(now: number = Date.now()): string {
+  return `Bennett-对话导出-${timestampSlug(now)}.md`;
+}
+
+/**
+ * 把多个会话合并成一个 Markdown 归档（批量导出的「备份」形态）。
+ *
+ * 不逐个触发下载：浏览器会拦截「连续多个下载」并要求用户确认，选中 20 个会话就是
+ * 20 次确认。一个文件更接近用户真正想要的「备份」，也方便一次性搜索/归档。
+ *
+ * 每段会话的标题降为 `##`，正文标题跟着降一级；会话之间用 `---` 分隔。
+ */
+export function buildArchiveMarkdown(
+  entries: readonly ArchiveEntry[],
+  { exportedAt = Date.now() }: ExportConversationOptions = {},
+): string {
+  const lines: string[] = [
+    '# Bennett 对话导出',
+    '',
+    '> 导出自 Bennett Agent',
+    `> 导出时间：${formatTimestamp(exportedAt)}`,
+    `> 会话数：${entries.length}`,
+    '',
+    '---',
+    '',
+  ];
+
+  if (entries.length === 0) {
+    lines.push('（没有可导出的会话。）', '');
+    return lines.join('\n');
+  }
+
+  for (const entry of entries) {
+    lines.push(
+      ...renderConversation(entry.session, entry.messages, {
+        titleLevel: 2,
+        meta: 'compact',
+        exportedAt,
+      }),
+    );
+    // 有消息的会话已经以 `---` 收尾；空会话要补一条，否则两段会粘在一起
+    if (!entry.messages.some(hasRenderableContent)) lines.push('---', '');
   }
 
   return lines.join('\n');

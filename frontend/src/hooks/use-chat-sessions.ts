@@ -4,8 +4,11 @@ import { db } from '../db';
 import { loadSessionMessages } from '../lib/chat-persistence';
 import { DEFAULT_REASONING_EFFORT, newSessionId } from '../lib/constants';
 import {
+  archiveFileName,
+  buildArchiveMarkdown,
   buildConversationMarkdown,
   exportFileName,
+  type ArchiveEntry,
   type ExportedConversation,
 } from '../lib/export-markdown';
 import { reconcileEffort } from '../lib/reasoning-effort';
@@ -62,6 +65,8 @@ export interface UseChatSessionsResult {
   clearAllSessions: () => Promise<void>;
   /** 读库生成一份 Markdown 导出（含文件名）。会话不存在时 reject。 */
   exportSession: (sessionId: string) => Promise<ExportedConversation>;
+  /** 把选中的多个会话合并成一个归档文件；没有任何有效会话时 reject。 */
+  exportSessions: (sessionIds: string[]) => Promise<ExportedConversation>;
   selectModel: (modelId: string) => Promise<void>;
   selectReasoningEffort: (effort: string) => Promise<void>;
   reloadSessions: () => Promise<SessionRecord[]>;
@@ -271,6 +276,35 @@ export function useChatSessions({
     [],
   );
 
+  /**
+   * 批量导出：一个归档文件，而不是逐个触发下载。
+   *
+   * 顺序按最近活动倒序（与侧边栏一致），不依赖选中集合的插入顺序——否则同样的选择
+   * 每次导出的段落顺序都可能不同。墓碑会话直接跳过（它们对用户已经不存在了）。
+   */
+  const exportSessions = useCallback(
+    async (sessionIds: string[]): Promise<ExportedConversation> => {
+      const unique = [...new Set(sessionIds)];
+      const loaded = await Promise.all(
+        unique.map(async (id): Promise<ArchiveEntry | null> => {
+          const [session, messages] = await Promise.all([
+            db.sessions.get(id),
+            loadSessionMessages(id),
+          ]);
+          if (!session || session.deleted) return null;
+          return { session, messages };
+        }),
+      );
+
+      const entries = loaded.filter((entry): entry is ArchiveEntry => entry !== null);
+      if (entries.length === 0) throw new Error('没有可导出的会话');
+
+      entries.sort((a, b) => (b.session.updatedAt || 0) - (a.session.updatedAt || 0));
+      return { filename: archiveFileName(), markdown: buildArchiveMarkdown(entries) };
+    },
+    [],
+  );
+
   // -------------------------------------------------------------------
   // 删除：单条、批量、清空共用同一个实现
   // -------------------------------------------------------------------
@@ -447,6 +481,7 @@ export function useChatSessions({
     removeSessions,
     clearAllSessions,
     exportSession,
+    exportSessions,
     selectModel,
     selectReasoningEffort,
     reloadSessions,

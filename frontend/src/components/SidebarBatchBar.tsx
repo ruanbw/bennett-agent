@@ -1,4 +1,4 @@
-import { Pin, PinOff, Trash2 } from 'lucide-react';
+import { Download, Pin, PinOff, Trash2 } from 'lucide-react';
 
 export interface SidebarBatchBarProps {
   selectedCount: number;
@@ -10,6 +10,8 @@ export interface SidebarBatchBarProps {
   onUnpinSelected: () => void | Promise<unknown>;
   onRequestBatchDelete: () => void | Promise<unknown>;
   onRequestClearAll: () => void | Promise<unknown>;
+  /** 把选中会话导出为一个 Markdown 归档；未传时不渲染（不给出点不动的入口）。 */
+  onExportSelected?: () => void | Promise<unknown>;
   canClearAll: boolean;
 }
 
@@ -33,6 +35,7 @@ export function SidebarBatchBar({
   onUnpinSelected,
   onRequestBatchDelete,
   onRequestClearAll,
+  onExportSelected,
   canClearAll,
 }: SidebarBatchBarProps) {
   const isEmpty = selectedCount === 0;
@@ -66,7 +69,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onPinSelected, '置顶选中会话失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
           title="置顶选中会话"
         >
           <Pin size={11} aria-hidden="true" />
@@ -76,7 +79,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onUnpinSelected, '取消置顶失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
           title="取消选中会话的置顶"
         >
           <PinOff size={11} aria-hidden="true" />
@@ -86,13 +89,26 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onRequestBatchDelete, '批量删除失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer transition"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
           title="删除选中"
         >
           <Trash2 size={11} aria-hidden="true" />
           <span>删除</span>
         </button>
       </div>
+
+      {onExportSelected && (
+        <button
+          type="button"
+          onClick={() => trigger(onExportSelected, '导出选中会话失败')}
+          disabled={isEmpty}
+          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition cursor-pointer disabled:opacity-50 disabled:hover:bg-transparent"
+          title="把选中的会话导出为一个 Markdown 文件"
+        >
+          <Download size={12} aria-hidden="true" />
+          <span>导出选中（Markdown）</span>
+        </button>
+      )}
 
       {canClearAll && (
         <button

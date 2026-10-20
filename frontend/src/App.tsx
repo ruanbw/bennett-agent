@@ -207,6 +207,7 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
     removeSessions,
     clearAllSessions,
     exportSession,
+    exportSessions,
     selectModel,
     selectReasoningEffort,
   } = useChatSessions({ models, defaultModel });
@@ -297,6 +298,15 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
     [exportSession]
   );
 
+  /** 批量导出：合并成一个归档文件（逐个下载会被浏览器拦截并要求多次确认）。 */
+  const handleExportSessions = useCallback(
+    async (sessionIds: string[]) => {
+      const { filename, markdown } = await exportSessions(sessionIds);
+      downloadMarkdownFile(filename, markdown);
+    },
+    [exportSessions]
+  );
+
   const closeSidebar = useCallback(() => setSidebarOverride(false), []);
   useMobileDrawerA11y(isMobile, isSidebarOpen, closeSidebar);
 
@@ -310,6 +320,7 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
         onUpdateTitle={updateTitle}
         onDeleteSession={handleDeleteSession}
         onExportSession={handleExportSession}
+        onExportSessions={handleExportSessions}
         onTogglePinSession={togglePin}
         onBatchDelete={removeSessions}
         onBatchTogglePin={setPinned}

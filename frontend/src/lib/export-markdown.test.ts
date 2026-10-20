@@ -12,11 +12,14 @@ import type { MessageRecord, SessionRecord, ToolCallRecord } from '../types';
 import {
   MAX_FILENAME_CHARS,
   MAX_TOOL_TEXT_CHARS,
+  archiveFileName,
+  buildArchiveMarkdown,
   buildConversationMarkdown,
   downloadMarkdownFile,
   exportFileName,
   fencedBlock,
   formatTimestamp,
+  type ArchiveEntry,
 } from './export-markdown';
 
 /** 本地时区的固定时刻：断言不依赖运行环境的 TZ。 */
@@ -218,5 +221,68 @@ describe('buildConversationMarkdown', () => {
 describe('downloadMarkdownFile', () => {
   it('没有 DOM 时安全地返回 false（不在浏览器里就不尝试）', () => {
     expect(downloadMarkdownFile('a.md', '# a')).toBe(false);
+  });
+});
+
+const entry = (
+  title: string,
+  messages: MessageRecord[],
+  updatedAt = at(11),
+): ArchiveEntry => ({
+  session: { title, createdAt: at(9), updatedAt },
+  messages,
+});
+
+describe('buildArchiveMarkdown', () => {
+  it('归档头带会话数，每段会话标题降为二级、角色标题降为三级', () => {
+    const markdown = buildArchiveMarkdown(
+      [entry('会话一', [userMessage()]), entry('会话二', [assistantMessage()])],
+      { exportedAt: at(12) },
+    );
+
+    expect(markdown.startsWith('# Bennett 对话导出\n')).toBe(true);
+    expect(markdown).toContain('> 导出时间：2026-10-21 12:00');
+    expect(markdown).toContain('> 会话数：2');
+    expect(markdown).toContain('## 会话一');
+    expect(markdown).toContain('### 你 · 2026-10-21 10:00');
+    expect(markdown).toContain('## 会话二');
+    expect(markdown).toContain('### 助手 · 2026-10-21 10:01');
+    // 一级的角色标题只属于单会话文件
+    expect(markdown).not.toMatch(/^## (你|助手) /m);
+  });
+
+  it('每段会话带一行紧凑元信息（不重复品牌头）', () => {
+    const markdown = buildArchiveMarkdown([entry('会话一', [userMessage()], at(11))], {
+      exportedAt: at(12),
+    });
+
+    expect(markdown).toContain('> 最后更新：2026-10-21 11:00 · 消息数：1');
+    // 品牌行只在归档头出现一次
+    expect(markdown.match(/导出自 Bennett Agent/g)).toHaveLength(1);
+  });
+
+  it('空会话也保留在归档里，并与下一段分隔开', () => {
+    const markdown = buildArchiveMarkdown(
+      [entry('空会话', []), entry('有内容', [userMessage()])],
+      { exportedAt: at(12) },
+    );
+
+    expect(markdown).toContain('（这条会话还没有可导出的消息。）');
+    // 空会话段落之后必须有分隔线，否则下一段标题会粘在上面
+    expect(markdown.indexOf('---', markdown.indexOf('## 空会话'))).toBeLessThan(
+      markdown.indexOf('## 有内容'),
+    );
+  });
+
+  it('没有任何会话时给出明确说明', () => {
+    const markdown = buildArchiveMarkdown([], { exportedAt: at(12) });
+    expect(markdown).toContain('> 会话数：0');
+    expect(markdown).toContain('（没有可导出的会话。）');
+  });
+});
+
+describe('archiveFileName', () => {
+  it('带时间戳、无空格、可排序', () => {
+    expect(archiveFileName(at(12))).toBe('Bennett-对话导出-20261021-1200.md');
   });
 });

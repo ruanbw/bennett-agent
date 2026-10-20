@@ -32,6 +32,8 @@ export interface SidebarProps {
   onDeleteSession: (id: string) => void | Promise<unknown>;
   /** 导出整段会话为 Markdown；未传时不渲染菜单项（不给出点不动的入口）。 */
   onExportSession?: (id: string) => void | Promise<unknown>;
+  /** 批量导出选中的会话（一个归档文件）；未传时批量栏不渲染导出按钮。 */
+  onExportSessions?: (ids: string[]) => void | Promise<unknown>;
   onTogglePinSession: (id: string) => void | Promise<unknown>;
   onBatchDelete: (ids: string[]) => void | Promise<unknown>;
   onBatchTogglePin: (ids: string[], pinned: boolean) => void | Promise<unknown>;
@@ -71,6 +73,7 @@ export function Sidebar({
   onUpdateTitle,
   onDeleteSession,
   onExportSession,
+  onExportSessions,
   onTogglePinSession,
   onBatchDelete,
   onBatchTogglePin,
@@ -232,6 +235,13 @@ export function Sidebar({
     },
     [onExportSession, runAction],
   );
+
+  const handleExportSelected = useCallback(() => {
+    if (!onExportSessions) return;
+    const ids = [...visibleSelectedIds];
+    if (ids.length === 0) return;
+    void runAction(() => onExportSessions(ids), '导出失败，请重试');
+  }, [onExportSessions, visibleSelectedIds, runAction]);
 
   const handleBatchPin = useCallback(
     (pinned: boolean) => {
@@ -477,6 +487,7 @@ export function Sidebar({
           onUnpinSelected={() => handleBatchPin(false)}
           onRequestBatchDelete={requestBatchDelete}
           onRequestClearAll={requestClearAll}
+          onExportSelected={onExportSessions ? handleExportSelected : undefined}
           canClearAll={sessions.length > 0}
         />
       )}
