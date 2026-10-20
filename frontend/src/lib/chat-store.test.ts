@@ -18,6 +18,7 @@ import {
   isRunPersistFailed,
   markRunPersistFailed,
   removeRun,
+  setRunError,
   subscribeRun,
   subscribeRunningSessions,
   type CreateRunParams,
@@ -312,12 +313,51 @@ describe('事件折叠', () => {
     expect(getRun('a')!.content).toContain('无法解析的流数据')
   })
 
+  describe('setRunError', () => {
+    it('没有输出时按「本轮失败」收尾，不再叠一条「回复不完整」', () => {
+      start('a')
+      setRunError('a', {
+        message: '网络连接中断，请检查网络后重试',
+        retryable: true,
+        code: null,
+      })
+
+      const run = getRun('a')!
+      expect(run.error).toEqual({
+        message: '网络连接中断，请检查网络后重试',
+        retryable: true,
+        code: null,
+      })
+      expect(run.content).toContain('网络连接中断')
+      expect(run.sawError).toBe(true)
+
+      finishRun('a', {})
+      expect(run.incomplete).toBe(false)
+    })
+
+    it('已经流出半截内容时保持 incomplete，让用户知道看到的回答不全', () => {
+      start('a')
+      applyEvent('a', { type: 'content', delta: '半截回答' })
+      setRunError('a', { message: '请求超时，请重试', retryable: true, code: null })
+
+      const run = getRun('a')!
+      expect(run.error?.retryable).toBe(true)
+      expect(run.sawError).toBe(false)
+
+      finishRun('a', {})
+      expect(run.incomplete).toBe(true)
+    })
+
+    it('会话不存在时是空操作（落库回读/竞态下可能已经没有 run）', () => {
+      expect(() => setRunError('missing', { message: 'x', retryable: true, code: null })).not.toThrow()
+    })
+  })
+
   it('未知事件被忽略且不触发渲染', () => {
     start('a')
     flushNow()
     const listener = vi.fn()
     subscribeRun('a', listener)
-
     // 模拟服务端未来新增的事件类型：客户端契约里没有它
     expect(applyEvent('a', { type: '未来新事件' } as unknown as ChatEvent)).toBe(false)
     flushNow()

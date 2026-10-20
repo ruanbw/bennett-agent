@@ -532,6 +532,12 @@ describe('错误响应', () => {
     await expect(drain()).rejects.toThrow('HTTP 429: 请求过于频繁，请稍后重试')
   })
 
+  it('错误带结构化 status / Retry-After，供上层决定是否给重试', async () => {
+    stubFetch({ ok: false, status: 429, headers: { 'Retry-After': '17' } })
+
+    await expect(drain()).rejects.toMatchObject({ status: 429, retryAfterSeconds: 17 })
+  })
+
   it('422 把具体超限字段带进错误信息', async () => {
     errorResponse(422, async () => ({
       detail: [

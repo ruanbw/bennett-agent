@@ -26,6 +26,7 @@ import {
   type ErrorCode,
   type PartKind,
   type Run,
+  type RunError,
   type ToolCallRecord,
 } from '../types';
 
@@ -330,6 +331,28 @@ export function appendNotice(sessionId: string, label: string, detail?: string):
   if (!run) return;
 
   run.content += detail ? `\n\n> ⚠️ **${label}**: ${detail}` : `\n\n> ⚠️ **${label}**`;
+  touch(sessionId);
+}
+
+/**
+ * 记录一次「这一轮没跑完」的结构化失败。
+ *
+ * 与 `appendNotice` 的区别：除了写正文提示，还把 error 挂到 run 上——消息区据此
+ * 显示「重试」按钮，落库后刷新也还能恢复。
+ *
+ * 没收到任何输出就把 sawError 置位：这不是「回复不完整」，而是本轮直接失败，不该
+ * 再叠一条「回复不完整（已中断）」。中途断流、已经有半截内容时保持 incomplete，
+ * 让用户知道看到的回答是不全的。
+ */
+export function setRunError(sessionId: string, error: RunError): void {
+  const run = runs.get(sessionId);
+  if (!run) return;
+
+  const hadOutput =
+    run.content.trim().length > 0 || run.thinking.trim().length > 0 || run.toolCalls.length > 0;
+  run.error = error;
+  if (!hadOutput) run.sawError = true;
+  run.content += `\n\n> ⚠️ **请求失败**: ${error.message}`;
   touch(sessionId);
 }
 

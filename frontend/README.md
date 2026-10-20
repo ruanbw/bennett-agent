@@ -46,6 +46,8 @@ same-site）；真正**跨站**（不同注册域）浏览器不会带上 cookie
 src/
 ├── lib/                     # 纯逻辑，全部有 vitest 覆盖
 │   ├── chat-transport.ts    # fetch + SSE 分帧 + 错误响应解析
+│   ├── chat-request-error.ts # 非 2xx 对话错误（status / detail / Retry-After）
+│   ├── connection-failure.ts # 传输失败 → 中文结论 + 是否可重试
 │   ├── chat-store.ts        # run 状态机 + 按会话订阅（useSyncExternalStore）
 │   ├── chat-persistence.ts  # Dexie 读写形状
 │   ├── chat-runs.ts         # 编排门面（传输 → 状态 → 持久化）
@@ -174,6 +176,13 @@ src/
   （导出完成、新建会话失败）没有持久位置可放，才用 `lib/toast.ts` + `Toaster`。
   同语气同文案去重并重置倒计时、最多 3 条、错误停 8s（成功 4s）；可达性上逐条用
   `role="status"`（错误才用 `role="alert"`），容器不设 `aria-live`。
+- **请求没完成时，用户要看到「为什么」和「下一步」。** fetch 的原始拒绝信息因浏览器而异
+  （Chrome「Failed to fetch」、Safari「Load failed」），直接拼出来既不是中文也不可行动。
+  `lib/connection-failure.ts` 按结构化字段分类：5xx / 超时 / 断网可重试，4xx 不承诺
+  重试（重发结果一样），429 保留后端 `Retry-After` 的秒数，401 直接说重新登录。对话流
+  失败会把结论写进消息正文并挂到 `run.error` 上——消息区因此出现「重试」按钮，刷新后
+  仍在；没收到任何输出时按「本轮失败」收尾，不叠加「回复不完整」。`/api/models` 拉取
+  失败也用同一套翻译，菜单空态显示可读原因而不是一句 HTTP 500。
 - **重命名失败不能静默回退。** `ChatContainer` 会 `await onUpdateTitle(...)`，所以
   `App` **必须**把 `updateTitle` 的 Promise 交回去——用 `void` 吞掉它，await 会立即
   成功，失败只剩控制台一行日志、标题悄悄退回旧值（本项目真踩过）。失败时编辑器保持

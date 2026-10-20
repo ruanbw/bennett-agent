@@ -38,8 +38,10 @@ import {
   finishRun,
   getRun,
   markRunPersistFailed,
+  setRunError,
 } from './chat-store';
 import { streamChat } from './chat-transport';
+import { describeConnectionFailure } from './connection-failure';
 import { acquireRunLock, notifySessionsChanged as broadcastToOtherTabs } from './multi-tab';
 import type { RunState } from './chat-store';
 import type { MessageRecord } from '../types';
@@ -279,7 +281,10 @@ async function executeRun(run: RunState): Promise<void> {
       stopped = true;
     } else {
       console.error('生成请求失败:', err);
-      appendNotice(sessionId, '请求失败', err instanceof Error ? err.message : String(err));
+      // 原始错误只进日志：Chrome 的「Failed to fetch」、Safari 的「Load failed」不是
+      // 给用户看的文案。翻译后挂到 run.error 上，消息区才会出现「重试」按钮。
+      const failure = describeConnectionFailure(err);
+      setRunError(sessionId, { message: failure.message, retryable: failure.retryable, code: null });
     }
   } finally {
     // saveFinal 会把 stopped 落库，先同步到 run 上，避免「内存已停止、库里仍是 false」

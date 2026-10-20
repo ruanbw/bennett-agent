@@ -8,6 +8,7 @@
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';
 import { apiFetch, readErrorDetail } from './api';
+import { ChatRequestError } from './chat-request-error';
 
 const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
@@ -178,18 +179,16 @@ async function* parseEventStream(
  * 429 单独处理：限流是**有恢复时间**的失败，用户需要知道等多久（后端在
  * `Retry-After` 里给了秒数），而不是一句「HTTP 错误: 429」。
  */
-async function requestError(response: Response): Promise<Error> {
+async function requestError(response: Response): Promise<ChatRequestError> {
   if (response.status === 429) {
     const seconds = parseRetryAfterSeconds(response.headers.get('Retry-After'));
-    return new Error(
-      seconds === null
-        ? 'HTTP 429: 请求过于频繁，请稍后重试'
-        : `HTTP 429: 请求过于频繁，请 ${seconds} 秒后重试`,
-    );
+    const message =
+      seconds === null ? '请求过于频繁，请稍后重试' : `请求过于频繁，请 ${seconds} 秒后重试`;
+    return new ChatRequestError(response.status, message, seconds);
   }
 
   const detail = await readErrorDetail(response);
-  return new Error(detail ? `HTTP ${response.status}: ${detail}` : `HTTP 错误: ${response.status}`);
+  return new ChatRequestError(response.status, detail);
 }
 
 /** `Retry-After` 的秒数形式（HTTP-date 形式网关不用，解析不出就退回「稍后」）。 */

@@ -17,6 +17,7 @@ import { useGlobalShortcuts } from './hooks/use-global-shortcuts';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
+import { describeConnectionFailure } from './lib/connection-failure';
 import { downloadMarkdownFile } from './lib/export-markdown';
 import { notify } from './lib/toast';
 import { startSync, stopSync } from './lib/sync/engine';
@@ -76,10 +77,11 @@ function useModels() {
       } catch (err) {
         if (!active) return;
         console.error('获取模型列表失败:', err);
-        // catch 的 err 是 unknown，这里保留「取 message 否则用兜底」的语义
+        // 浏览器原始报错（Failed to fetch / HTTP 500）不是给用户看的：翻译成能行动的话。
+        // 不认识的异常退化为「请求失败，请稍后重试」，菜单里的「重试」按钮仍然可用。
         setState((prev) => ({
           ...prev,
-          modelsError: (err as { message?: string } | null)?.message || '模型列表加载失败',
+          modelsError: describeConnectionFailure(err).message,
         }));
       } finally {
         // 只有最新一次拉取才结算：旧请求已被 cleanup 标成过期，它的完成不代表
