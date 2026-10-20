@@ -14,3 +14,10 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/**
+ * 构建时注入的版本号（`vite.config.js` 的 `define`，来源是 package.json）。
+ *
+ * 定义在这里而不是从 package.json import：前端源码不应把整个 package.json 打进产物。
+ */
+declare const __APP_VERSION__: string

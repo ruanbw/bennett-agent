@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { Check, Pencil, Plus, Search, X } from 'lucide-react';
+import { Check, Pencil, Plus, Search, Settings, X } from 'lucide-react';
 
 import { Thread } from './assistant-ui/elements/thread.aui';
 import { ChatSessionNotices } from './ChatProvider';
@@ -20,6 +20,8 @@ export interface ChatContainerProps {
   onCreateSession?: () => void | Promise<unknown>;
   /** 收起态胶囊工具栏的搜索入口：展开侧边栏并把光标放进搜索框。 */
   onOpenSearch?: () => void;
+  /** 收起态胶囊工具栏的设置入口（设置面板挂在 App，收起侧边栏时 AccountBar 不渲染）。 */
+  onOpenSettings?: () => void;
   /** 侧边栏是否展开，决定是否展示左上角胶囊工具栏 */
   isSidebarOpen: boolean;
 }
@@ -28,7 +30,7 @@ export interface ChatContainerProps {
  * 对话主区域：顶栏（胶囊工具栏 + 可编辑标题）+ Thread。
  *
  * 当侧边栏折叠时，左上角出现仿 DeepSeek 的胶囊药丸工具栏（Pill Toolbar）：
- * 展开侧边栏、新建对话、搜索、同步状态。
+ * 展开侧边栏、新建对话、搜索、设置、同步状态。
  *
  * **收起不能等于失去入口。** 搜索框与同步面板都长在侧边栏里，收起后它们就消失——
  * 用户看不到同步是否失败（面板存在的全部意义就是不让同步静默），也没法搜索历史。
@@ -48,6 +50,7 @@ export function ChatContainer({
   onToggleSidebar,
   onCreateSession,
   onOpenSearch,
+  onOpenSettings,
   isSidebarOpen,
 }: ChatContainerProps) {
   const [isEditing, setIsEditing] = useState(false);
@@ -134,6 +137,17 @@ export function ChatContainer({
                   aria-label="搜索对话"
                 >
                   <Search size={16} aria-hidden="true" />
+                </button>
+              )}
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenSettings}
+                  className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                  title="设置"
+                  aria-label="设置"
+                >
+                  <Settings size={16} aria-hidden="true" />
                 </button>
               )}
               {/* 同步状态：与侧边栏顶部同一个组件，收起后仍然能看到失败并恢复 */}

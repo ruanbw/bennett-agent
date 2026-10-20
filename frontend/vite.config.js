@@ -2,9 +2,21 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
+import { readFileSync } from 'node:fs'
+
+/**
+ * 版本号的唯一来源。
+ *
+ * 设置面板曾经写死 `v0.1.0`，而 package.json 是 `0.0.0`——用户看到的版本跟真实构建
+ * 没有任何关系。这里在构建时（含 vitest）注入同一个值，避免第二份手写版本信息。
+ */
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [
     react(),
     tailwindcss(),

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AccountBar } from './AccountBar';
 import { SettingsPanel } from './SettingsDialog';
 import { ThemeContext } from '../context/theme-context';
+import { APP_VERSION } from '../lib/app-info';
 
 function withTheme(children: React.ReactNode, theme: 'light' | 'dark' | 'system' = 'system') {
   return createElement(
@@ -26,6 +27,7 @@ describe('AccountBar 侧边栏底部账号与设置入口', () => {
       withTheme(
         createElement(AccountBar, {
           email: 'bennett@example.com',
+          onOpenSettings: vi.fn(),
           onLogout: vi.fn(),
           collapsed: false,
         })
@@ -45,6 +47,7 @@ describe('AccountBar 侧边栏底部账号与设置入口', () => {
       withTheme(
         createElement(AccountBar, {
           email: 'bennett@example.com',
+          onOpenSettings: vi.fn(),
           onLogout: vi.fn(),
           collapsed: true,
         })
@@ -64,6 +67,7 @@ describe('AccountBar 侧边栏底部账号与设置入口', () => {
       withTheme(
         createElement(AccountBar, {
           email: null,
+          onOpenSettings: vi.fn(),
           onLogout: vi.fn(),
         })
       )
@@ -75,7 +79,7 @@ describe('AccountBar 侧边栏底部账号与设置入口', () => {
 });
 
 describe('SettingsPanel 设置面板内容', () => {
-  it('渲染外观设置、账号信息与关于系统', () => {
+  it('渲染外观设置、账号信息、本机数据与关于系统', () => {
     const html = renderToStaticMarkup(
       withTheme(
         createElement(SettingsPanel, {
@@ -88,6 +92,7 @@ describe('SettingsPanel 设置面板内容', () => {
     // 各个板块
     expect(html).toContain('当前账号');
     expect(html).toContain('外观与主题');
+    expect(html).toContain('本机数据');
     expect(html).toContain('关于系统');
 
     // 用户信息
@@ -99,8 +104,28 @@ describe('SettingsPanel 设置面板内容', () => {
     expect(html).toContain('深色');
     expect(html).toContain('跟随系统');
 
-    // 系统版本信息
-    expect(html).toContain('v0.1.0');
+    // 版本来自 package.json（构建时注入），不是手写字面量；服务端渲染时统计还没回来
+    expect(html).toContain(`v${APP_VERSION}`);
     expect(html).toContain('PydanticAI');
+    expect(html).toContain('存储占用');
+  });
+
+  it('角色徽标来自后端 role，未知角色不猜', () => {
+    const adminHtml = renderToStaticMarkup(
+      withTheme(createElement(SettingsPanel, { userEmail: 'a@example.com', userRole: 'admin' }))
+    );
+    expect(adminHtml).toContain('管理员');
+
+    const superHtml = renderToStaticMarkup(
+      withTheme(createElement(SettingsPanel, { userEmail: 'a@example.com', userRole: 'superadmin' }))
+    );
+    expect(superHtml).toContain('超级管理员');
+
+    // 后端新增的未知档位：宁可不显示，也不要猜成错的角色
+    const unknownHtml = renderToStaticMarkup(
+      withTheme(createElement(SettingsPanel, { userEmail: 'a@example.com', userRole: 'owner' }))
+    );
+    expect(unknownHtml).not.toContain('普通用户');
+    expect(unknownHtml).not.toContain('owner');
   });
 });

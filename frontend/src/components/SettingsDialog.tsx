@@ -1,4 +1,4 @@
-import { Check, Laptop, Moon, Sun, User, Info } from 'lucide-react';
+import { Check, Laptop, Moon, Sun, User, Info, HardDrive } from 'lucide-react';
 
 import {
   Dialog,
@@ -11,15 +11,27 @@ import {
 import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
+import { useLocalDataStats } from '../hooks/use-local-stats';
+import { ROLE_LABELS } from '../lib/admin';
+import { APP_VERSION } from '../lib/app-info';
+import { formatBytes } from '../lib/local-stats';
 
 export interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   userEmail: string | null;
+  /** 当前账号角色（`user` / `admin` / `superadmin`）。未知/未传时不显示徽标。 */
+  userRole?: string | null;
 }
 
 export interface SettingsPanelProps {
   userEmail: string | null;
+  userRole?: string | null;
+  /**
+   * 面板是否可见。默认 true（直接渲染 `SettingsPanel` 的场景）。
+   * 本机数据只在打开时读一次，不是实时监控。
+   */
+  open?: boolean;
 }
 
 const THEME_OPTIONS: Array<{
@@ -51,12 +63,15 @@ const THEME_OPTIONS: Array<{
 /**
  * 设置面板内容组件：支持独立复用与服务端渲染测试。
  */
-export function SettingsPanel({ userEmail }: SettingsPanelProps) {
+export function SettingsPanel({ userEmail, userRole = null, open = true }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
+  const stats = useLocalDataStats(open);
 
   // 从邮箱派生昵称与头像首字母
   const nickname = userEmail ? userEmail.split('@')[0] : '未登录用户';
   const initial = userEmail ? nickname.charAt(0).toUpperCase() : '未';
+  // 未知角色（后端新增了一档）不猜，宁可只显示邮箱
+  const roleLabel = userRole ? (ROLE_LABELS[userRole] ?? null) : null;
 
   return (
     <div className="space-y-5 py-1">
@@ -73,7 +88,14 @@ export function SettingsPanel({ userEmail }: SettingsPanelProps) {
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground truncate">{nickname}</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-foreground truncate">{nickname}</span>
+              {roleLabel && (
+                <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                  {roleLabel}
+                </span>
+              )}
+            </div>
             <div className="text-[11px] text-muted-foreground truncate" title={userEmail ?? undefined}>
               {userEmail ?? '未登录'}
             </div>
@@ -127,6 +149,40 @@ export function SettingsPanel({ userEmail }: SettingsPanelProps) {
         </div>
       </div>
 
+      {/* 本机数据区块：数据默认只存浏览器，用户应该能知道自己存了多少 */}
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <HardDrive className="size-3.5" />
+          <span>本机数据</span>
+        </h4>
+        <div className="rounded-lg border border-border/70 bg-muted/40 p-3 space-y-1.5 text-xs">
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">会话</span>
+            <span className="tabular-nums text-foreground">
+              {stats ? `${stats.sessions} 个` : '—'}
+            </span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">消息</span>
+            <span className="tabular-nums text-foreground">
+              {stats ? `${stats.messages} 条` : '—'}
+            </span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">存储占用</span>
+            <span
+              className="tabular-nums text-foreground"
+              title="浏览器对整个站点的估算值，包含缓存等其他数据"
+            >
+              {stats ? formatBytes(stats.usageBytes) : '—'}
+            </span>
+          </div>
+        </div>
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          会话默认保存在本机浏览器；登录同一账号时后台同步到服务器。存储占用是浏览器对本站点的估算值。
+        </p>
+      </div>
+
       {/* 关于 Bennett Agent 区块 */}
       <div className="space-y-2">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
@@ -136,7 +192,8 @@ export function SettingsPanel({ userEmail }: SettingsPanelProps) {
         <div className="rounded-lg border border-border/70 bg-muted/40 p-3 space-y-1.5 text-xs">
           <div className="flex justify-between items-center">
             <span className="text-muted-foreground">应用版本</span>
-            <span className="font-mono text-[11px] text-foreground">v0.1.0</span>
+            {/* 版本来自 package.json（构建时注入），不再手写 */}
+            <span className="font-mono text-[11px] text-foreground">v{APP_VERSION}</span>
           </div>
           <div className="flex justify-between items-center">
             <span className="text-muted-foreground">推理内核</span>
@@ -148,7 +205,7 @@ export function SettingsPanel({ userEmail }: SettingsPanelProps) {
   );
 }
 
-export function SettingsDialog({ open, onOpenChange, userEmail }: SettingsDialogProps) {
+export function SettingsDialog({ open, onOpenChange, userEmail, userRole = null }: SettingsDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto">
@@ -157,7 +214,7 @@ export function SettingsDialog({ open, onOpenChange, userEmail }: SettingsDialog
           <DialogDescription>管理你的外观偏好与账号信息</DialogDescription>
         </DialogHeader>
 
-        <SettingsPanel userEmail={userEmail} />
+        <SettingsPanel userEmail={userEmail} userRole={userRole} open={open} />
 
         <DialogFooter>
           <Button variant="default" size="sm" onClick={() => onOpenChange(false)}>

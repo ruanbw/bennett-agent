@@ -54,10 +54,13 @@ src/
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
 │   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
+│   ├── local-stats.ts       # 本机数据统计 + 字节格式化
+│   ├── app-info.ts          # 版本号（构建注入的单一来源）
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
 │   ├── use-session-search.ts # 搜索防抖/中止/保留旧结果
+│   ├── use-local-stats.ts   # 设置面板打开时读一次本机数据
 │   └── use-media-query.ts   # 响应式媒体查询
 ├── context/                 # theme / clarification
 ├── components/
@@ -122,6 +125,13 @@ src/
   **不搜 `thinking`**：思考链默认折叠且体积不可控，命中它等于给用户一个点开也找不到关键词
   的会话。输入过程中保留上一次结果（仅同一串词的前后缀变化），否则每敲一个字列表都会
   先塌掉再弹回来；旧扫描用 `AbortSignal` 中止，慢查询不会覆盖新查询的结果。
+- **设置面板里的每个数字都要有出处。** 版本号来自 package.json（`vite.config.js` 的
+  `define` 注入 `__APP_VERSION__`，唯一读取点是 `lib/app-info.ts`）——此前写死 `v0.1.0`
+  而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑
+  （同步用的删除标记），否则会和侧边栏列表对不上；存储占用来自
+  `navigator.storage.estimate()`，是**整个 origin** 的估算值，文案必须说清这一点，
+  否则用户会拿它精确对账。设置面板挂在 `App` 而不是 `AccountBar`：侧边栏收起时
+  AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
 - **本地缓存只属于一个账号。** IndexedDB 按 origin 隔离，不跟账号走。登录/注册/启动
   探测确认身份后都要先 `claimLocalData(userId)`（`lib/local-owner.ts`）：归属一致保留
   历史，换了账号先清空再写新归属，然后才允许把状态切成已登录、启动同步引擎——顺序

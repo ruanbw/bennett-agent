@@ -16,7 +16,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { SettingsDialog } from './SettingsDialog';
 import { useTheme } from '../context/theme-context';
 import { countPending } from '../lib/sync/engine';
 
@@ -27,6 +26,13 @@ export interface AccountBarProps {
   /** 是否渲染管理后台入口：只有超级管理员能拿到。 */
   canOpenAdmin?: boolean;
   onOpenAdmin?: () => void;
+  /**
+   * 打开设置面板。
+   *
+   * 设置面板挂在 `App` 而不是这里：侧边栏收起时 AccountBar 整块不渲染，面板就跟着
+   * 消失。顶栏胶囊工具栏的齿轮要能打开它，因此宿主必须是常驻的父层。
+   */
+  onOpenSettings: () => void;
 }
 
 export function AccountBar({
@@ -35,11 +41,11 @@ export function AccountBar({
   collapsed = false,
   canOpenAdmin = false,
   onOpenAdmin,
+  onOpenSettings,
 }: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
   const [unsynced, setUnsynced] = useState(0);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { theme, setTheme } = useTheme();
 
@@ -103,7 +109,7 @@ export function AccountBar({
 
           <DropdownMenuSeparator />
 
-          <DropdownMenuItem onClick={() => setSettingsOpen(true)}>
+          <DropdownMenuItem onClick={() => onOpenSettings()}>
             <Settings className="size-4 text-muted-foreground" />
             <span>设置</span>
           </DropdownMenuItem>
@@ -168,8 +174,6 @@ export function AccountBar({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} userEmail={email} />
 
       <ConfirmDialog
         open={confirming}

@@ -5,6 +5,7 @@ import { ChatContainer } from './components/ChatContainer';
 import { ChatProvider } from './components/ChatProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LoginPage } from './components/LoginPage';
+import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
@@ -135,6 +136,8 @@ function AuthLoadingScreen() {
 
 export interface AuthenticatedShellProps {
   userEmail: string | null;
+  /** 当前账号角色（`user` / `admin` / `superadmin`），设置面板里展示。 */
+  userRole: string | null;
   canOpenAdmin: boolean;
   /** 是否 superadmin：决定管理后台「用户管理」里能不能改角色。 */
   canManageRoles: boolean;
@@ -188,7 +191,7 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
  * 已登录才该跑的副作用，只有整个组件按登录态挂载/卸载才能自然做到，而 hook 不能
  * 条件调用。
  */
-function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout }: AuthenticatedShellProps) {
+function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles, onLogout }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
   const {
     sessions,
@@ -212,8 +215,11 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
   // 管理后台是覆盖层。状态放在 shell 里（而不是 App）：关闭时要能就地刷新模型列表，
   // 而 `/api/models` 的 state 就在这个组件的 `useModels` 里。
   const [adminOpen, setAdminOpen] = useState(false);
+  // 设置面板挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口在顶栏胶囊工具栏
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleOpenAdmin = useCallback(() => setAdminOpen(true), []);
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
 
   const handleCloseAdmin = useCallback(() => {
     setAdminOpen(false);
@@ -310,6 +316,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
         userEmail={userEmail}
         canOpenAdmin={canOpenAdmin}
         onOpenAdmin={handleOpenAdmin}
+        onOpenSettings={handleOpenSettings}
         onLogout={onLogout}
       />
 
@@ -350,6 +357,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
                 onRefreshModels={refreshModels}
                 onToggleSidebar={handleToggleSidebar}
                 onOpenSearch={handleOpenSearch}
+                onOpenSettings={handleOpenSettings}
                 onCreateSession={handleCreateSession}
                 isSidebarOpen={isSidebarOpen}
               />
@@ -357,6 +365,13 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
           </ErrorBoundary>
         )}
       </main>
+
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        userEmail={userEmail}
+        userRole={userRole}
+      />
 
       {adminOpen && (
         <ErrorBoundary fallbackTitle="管理后台加载异常">
@@ -414,6 +429,7 @@ export function App() {
         */
         <AuthenticatedShell
           userEmail={user?.email ?? null}
+          userRole={user?.role ?? null}
           canOpenAdmin={canAccessAdmin(user)}
           canManageRoles={isSuperadmin(user)}
           onLogout={logout}

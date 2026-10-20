@@ -47,13 +47,15 @@ describe('ChatContainer 顶栏与可编辑标题', () => {
         onToggleSidebar: vi.fn(),
         onCreateSession: vi.fn(),
         onOpenSearch: vi.fn(),
+        onOpenSettings: vi.fn(),
       })
     );
 
     expect(html).toContain('aria-label="展开侧边栏"');
     expect(html).toContain('aria-label="新建对话"');
-    // 搜索框和同步面板长在侧边栏里：收起后必须由胶囊工具栏补上入口
+    // 搜索框、设置面板和同步面板都长在侧边栏里：收起后必须由胶囊工具栏补上入口
     expect(html).toContain('aria-label="搜索对话"');
+    expect(html).toContain('aria-label="设置"');
     expect(html).toContain('aria-label="已同步，查看同步详情"');
     expect(html).toContain('rounded-xl');
   });
@@ -71,6 +73,7 @@ describe('ChatContainer 顶栏与可编辑标题', () => {
 
     expect(html).toContain('aria-label="展开侧边栏"');
     expect(html).not.toContain('aria-label="搜索对话"');
+    expect(html).not.toContain('aria-label="设置"');
   });
 
   it('未提供标题时优雅回退为「新对话」', () => {

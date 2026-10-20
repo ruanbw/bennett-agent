@@ -47,6 +47,8 @@ export interface SidebarProps {
   searchRequest?: number;
   userEmail: string | null;
   onLogout: () => void | Promise<unknown>;
+  /** 打开设置面板（面板挂在 App，收起侧边栏后仍可由胶囊工具栏打开）。 */
+  onOpenSettings: () => void;
   /** 超级管理员才渲染管理后台入口；普通用户可不传。 */
   canOpenAdmin?: boolean;
   onOpenAdmin?: () => void;
@@ -77,6 +79,7 @@ export function Sidebar({
   searchRequest = 0,
   userEmail,
   onLogout,
+  onOpenSettings,
   canOpenAdmin = false,
   onOpenAdmin,
 }: SidebarProps) {
@@ -537,6 +540,7 @@ export function Sidebar({
       <AccountBar
         email={userEmail}
         onLogout={onLogout}
+        onOpenSettings={onOpenSettings}
         canOpenAdmin={canOpenAdmin}
         onOpenAdmin={onOpenAdmin}
       />
