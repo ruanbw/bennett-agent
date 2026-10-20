@@ -92,6 +92,12 @@ src/
 - **思考链不回放。** `chat-persistence.ts:loadContextMessages` 只回传 `content`。
   思考链只用于展示，回传会放大请求体积，且长度不可控——一旦超过后端的
   `MAX_THINKING_CHARS`，该会话的每次重试都会拿到 422。
+- **不要只靠 hover 暴露操作。** Tailwind 4 会把 `hover:` / `group-hover:` 包进
+  `@media (hover: hover)`，触屏上永远不生效。会话条目的「…」菜单、历史消息的复制 /
+  重新生成都同时挂了 `pointer-coarse:`（触屏）与 `focus-within:` / `group-focus-within:`
+  （键盘），否则手机用户点不到、键盘用户看不见。会话条目整行是一个铺满的
+  `<button>`（内容层 `pointer-events-none` 让点击穿透），不是 `div onClick`；多选模式
+  复用 `<button role="checkbox">` + `aria-checked`，原生 Enter/Space 即生效。
 - **同步状态要能解释，也要能恢复。** 侧边栏云图标是入口而不是装饰：面板给出
   「已同步 / 待上传 / 无法同步 / 失败」的结论、上次同步时间、待上传与被拒数量，并提供
   「立即同步」与「重新上传被拒内容」。被服务端拒收的行（`too_large` / `quota_exceeded` /

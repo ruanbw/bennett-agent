@@ -155,19 +155,26 @@ export function ChatContainer({
               </button>
             </form>
           ) : (
-            <div
-              className="group flex items-center gap-1.5 max-w-[50vw] sm:max-w-md px-2 py-1 rounded-lg hover:bg-muted/50 transition cursor-pointer min-w-0"
+            /*
+              标题本身是重命名的入口，必须是可聚焦的 button：
+              之前是 div onClick，键盘用户只能看到标题、改不了名字；触屏上铅笔图标又被
+              `group-hover` 隐藏（触屏没有 hover），所幸点击标题仍生效，所以只修语义即可。
+            */
+            <button
+              type="button"
               onClick={handleStartEdit}
               title="点击修改会话标题"
+              aria-label={`重命名会话标题：${sessionTitle || '新对话'}`}
+              className="group flex items-center gap-1.5 max-w-[50vw] sm:max-w-md px-2 py-1 rounded-lg hover:bg-muted/50 transition cursor-pointer min-w-0 outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
             >
               <span className="text-sm font-medium text-foreground truncate select-none">
                 {sessionTitle || '新对话'}
               </span>
               <Pencil
-                className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition shrink-0"
+                className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition shrink-0"
                 aria-hidden="true"
               />
-            </div>
+            </button>
           )}
         </div>
       </header>

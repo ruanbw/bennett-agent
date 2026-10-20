@@ -543,9 +543,13 @@ const AssistantActionBar: FC = () => {
       autohide="never"
       className={cn(
         "text-muted-foreground flex gap-1 text-xs transition-opacity duration-200",
+        // 非最后一条回答：hover / 键盘焦点 / 触屏时可见。
+        // 触屏必须单独写 pointer-coarse：Tailwind 4 的 group-hover 被包在
+        // `@media (hover: hover)` 里，手机/平板上永远不生效，而这里还挂着
+        // pointer-events-none——不补这一条，历史回答的「复制」在触屏上根本点不到。
         isLast
           ? "opacity-100 pointer-events-auto"
-          : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto"
+          : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto pointer-coarse:opacity-100 pointer-coarse:pointer-events-auto"
       )}
     >
       <ActionBarPrimitive.Copy asChild>
