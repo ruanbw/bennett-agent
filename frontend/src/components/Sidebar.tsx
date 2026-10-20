@@ -1,10 +1,11 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
+import { Cloud, CloudOff, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
 import { visibleSelection } from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
+import { useSyncStatus } from '../hooks/use-sync-status';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
@@ -284,6 +285,7 @@ export function Sidebar({
             Bennett
           </span>
           <div className="flex items-center gap-0.5">
+            <SyncIndicator />
             <button
               type="button"
               onClick={() => {
@@ -470,5 +472,38 @@ export function Sidebar({
 
       {confirmDialog}
     </aside>
+  );
+}
+
+
+/**
+ * 同步状态的角标。
+ *
+ * 只在有话说的时候出现：没有待推送内容、也没有错误时完全不占位置。
+ * 「静默失败」是同步这类功能最糟的失败方式——用户以为存上了，换设备才发现没有，
+ * 所以错误必须有一个常驻的、能点开看原因的入口。
+ */
+function SyncIndicator() {
+  const status = useSyncStatus();
+  const failed = status.lastError !== null;
+  if (!failed && status.pending === 0) return null;
+
+  const label = failed
+    ? `同步失败：${status.lastError}`
+    : `${status.pending} 条内容待同步`;
+  const Icon = failed ? CloudOff : Cloud;
+
+  return (
+    <span
+      role="status"
+      title={label}
+      aria-label={label}
+      className={`flex h-7 items-center gap-1 rounded-lg px-1.5 text-[11px] tabular-nums ${
+        failed ? 'text-destructive' : 'text-muted-foreground'
+      }`}
+    >
+      <Icon size={14} aria-hidden="true" className={failed ? '' : 'animate-pulse'} />
+      {!failed && status.pending > 0 && <span>{status.pending}</span>}
+    </span>
   );
 }

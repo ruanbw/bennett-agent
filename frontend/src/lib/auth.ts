@@ -10,6 +10,7 @@
 import { clearAllLocalData } from '../db';
 import { apiFetch, bumpAuthEpoch, readErrorDetail } from './api';
 import { abortAllRuns } from './chat-runs';
+import { flushPending, stopSync } from './sync/engine';
 
 /** 当前登录用户。字段与后端 `UserRead` 对齐（snake_case 是线上契约）。 */
 export interface AuthUser {
@@ -302,6 +303,18 @@ export async function logoutAndClearLocalData(): Promise<LogoutResult> {
     console.error('中止在途生成失败:', err);
   }
 
+  // 顺序不能换：**先推再登出**。后端登出 = 删掉 access_token 行，之后任何 push 都是
+  // 401；反过来写就等于「登出前的最后一次同步」永远失败，还要多触发一次全局 401。
+  // 推不上去也照常登出（不能把用户卡住），但要在日志里留下痕迹。
+  try {
+    const remaining = await flushPending(2_000);
+    if (remaining > 0) {
+      console.warn(`登出时仍有 ${remaining} 条内容未同步到服务器`);
+    }
+  } catch (err) {
+    console.warn('登出前的最后一次同步失败:', err);
+  }
+
   let serverConfirmed = false;
   try {
     await logout();
@@ -309,6 +322,7 @@ export async function logoutAndClearLocalData(): Promise<LogoutResult> {
   } catch (err) {
     console.error('登出请求两次都失败，服务端会话可能仍然有效:', err);
   }
+  stopSync();
 
   try {
     await clearAllLocalData();

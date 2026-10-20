@@ -1,0 +1,584 @@
+/**
+ * 跨设备同步引擎：把本机变更推上去、把服务端变更拉下来。
+ *
+ * ## 形状
+ *
+ * 一个模块级单例，不依赖 React：登录后 `startSync(userId)`，登出时 `stopSync()`。
+ * 状态通过订阅暴露给 UI（`subscribeStatus` / `subscribeApplied`），React 只做展示。
+ *
+ * 循环长这样：
+ *
+ *   push 掉所有 pending → pull（可见时长轮询 25s；隐藏时立即返回）
+ *        ↑                                   │
+ *        └──────────── has_more 就继续 ────────┘
+ *
+ * ## 三条必须守住的规则
+ *
+ * 1. **远端写入不能触发本地标记**。应用拉下来的行必须走 `runSyncInternal`，否则会被
+ *    表级 hook 标成 pending，然后又被推上去 —— 拉/推无限循环。
+ * 2. **pending 的行不许被拉到的东西覆盖**（见 `shouldApplyRemote`）。本机还有没推上去
+ *    的内容时，服务端那份是旧的。
+ * 3. **失败要能被看见**。连续失败只在 console 里打日志等于没发生：`status.lastError`
+ *    会挂到侧边栏的角标上。
+ *
+ * ## 为什么不是「每次写库都推一次」
+ *
+ * 流式生成期间 `saveProgress` 每 800ms 写一次助手消息。按写入触发推送会把中间态反复
+ * 上传；所以表级 hook 只负责**打标记**，推送由明确的时机触发：一轮结束、标签页隐藏、
+ * 恢复在线、启动、以及用户改动会话（重命名/置顶/删除）。
+ */
+
+import { db, runSyncInternal } from '../../db';
+import type { MessageRecord, SessionRecord } from '../../types';
+import { notifySessionsChanged } from '../multi-tab';
+import { type PullResponse, type PushResponse, pullRows, pushRows, SyncHttpError } from './api';
+import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
+
+/** 本地连续写入（标题占位 → 标题定稿 → 终态落库）合并成一个推送窗口。 */
+const PUSH_DEBOUNCE_MS = 400;
+/** 单次 push 的行数上限，与后端 `SYNC_PUSH_MAX_ROWS`（默认 200）留余量。 */
+const PUSH_BATCH_ROWS = 150;
+/** 单次 pull 每个数据流的行数上限；服务端还会按字节再截一次。 */
+const PULL_LIMIT = 300;
+/** 长轮询挂起时长，需小于后端默认 25s 以便「无变化」时也能按期返回。 */
+const LONG_POLL_SECONDS = 25;
+const RETRY_MIN_MS = 2_000;
+const RETRY_MAX_MS = 60_000;
+const CURSOR_KEY = 'cursor';
+const BACKFILL_KEY = 'backfill';
+
+export interface SyncStatus {
+  /** 引擎是否在跑（登录后 true）。 */
+  running: boolean;
+  /** 本机待推送的行数（会话 + 消息）。 */
+  pending: number;
+  /** 被服务端明确拒绝、停在那里的行数（超长 / 超配额）。 */
+  rejected: number;
+  /** 最近一次失败的可读原因；成功一轮后清空。 */
+  lastError: string | null;
+  /** 最近一次成功同步完成的时间（毫秒）；从未成功过为 null。 */
+  lastSyncedAt: number | null;
+}
+
+const IDLE_STATUS: SyncStatus = {
+  running: false,
+  pending: 0,
+  rejected: 0,
+  lastError: null,
+  lastSyncedAt: null,
+};
+
+let status: SyncStatus = { ...IDLE_STATUS };
+const statusListeners = new Set<() => void>();
+const appliedListeners = new Set<(sessionIds: string[]) => void>();
+
+let userId: string | null = null;
+let started = false;
+/** 每次 start/stop 递增：所有 async 结果回来时先核对它，避免旧循环写新账号的数据。 */
+let generation = 0;
+let cursor: string | null = null;
+let pushTimer: ReturnType<typeof setTimeout> | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let backoffMs = RETRY_MIN_MS;
+let pumpRunning = false;
+let pushInFlight: Promise<number> | null = null;
+
+// ---------------------------------------------------------------------
+// 订阅
+// ---------------------------------------------------------------------
+
+export function getStatus(): SyncStatus {
+  return status;
+}
+
+export function subscribeStatus(listener: () => void): () => void {
+  statusListeners.add(listener);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+/** 同标签页的「拉到了新内容」通知。跨标签页的走 `notifySessionsChanged`。 */
+export function subscribeApplied(listener: (sessionIds: string[]) => void): () => void {
+  appliedListeners.add(listener);
+  return () => {
+    appliedListeners.delete(listener);
+  };
+}
+
+function setStatus(patch: Partial<SyncStatus>): void {
+  status = { ...status, ...patch };
+  for (const listener of [...statusListeners]) listener();
+}
+
+// ---------------------------------------------------------------------
+// 生命周期
+// ---------------------------------------------------------------------
+
+export function startSync(id: string): void {
+  if (started && userId === id) return;
+  stopSync();
+  userId = id;
+  started = true;
+  generation += 1;
+  const gen = generation;
+  setStatus({ running: true, lastError: null });
+  attachBrowserListeners();
+
+  void (async () => {
+    try {
+      const storedCursor = await loadCursor(id);
+      if (!isCurrent(gen)) return;
+      cursor = storedCursor;
+      await backfillIfNeeded(id);
+      if (!isCurrent(gen)) return;
+      await refreshPending();
+      if (!isCurrent(gen)) return;
+      void pump(gen);
+    } catch (err) {
+      if (isCurrent(gen)) reportError(err);
+    }
+  })();
+}
+
+export function stopSync(): void {
+  started = false;
+  generation += 1;
+  userId = null;
+  cursor = null;
+  if (pushTimer !== null) clearTimeout(pushTimer);
+  if (retryTimer !== null) clearTimeout(retryTimer);
+  pushTimer = null;
+  retryTimer = null;
+  backoffMs = RETRY_MIN_MS;
+  detachBrowserListeners();
+  setStatus({ ...IDLE_STATUS });
+}
+
+function isCurrent(gen: number): boolean {
+  return started && generation === gen;
+}
+
+function isVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
+// ---------------------------------------------------------------------
+// 浏览器事件
+// ---------------------------------------------------------------------
+
+function onVisibilityChange(): void {
+  if (!started) return;
+  if (isVisible()) {
+    // 回到前台：先补推（隐藏期间的写入可能还没上去），再继续长轮询
+    requestPush(0);
+    void pump(generation);
+  }
+}
+
+function onOnline(): void {
+  if (!started) return;
+  backoffMs = RETRY_MIN_MS;
+  requestPush(0);
+  void pump(generation);
+}
+
+function attachBrowserListeners(): void {
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange);
+  if (typeof window !== 'undefined') window.addEventListener('online', onOnline);
+}
+
+function detachBrowserListeners(): void {
+  if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange);
+  if (typeof window !== 'undefined') window.removeEventListener('online', onOnline);
+}
+
+// ---------------------------------------------------------------------
+// 触发
+// ---------------------------------------------------------------------
+
+/** 请求一次推送（合并窗口）。引擎没在跑时是空操作。 */
+export function requestPush(delayMs: number = PUSH_DEBOUNCE_MS): void {
+  if (!started) return;
+  if (pushTimer !== null) clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    pushTimer = null;
+    void kickPush();
+  }, delayMs);
+}
+
+/** 请求一次拉取（例如切换会话、回前台）。 */
+export function requestPull(): void {
+  if (!started) return;
+  void pump(generation);
+}
+
+async function kickPush(): Promise<void> {
+  const gen = generation;
+  try {
+    await pushUntilDrained(gen);
+    if (isCurrent(gen)) await refreshPending();
+  } catch (err) {
+    if (!isCurrent(gen)) return;
+    reportError(err);
+    scheduleRetry(gen, err);
+  }
+}
+
+// ---------------------------------------------------------------------
+// 主循环
+// ---------------------------------------------------------------------
+
+async function pump(gen: number): Promise<void> {
+  if (pumpRunning || !isCurrent(gen)) return;
+  pumpRunning = true;
+  try {
+    while (isCurrent(gen)) {
+      await pushUntilDrained(gen);
+      if (!isCurrent(gen)) return;
+
+      const hasMore = await pullOnce(gen, isVisible() ? LONG_POLL_SECONDS : 0);
+      if (!isCurrent(gen)) return;
+      if (hasMore) continue;
+      // 隐藏时不长轮询：挂起一个 25s 的请求只会在切回来时立刻作废
+      if (!isVisible()) return;
+      // 成功走过一轮：清掉错误与退避
+      backoffMs = RETRY_MIN_MS;
+      if (status.lastError !== null) setStatus({ lastError: null });
+    }
+  } catch (err) {
+    if (!isCurrent(gen)) return;
+    reportError(err);
+    scheduleRetry(gen, err);
+  } finally {
+    pumpRunning = false;
+    // 旧世代结束（换账号/登出）时，新世代的 pump 可能因为 pumpRunning 被吞掉。
+    // 这里补一次：宁可多跑一次 pump（它自己会判 isCurrent），也不要让同步静默停摆。
+    if (started && generation !== gen) void pump(generation);
+  }
+}
+
+function scheduleRetry(gen: number, err: unknown): void {
+  if (!isRetryable(err) || !isCurrent(gen)) return;
+  if (retryTimer !== null) clearTimeout(retryTimer);
+  const delay = backoffMs;
+  backoffMs = Math.min(backoffMs * 2, RETRY_MAX_MS);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void pump(gen);
+  }, delay);
+}
+
+/** 4xx 里除了游标问题都是「请求本身不对」：重试只会一直撞同一面墙。 */
+function isRetryable(err: unknown): boolean {
+  if (err instanceof SyncHttpError) return !err.isFatal;
+  return true;
+}
+
+function reportError(err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn('同步失败:', err);
+  setStatus({ lastError: message });
+}
+
+// ---------------------------------------------------------------------
+// push
+// ---------------------------------------------------------------------
+
+async function pushUntilDrained(gen: number): Promise<number> {
+  let total = 0;
+  // 轮数上限只是兜底：正常情况下每轮要么推进、要么把行标成 error，不会原地打转。
+  // 有它的话，将来任何一种新的拒绝原因都不可能把整条同步链路卡死在这里。
+  for (let round = 0; round < 50 && isCurrent(gen); round += 1) {
+    const pushed = await pushBatch();
+    total += pushed;
+    if (pushed === 0) break;
+  }
+  return total;
+}
+
+/**
+ * 推一批。返回本批处理的行数；0 表示没有待推内容。
+ *
+ * 并发调用共享同一个在飞 Promise：长轮询唤醒、用户操作、可见性事件可能同时想推，
+ * 各推一批会互相把对方的行重复发一遍。
+ */
+async function pushBatch(): Promise<number> {
+  if (pushInFlight !== null) return pushInFlight;
+  pushInFlight = (async () => {
+    const [sessions, messages] = await readPending();
+    const batch = buildPushBatch(sessions, messages, PUSH_BATCH_ROWS);
+    if (batch.conversations.length === 0 && batch.messages.length === 0) return 0;
+
+    const response = await pushRows({
+      conversations: batch.conversations,
+      messages: batch.messages,
+    });
+    await ackPush(batch, response);
+    return batch.conversations.length + batch.messages.length;
+  })();
+  try {
+    return await pushInFlight;
+  } finally {
+    pushInFlight = null;
+  }
+}
+
+async function readPending(): Promise<[SessionRecord[], MessageRecord[]]> {
+  return db.transaction('r', db.sessions, db.messages, async () => {
+    const sessions = await db.sessions.where('syncState').equals('pending').toArray();
+    const messages = await db.messages.where('syncState').equals('pending').toArray();
+    return [sessions, messages] as [SessionRecord[], MessageRecord[]];
+  });
+}
+
+/**
+ * 处理服务端的逐行结果。
+ *
+ * - 接受 → 标 synced；
+ * - `stale` / `not_owned` / `conversation_deleted` → 也标 synced：这几行服务端已有
+ *   更新版本或本来就不该存在，重试永远不会成功；
+ * - `conversation_missing` → 消息留着 pending，把会话重新标 pending（下一批先推会话）；
+ * - 其余（`too_large` / `quota_exceeded`）→ 标 error 并计数，重试没有意义。
+ */
+async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> {
+  const rejections = new Map(response.rejected.map((row) => [`${row.kind}:${row.id}`, row.reason]));
+  let rejectedRows = 0;
+
+  await runSyncInternal(async () => {
+    for (const row of batch.conversations) {
+      const reason = rejections.get(`conversation:${row.id}`);
+      if (await settleRow('conversation', row.id, row.client_rev, reason)) rejectedRows += 1;
+    }
+    for (const row of batch.messages) {
+      const reason = rejections.get(`message:${row.id}`);
+      if (reason === 'conversation_missing') {
+        const conversationRejected = rejections.get(`conversation:${row.conversation_id}`);
+        const conversation = await db.sessions.get(row.conversation_id);
+        if (!conversationRejected && conversation && !conversation.deleted) {
+          // 会话在本批里没带上去（被截断或在写库后才出现）：下一批先推会话，消息保持 pending。
+          await db.sessions.update(row.conversation_id, { syncState: 'pending' });
+          continue;
+        }
+        // 会话根本不存在（或已被服务端判死）：这条消息永远不会成功，停下来并报错，
+        // 否则每轮都会「标 pending → 再被判 missing」，形成死循环。
+        await db.messages.update(row.id, { syncState: 'error' });
+        rejectedRows += 1;
+        continue;
+      }
+      if (await settleRow('message', row.id, row.client_rev, reason)) rejectedRows += 1;
+    }
+  });
+
+  setStatus({ rejected: rejectedRows > 0 ? status.rejected + rejectedRows : status.rejected });
+}
+
+/**
+ * 结算一行。返回该行是否停在 error。
+ *
+ * **必须先核对修订号**：`pushBatch` 读的是快照，HTTP 往返期间用户完全可能又改了这行
+ * （保存完整回答、重命名、甚至删掉它）。按 id 无条件写 `synced` 会把那次改动标成
+ * 「已同步」，而它其实从没发出去过——本地与服务端从此永久不一致，且因为本地修订号
+ * 更大，拉取也不会把它改回来。删会话就是这么丢的。
+ */
+async function settleRow(
+  kind: 'conversation' | 'message',
+  id: string,
+  pushedRev: number,
+  reason: string | undefined,
+): Promise<boolean> {
+  const table = kind === 'conversation' ? db.sessions : db.messages;
+  const local = await table.get(id);
+  if (!local) return false;
+  if ((local.clientRev ?? 0) !== pushedRev) {
+    // 在途期间又改过：保持 pending，下一批会把更新的版本推上去。
+    return false;
+  }
+  if (reason === undefined || reason === 'stale' || reason === 'not_owned' || reason === 'conversation_deleted') {
+    await table.update(id, { syncState: 'synced' });
+    if (reason !== undefined) {
+      console.warn(`同步行被服务端忽略 (${kind}=${id} reason=${reason})`);
+    }
+    return false;
+  }
+  await table.update(id, { syncState: 'error' });
+  console.warn(`同步行被服务端拒绝 (${kind}=${id} reason=${reason})`);
+  return true;
+}
+
+// ---------------------------------------------------------------------
+// pull
+// ---------------------------------------------------------------------
+
+/** 返回是否还有下一页。 */
+async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
+  let page: PullResponse;
+  try {
+    page = await pullRows(cursor, { timeoutSeconds, limit: PULL_LIMIT });
+  } catch (err) {
+    if (!(err instanceof SyncHttpError) || !err.isCursorReset) throw err;
+    // 游标失效（服务端回滚 / 格式升级）：丢掉它，从头拉一次全量
+    console.warn('同步游标失效，改为全量重新同步:', err.message);
+    cursor = null;
+    await saveCursor(null);
+    // 服务端被回滚/换库时，本机那些「已同步」的行在服务端可能根本不存在。
+    // 只重置游标会把它们永久留在本机，所以顺带标脏，让下一轮 push 补回去。
+    await markAllPending();
+    page = await pullRows(null, { limit: PULL_LIMIT });
+  }
+  if (!isCurrent(gen)) return false;
+
+  const affected = await applyPage(page);
+  cursor = page.cursor;
+  await saveCursor(cursor);
+  setStatus({ lastSyncedAt: Date.now() });
+  if (affected.length > 0) notifyApplied(affected);
+  await refreshPending();
+  return page.has_more;
+}
+
+/**
+ * 把一页服务端数据应用进本地库（**不触发**同步标记）。
+ *
+ * 删除是单向的：服务端说这个会话没了，本地就算还有内容也一起删——否则下次推送会把它
+ * 复活成一条新会话。
+ */
+async function applyPage(page: PullResponse): Promise<string[]> {
+  const affected: string[] = [];
+
+  await runSyncInternal(async () => {
+    // 本页里被删掉的会话：消息循环必须跳过它们，否则会把刚删掉的消息再 put 回来。
+    // 今天服务端删墓碑时会级联删消息，所以同一页不会同时出现两者；但这层顺序依赖
+    // 不该由「服务端实现细节」保证。
+    const deletedIds = new Set(page.conversations.filter((row) => row.deleted).map((row) => row.id));
+
+    for (const row of page.conversations) {
+      const local = await db.sessions.get(row.id);
+      if (row.deleted) {
+        await db.messages.where('sessionId').equals(row.id).delete();
+        if (local) await db.sessions.delete(row.id);
+        affected.push(row.id);
+        continue;
+      }
+      if (!shouldApplyRemote(row, local)) continue;
+      await db.sessions.put(fromConversationRow(row, local));
+      affected.push(row.id);
+    }
+
+    for (const row of page.messages) {
+      if (deletedIds.has(row.conversation_id)) continue;
+      const local = await db.messages.get(row.id);
+      if (!shouldApplyRemote(row, local)) continue;
+      await db.messages.put(fromMessageRow(row, local));
+      affected.push(row.conversation_id);
+    }
+  });
+
+  return [...new Set(affected)];
+}
+
+function notifyApplied(sessionIds: string[]): void {
+  const unique = [...new Set(sessionIds.filter(Boolean))];
+  for (const listener of [...appliedListeners]) listener(unique);
+  // 其他标签页：让它们自己重读（BroadcastChannel 不回传给发送方）
+  for (const id of unique) notifySessionsChanged(id);
+}
+
+// ---------------------------------------------------------------------
+// 游标与回填
+// ---------------------------------------------------------------------
+
+async function loadCursor(id: string): Promise<string | null> {
+  const record = await db.syncMeta.get(CURSOR_KEY);
+  if (!record || record.userId !== id) return null;
+  return record.value || null;
+}
+
+async function saveCursor(value: string | null): Promise<void> {
+  if (!userId) return;
+  await db.syncMeta.put({
+    key: CURSOR_KEY,
+    userId,
+    value: value ?? '',
+    updatedAt: Date.now(),
+  });
+}
+
+/**
+ * 首次同步：把本机已有内容全部标成待推送。
+ *
+ * 只做一次（用 `backfill` 标记）。换了账号要重做——游标和标记都是按 userId 校验的，
+ * 登出时本地库本来也会被清空。
+ */
+/** 把本机所有行标成待推送（修订号不动：内容没变，只是「服务端可能没有」）。 */
+async function markAllPending(): Promise<void> {
+  await runSyncInternal(async () => {
+    await db.sessions.toCollection().modify((session) => {
+      session.syncState = 'pending';
+      session.clientRev = session.clientRev ?? 0;
+    });
+    await db.messages.toCollection().modify((message) => {
+      message.syncState = 'pending';
+      message.clientRev = message.clientRev ?? 0;
+    });
+  });
+}
+
+async function backfillIfNeeded(id: string): Promise<void> {
+  const done = await db.syncMeta.get(BACKFILL_KEY);
+  if (done?.userId === id) return;
+
+  await markAllPending();
+  await db.syncMeta.put({ key: BACKFILL_KEY, userId: id, value: '1', updatedAt: Date.now() });
+}
+
+// ---------------------------------------------------------------------
+// 给 UI / 登出流程用的查询
+// ---------------------------------------------------------------------
+
+/**
+ * 尚未落到服务端的行数：`pending`（还会重试）+ `error`（服务端明确拒绝，需要用户处理）。
+ *
+ * error 必须一起算：它们同样只存在于本机，登出会一起清掉。只数 pending 会让确认框
+ * 显示「0 条未同步」然后把拒收的内容删掉。
+ */
+export async function countUnsynced(): Promise<number> {
+  const states = ['pending', 'error'] as const;
+  let total = 0;
+  for (const state of states) {
+    total += await db.sessions.where('syncState').equals(state).count();
+    total += await db.messages.where('syncState').equals(state).count();
+  }
+  return total;
+}
+
+export async function countPending(): Promise<number> {
+  return countUnsynced();
+}
+
+async function refreshPending(): Promise<void> {
+  try {
+    const pending = await countPending();
+    if (pending !== status.pending) setStatus({ pending });
+  } catch (err) {
+    console.warn('统计待同步行数失败:', err);
+  }
+}
+
+/**
+ * 登出前最后一次推送，`timeoutMs` 到点就放弃（不阻塞用户退出）。
+ *
+ * 返回仍未能推送出去的行数：调用方据此决定要不要提醒用户「这些内容会丢」。
+ */
+export async function flushPending(timeoutMs = 2_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (Date.now() < deadline) {
+      const pushed = await pushBatch();
+      if (pushed === 0) break;
+    }
+  } catch (err) {
+    console.warn('登出前的最后一次同步失败:', err);
+  }
+  return countPending();
+}

@@ -323,8 +323,18 @@ async def _existing_message_payloads(session: AsyncSession, ids: Sequence[str]) 
 
 
 def _conversation_signature(value: ConversationIn | _ConversationMeta) -> tuple:
-    """会话里「可变内容」的指纹，用来区分纯重放与内容变更。"""
-    return (value.title, value.model, value.reasoning_effort, bool(value.is_pinned))
+    """会话里「可变内容」的指纹，用来区分纯重放与内容变更。
+
+    `deleted` 必须在里面：漏掉它的话，一个「修订号没变但要把会话删掉」的推送会被判成
+    纯重放而**静默丢弃**——墓碑不写、消息不删、版本不前进，删除永久丢失。
+    """
+    return (
+        value.title,
+        value.model,
+        value.reasoning_effort,
+        bool(value.is_pinned),
+        bool(value.deleted),
+    )
 
 
 async def _next_seq(session: AsyncSession, conversation_id: str) -> int:
@@ -366,6 +376,9 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     rejected: list[RejectedRow] = []
     accepted_conversations = 0
     accepted_messages = 0
+    #: 是否真的写进了行。纯重放（内容完全相同）不写库也不推进版本，
+    #: 因此不该唤醒该用户其它设备的长轮询——那只会让它们空拉一次再挂回去。
+    wrote_rows = False
 
     async with async_session_maker() as session, session.begin():
         conversation_rows = _dedupe_conversations(request.conversations)
@@ -461,6 +474,7 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                 continue
 
             accepted_conversations += 1
+            wrote_rows = True
             if row.deleted:
                 deleted_ids.add(row.id)
                 # 墓碑留下，消息清掉：墓碑是删除信号，消息没有保留价值。
@@ -488,7 +502,9 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         equal_rev_ids = [
             row.id
             for row in message_rows
-            if (meta := existing_messages.get(row.id)) is not None and meta.client_rev == row.client_rev
+            if (meta := existing_messages.get(row.id)) is not None
+            and meta.user_id == user_id
+            and meta.client_rev == row.client_rev
         ]
         unchanged_payloads = await _existing_message_payloads(session, equal_rev_ids) if equal_rev_ids else {}
 
@@ -560,11 +576,11 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                 rejected.append(_reject("message", row.id, "not_owned"))
                 continue
             accepted_messages += 1
+            wrote_rows = True
 
         version_after = await _head_version(session, user_id)
 
-    accepted = accepted_conversations + accepted_messages
-    if accepted:
+    if wrote_rows:
         # 提交之后再唤醒：提交前唤醒会让等待方读到旧版本，然后白等一轮。
         notify_change(user_id)
 

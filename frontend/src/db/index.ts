@@ -1,6 +1,6 @@
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type Table, type Transaction } from 'dexie';
 
-import type { MessageRecord, SessionRecord } from '../types';
+import type { MessageRecord, SessionRecord, SyncMetaRecord } from '../types';
 
 /**
  * 本地会话与消息存储。
@@ -31,6 +31,7 @@ export class ChatDatabase extends Dexie {
   // 写错字段名不会被发现。
   sessions!: Table<SessionRecord, string>;
   messages!: Table<MessageRecord, string>;
+  syncMeta!: Table<SyncMetaRecord, string>;
 
   constructor() {
     super('BennettAgentDB');
@@ -94,6 +95,17 @@ export class ChatDatabase extends Dexie {
       messages: 'id, sessionId, role, createdAt',
     });
 
+    // v8：跨设备同步。
+    //
+    // 只加**索引**才需要升版本：`syncState` 要用来查「还有哪些没推上去」，所以必须进
+    // 索引；`clientRev` 只在按 id 读写时使用，不进索引。`syncMeta` 存游标与回填标记，
+    // 跟业务数据同库，保证登出清空时一起清掉。
+    this.version(8).stores({
+      sessions: 'id, title, model, reasoningEffort, isPinned, createdAt, updatedAt, syncState',
+      messages: 'id, sessionId, role, createdAt, syncState',
+      syncMeta: 'key',
+    });
+
     // 这里**刻意不**自己监听 versionchange。
     //
     // Dexie 构造时会注册内建处理器，用 `close({ disableAutoOpen: false })` 关连接：
@@ -105,7 +117,56 @@ export class ChatDatabase extends Dexie {
     this.on('blocked', () => {
       console.warn('数据库升级被阻挡，请关闭其他标签页');
     });
+
+    // 同步标记：任何本地写入都自动变成 pending + 修订号 +1。
+    //
+    // 放在表级 hook 而不是散落的 9 个写入点：漏掉任何一处，那条内容就永远不会被推上去，
+    // 而症状是「换设备后少了一条消息」——几乎不可能靠人工发现。
+    //
+    // 反向要求：同步层自己写库（应用远端行、标记已同步）**必须**走 `runSyncInternal`，
+    // 否则拉下来的行又被标成 pending，形成「拉 → 推 → 拉」的死循环。
+    for (const table of [this.sessions, this.messages]) {
+      table.hook('creating', (_primKey, obj) => {
+        markPending(obj as { syncState?: string; clientRev?: number });
+      });
+      // 返回值才是「额外要写进去的变更」：Dexie 4 会把 updating 的返回值合并进待写对象，
+      // 而**直接改 `modifications` 参数是没有用的**（它只是算出来的 diff，改完照样被丢弃）。
+      // 这个坑很隐蔽——子序列的 hook 能看到被改过的 diff，落库却是原样，表现为
+      // 「标记永远 pending=0、修订号永远 0」，同步静默不发。
+      table.hook('updating', (_modifications, _primKey, obj, transaction) => {
+        if (isSyncInternal(transaction)) return undefined;
+        return {
+          syncState: 'pending',
+          clientRev: ((obj as { clientRev?: number }).clientRev ?? 0) + 1,
+        };
+      });
+    }
   }
+}
+
+/** 同步层内部事务的标记键。挂在 Transaction 对象上：它是事务级的，不会被并发写入串味。 */
+const SYNC_INTERNAL = '__syncInternal';
+
+function isSyncInternal(transaction: Transaction): boolean {
+  return (transaction as unknown as Record<string, unknown>)[SYNC_INTERNAL] === true;
+}
+
+function markPending(obj: { syncState?: string; clientRev?: number }): void {
+  if (obj.syncState === undefined) obj.syncState = 'pending';
+  if (obj.clientRev === undefined) obj.clientRev = 0;
+}
+
+/**
+ * 在「不触发同步标记」的事务里执行写库。
+ *
+ * 两个调用方：应用服务端拉下来的行、以及把行标记成已同步。两者都不该被当成「本地
+ * 新修改」，否则会无限循环或被自己推上去。
+ */
+export async function runSyncInternal<T>(fn: () => Promise<T>): Promise<T> {
+  return db.transaction('rw', db.sessions, db.messages, db.syncMeta, async (transaction) => {
+    (transaction as unknown as Record<string, unknown>)[SYNC_INTERNAL] = true;
+    return fn();
+  });
 }
 
 export const db = new ChatDatabase();
@@ -117,9 +178,11 @@ export const db = new ChatDatabase();
  * 半清空状态，下一次加载要么显示孤立的空会话，要么读到不属于当前账号的残留。
  */
 export async function clearAllLocalData(): Promise<void> {
-  await db.transaction('rw', db.sessions, db.messages, async () => {
+  await db.transaction('rw', db.sessions, db.messages, db.syncMeta, async () => {
     await db.messages.clear();
     await db.sessions.clear();
+    // 游标必须一起清：留着会让下一个账号从别人的同步位置开始拉
+    await db.syncMeta.clear();
   });
 }
 

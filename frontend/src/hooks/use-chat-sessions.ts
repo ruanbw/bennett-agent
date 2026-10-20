@@ -12,6 +12,7 @@ import {
   setSessionsChangedHandler,
 } from '../lib/chat-runs';
 import { SESSIONS_CHANGED_DEBOUNCE_MS, subscribeSessionsChanged } from '../lib/multi-tab';
+import { requestPush, subscribeApplied } from '../lib/sync/engine';
 import type { ModelItem, SessionRecord } from '../types';
 
 /**
@@ -92,7 +93,8 @@ export function useChatSessions({
   /** 加载全部本地会话：置顶在前，再按 updatedAt 倒序。 */
   const reloadSessions = useCallback(async (): Promise<SessionRecord[]> => {
     try {
-      const list = sortSessions(await db.sessions.toArray());
+      // 墓碑（deleted）必须过滤掉：它们是同步用的删除标记，不是会话
+      const list = sortSessions((await db.sessions.toArray()).filter((session) => !session.deleted));
       sessionsRef.current = list;
       // 只更新列表，绝不改当前选中：重载可能在用户点选/新建的同一窗口内完成，
       // 选中是用户的决定，重载不得覆盖它。
@@ -165,6 +167,7 @@ export function useChatSessions({
     };
 
     await db.sessions.add(session);
+    requestPush();
     sessionsRef.current = [session, ...sessionsRef.current];
     setSessions((prev) => [session, ...prev]);
     // 守卫式更新：只有当前选中仍是「创建前」的值才切到新会话。用户在等待写入期间
@@ -197,6 +200,7 @@ export function useChatSessions({
       // 标题没变就什么都不写：同名保存不该 bump updatedAt 把旧会话顶到最前
       if (!changes) return;
       await db.sessions.update(sessionId, changes);
+      requestPush();
       await reloadSessions();
     },
     [reloadSessions],
@@ -211,6 +215,7 @@ export function useChatSessions({
       if (!session) return;
 
       await db.sessions.update(sessionId, pinChange(!session.isPinned));
+      requestPush();
       await reloadSessions();
     },
     [reloadSessions],
@@ -226,6 +231,7 @@ export function useChatSessions({
           await db.sessions.update(id, changes);
         }
       });
+      requestPush();
       await reloadSessions();
     },
     [reloadSessions],
@@ -244,9 +250,12 @@ export function useChatSessions({
       await db.transaction('rw', db.sessions, db.messages, async () => {
         for (const id of sessionIds) {
           await db.messages.where('sessionId').equals(id).delete();
-          await db.sessions.delete(id);
+          // 保留一行墓碑而不是直接 delete：同步层要靠它把「删了」推给服务端和其他设备。
+          // 直接删的话服务端永远不知道这个会话该消失，下次拉取还会把它带回来。
+          await db.sessions.update(id, { deleted: true, updatedAt: Date.now() });
         }
       });
+      requestPush();
 
       for (const id of sessionIds) {
         abortChatRun(id);
@@ -266,14 +275,50 @@ export function useChatSessions({
     [reloadSessions, selectSession, createSession],
   );
 
+  /**
+   * 同步层拉到了本机没有的内容：重读列表，必要时重读当前会话的消息。
+   *
+   * 跨标签页走 `subscribeSessionsChanged`；这里是**同标签页**的那条路——BroadcastChannel
+   * 不会把消息回传给发送方，所以同步引擎必须单独通知自己所在的页面。
+   *
+   * 会话在别的设备被删掉时列表里就没有它了：那要像本地删除一样切走，否则用户会停在
+   * 一个已经不存在的会话上（发消息会 404）。
+   */
+  useEffect(() => {
+    return subscribeApplied((sessionIds: string[]) => {
+      void (async () => {
+        const list = await reloadSessions();
+        const current = currentSessionIdRef.current;
+        if (!current) return;
+
+        if (!list.some((session) => session.id === current)) {
+          // 会话在别的设备被删了。这里**不能**因为本页还在生成就原地不动：
+          // 该会话的落库从此都是 no-op（行已不存在），页面会永久停在一个不存在的会话上，
+          // 继续发消息还会写出孤儿消息。中止本轮、切走，是唯一自洽的选择。
+          if (isRunActive(current)) abortChatRun(current);
+          if (list.length > 0) selectSession(list[0].id, list);
+          else await createSession();
+          return;
+        }
+
+        if (!sessionIds.includes(current) || isRunActive(current)) return;
+        void requestSessionMessagesReload(current);
+      })();
+    });
+  }, [reloadSessions, selectSession, createSession]);
+
   const clearAllSessions = useCallback(async (): Promise<void> => {
     const removedIds = sessionsRef.current.map((session) => session.id);
 
     // 同 removeSessions：先删库再中止 run，事务失败时内存里的 run 仍然可用
     await db.transaction('rw', db.sessions, db.messages, async () => {
       await db.messages.clear();
-      await db.sessions.clear();
+      // 同 removeSessions：会话改成墓碑，让「全部清空」也能同步出去
+      for (const id of removedIds) {
+        await db.sessions.update(id, { deleted: true, updatedAt: Date.now() });
+      }
     });
+    requestPush();
 
     for (const id of removedIds) {
       abortChatRun(id);
@@ -305,6 +350,7 @@ export function useChatSessions({
         reasoningEffort: nextEffort,
         updatedAt: Date.now(),
       });
+      requestPush();
       setSessions((prev) =>
         prev.map((session) =>
           session.id === currentSessionId
@@ -327,6 +373,7 @@ export function useChatSessions({
         reasoningEffort: nextEffort,
         updatedAt: Date.now(),
       });
+      requestPush();
       setSessions((prev) =>
         prev.map((session) =>
           session.id === currentSessionId ? { ...session, reasoningEffort: nextEffort } : session,

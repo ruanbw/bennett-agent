@@ -8,6 +8,7 @@
  */
 
 import { db } from '../db';
+import { requestPush } from './sync/engine';
 import { isRunIncomplete, type RunState } from './chat-store';
 import type { ClarificationState, MessageRecord, Run } from '../types';
 
@@ -57,6 +58,9 @@ export async function saveFinal(assistantMsgId: string, run: RunState): Promise<
     incomplete: isRunIncomplete(run),
     clarification: run.clarification ?? null,
   });
+  // 一轮结束是推送的自然时机：中间态（saveProgress）只打标记，不上传。
+  // 引擎没在登录态时是空操作，所以纯逻辑测试不受影响。
+  requestPush();
 }
 
 export async function touchSession(sessionId: string): Promise<void> {

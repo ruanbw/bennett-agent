@@ -1,0 +1,195 @@
+/**
+ * 本地记录 ⇄ 同步协议行 的映射，以及「这一行该不该覆盖本地」的判定。
+ *
+ * 全部是纯函数：同步里最容易出错的就是这几个判断（覆盖规则、payload 收哪些字段、
+ * 会话 id 怎么对应），抽出来才能在 node 环境的 vitest 里直接钉住。
+ */
+
+import type { ChatRole, MessageRecord, SessionRecord, SyncState } from '../../types';
+
+/** push 上行（不带服务端版本号）。字段名是线上契约（snake_case）。 */
+export interface ConversationPushRow {
+  id: string;
+  title: string;
+  model: string | null;
+  reasoning_effort: string | null;
+  is_pinned: boolean;
+  deleted: boolean;
+  client_rev: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface MessagePushRow {
+  id: string;
+  conversation_id: string;
+  role: string;
+  /** 前端自有结构的整包透传；服务端不理解也不校验内部字段。 */
+  payload: Record<string, unknown>;
+  client_rev: number;
+  created_at: number;
+}
+
+export interface ConversationRow extends ConversationPushRow {
+  version: number;
+}
+
+export interface MessageRow extends MessagePushRow {
+  /** 服务端赋值的会话内顺序。 */
+  seq: number;
+  version: number;
+}
+
+/**
+ * 进 payload 的字段白名单。
+ *
+ * 用白名单而不是「整个记录减掉几个键」：减法的写法会在以后新增字段时默默把
+ * `syncState` / `clientRev` 这类同步元数据也发上去，服务端存下来再拉回本地，
+ * 就成了同步层自己污染自己。
+ */
+const MESSAGE_PAYLOAD_KEYS = [
+  'content',
+  'thinking',
+  'thinkingMs',
+  'toolCalls',
+  'clarification',
+  'fallback',
+  'usage',
+  'error',
+  'partOrder',
+  'model',
+  'stopped',
+  'incomplete',
+] as const;
+
+export function toConversationPushRow(session: SessionRecord): ConversationPushRow {
+  return {
+    id: session.id,
+    title: session.title,
+    model: session.model ?? null,
+    reasoning_effort: session.reasoningEffort ?? null,
+    is_pinned: Boolean(session.isPinned),
+    deleted: session.deleted === true,
+    client_rev: session.clientRev ?? 0,
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+  };
+}
+
+export function toMessagePushRow(record: MessageRecord): MessagePushRow {
+  const payload: Record<string, unknown> = {};
+  for (const key of MESSAGE_PAYLOAD_KEYS) {
+    if (record[key] !== undefined) payload[key] = record[key];
+  }
+  return {
+    id: record.id,
+    conversation_id: record.sessionId,
+    role: record.role,
+    payload,
+    client_rev: record.clientRev ?? 0,
+    created_at: record.createdAt,
+  };
+}
+
+/** 服务端行 → 本地会话。`local` 存在时保留它上面同步层不认识的字段。 */
+export function fromConversationRow(row: ConversationRow, local?: SessionRecord): SessionRecord {
+  return {
+    ...local,
+    id: row.id,
+    title: row.title,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort ?? undefined,
+    isPinned: row.is_pinned ? 1 : 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deleted: row.deleted,
+    syncState: 'synced',
+    clientRev: row.client_rev,
+  };
+}
+
+/** 服务端行 → 本地消息。 */
+export function fromMessageRow(row: MessageRow, local?: MessageRecord): MessageRecord {
+  const payload = row.payload as Partial<MessageRecord>;
+  return {
+    ...local,
+    ...payload,
+    id: row.id,
+    sessionId: row.conversation_id,
+    role: row.role as ChatRole,
+    // content 是必填字段：服务端允许它为空串（只产出思考链的历史、流式占位），
+    // 但绝不允许缺席——缺了就是坏数据，补空串比留 undefined 更安全。
+    content: typeof payload.content === 'string' ? payload.content : '',
+    createdAt: row.created_at,
+    syncState: 'synced',
+    clientRev: row.client_rev,
+  };
+}
+
+/**
+ * 拉到的这一行是否应该覆盖本地。
+ *
+ * 三条规则，顺序不能换：
+ *
+ * 1. 本地没有 → 直接建；
+ * 2. 本地是 `pending` / `error` → **不动**。pending 意味着本机有还没推上去的内容，
+ *    拿服务端的旧版本盖掉它就是同步把用户刚写的消息回滚；error 是服务端明确拒绝过
+ *    的行，覆盖会让它看起来像成功；
+ * 3. 其余按 `client_rev` 比较：同一行的修订号只有写它的那台设备会推进，所以
+ *    「服务端更大」= 那台设备后来又改了它。
+ *
+ * 不用 `version` 比较：它是全用户级别的游标，和「这一行被改过几次」无关。
+ */
+export function shouldApplyRemote(
+  row: { client_rev: number },
+  local?: { syncState?: SyncState; clientRev?: number },
+): boolean {
+  if (!local) return true;
+  if (local.syncState === 'pending' || local.syncState === 'error') return false;
+  return row.client_rev > (local.clientRev ?? 0);
+}
+
+export interface PushBatch {
+  conversations: ConversationPushRow[];
+  messages: MessagePushRow[];
+}
+
+/**
+ * 组一批要推送的行。
+ *
+ * 两条约束：
+ *
+ * 1. 会话必须先于它的消息到达服务端（服务端会按 id 校验会话归属）；
+ * 2. 会话数超出一批时，**不能**把引用这些会话的消息塞进同一批——那只会换回一堆
+ *    `conversation_missing`。本轮先推会话，消息下一批再说。
+ */
+export function buildPushBatch(
+  sessions: readonly SessionRecord[],
+  messages: readonly MessageRecord[],
+  limit: number,
+): PushBatch {
+  // 同毫秒的会话按 id 兜底排序：批次的顺序必须确定，否则「谁先到服务端」随
+  // 引擎实现细节漂移，排查问题时无法复现。
+  const orderedSessions = [...sessions].sort(
+    (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id),
+  );
+  const batchSessions = orderedSessions.slice(0, limit);
+  const batchedIds = new Set(batchSessions.map((session) => session.id));
+  const pendingIds = new Set(orderedSessions.map((session) => session.id));
+
+  const eligible = messages.filter(
+    (message) => !pendingIds.has(message.sessionId) || batchedIds.has(message.sessionId),
+  );
+  // 会话内按时间排：服务端按到达顺序赋 seq，顺序稳定才能让两端看到同样的消息次序
+  const orderedMessages = [...eligible].sort(
+    (a, b) =>
+      a.sessionId.localeCompare(b.sessionId) || a.createdAt - b.createdAt || a.id.localeCompare(b.id),
+  );
+
+  return {
+    conversations: batchSessions.map(toConversationPushRow),
+    messages: orderedMessages
+      .slice(0, Math.max(limit - batchSessions.length, 0))
+      .map(toMessagePushRow),
+  };
+}

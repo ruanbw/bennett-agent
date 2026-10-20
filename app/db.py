@@ -34,6 +34,7 @@ from fastapi_users_db_sqlalchemy.access_token import (
     SQLAlchemyAccessTokenDatabase,
     SQLAlchemyBaseAccessTokenTableUUID,
 )
+from fastapi_users_db_sqlalchemy.generics import GUID
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -210,6 +211,15 @@ class ProviderModel(Base):
     provider: Mapped[ModelProvider] = relationship(back_populates="models")
 
 
+#: 同步表的外键列必须用 `GUID` 而不是 `SQLUuid`。
+#:
+#: fastapi-users 的 user 表用的是它自己的 `GUID` 类型：SQLite 下存成 **CHAR(36) 带横线**
+#: 的字符串，而 SQLAlchemy 的 `Uuid` 存成 CHAR(32) 不带横线。两者都是 32 个 hex 字符的
+#: uuid，但字面量不同，外键约束会直接拒绝——症状是 push 报 500
+#: `FOREIGN KEY constraint failed`，而单元测试因为没开 PRAGMA foreign_keys 反而全绿。
+SYNC_USER_FK = GUID
+
+
 class SyncCounter(Base):
     """每用户单调递增的同步版本号（跨设备同步的游标来源）。
 
@@ -227,7 +237,7 @@ class SyncCounter(Base):
     __tablename__ = "sync_counter"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SQLUuid(as_uuid=True),
+        SYNC_USER_FK,
         ForeignKey("user.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -254,7 +264,7 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SQLUuid(as_uuid=True),
+        SYNC_USER_FK,
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -301,7 +311,7 @@ class Message(Base):
     )
     #: 与 conversation.user_id 冗余一份：拉取时不必 join，索引能直接命中。
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SQLUuid(as_uuid=True),
+        SYNC_USER_FK,
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )

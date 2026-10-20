@@ -239,6 +239,19 @@ export interface RunError {
   code: ErrorCode | null;
 }
 
+/**
+ * 一条记录与服务端之间的同步状态。
+ *
+ * - `pending`：本机有还没推上去的变更。**这个状态下 pull 不许覆盖它**——否则同步会
+ *   把用户刚写的内容回滚成服务端的旧版本。
+ * - `synced`：服务端与本机一致。
+ * - `error`：服务端明确拒绝且重试不会成功（超长、超配额）。停在 error 而不是无限重试：
+ *   重试既不会成功，还会一直占用同步配额。
+ *
+ * 老记录没有这个字段 → 视为 `synced`（它们本来就在本机）。
+ */
+export type SyncState = 'pending' | 'synced' | 'error';
+
 export interface MessageRecord {
   id: string;
   sessionId: string;
@@ -268,6 +281,13 @@ export interface MessageRecord {
    */
   partOrder?: PartKind[];
   createdAt: number;
+  /** 同步状态；缺席 = 「老记录，已视为同步」。 */
+  syncState?: SyncState;
+  /**
+   * 本机修订号：每次本地修改 +1。服务端据此拒绝「旧内容覆盖新内容」的重放。
+   * **不是时间戳**，不参与任何跨设备比较。
+   */
+  clientRev?: number;
 }
 
 export interface SessionRecord {
@@ -277,6 +297,27 @@ export interface SessionRecord {
   reasoningEffort?: string;
   isPinned?: number;
   createdAt: number;
+  updatedAt: number;
+  /**
+   * 本机墓碑：删除会话时保留一行并置 true（消息直接删掉），同步层据此把删除推给
+   * 服务端与其他设备。列表查询必须过滤掉它。
+   */
+  deleted?: boolean;
+  syncState?: SyncState;
+  clientRev?: number;
+}
+
+/**
+ * 同步元数据（游标 / 回填标记）。
+ *
+ * 存 IndexedDB 而不是 localStorage：它必须和 sessions/messages 在同一个库、同一个
+ * 「登出即清空」的生命周期里，否则换账号后会把别人的游标带过来。
+ */
+export interface SyncMetaRecord {
+  key: string;
+  /** 这份元数据属于哪个用户：换账号后旧值必须失效。 */
+  userId: string;
+  value: string;
   updatedAt: number;
 }
 

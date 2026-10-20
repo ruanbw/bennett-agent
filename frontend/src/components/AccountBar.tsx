@@ -18,6 +18,7 @@ import {
 } from './ui/dropdown-menu';
 import { SettingsDialog } from './SettingsDialog';
 import { useTheme } from '../context/theme-context';
+import { countPending } from '../lib/sync/engine';
 
 export interface AccountBarProps {
   email: string | null;
@@ -36,6 +37,7 @@ export function AccountBar({
   onOpenAdmin,
 }: AccountBarProps) {
   const [confirming, setConfirming] = useState(false);
+  const [unsynced, setUnsynced] = useState(0);
   const [loggingOut, setLoggingOut] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -146,7 +148,14 @@ export function AccountBar({
           <DropdownMenuSeparator />
 
           <DropdownMenuItem
-            onClick={() => setConfirming(true)}
+            onClick={() => {
+              // 打开确认框时查一次待同步行数：登出会清空本机数据，未同步的内容会永久丢失，
+              // 这件事必须在用户按下「登出」之前说清楚。
+              void countPending()
+                .then(setUnsynced)
+                .catch(() => setUnsynced(0));
+              setConfirming(true);
+            }}
             disabled={loggingOut}
             className="text-destructive hover:bg-destructive/10 data-[highlighted]:bg-destructive/10 data-[highlighted]:text-destructive"
           >
@@ -166,7 +175,11 @@ export function AccountBar({
         open={confirming}
         onOpenChange={setConfirming}
         title="登出？"
-        description="登出会清空本机保存的会话记录，之后需要重新输入邮箱和密码才能继续对话。"
+        description={
+          unsynced > 0
+            ? `有 ${unsynced} 条内容尚未同步到服务器，登出会清空本机数据，这些内容将无法恢复。`
+            : '登出会清空本机保存的会话记录，之后需要重新输入邮箱和密码才能继续对话。'
+        }
         confirmLabel="登出"
         destructive
         onConfirm={() => {

@@ -13,6 +13,7 @@ import { useChatSessions } from './hooks/use-chat-sessions';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
+import { startSync, stopSync } from './lib/sync/engine';
 import type { ModelItem } from './types';
 
 /** `useModels` 的 state 形状。必须显式声明：否则 `[]`/`null` 会被推成 `never[]` 与字面量 `null`，写入真实数据时报错。 */
@@ -340,6 +341,18 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
  */
 export function App() {
   const { status, user, pending, error, login, register, logout, clearError } = useAuth();
+  const userId = user?.id ?? null;
+
+  /*
+    同步引擎跟着登录态起停：它持有游标与定时器，必须和「当前是谁」同生命周期。
+    依赖写成 userId 而不是 user 对象：`/api/auth/me` 每次刷新都可能返回新对象，
+    用对象做依赖会把整条同步链路反复重启。
+  */
+  useEffect(() => {
+    if (!userId) return undefined;
+    startSync(userId);
+    return () => stopSync();
+  }, [userId]);
 
   return (
     <ThemeProvider>

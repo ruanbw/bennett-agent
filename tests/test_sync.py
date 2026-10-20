@@ -19,7 +19,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -40,6 +40,15 @@ class Env:
 @pytest.fixture
 async def env(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sync.db'}")
+
+    # 与 app/db.py 保持一致：SQLite 默认**不开**外键约束，不开的话「外键列类型写错」
+    # 这类问题在测试里完全看不见——线上第一次 push 才 500。
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -512,3 +521,24 @@ async def test_pull_response_is_capped_by_bytes_too(env, monkeypatch):
 
     _, messages, _ = await drain(env.alice)
     assert messages == [f"msg_{index}" for index in range(5)]
+
+
+async def test_tombstone_with_equal_client_rev_is_still_applied(env):
+    """修订号没变也要删：否则「客户端漏了 +1 的删除」会被当成纯重放静默丢弃。"""
+    await sync_service.push(
+        env.alice,
+        PushRequest(
+            conversations=[conversation("sess_a")],
+            messages=[message("msg_1", "sess_a")],
+        ),
+    )
+
+    result = await sync_service.push(
+        env.alice,
+        PushRequest(conversations=[conversation("sess_a", deleted=True, client_rev=0)]),
+    )
+    assert result.rejected == []
+
+    page = await sync_service.pull(env.alice, 0)
+    assert [(row.id, row.deleted) for row in page.conversations] == [("sess_a", True)]
+    assert page.messages == []
