@@ -444,9 +444,12 @@ const Composer: FC<{
           }}
         />
 
-        {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧 */}
-        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2.5 pt-1">
-          <div className="flex min-w-0 items-center gap-2">
+        {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧。
+            窄屏用更小的间距、并允许模型名与思考等级被压缩（见两个选择器的 min-w-0）：
+            发送按钮必须留在同一行，不能独占第二行把输入区撑高 34px。这里用 nowrap
+            而不是 wrap——wrap 会先换行再考虑压缩，模型名永远等不到收缩的机会。 */}
+        <div className="flex flex-nowrap items-center justify-between gap-x-1 gap-y-1 px-2 pb-2.5 pt-1 sm:gap-x-2 sm:px-3">
+          <div className="flex min-w-0 items-center gap-1 sm:gap-2">
             <ComposerAddAttachment />
             {(models.length > 0 || modelsError) && (
               <ModelSelector
@@ -467,7 +470,7 @@ const Composer: FC<{
           </div>
 
           {/* 发送/停止合并为同一个位置：生成中显示停止，空闲时显示发送 */}
-          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
             {/* 上下文用量紧贴发送按钮左侧：它是「能不能继续问」的唯一依据，位置要固定。 */}
             <ContextUsageIndicator
               usage={latestUsage}
@@ -482,7 +485,7 @@ const Composer: FC<{
                   type="button"
                   variant="destructive"
                   size="icon"
-                  className="size-8 rounded-xl cursor-pointer"
+                  className="size-8 pointer-coarse:size-10 rounded-xl cursor-pointer"
                   title="停止生成"
                   aria-label="停止生成"
                 >
@@ -500,7 +503,7 @@ const Composer: FC<{
                   variant="default"
                   size="icon"
                   disabled={blocked}
-                  className="size-8 rounded-xl cursor-pointer"
+                  className="size-8 pointer-coarse:size-10 rounded-xl cursor-pointer"
                   aria-label={sendTooltip}
                 >
                   <ArrowUpIcon className="size-4" />

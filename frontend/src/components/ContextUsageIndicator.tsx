@@ -119,7 +119,7 @@ export function ContextUsageIndicator({
         // 完整数字在弹层与 aria-label 里（读屏走 aria-label）。
         onFocus={() => setOpen(true)}
         onClick={() => setOpen(true)}
-        className={`flex h-7 items-center gap-1 rounded-lg px-1.5 text-[11px] transition-colors cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none ${
+        className={`flex h-7 items-center gap-1 rounded-lg px-1.5 text-[11px] transition-colors cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none pointer-coarse:min-h-9 pointer-coarse:min-w-9 pointer-coarse:justify-center ${
           alerting
             ? 'text-destructive hover:bg-destructive/10'
             : 'text-muted-foreground hover:bg-muted hover:text-foreground'
@@ -138,7 +138,10 @@ export function ContextUsageIndicator({
           aria-label="上下文用量详情"
           onPointerEnter={cancelClose}
           onPointerLeave={scheduleClose}
-          className="absolute right-0 bottom-full z-50 mb-2 w-64 max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-xl"
+          /* 右对齐到用量按钮，而按钮离屏幕右缘只有约 4rem（发送按钮 + 内边距）。
+             320px 屏幕上只减 1.5rem 会让弹层左边出界（右侧 251 - 256 = -5），
+             这里按实际留白收窄；大屏仍由 w-64 限制。 */
+          className="absolute right-0 bottom-full z-50 mb-2 w-64 max-w-[calc(100vw-5rem)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-xl"
         >
           <div className="mb-2 flex items-baseline justify-between gap-2">
             <span className="text-xs font-medium text-foreground">{locked ? '上下文已满' : '上下文用量'}</span>

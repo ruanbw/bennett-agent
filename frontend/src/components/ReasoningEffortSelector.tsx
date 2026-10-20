@@ -109,7 +109,7 @@ export function ReasoningEffortSelector({
   };
 
   return (
-    <div className="relative inline-block" ref={containerRef} onBlur={handleBlur}>
+    <div className="relative inline-block shrink-0" ref={containerRef} onBlur={handleBlur}>
       <button
         ref={triggerRef}
         type="button"
@@ -125,7 +125,7 @@ export function ReasoningEffortSelector({
         aria-expanded={isOpen}
         aria-label={`思考等级：${currentEffort}`}
         title={`reasoning_effort: ${currentEffort}`}
-        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition cursor-pointer shadow-xs text-xs font-mono ${
+        className={`flex items-center gap-1 px-2 py-1.5 sm:gap-1.5 sm:px-2.5 rounded-lg border transition cursor-pointer shadow-xs text-xs font-mono pointer-coarse:min-h-9 ${
           disabled
             ? 'opacity-50 cursor-not-allowed border-border/40 bg-muted/20 text-muted-foreground'
             : isOffNow
@@ -135,12 +135,17 @@ export function ReasoningEffortSelector({
       >
         <Brain
           size={13}
-          className={`shrink-0 ${isOffNow || disabled ? 'text-muted-foreground' : 'text-primary'}`}
+          className={`hidden shrink-0 min-[480px]:block ${
+            isOffNow || disabled ? 'text-muted-foreground' : 'text-primary'
+          }`}
           aria-hidden="true"
         />
         {/*
           窄屏不再只留图标：只剩一个大脑图标时，用户不知道当前是 low / medium / high。
           360px 起显示文字（极窄的 320px 级屏幕仍然隐藏，优先保证不换行挤压发送按钮）。
+          思考等级是三个短词，必须完整可读，因此它不参与压缩：工具条空间不够时先截断
+          模型名（模型选择器有 min-w-0），不要把「low」缩成「l…」。480px 以下隐藏
+          大脑图标，把宽度让给文字本身。
         */}
         <span className="hidden max-w-[3.5rem] truncate text-xs min-[360px]:inline">
           {currentEffort}

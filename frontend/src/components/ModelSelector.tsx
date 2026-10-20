@@ -135,7 +135,7 @@ export function ModelSelector({
   };
 
   return (
-    <div className="relative inline-block" ref={containerRef} onBlur={handleBlur}>
+    <div className="relative inline-block min-w-0" ref={containerRef} onBlur={handleBlur}>
       <button
         ref={triggerRef}
         type="button"
@@ -159,15 +159,18 @@ export function ModelSelector({
               }`
             : undefined
         }
-        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
+        className="flex min-w-0 max-w-full items-center gap-1 px-2 py-1.5 sm:gap-1.5 sm:px-2.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs pointer-coarse:min-h-9"
       >
-        <Cpu size={13} className="text-muted-foreground shrink-0" />
+        <Cpu size={13} className="hidden shrink-0 text-muted-foreground min-[480px]:block" />
         {/*
           窄屏：64px 只够「DeepSee…」，既看不出型号也看不出版本。按可用宽度分档放宽
-          （360px 起 7rem、380px 起 8rem，够放「DeepSeek V4.1 Flash」），
-          桌面沿用 150px。320px 级极窄屏才退回 64px，避免把工具条挤到换行。
+          （360px 起 7rem、380px 起 8rem，够放「DeepSeek V4.1 Flash」），桌面沿用
+          150px；工具条更挤时（例如上下文用量出现）允许**先截断模型名**而不是把发送
+          按钮挤到第二行——min-w-0 让 flex 能压缩这个按钮，truncate 负责省略号。
+          480px 以下隐藏前面的 CPU 图标：它是装饰，名字才是「选了什么」的证据，省下
+          的 19px 留给模型名（否则手机上会截成「DeepSeek…」）。
         */}
-        <span className="max-w-[64px] min-[360px]:max-w-[7rem] min-[380px]:max-w-[8rem] sm:max-w-[150px] truncate text-xs font-medium">
+        <span className="min-w-0 max-w-[64px] min-[360px]:max-w-[7rem] min-[380px]:max-w-[8rem] sm:max-w-[150px] truncate text-xs font-medium">
           {label}
         </span>
         <ChevronDown
@@ -177,7 +180,10 @@ export function ModelSelector({
       </button>
 
       {isOpen && (
-        <div className="absolute left-0 bottom-full mb-1.5 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover text-popover-foreground shadow-xl p-1 z-50 text-xs backdrop-blur-md">
+        /* 320px 屏幕上触发器在 x≈61px：只减 1.5rem 的 max-w 会让菜单右侧出界
+           （61 + 288 = 349 > 320）。这里按触发器左侧留白再多减一些，保证菜单完整落在
+           视口内；更宽的屏幕宽度仍由 w-72 限制，不受影响。 */
+        <div className="absolute left-0 bottom-full mb-1.5 w-72 max-w-[calc(100vw-4.5rem)] rounded-xl border border-border bg-popover text-popover-foreground shadow-xl p-1 z-50 text-xs backdrop-blur-md">
           <div className="px-2.5 py-1 text-[10px] font-semibold text-muted-foreground border-b border-border/50 select-none flex justify-between items-center">
             <span>切换对话模型</span>
             <span>{isEmpty ? '不可用' : `${models.length} 款可用`}</span>
