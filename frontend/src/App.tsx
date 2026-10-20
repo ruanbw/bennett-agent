@@ -360,9 +360,14 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
             >
               <ChatContainer
                 sessionTitle={sessions.find((s) => s.id === currentSessionId)?.title}
-                onUpdateTitle={(title) => {
-                  if (currentSessionId) void updateTitle(currentSessionId, title);
-                }}
+                /*
+                  必须把 updateTitle 的 Promise 交回去：`void` 掉之后 ChatContainer 的
+                  `await onUpdateTitle(...)` 会立刻成功，保存失败既不报错、也不会把编辑器
+                  留在原地——用户只看到标题悄悄回退，错误只出现在控制台。
+                */
+                onUpdateTitle={(title) =>
+                  currentSessionId ? updateTitle(currentSessionId, title) : undefined
+                }
                 models={models}
                 modelsError={modelsError}
                 currentModel={currentModel}

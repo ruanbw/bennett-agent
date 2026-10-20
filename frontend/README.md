@@ -137,6 +137,12 @@ src/
   `event.key` 不是 `k`）。入口按钮同时挂 `title`（平台化提示）与 `aria-keyshortcuts`，
   否则快捷键只有作者知道。搜索已经打开时再按 `⌘K` 要主动聚焦输入框——`autoFocus`
   只在挂载那一次生效。
+- **重命名失败不能静默回退。** `ChatContainer` 会 `await onUpdateTitle(...)`，所以
+  `App` **必须**把 `updateTitle` 的 Promise 交回去——用 `void` 吞掉它，await 会立即
+  成功，失败只剩控制台一行日志、标题悄悄退回旧值（本项目真踩过）。失败时编辑器保持
+  打开、错误就地显示（`role="alert"` + `aria-invalid`），按 Enter 即重试；blur 与
+  submit 可能同批触发，用 ref 挡住第二次保存。输入框用 `[field-sizing:content]` 按
+  内容自适应（`size` 属性作旧浏览器退路），固定 12rem 时 90 字标题只能看见一小截。
 - **设置面板里的每个数字都要有出处。** 版本号来自 package.json（`vite.config.js` 的
   `define` 注入 `__APP_VERSION__`，唯一读取点是 `lib/app-info.ts`）——此前写死 `v0.1.0`
   而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑

@@ -42,6 +42,11 @@ export interface ChatContainerProps {
  * 用户看不到同步是否失败（面板存在的全部意义就是不让同步静默），也没法搜索历史。
  * 所以胶囊工具栏必须补上这两个入口：搜索把侧边栏重新展开（移动端即打开抽屉）并把
  * 光标放进输入框；同步直接复用 `SyncStatusButton`，状态与面板完全一致。
+ *
+ * 标题重命名：输入框按内容自动加宽（`field-sizing: content`，不支持的浏览器退回 size
+ * 属性），否则长标题在 12rem 的固定宽度里只能看见一小截。**保存失败时不关闭编辑器**：
+ * 文本留在原地、错误就显示在旁边，用户可以按 Enter 重试；关掉编辑器再默默回退标题，
+ * 等于把失败藏进控制台。
  */
 export function ChatContainer({
   sessionTitle,
@@ -61,9 +66,17 @@ export function ChatContainer({
 }: ChatContainerProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editingTitle, setEditingTitle] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [prevSessionTitle, setPrevSessionTitle] = useState(sessionTitle);
   const inputRef = useRef<HTMLInputElement>(null);
   const cancelEditRef = useRef(false);
+  // 在飞标记用 ref：blur 与 submit 可能在同一轮事件里先后触发，state 还没更新，
+  // 只看 `saving` 会把同一次保存写两遍（第二次还会被当成失败重试的入口）。
+  const savingRef = useRef(false);
+  // 取消/重新开始编辑会换一个 token：在途保存回来时据此丢弃结果，不把已经取消的编辑器
+  // 又打开、也不弹一条属于上一次编辑的错误。
+  const saveTokenRef = useRef(0);
 
   if (prevSessionTitle !== sessionTitle) {
     setPrevSessionTitle(sessionTitle);
@@ -74,6 +87,7 @@ export function ChatContainer({
 
   const handleStartEdit = useCallback(() => {
     cancelEditRef.current = false;
+    setSaveError(null);
     setEditingTitle(sessionTitle || '新对话');
     setIsEditing(true);
   }, [sessionTitle]);
@@ -86,13 +100,33 @@ export function ChatContainer({
         setIsEditing(false);
         return;
       }
+      if (savingRef.current) return;
+
       const trimmed = editingTitle.trim();
-      setIsEditing(false);
-      if (!trimmed || trimmed === sessionTitle) return;
+      if (!trimmed || trimmed === sessionTitle) {
+        setSaveError(null);
+        setIsEditing(false);
+        return;
+      }
+
+      const token = saveTokenRef.current + 1;
+      saveTokenRef.current = token;
+      savingRef.current = true;
+      setSaving(true);
+      setSaveError(null);
+
       try {
         await onUpdateTitle?.(trimmed);
+        if (token === saveTokenRef.current) setIsEditing(false);
       } catch (err) {
         console.error('修改会话标题失败:', err);
+        // 不关闭编辑器：文本与错误都在眼前，按 Enter 就是重试。
+        if (token === saveTokenRef.current) setSaveError('标题保存失败，请重试');
+      } finally {
+        if (token === saveTokenRef.current) {
+          savingRef.current = false;
+          setSaving(false);
+        }
       }
     },
     [editingTitle, sessionTitle, onUpdateTitle]
@@ -100,6 +134,11 @@ export function ChatContainer({
 
   const handleCancelEdit = useCallback(() => {
     cancelEditRef.current = true;
+    // 让在途保存的结算全部失效（它既不该关闭编辑器，也不该弹错误）
+    saveTokenRef.current += 1;
+    savingRef.current = false;
+    setSaving(false);
+    setSaveError(null);
     setIsEditing(false);
     setEditingTitle(sessionTitle || '新对话');
   }, [sessionTitle]);
@@ -175,14 +214,25 @@ export function ChatContainer({
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') handleCancelEdit();
                 }}
-                className="h-7 px-2.5 text-sm font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground w-48 sm:w-72"
+                /* size 是不支持 field-sizing 的浏览器（Firefox 旧版等）的退路；
+                   支持时它被 content 尺寸覆盖 */
+                size={Math.min(Math.max(12, editingTitle.length), 48)}
+                className="h-7 min-w-32 max-w-[min(80vw,28rem)] px-2.5 text-sm font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground [field-sizing:content]"
                 maxLength={100}
                 placeholder="输入会话标题..."
+                aria-invalid={saveError ? true : undefined}
+                aria-describedby={saveError ? 'title-save-error' : undefined}
                 autoFocus
               />
+              {editingTitle.length >= 80 && (
+                <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                  {editingTitle.length}/100
+                </span>
+              )}
               <button
                 type="submit"
-                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer"
+                disabled={saving}
+                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-default"
                 title="保存"
                 aria-label="保存"
               >
@@ -197,6 +247,15 @@ export function ChatContainer({
               >
                 <X className="size-3.5" />
               </button>
+              {saveError && (
+                <span
+                  id="title-save-error"
+                  role="alert"
+                  className="shrink-0 whitespace-nowrap text-[11px] text-destructive"
+                >
+                  {saveError}
+                </span>
+              )}
             </form>
           ) : (
             /*
