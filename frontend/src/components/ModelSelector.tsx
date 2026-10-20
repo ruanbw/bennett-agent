@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, ChevronDown, Cpu, RefreshCw } from 'lucide-react';
 
 import type { ModelItem } from '@/types';
+import { formatTokens } from '@/lib/context-usage';
 import { modelFullLabel, modelSubtitle } from '@/lib/model-identity';
 
 export interface ModelSelectorProps {
@@ -149,7 +150,15 @@ export function ModelSelector({
         aria-expanded={isOpen}
         /* 名字本身是「当前选了什么」的唯一可见证据，读屏也要能听到 */
         aria-label={`选择模型：${label}`}
-        title={selected ? modelFullLabel(selected.name, selected) : undefined}
+        title={
+          selected
+            ? `${modelFullLabel(selected.name, selected)}${
+                typeof selected.context_window === 'number' && selected.context_window > 0
+                  ? ` · 上下文 ${formatTokens(selected.context_window)}`
+                  : ''
+              }`
+            : undefined
+        }
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
       >
         <Cpu size={13} className="text-muted-foreground shrink-0" />
@@ -228,6 +237,16 @@ export function ModelSelector({
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {/* 上下文窗口是「还能不能继续问」的关键信息：上下文锁住的提示会让用户
+                        换一个窗口更大的模型，这里直接把候选的窗口摆出来。网关没报时隐藏。 */}
+                    {typeof model.context_window === 'number' && model.context_window > 0 && (
+                      <span
+                        className="text-[9px] tabular-nums bg-muted px-1 py-0.2 rounded border border-border/50 text-muted-foreground"
+                        title={`上下文窗口：${model.context_window.toLocaleString('en-US')} tokens`}
+                      >
+                        {formatTokens(model.context_window)}
+                      </span>
+                    )}
                     {model.reasoning && (
                       <span className="text-[9px] bg-muted px-1 py-0.2 rounded border border-border/50 text-muted-foreground">
                         思考
