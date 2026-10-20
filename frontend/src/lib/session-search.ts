@@ -13,6 +13,8 @@
  *   失败模式，代价是英文只能按子串匹配）。
  * - 正文命中**按会话聚合**：片段取最近一条命中的消息（越新的上下文越可能是用户要找的），
  *   同时给出命中的消息条数。
+ * - **工具调用也参与搜索**（名称 / 参数 / 结果），但片段会标出来源（`工具 search_docs`）：
+ *   工具块在界面上默认折叠，不标来源的话用户点开也看不到关键词在哪。
  * - **不搜 `thinking`**：思考链在界面上默认折叠、体积不可控，命中它会让用户看到一条
  *   自己点开也找不到关键词的会话。搜索范围与「用户看得见的正文」保持一致。
  *
@@ -61,6 +63,13 @@ export interface ContentMatch {
   sessionId: string;
   /** 最近一条命中消息的片段。 */
   snippet: SearchSnippet;
+  /**
+   * 命中来源：`工具 search_docs` / `提问`；`null` = 消息正文。
+   *
+   * 界面必须显示它：工具结果在默认折叠的区域里，只给片段而不说来源，用户会以为
+   * 命中的是自己的某句话。
+   */
+  label: string | null;
   /** 这个会话里有几条消息命中（同一会话可能命中多条）。 */
   messageCount: number;
   /** 最近一条命中消息的时间，用于「片段取最新」的判定（也便于将来排序）。 */
@@ -204,16 +213,64 @@ export function buildSnippet(
   };
 }
 
+/** 单条消息里的一段可搜索文本；`label` 说明命中来自哪里（null = 正文）。 */
+interface SearchSegment {
+  label: string | null;
+  text: string;
+}
+
 /**
- * 一条消息参与搜索的文本：正文 + 待答提问。
+ * 工具结果只搜前 20k 字符。
+ *
+ * 单个工具结果可以到几百 KB（网页正文、文档），逐条全文扫描会让每次按键都变慢；
+ * 20k 已经覆盖绝大多数「我见过某段内容」的场景，超出部分搜索不到是明确取舍。
+ */
+export const MAX_TOOL_SEARCH_CHARS = 20_000;
+
+/**
+ * 一条消息参与搜索的片段，按「优先展示」的顺序：正文 → 待答提问 → 工具调用。
  *
  * 提问只存在 `clarification.question` 里、正文往往是空的（见 chat-persistence 的
  * `renderClarification`），不并进来就会出现「提问里明明有这个说法却搜不到」。
+ * 工具调用包含名称、参数与结果：搜工具名本身也是合理需求（「那次 search_docs 返回了
+ * 什么」）。
  */
-function searchableText(message: Pick<MessageRecord, 'content' | 'clarification'>): string {
+function searchableSegments(
+  message: Pick<MessageRecord, 'content' | 'clarification' | 'toolCalls'>,
+): SearchSegment[] {
+  const segments: SearchSegment[] = [];
+
+  const content = message.content.trim();
+  if (content) segments.push({ label: null, text: content });
+
   const question = message.clarification?.question?.trim();
-  if (!question) return message.content;
-  return message.content.trim() ? `${message.content} ${question}` : question;
+  if (question) segments.push({ label: '提问', text: question });
+
+  for (const toolCall of message.toolCalls ?? []) {
+    const parts = [toolCall.toolName, toolCall.argsText, toolCall.result ?? '']
+      .map((part) => part?.trim() ?? '')
+      .filter(Boolean)
+      .join('\n');
+    if (!parts) continue;
+    segments.push({
+      label: `工具 ${toolCall.toolName}`,
+      text: parts.length > MAX_TOOL_SEARCH_CHARS ? parts.slice(0, MAX_TOOL_SEARCH_CHARS) : parts,
+    });
+  }
+
+  return segments;
+}
+
+/** 按片段顺序找第一个「所有词都在场」的片段；正文命中优先于工具命中。 */
+function findMessageMatch(
+  message: Pick<MessageRecord, 'content' | 'clarification' | 'toolCalls'>,
+  tokens: readonly string[],
+): { snippet: SearchSnippet; label: string | null } | null {
+  for (const segment of searchableSegments(message)) {
+    const snippet = buildSnippet(segment.text, tokens);
+    if (snippet) return { snippet, label: segment.label };
+  }
+  return null;
 }
 
 export interface SearchContentOptions {
@@ -242,6 +299,10 @@ export async function searchSessionContent(
   const matches = new Map<string, ContentMatch>();
   if (tokens.length === 0 || sessionIds.length === 0 || signal?.aborted) return matches;
 
+  // `parseSearchQuery` 已经小写化了，但这里再归一化一次：大小写不敏感是对调用方的
+  // 承诺，靠「上一层记得转」会让直接调用本函数的人踩到「明明有这个词却搜不到」。
+  const normalizedTokens = tokens.map((token) => token.toLowerCase());
+
   try {
     await db.messages
       .where('sessionId')
@@ -249,24 +310,28 @@ export async function searchSessionContent(
       .each((message) => {
         if (signal?.aborted) throw ABORT;
 
-        const snippet = buildSnippet(searchableText(message), tokens);
-        if (!snippet) return;
+        const match = findMessageMatch(message, normalizedTokens);
+        if (!match) return;
 
         const existing = matches.get(message.sessionId);
         if (!existing) {
           matches.set(message.sessionId, {
             sessionId: message.sessionId,
-            snippet,
+            snippet: match.snippet,
+            label: match.label,
             messageCount: 1,
             newestMatchedAt: message.createdAt,
           });
           return;
         }
 
+        // 片段与来源标签必须一起换：只换片段会把上一个片段的「工具 search_docs」
+        // 留在新的正文片段前面。
         const isNewer = message.createdAt >= existing.newestMatchedAt;
         matches.set(message.sessionId, {
           sessionId: message.sessionId,
-          snippet: isNewer ? snippet : existing.snippet,
+          snippet: isNewer ? match.snippet : existing.snippet,
+          label: isNewer ? match.label : existing.label,
           messageCount: existing.messageCount + 1,
           newestMatchedAt: Math.max(existing.newestMatchedAt, message.createdAt),
         });

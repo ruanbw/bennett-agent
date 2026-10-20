@@ -124,7 +124,9 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
     .join('，');
   // 正文命中是视觉信息（标题下一行小字），读屏必须能从行名里听到，否则「为什么这个会话
   // 会出现在搜索结果里」对读屏用户完全不可解释。片段过长时截断，避免行名变成一段正文。
-  const snippetLabel = contentMatch ? contentMatch.snippet.text.slice(0, 40) : '';
+  const snippetLabel = contentMatch
+    ? `${contentMatch.label ? `${contentMatch.label}：` : ''}${contentMatch.snippet.text.slice(0, 40)}`
+    : '';
   const baseLabel = stateSuffix ? `${title}（${stateSuffix}）` : title;
   const rowLabel = snippetLabel ? `${baseLabel}，内容命中：${snippetLabel}` : baseLabel;
 
@@ -192,6 +194,12 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
             </span>
             {contentMatch && (
               <span className="mt-0.5 block truncate text-[11px] leading-4 text-muted-foreground/80 select-none">
+                {/* 工具命中必须标来源：工具块默认折叠，不标的话用户点开也找不到关键词 */}
+                {contentMatch.label && (
+                  <span className="mr-1 rounded bg-foreground/[0.06] px-1 text-[10px] text-muted-foreground">
+                    {contentMatch.label}
+                  </span>
+                )}
                 <HighlightedText text={contentMatch.snippet.text} ranges={snippetRanges} />
               </span>
             )}

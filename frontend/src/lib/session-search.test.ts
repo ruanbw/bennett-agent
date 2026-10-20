@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { MessageRecord } from '../types';
 import { db } from '../db';
 import {
+  MAX_TOOL_SEARCH_CHARS,
   buildSnippet,
   collapseWhitespace,
   highlightRanges,
@@ -177,6 +178,93 @@ describe('searchSessionContent（真 Dexie）', () => {
     expect(matches.size).toBe(0);
   });
 
+  it('工具结果参与搜索，并标注来源（工具块默认折叠）', async () => {
+    await db.messages.add(
+      message('m1', 's1', '', 1, {
+        role: 'assistant',
+        toolCalls: [
+          {
+            toolCallId: 't1',
+            toolName: 'search_docs',
+            argsText: '{"q":"x"}',
+            result: '这是一段只在工具结果里出现的独特文本',
+            status: 'complete',
+          },
+        ],
+      }),
+    );
+
+    const matches = await searchSessionContent(['独特文本'], { sessionIds: ['s1'] });
+
+    expect(matches.get('s1')!.label).toBe('工具 search_docs');
+    expect(matches.get('s1')!.snippet.text).toContain('独特文本');
+  });
+
+  it('工具名与参数也参与搜索', async () => {
+    await db.messages.add(
+      message('m1', 's1', '', 1, {
+        role: 'assistant',
+        toolCalls: [
+          {
+            toolCallId: 't1',
+            toolName: 'web_search',
+            argsText: '{"query":"special_arg_token"}',
+            result: '结果',
+            status: 'complete',
+          },
+        ],
+      }),
+    );
+
+    const byName = await searchSessionContent(['web_search'], { sessionIds: ['s1'] });
+    expect(byName.get('s1')!.label).toBe('工具 web_search');
+
+    const byArg = await searchSessionContent(['special_arg_token'], { sessionIds: ['s1'] });
+    expect(byArg.get('s1')!.label).toBe('工具 web_search');
+  });
+
+  it('正文命中优先于工具命中（同一消息里先看正文）', async () => {
+    await db.messages.add(
+      message('m1', 's1', 'HNSW 在正文里', 1, {
+        toolCalls: [
+          {
+            toolCallId: 't1',
+            toolName: 'search_docs',
+            argsText: '',
+            result: 'HNSW 也在工具结果里',
+            status: 'complete',
+          },
+        ],
+      }),
+    );
+
+    const matches = await searchSessionContent(['HNSW'], { sessionIds: ['s1'] });
+
+    expect(matches.get('s1')!.label).toBeNull();
+    expect(matches.get('s1')!.snippet.text).toContain('正文');
+  });
+
+  it('工具结果只搜前 20k 字符，超出部分不命中', async () => {
+    const longResult = `${'a'.repeat(MAX_TOOL_SEARCH_CHARS)}尾部独有词`;
+    await db.messages.add(
+      message('m1', 's1', '', 1, {
+        role: 'assistant',
+        toolCalls: [
+          {
+            toolCallId: 't1',
+            toolName: 'fetch_page',
+            argsText: '',
+            result: longResult,
+            status: 'complete',
+          },
+        ],
+      }),
+    );
+
+    const matches = await searchSessionContent(['尾部独有词'], { sessionIds: ['s1'] });
+    expect(matches.size).toBe(0);
+  });
+
   it('待答提问参与搜索（正文为空时也能命中）', async () => {
     await db.messages.bulkAdd([
       message('m1', 's1', '', 1, {
@@ -192,6 +280,7 @@ describe('searchSessionContent（真 Dexie）', () => {
 
     const matches = await searchSessionContent(['向量库'], { sessionIds: ['s1'] });
     expect(matches.get('s1')!.messageCount).toBe(1);
+    expect(matches.get('s1')!.label).toBe('提问');
     expect(matches.get('s1')!.snippet.text).toContain('向量库');
   });
 
