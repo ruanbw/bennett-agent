@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { LoginPage } from './components/LoginPage';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
+import { Toaster } from './components/Toaster';
 import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
 import { useAuth } from './hooks/use-auth';
@@ -16,6 +17,7 @@ import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
 import { downloadMarkdownFile } from './lib/export-markdown';
+import { notify } from './lib/toast';
 import { startSync, stopSync } from './lib/sync/engine';
 import type { ModelItem } from './types';
 
@@ -294,6 +296,8 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
     async (sessionId: string) => {
       const { filename, markdown } = await exportSession(sessionId);
       downloadMarkdownFile(filename, markdown);
+      // 下载动作本身在下载栏里可见，但用户点完菜单后没有任何页面内反馈；给一条确认
+      notify('success', `已导出 ${filename}`);
     },
     [exportSession]
   );
@@ -303,6 +307,7 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
     async (sessionIds: string[]) => {
       const { filename, markdown } = await exportSessions(sessionIds);
       downloadMarkdownFile(filename, markdown);
+      notify('success', `已导出 ${sessionIds.length} 个会话（${filename}）`);
     },
     [exportSessions]
   );
@@ -439,6 +444,8 @@ export function App() {
 
   return (
     <ThemeProvider>
+      {/* 动作反馈（导出完成 / 新建失败）：持久状态仍用页面内联条，不用 toast */}
+      <Toaster />
       {status === 'loading' ? (
         <AuthLoadingScreen />
       ) : status === 'anonymous' ? (

@@ -55,6 +55,7 @@ src/
 │   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
 │   ├── local-stats.ts       # 本机数据统计 + 字节格式化
+│   ├── toast.ts             # 动作反馈状态机（去重/上限/自动消失）
 │   ├── keyboard-shortcuts.ts # 快捷键判定与平台化提示文案
 │   ├── app-info.ts          # 版本号（构建注入的单一来源）
 │   └── constants.ts         # 共享常量与 id 生成
@@ -143,6 +144,11 @@ src/
   `event.key` 不是 `k`）。入口按钮同时挂 `title`（平台化提示）与 `aria-keyshortcuts`，
   否则快捷键只有作者知道。搜索已经打开时再按 `⌘K` 要主动聚焦输入框——`autoFocus`
   只在挂载那一次生效。
+- **toast 只装「动作反馈」，不装持续状态。** 同步失败、落库失败、上下文已满这些刷新后
+  仍然成立的状态留在页面内联条上（会自动消失的提示会让人错过）；一次动作的结果
+  （导出完成、新建会话失败）没有持久位置可放，才用 `lib/toast.ts` + `Toaster`。
+  同语气同文案去重并重置倒计时、最多 3 条、错误停 8s（成功 4s）；可达性上逐条用
+  `role="status"`（错误才用 `role="alert"`），容器不设 `aria-live`。
 - **重命名失败不能静默回退。** `ChatContainer` 会 `await onUpdateTitle(...)`，所以
   `App` **必须**把 `updateTitle` 的 Promise 交回去——用 `void` 吞掉它，await 会立即
   成功，失败只剩控制台一行日志、标题悄悄退回旧值（本项目真踩过）。失败时编辑器保持

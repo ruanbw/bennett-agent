@@ -8,6 +8,7 @@ import {
   settingsShortcutLabel,
 } from '../lib/keyboard-shortcuts';
 import { Thread } from './assistant-ui/elements/thread.aui';
+import { notify } from '../lib/toast';
 import { AccountMenu } from './AccountMenu';
 import { ChatSessionNotices } from './ChatProvider';
 import { SyncStatusButton } from './SyncStatusButton';
@@ -98,6 +99,20 @@ export function ChatContainer({
     }
   }
 
+  /**
+   * 新建对话必须接住 rejection。
+   *
+   * 直接把 async 的 onCreateSession 挂在 onClick 上，失败就是一个没人处理的 Promise：
+   * 点了没反应、控制台里也没有归属，用户只会再点几次。这里给一条错误提示。
+   */
+  const handleCreateSession = useCallback(() => {
+    if (!onCreateSession) return;
+    void Promise.resolve(onCreateSession()).catch((err: unknown) => {
+      console.error('新建会话失败:', err);
+      notify('error', '新建会话失败，请重试');
+    });
+  }, [onCreateSession]);
+
   const handleStartEdit = useCallback(() => {
     cancelEditRef.current = false;
     setSaveError(null);
@@ -178,7 +193,7 @@ export function ChatContainer({
               {onCreateSession && (
                 <button
                   type="button"
-                  onClick={onCreateSession}
+                  onClick={handleCreateSession}
                   className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
                   title="新建对话"
                   aria-label="新建对话"
