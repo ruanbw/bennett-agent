@@ -32,5 +32,6 @@ evals/runs/
 
 # agent
 .pi
+.pi-loop
 .agents
 skills-lock.json
