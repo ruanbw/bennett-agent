@@ -51,6 +51,8 @@ src/
 │   ├── chat-runs.ts         # 编排门面（传输 → 状态 → 持久化）
 │   ├── chat-message.ts      # 记录/run → assistant-ui runtime 消息
 │   ├── capabilities.ts      # 运行时能力探针的客户端（起步建议裁剪）
+│   ├── model-identity.ts    # 模型名称 / 提供商 / 上游 ID 的展示身份
+│   ├── model-selection.ts   # 当前模型是否仍在列表、默认模型是哪一条
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
 │   ├── session-grouping.ts  # 会话时间分组：本地日历日边界 / 组内排序 / 午夜刷新
@@ -236,10 +238,15 @@ src/
   切换登录/注册模式时复位为隐藏——前一屏看过的密码不该在新表单里继续明文显示。
   邮箱字段加 `autoCapitalize=none` / `autoCorrect=off` / `spellCheck=false`，避免移动端
   把邮箱首字母自动大写。
-- **模型菜单要标出上下文窗口。** 上下文用满时的提示就是「换一个窗口更大的模型」，所以候选
-  列表必须能直接看到窗口大小（`/api/models` 的 `context_window`，网关没报时隐藏这个徽标，
-  不要编造）。徽标复用 `formatTokens`（`1.0M` / `128k`），精确值在 `title` 里；触发器的
-  tooltip 也带上窗口，收起菜单后仍可确认。
+- **模型菜单要标出上下文窗口，并说明「默认」与「已不可用」。** 上下文用满时的提示就是
+  「换一个窗口更大的模型」，所以候选列表必须能直接看到窗口大小（`/api/models` 的
+  `context_window`，网关没报时隐藏这个徽标，不要编造）。徽标复用 `formatTokens`
+  （`1.0M` / `128k`），精确值在 `title` 里；触发器的 tooltip 也带上窗口，收起菜单后
+  仍可确认。`is_default` 标成「默认」徽标（新会话实际会用，和临时选中的模型不是一回事）。
+  当前模型被管理员停用后，`/api/models` 会移除它，但会话里仍保存旧 id：列表**非空**
+  且查不到当前 id 时，触发器转琥珀色并带警告图标，菜单顶部说明「继续发送会被拒绝」并
+  给出一键「切到默认模型」。列表为空（加载中/失败）时**不**下「不可用」结论。这条
+  推导在 `lib/model-selection.ts`，有 vitest 覆盖。
 - **上下文进度条的分母是预算上限，不是模型窗口。** 后端判定超限用的是「窗口 - 回答预留」
   再乘安全系数（`app/services/token_budget.py`），32k 窗口可能只剩 19k 放历史。用量事件
   因此带 `context_limit_tokens`，`lib/context-usage.ts` 优先拿它当分母；拿原始窗口当分母会

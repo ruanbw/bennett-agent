@@ -4,6 +4,7 @@ import { AlertCircle, Check, ChevronDown, Cpu, RefreshCw } from 'lucide-react';
 import type { ModelItem } from '@/types';
 import { formatTokens } from '@/lib/context-usage';
 import { modelFullLabel, modelSubtitle } from '@/lib/model-identity';
+import { readModelSelection } from '@/lib/model-selection';
 
 export interface ModelSelectorProps {
   models?: ModelItem[];
@@ -124,7 +125,9 @@ export function ModelSelector({
     }
   };
 
-  const selected = models.find((m) => m.id === currentModel);
+  const { selected, selectedMissing, defaultModel } = readModelSelection(models, currentModel);
+  // 当前 id 还在列表里时用展示名；被管理员停用后列表里查不到，退回 id 尾段，至少与
+  // 会话记录里保存的路由对得上。
   const label = selected?.name || (currentModel ? currentModel.split('/').pop() : '选择模型');
 
   // Tab 把焦点移出容器（含移出到浏览器 UI：relatedTarget 为 null）时关闭。只监听
@@ -148,8 +151,9 @@ export function ModelSelector({
         }}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        /* 名字本身是「当前选了什么」的唯一可见证据，读屏也要能听到 */
-        aria-label={`选择模型：${label}`}
+        /* 名字本身是「当前选了什么」的唯一可见证据，读屏也要能听到；当前模型被停用时
+           把这个结论也念出来，不能只靠颜色。 */
+        aria-label={`选择模型：${label}${selectedMissing ? '（当前模型不可用）' : ''}`}
         title={
           selected
             ? `${modelFullLabel(selected.name, selected)}${
@@ -157,11 +161,22 @@ export function ModelSelector({
                   ? ` · 上下文 ${formatTokens(selected.context_window)}`
                   : ''
               }`
-            : undefined
+            : selectedMissing
+              ? `${currentModel}（当前模型已不在可用列表，请重新选择）`
+              : undefined
         }
-        className="flex min-w-0 max-w-full items-center gap-1 px-2 py-1.5 sm:gap-1.5 sm:px-2.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs pointer-coarse:min-h-9"
+        className={`flex min-w-0 max-w-full items-center gap-1 px-2 py-1.5 sm:gap-1.5 sm:px-2.5 rounded-lg border text-xs font-medium transition cursor-pointer shadow-xs pointer-coarse:min-h-9 ${
+          selectedMissing
+            ? 'border-amber-500/60 bg-amber-500/5 text-amber-700 hover:bg-amber-500/10 dark:text-amber-400'
+            : 'border-border/60 bg-muted/30 text-foreground/80 hover:bg-muted hover:text-foreground'
+        }`}
       >
-        <Cpu size={13} className="hidden shrink-0 text-muted-foreground min-[480px]:block" />
+        {selectedMissing ? (
+          // 异常态优先于装饰图标：手机上也不隐藏，让「当前模型不可用」有视觉线索
+          <AlertCircle size={13} className="shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+        ) : (
+          <Cpu size={13} className="hidden shrink-0 text-muted-foreground min-[480px]:block" aria-hidden="true" />
+        )}
         {/*
           窄屏：64px 只够「DeepSee…」，既看不出型号也看不出版本。按可用宽度分档放宽
           （360px 起 7rem、380px 起 8rem，够放「DeepSeek V4.1 Flash」），桌面沿用
@@ -188,6 +203,26 @@ export function ModelSelector({
             <span>切换对话模型</span>
             <span>{isEmpty ? '不可用' : `${models.length} 款可用`}</span>
           </div>
+
+          {/* 管理员停用了当前模型：列表里已经没有它，继续发请求只会拿到
+              model_unavailable。这里给出结论和一条出路（默认模型仍在时一键切过去）。 */}
+          {selectedMissing && (
+            <div
+              role="status"
+              className="mx-1 mt-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-700 dark:text-amber-400"
+            >
+              <p>当前模型已不在可用列表，可能已被管理员停用；继续发送会被服务端拒绝。</p>
+              {defaultModel && (
+                <button
+                  type="button"
+                  onClick={() => handleSelect(defaultModel)}
+                  className="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-md border border-amber-500/40 bg-background/70 px-2 py-0.5 font-medium text-foreground hover:bg-background"
+                >
+                  切到默认模型：{defaultModel.name}
+                </button>
+              )}
+            </div>
+          )}
 
           {isEmpty ? (
             <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
@@ -243,6 +278,16 @@ export function ModelSelector({
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {/* 默认模型：新会话/未显式选择时实际会用的那一条，和「当前选中」
+                        不是一回事（用户可能临时切到了别的模型）。 */}
+                    {model.is_default && (
+                      <span
+                        className="text-[9px] bg-primary/5 px-1 py-0.2 rounded border border-primary/30 text-primary"
+                        title="新会话的默认模型"
+                      >
+                        默认
+                      </span>
+                    )}
                     {/* 上下文窗口是「还能不能继续问」的关键信息：上下文锁住的提示会让用户
                         换一个窗口更大的模型，这里直接把候选的窗口摆出来。网关没报时隐藏。 */}
                     {typeof model.context_window === 'number' && model.context_window > 0 && (
