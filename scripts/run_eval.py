@@ -1,6 +1,6 @@
 """行为回归评测 CLI。
 
-    uv run python scripts/run_eval.py                 # 全量，自动与同模型上一次对比
+    uv run python scripts/run_eval.py                 # 全量，与同配置的上一次对比
     uv run python scripts/run_eval.py --list          # 只列用例，不连网关
     uv run python scripts/run_eval.py --tag clarify   # 按标签过滤
     uv run python scripts/run_eval.py --model openai/gpt-4o-mini --effort low
@@ -30,12 +30,14 @@ from evals.harness import (  # noqa: E402
     EvalCase,
     Totals,
     TurnRecord,
+    baseline_config_mismatch,
     build_report,
     diff_reports,
     load_cases,
     make_result,
     missing_requirements,
     read_report,
+    select_baseline,
     totals_of,
     write_report,
 )
@@ -68,7 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--baseline",
         default="auto",
-        help="auto = 同模型最近一次报告；none = 不比较；其他值按路径读取",
+        help=(
+            "auto = 同模型 + 同思考等级 + 同上下文守卫的最近一份报告；"
+            "none = 不比较；其他值按路径读取（配置不一致会先警告）"
+        ),
     )
     parser.add_argument("--runs-dir", default=str(DEFAULT_RUNS_DIR), help="报告目录（默认 evals/runs）")
     parser.add_argument("--timeout", type=float, default=180.0, help="单条用例超时秒数（默认 180）")
@@ -110,16 +115,6 @@ def list_cases(cases: list[EvalCase]) -> None:
         tags = ",".join(case.tags) or "-"
         requires = f" requires={','.join(case.requires)}" if case.requires else ""
         print(f"{case.id:<{width}}  [{tags}]{requires}  {case.prompt}")
-
-
-def resolve_baseline(spec: str, run_dir: Path) -> Path | None:
-    """解析基线路径。`auto` 在**本次报告写入之前**调用，取最近一份历史报告。"""
-    if spec.strip().lower() == "none":
-        return None
-    if spec.strip().lower() != "auto":
-        return Path(spec)
-    candidates = sorted(run_dir.glob("*.json"))
-    return candidates[-1] if candidates else None
 
 
 def print_diff(baseline_path: Path, baseline: dict, diff) -> None:
@@ -233,10 +228,25 @@ def main() -> int:
         return EXIT_USAGE
 
     run_dir = Path(args.runs_dir) / slugify(model_key)
-    baseline_path = resolve_baseline(args.baseline, run_dir)
+    baseline_path = select_baseline(
+        args.baseline,
+        run_dir,
+        model=model_key,
+        reasoning_effort=args.effort,
+        context_guard=settings.context_guard_mode,
+    )
+    if baseline_path is None and args.baseline.strip().lower() == "auto":
+        print(
+            "提示：没有找到同模型 / 同思考等级 / 同上下文守卫的历史报告，本次不做基线对比。",
+            file=sys.stderr,
+        )
 
     started_at = datetime.now(timezone.utc)
-    print(f"模型：{model_key}  · 用例：{len(selected)}  · 网关：{settings.litellm_api_base}")
+    effort_label = args.effort or "默认"
+    print(
+        f"模型：{model_key}  · 思考等级：{effort_label}  · 上下文守卫：{settings.context_guard_mode}"
+        f"  · 用例：{len(selected)}  · 网关：{settings.litellm_api_base}",
+    )
     results = asyncio.run(run_all(selected, args, model_key))
 
     report = build_report(
@@ -263,6 +273,17 @@ def main() -> int:
         except ValueError as exc:
             print(f"提示：基线无法读取，跳过对比（{exc}）", file=sys.stderr)
         else:
+            # auto 已经按行为配置筛过；只有用户显式指定路径时才可能不一致。
+            mismatch = baseline_config_mismatch(
+                baseline,
+                model=model_key,
+                reasoning_effort=args.effort,
+                context_guard=settings.context_guard_mode,
+            )
+            if mismatch:
+                print("警告：基线来自不同配置，下面的差异未必是行为回归：", file=sys.stderr)
+                for item in mismatch:
+                    print(f"  - {item}", file=sys.stderr)
             print_diff(baseline_path, baseline, diff_reports(baseline, report))
 
     return EXIT_FAILED if totals.failed else EXIT_OK

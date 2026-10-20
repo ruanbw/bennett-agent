@@ -33,6 +33,11 @@ SCHEMA_VERSION = 1
 #: 拿这种用例去判模型「没用工具」是冤枉它。
 KNOWN_REQUIREMENTS = frozenset({"tavily"})
 
+#: 会改变模型行为的运行配置。换思考等级、开关上下文守卫之后，同一模型也会给出不同
+#: 的工具调用序列；拿不同配置的报告做基线，会把「配置不同」误报成「新失败」。
+#: 自动基线按这三项筛选（见 `select_baseline`），显式基线不一致时先警告。
+BEHAVIOR_FIELDS = ("model", "reasoning_effort", "context_guard")
+
 Status = Literal["pass", "fail", "skip"]
 
 
@@ -423,7 +428,12 @@ def write_report(report: dict[str, Any], path: str | Path) -> Path:
 
 
 def read_report(path: str | Path) -> dict[str, Any]:
-    """读回一份报告，结构不对时抛出带路径的错误。"""
+    """读回一份报告，结构/版本不对时抛出带路径的错误。
+
+    基线对比只关心用例状态，但状态字段坏了会被 `_status_map` 静默当成 'None' 参与
+    比较；版本不一致则可能把不同判分口径的报告混在一起。两种都必须在读入时挡住，
+    并给出「是哪份文件」而不是一句 KeyError。
+    """
     file_path = Path(path)
     try:
         payload = json.loads(file_path.read_text(encoding="utf-8"))
@@ -433,7 +443,78 @@ def read_report(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"基线报告不是合法 JSON（{file_path}）：{exc}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("cases"), list):
         raise ValueError(f"基线报告结构不正确（{file_path}）")
+
+    version = payload.get("schema_version")
+    if version != SCHEMA_VERSION:
+        raise ValueError(
+            f"基线报告 schema_version={version!r}，当前工具是 {SCHEMA_VERSION}，不能直接对比（{file_path}）",
+        )
+    for index, entry in enumerate(payload["cases"], start=1):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or entry.get("status") not in {"pass", "fail", "skip"}
+        ):
+            raise ValueError(f"基线报告第 {index} 条用例缺少合法的 id/status（{file_path}）")
     return payload
+
+
+def select_baseline(
+    spec: str,
+    run_dir: str | Path,
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    context_guard: str,
+) -> Path | None:
+    """解析 `--baseline`。
+
+    - `none`：不做对比；
+    - `auto`（默认）：在报告目录里取**最近一份行为配置完全一致**的报告。目录按模型
+      分，但思考等级与上下文守卫是每次运行的参数，只看文件名会把不同配置的报告选成
+      基线；
+    - 其他值：原样当作路径，配置不一致由调用方警告（用户显式指定了它）。
+
+    损坏/旧版本的报告在 auto 模式下跳过，而不是让整次评测失败——它们只是历史产物。
+    """
+    normalized = spec.strip().lower()
+    if normalized == "none":
+        return None
+    if normalized != "auto":
+        return Path(spec)
+
+    for path in sorted(Path(run_dir).glob("*.json"), reverse=True):
+        try:
+            report = read_report(path)
+        except ValueError:
+            continue
+        if (
+            report.get("model") == model
+            and report.get("reasoning_effort") == reasoning_effort
+            and report.get("context_guard") == context_guard
+        ):
+            return path
+    return None
+
+
+def baseline_config_mismatch(
+    report: dict[str, Any],
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    context_guard: str,
+) -> list[str]:
+    """显式基线来自别的运行配置时返回差异说明（给人看的字符串）。"""
+    expected: dict[str, Any] = {
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "context_guard": context_guard,
+    }
+    return [
+        f"{key}：基线 {report.get(key)!r}，本次 {expected[key]!r}"
+        for key in BEHAVIOR_FIELDS
+        if report.get(key) != expected[key]
+    ]
 
 
 @dataclass(frozen=True)

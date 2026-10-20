@@ -75,8 +75,13 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 
 - 会真实调用上游模型并**产生费用**，因此不在 CI 里运行。
 - 报告落在 `evals/runs/<模型>/<时间戳>.json`（已忽略），含每轮完整回答、工具入参与
-  真实 token 用量。`--baseline auto` 取同模型最近一份报告做 diff，其中 **新失败
-  （newly_failed）** 是唯一需要立刻处理的信号：它表示某个用例从 PASS 变成了 FAIL。
+  真实 token 用量。`--baseline auto` 取**同模型 + 同思考等级 + 同上下文守卫**的最近一份
+  报告做 diff；换过 `--effort` 或 `--context-guard` 后不会拿旧配置的报告硬比，
+  否则「配置不同」会被误报成「新失败」。显式传 `--baseline <路径>` 时若配置不一致会
+  先打印警告。其中 **新失败（newly_failed）** 是唯一需要立刻处理的信号：它表示某个用
+  例从 PASS 变成了 FAIL。
+- 报告内自带 `schema_version`；读入时会校验版本与每条用例的 `id`/`status`，旧版或损坏
+  的基线会给出「哪份文件、哪个字段」的错误并跳过对比，而不是抛一个 KeyError。
 - `requires: [tavily]` 的用例在没配 `TAVILY_API_KEY` 时记为 SKIP 而不是失败——没有 key
   时这个工具根本不会被装配。
 - 用例格式见 `evals/cases.yaml` 顶部注释；断言与聚合是纯逻辑（`evals/harness.py`），

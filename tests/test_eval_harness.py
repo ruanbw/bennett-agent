@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from evals.harness import (
     Failure,
     ToolInvocation,
     TurnRecord,
+    baseline_config_mismatch,
     build_report,
     diff_reports,
     evaluate,
@@ -24,6 +26,7 @@ from evals.harness import (
     missing_requirements,
     parse_cases,
     read_report,
+    select_baseline,
     totals_of,
     write_report,
 )
@@ -257,6 +260,93 @@ def test_diff_reports_classifies_status_changes():
     assert diff.context_tokens_delta == 150
     assert diff.output_tokens_delta == -5
     assert diff.latency_ms_delta == 500
+
+
+# =====================================================================
+# 基线的配置一致性与报告结构
+# =====================================================================
+
+
+def report_shape(**overrides) -> dict:
+    """最小可读报告；只填基线选择/校验真正会读的字段。"""
+    payload = {
+        "schema_version": 1,
+        "model": "test/model",
+        "reasoning_effort": None,
+        "context_guard": "off",
+        "totals": {},
+        "cases": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_read_report_rejects_wrong_schema_version(tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"schema_version": 2, "cases": []}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version"):
+        read_report(path)
+
+
+def test_read_report_rejects_broken_case_entries(tmp_path):
+    """状态字段坏了不能在 diff 里静默变成 'None'，必须在读入时指出是哪份报告。"""
+    path = tmp_path / "report.json"
+    path.write_text(
+        json.dumps({"schema_version": 1, "cases": [{"id": "a", "status": "unknown"}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="id/status"):
+        read_report(path)
+
+
+def test_select_baseline_picks_latest_matching_config(tmp_path):
+    """auto 只认同模型 + 同 effort + 同上下文守卫；更新的不同配置报告必须跳过。"""
+    write_report(report_shape(), tmp_path / "20260101T000000Z.json")
+    write_report(report_shape(reasoning_effort="high"), tmp_path / "20260103T000000Z.json")
+    write_report(report_shape(context_guard="reject"), tmp_path / "20260104T000000Z.json")
+    newest_matching = write_report(report_shape(), tmp_path / "20260102T000000Z.json")
+
+    selected = select_baseline("auto", tmp_path, model="test/model", reasoning_effort=None, context_guard="off")
+
+    assert selected == newest_matching
+
+
+def test_select_baseline_skips_corrupt_and_foreign_reports(tmp_path):
+    write_report(report_shape(model="other/model"), tmp_path / "20260105T000000Z.json")
+    (tmp_path / "20260106T000000Z.json").write_text("{not json", encoding="utf-8")
+    matching = write_report(report_shape(), tmp_path / "20260101T000000Z.json")
+
+    selected = select_baseline("auto", tmp_path, model="test/model", reasoning_effort=None, context_guard="off")
+
+    assert selected == matching
+
+
+def test_select_baseline_none_and_explicit(tmp_path):
+    assert select_baseline("none", tmp_path, model="m", reasoning_effort=None, context_guard="off") is None
+    assert select_baseline("some/run.json", tmp_path, model="m", reasoning_effort=None, context_guard="off") == Path(
+        "some/run.json"
+    )
+
+
+def test_select_baseline_returns_none_without_matching_config(tmp_path):
+    """目录里只有别的 effort 的报告时宁可不比，也不要拿它当基线。"""
+    write_report(report_shape(reasoning_effort="high"), tmp_path / "20260101T000000Z.json")
+
+    assert select_baseline("auto", tmp_path, model="test/model", reasoning_effort=None, context_guard="off") is None
+
+
+def test_baseline_config_mismatch_lists_every_difference():
+    report = report_shape(model="a", reasoning_effort="low", context_guard="off")
+
+    assert baseline_config_mismatch(report, model="a", reasoning_effort="low", context_guard="off") == []
+
+    mismatch = baseline_config_mismatch(report, model="b", reasoning_effort="high", context_guard="reject")
+    assert len(mismatch) == 3
+    assert any("model" in item for item in mismatch)
+    assert any("reasoning_effort" in item for item in mismatch)
+    assert any("context_guard" in item for item in mismatch)
 
 
 # =====================================================================
