@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { Check, Pencil, Plus, Search, Settings, X } from 'lucide-react';
+import { Check, Pencil, Plus, Search, Settings, UserRound, X } from 'lucide-react';
 
 import {
   SEARCH_SHORTCUT_KEYS,
@@ -8,9 +8,19 @@ import {
   settingsShortcutLabel,
 } from '../lib/keyboard-shortcuts';
 import { Thread } from './assistant-ui/elements/thread.aui';
+import { AccountMenu } from './AccountMenu';
 import { ChatSessionNotices } from './ChatProvider';
 import { SyncStatusButton } from './SyncStatusButton';
 import type { ModelItem } from '../types';
+
+/** 账号菜单需要的上下文：只在收起态渲染，由 App 透传。 */
+export interface ChatContainerAccountProps {
+  email: string | null;
+  onLogout: () => void | Promise<unknown>;
+  onOpenSettings: () => void;
+  canOpenAdmin?: boolean;
+  onOpenAdmin?: () => void;
+}
 
 export interface ChatContainerProps {
   sessionTitle?: string;
@@ -28,6 +38,8 @@ export interface ChatContainerProps {
   onOpenSearch?: () => void;
   /** 收起态胶囊工具栏的设置入口（设置面板挂在 App，收起侧边栏时 AccountBar 不渲染）。 */
   onOpenSettings?: () => void;
+  /** 收起态胶囊工具栏的账号菜单（登出 / 管理后台 / 主题），与侧边栏底部共用同一实现。 */
+  account?: ChatContainerAccountProps;
   /** 侧边栏是否展开，决定是否展示左上角胶囊工具栏 */
   isSidebarOpen: boolean;
 }
@@ -62,6 +74,7 @@ export function ChatContainer({
   onCreateSession,
   onOpenSearch,
   onOpenSettings,
+  account,
   isSidebarOpen,
 }: ChatContainerProps) {
   const [isEditing, setIsEditing] = useState(false);
@@ -199,6 +212,26 @@ export function ChatContainer({
               )}
               {/* 同步状态：与侧边栏顶部同一个组件，收起后仍然能看到失败并恢复 */}
               <SyncStatusButton />
+              {account && (
+                <AccountMenu
+                  collapsed
+                  email={account.email}
+                  onLogout={account.onLogout}
+                  onOpenSettings={account.onOpenSettings}
+                  canOpenAdmin={account.canOpenAdmin}
+                  onOpenAdmin={account.onOpenAdmin}
+                  trigger={
+                    <button
+                      type="button"
+                      className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                      title={`账号：${account.email ?? '未登录'}`}
+                      aria-label="账号与设置菜单"
+                    >
+                      <UserRound size={16} aria-hidden="true" />
+                    </button>
+                  }
+                />
+              )}
             </div>
           )}
 

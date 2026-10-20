@@ -378,6 +378,13 @@ function AuthenticatedShell({ userEmail, userRole, canOpenAdmin, canManageRoles,
                 onToggleSidebar={handleToggleSidebar}
                 onOpenSearch={handleOpenSearch}
                 onOpenSettings={handleOpenSettings}
+                account={{
+                  email: userEmail,
+                  onLogout,
+                  onOpenSettings: handleOpenSettings,
+                  canOpenAdmin,
+                  onOpenAdmin: handleOpenAdmin,
+                }}
                 onCreateSession={handleCreateSession}
                 isSidebarOpen={isSidebarOpen}
               />

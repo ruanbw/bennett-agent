@@ -3,6 +3,21 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { AccountBar } from './AccountBar';
+import { AccountMenu } from './AccountMenu';
+
+/**
+ * base-ui 的菜单内容挂在 portal 里、且关闭时不渲染，所以 SSR 拿不到菜单项。
+ * 这里只把「内容容器」替换成直接渲染 children，其余（Trigger/Item/Group…）保持真实——
+ * 断言的是「哪些入口存在」，不是 popup 的定位行为（那个由 Playwright 覆盖）。
+ */
+vi.mock('./ui/dropdown-menu', async () => {
+  const actual = await vi.importActual<typeof import('./ui/dropdown-menu')>('./ui/dropdown-menu');
+  return {
+    ...actual,
+    DropdownMenuContent: ({ children }: { children?: React.ReactNode }) =>
+      createElement('div', { 'data-slot': 'menu-content' }, children),
+  };
+});
 import { SettingsPanel } from './SettingsDialog';
 import { ThemeContext } from '../context/theme-context';
 import { APP_VERSION } from '../lib/app-info';
@@ -75,6 +90,32 @@ describe('AccountBar 侧边栏底部账号与设置入口', () => {
 
     expect(html).toContain('未登录');
     expect(html).toContain('未');
+  });
+});
+
+describe('菜单内容只有一份（AccountMenu）', () => {
+  it('账号菜单渲染出设置、主题三态与登出（侧边栏与胶囊工具栏共用）', () => {
+    const html = renderToStaticMarkup(
+      withTheme(
+        createElement(AccountMenu, {
+          trigger: createElement('button', { type: 'button' }, '触发器'),
+          email: 'bennett@example.com',
+          onLogout: vi.fn(),
+          onOpenSettings: vi.fn(),
+          canOpenAdmin: true,
+          onOpenAdmin: vi.fn(),
+        })
+      )
+    );
+
+    // 收起侧边栏后这些入口不该消失：它们现在由 AccountMenu 统一提供
+    expect(html).toContain('bennett@example.com');
+    expect(html).toContain('设置');
+    expect(html).toContain('管理后台');
+    expect(html).toContain('浅色');
+    expect(html).toContain('深色');
+    expect(html).toContain('跟随系统');
+    expect(html).toContain('退出登录');
   });
 });
 
