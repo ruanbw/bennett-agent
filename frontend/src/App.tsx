@@ -96,6 +96,19 @@ function useModels() {
     [],
   );
 
+  // 切回这个标签页时重拉一次。模型清单可能在别处被改过（另一个标签页开着管理后台、
+  // 或管理员从另一台机器改了启停）：只在挂载时拉一次的话，用户看到的是一份可能已经
+  // 过期的列表，而失败的代价是「选了后台已停用的模型 → 请求报 model_unavailable」。
+  // 这次拉取不展示 loading：旧列表继续可用，拿到了再替换（失败也保留旧列表）。
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void refreshModels();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [refreshModels]);
+
   return { ...state, refreshModels };
 }
 
@@ -121,7 +134,8 @@ function AuthLoadingScreen() {
 export interface AuthenticatedShellProps {
   userEmail: string | null;
   canOpenAdmin: boolean;
-  onOpenAdmin: () => void;
+  /** 是否 superadmin：决定管理后台「用户管理」里能不能改角色。 */
+  canManageRoles: boolean;
   onLogout: () => void | Promise<unknown>;
 }
 
@@ -164,7 +178,7 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
  * 已登录才该跑的副作用，只有整个组件按登录态挂载/卸载才能自然做到，而 hook 不能
  * 条件调用。
  */
-function AuthenticatedShell({ userEmail, canOpenAdmin, onOpenAdmin, onLogout }: AuthenticatedShellProps) {
+function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
   const {
     sessions,
@@ -183,6 +197,20 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, onOpenAdmin, onLogout }: 
   } = useChatSessions({ models, defaultModel });
 
   const isMobile = useIsMobileViewport();
+
+  // 管理后台是覆盖层。状态放在 shell 里（而不是 App）：关闭时要能就地刷新模型列表，
+  // 而 `/api/models` 的 state 就在这个组件的 `useModels` 里。
+  const [adminOpen, setAdminOpen] = useState(false);
+
+  const handleOpenAdmin = useCallback(() => setAdminOpen(true), []);
+
+  const handleCloseAdmin = useCallback(() => {
+    setAdminOpen(false);
+    // 后台刚改过什么都有可能：启停开关、新增/删除模型、换默认模型。而 `/api/models`
+    // 只在挂载与手动重试时拉取，不在这里刷的话聊天框会继续用进后台之前的那份快照
+    // （表现为「后台 5 个、聊天框 6 款」，而且停用的模型仍然可选）。
+    void refreshModels();
+  }, [refreshModels]);
 
   // 抽屉的开合是「用户手动状态 + 断点默认值」的组合。用渲染期调整而不是 effect：
   // 断点变化时清掉手动覆盖即可，不需要额外一轮渲染。
@@ -240,7 +268,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, onOpenAdmin, onLogout }: 
         onToggleOpen={handleToggleSidebar}
         userEmail={userEmail}
         canOpenAdmin={canOpenAdmin}
-        onOpenAdmin={onOpenAdmin}
+        onOpenAdmin={handleOpenAdmin}
         onLogout={onLogout}
       />
 
@@ -287,6 +315,16 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, onOpenAdmin, onLogout }: 
           </ErrorBoundary>
         )}
       </main>
+
+      {adminOpen && (
+        <ErrorBoundary fallbackTitle="管理后台加载异常">
+          <AdminConsole
+            userEmail={userEmail}
+            canManageRoles={canManageRoles}
+            onClose={handleCloseAdmin}
+          />
+        </ErrorBoundary>
+      )}
     </div>
   );
 }
@@ -303,13 +341,6 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, onOpenAdmin, onLogout }: 
 export function App() {
   const { status, user, pending, error, login, register, logout, clearError } = useAuth();
 
-  // 管理后台是覆盖层：状态放在 App 才能让 AuthenticatedShell 始终挂载（聊天状态不丢）
-  const [adminOpen, setAdminOpen] = useState(false);
-
-  // 会话过期或主动登出后状态回到 anonymous：在渲染期就地复位（React 官方 pattern），
-  // 否则标记会留到下一次登录，管理后台一进来就又弹出来。
-  if (status !== 'authenticated' && adminOpen) setAdminOpen(false);
-
   return (
     <ThemeProvider>
       {status === 'loading' ? (
@@ -323,23 +354,16 @@ export function App() {
           onClearError={clearError}
         />
       ) : (
-        <>
-          <AuthenticatedShell
-            userEmail={user?.email ?? null}
-            canOpenAdmin={canAccessAdmin(user)}
-            onOpenAdmin={() => setAdminOpen(true)}
-            onLogout={logout}
-          />
-          {adminOpen && (
-            <ErrorBoundary fallbackTitle="管理后台加载异常">
-              <AdminConsole
-                userEmail={user?.email ?? null}
-                canManageRoles={isSuperadmin(user)}
-                onClose={() => setAdminOpen(false)}
-              />
-            </ErrorBoundary>
-          )}
-        </>
+        /*
+          管理后台是 shell 自己的覆盖层：关闭时要刷新模型列表，而模型 state 在 shell 的
+          `useModels` 里。登录态一变整个 shell 卸载，后台的开关也跟着自然复位。
+        */
+        <AuthenticatedShell
+          userEmail={user?.email ?? null}
+          canOpenAdmin={canAccessAdmin(user)}
+          canManageRoles={isSuperadmin(user)}
+          onLogout={logout}
+        />
       )}
     </ThemeProvider>
   );

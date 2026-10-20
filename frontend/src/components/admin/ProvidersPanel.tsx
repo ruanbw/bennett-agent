@@ -438,6 +438,9 @@ function ProviderCard({
   const isBusy = busy !== null;
   const isTesting = busy === `test:${provider.id}`;
   const isSyncing = busy === `sync:${provider.id}`;
+  // 对话侧的模型列表只包含「提供商启用 + 模型启用」的行。后台展示全部（要能管理停用项），
+  // 所以这里把两个数一起写出来，否则「后台 6 个 / 聊天框 5 款」看起来就像两个列表不同步。
+  const enabledCount = models.filter((model) => model.enabled).length;
 
   return (
     <article className="rounded-xl border border-border/70 bg-card/50">
@@ -464,7 +467,9 @@ function ProviderCard({
               <KeyRound className="size-3" aria-hidden="true" />
               <span className="font-mono">{provider.api_key_hint ?? '未设置'}</span>
             </span>
-            <span>{modelCount} 个模型</span>
+            <span title="只有已启用的模型才会出现在对话的模型选择器里">
+              {provider.enabled ? `${enabledCount} / ${modelCount} 个模型已启用` : `${modelCount} 个模型（提供商已停用）`}
+            </span>
           </div>
         </div>
 

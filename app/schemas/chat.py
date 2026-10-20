@@ -162,6 +162,13 @@ class ModelItem(BaseModel):
     id: str
     name: str
     provider: str
+    #: 上游真实模型 ID（`id` 去掉 `{provider.slug}/` 前缀的部分）。
+    #:
+    #: 展示层需要它：同一个提供商下可以有多个路由前缀指向同名模型
+    #: （`auto/deepseek`、`workbuddy/deepseek` 的 display_name 都是 Deepseek），
+    #: 只给 `provider` + `name` 的话聊天框里会出现几条一模一样的条目，看不出区别。
+    #: 旧版网关路径（模型 id 本身就是完整上游 id）留空，前端回退到只显示 provider。
+    model_id: str | None = None
     description: str | None = None
     # 三态：True/False 来自网关的明确表态，None 表示网关没给这个字段（前端按「未知」处理）。
     reasoning: bool | None = False

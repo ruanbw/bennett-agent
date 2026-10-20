@@ -832,6 +832,7 @@ async def _public_models() -> ModelListResponse:
                 id=key,
                 name=model.display_name,
                 provider=provider.name,
+                model_id=model.model_id,
                 description=model.description or f"{provider.name} {model.display_name}",
                 reasoning=model.reasoning,
                 supported_reasoning_levels=list(model.supported_reasoning_levels or []),

@@ -23,6 +23,13 @@ export interface ModelItem {
   id: string;
   name: string;
   provider: string;
+  /**
+   * 上游真实模型 ID（`id` 去掉 `{provider.slug}/` 前缀的部分）。
+   *
+   * 同一提供商下可能有多个路由指向同名模型，选择器要靠它把「看起来一模一样」
+   * 的条目区分开；旧版网关路径没有这个字段。
+   */
+  model_id?: string | null;
   description?: string | null;
   /** 三态：true=支持、false=明确不支持、null=网关未声明（前端按“未知”回退默认等级）。 */
   reasoning: boolean | null;

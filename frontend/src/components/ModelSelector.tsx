@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, ChevronDown, Cpu, RefreshCw } from 'lucide-react';
 
 import type { ModelItem } from '@/types';
+import { modelFullLabel, modelSubtitle } from '@/lib/model-identity';
 
 export interface ModelSelectorProps {
   models?: ModelItem[];
@@ -147,6 +148,7 @@ export function ModelSelector({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-label="选择模型"
+        title={selected ? modelFullLabel(selected.name, selected) : undefined}
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
       >
         <Cpu size={13} className="text-muted-foreground shrink-0" />
@@ -160,7 +162,7 @@ export function ModelSelector({
       </button>
 
       {isOpen && (
-        <div className="absolute left-0 bottom-full mb-1.5 w-64 max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover text-popover-foreground shadow-xl p-1 z-50 text-xs backdrop-blur-md">
+        <div className="absolute left-0 bottom-full mb-1.5 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover text-popover-foreground shadow-xl p-1 z-50 text-xs backdrop-blur-md">
           <div className="px-2.5 py-1 text-[10px] font-semibold text-muted-foreground border-b border-border/50 select-none flex justify-between items-center">
             <span>切换对话模型</span>
             <span>{isEmpty ? '不可用' : `${models.length} 款可用`}</span>
@@ -210,8 +212,13 @@ export function ModelSelector({
                 >
                   <div className="flex flex-col truncate pr-2">
                     <span className="truncate text-xs">{model.name}</span>
-                    <span className="text-[10px] text-muted-foreground/80 truncate">
-                      {model.provider}
+                    {/* 提供商会变化、模型 ID 才能区分同名的多条路由；截断由 CSS 负责，
+                        完整值放 title 里供悬停查看 */}
+                    <span
+                      className="truncate text-[10px] text-muted-foreground/80"
+                      title={modelSubtitle(model)}
+                    >
+                      {modelSubtitle(model)}
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">

@@ -360,3 +360,62 @@ async def test_resolve_chat_model_gateway_path_is_fail_open(registry_db, monkeyp
     assert snapshot.target is None
     assert snapshot.known_ids is None
     assert (snapshot.context_window, snapshot.max_output_tokens) == (None, None)
+
+
+# ---------------------------------------------------------------------
+# 对外模型列表：与后台列表的对应关系
+#
+# 这两个列表本来就**不该**逐行相同（后台要管理停用项，对话只展示可用项），但必须能
+# 对上号：聊天框里挑中的那条要能在后台找到对应行。下面锁住的就是「对得上号」的两个
+# 前提——暴露上游 model_id，以及启停过滤只发生在对外列表这一侧。
+# ---------------------------------------------------------------------
+async def test_public_models_expose_upstream_model_id(registry_db):
+    """展示名可以重复（同一提供商下多条路由指向同名模型），model_id 是唯一区分依据。
+
+    实测库里就有三条 display_name 都叫 `Deepseek-V4.1-Flash` 的模型
+    （`auto/`、`workbuddy/`、`workbuddy-ai/`）。对外列表不带 model_id 时，聊天框里
+    几个选项长得一模一样，也没法和后台「展示名 + model_id」的清单对应。
+    """
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="auto/deepseek-v4.1-flash", display_name="Deepseek-V4.1-Flash")
+    await _add_model(
+        registry_db, provider_id, model_id="workbuddy/deepseek-v4.1-flash", display_name="Deepseek-V4.1-Flash"
+    )
+
+    result = await model_service.fetch_available_models()
+
+    assert {model.model_id for model in result.models} == {
+        "auto/deepseek-v4.1-flash",
+        "workbuddy/deepseek-v4.1-flash",
+    }
+    # 路由键仍然是 {slug}/{model_id}，客户端选中的 id 不变
+    assert {model.id for model in result.models} == {
+        "gw/auto/deepseek-v4.1-flash",
+        "gw/workbuddy/deepseek-v4.1-flash",
+    }
+    assert len({(model.name, model.provider) for model in result.models}) == 1
+
+
+async def test_public_list_filters_disabled_models_but_admin_list_keeps_them(registry_db):
+    """停用的模型只在对话侧消失，后台仍然要看得到（否则无法重新启用）。"""
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="openai/on")
+    await _add_model(registry_db, provider_id, model_id="openai/off", enabled=False)
+
+    public = await model_service.fetch_available_models()
+    admin = await model_service.list_provider_models(provider_id)
+
+    assert [model.model_id for model in public.models] == ["openai/on"]
+    assert {model.model_id for model in admin} == {"openai/on", "openai/off"}
+
+
+async def test_public_list_and_known_ids_agree_on_disabled_providers(registry_db):
+    """提供商停用时，它的模型既不出现在列表里，也不在接受的白名单里。"""
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="openai/gpt-4o")
+    await model_service.update_provider(provider_id, enabled=False)
+
+    result = await model_service.fetch_available_models()
+
+    assert result.models == []
+    assert await model_service.get_known_model_ids() == frozenset()
