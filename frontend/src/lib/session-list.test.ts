@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import type { SessionRecord } from '../types'
-import { pinChange, sortSessions, titleChange, visibleSelection } from './session-list'
+import {
+  TITLE_MAX_LENGTH,
+  clampTitle,
+  pinChange,
+  sortSessions,
+  titleChange,
+  titleLength,
+  visibleSelection,
+} from './session-list'
 
 function session(id: string, updatedAt: number, extra: Partial<SessionRecord> = {}): SessionRecord {
   return { id, title: id, createdAt: 0, updatedAt, ...extra }
@@ -90,5 +98,36 @@ describe('visibleSelection', () => {
   it('空选中或空可见集合都返回空集合', () => {
     expect(visibleSelection(new Set(), ['a']).size).toBe(0)
     expect(visibleSelection(new Set(['a']), []).size).toBe(0)
+  })
+})
+
+
+describe('标题长度', () => {
+  it('按 Unicode 码点计数：emoji 算一个字', () => {
+    expect(titleLength('向量数据库')).toBe(5)
+    expect(titleLength('😀')).toBe(1)
+    expect('😀'.length).toBe(2) // UTF-16 长度是 2，说明这里没有用它
+  })
+
+  it('未超限时原样返回', () => {
+    expect(clampTitle('短标题')).toEqual({ title: '短标题', truncated: false })
+  })
+
+  it('超限时截到 100 个码点并标记 truncated', () => {
+    const input = '长'.repeat(TITLE_MAX_LENGTH + 20)
+    const result = clampTitle(input)
+
+    expect(result.truncated).toBe(true)
+    expect(titleLength(result.title)).toBe(TITLE_MAX_LENGTH)
+  })
+
+  it('不会劈开代理对（emoji 序列保持合法）', () => {
+    const input = '😀'.repeat(TITLE_MAX_LENGTH + 10)
+    const { title, truncated } = clampTitle(input)
+
+    expect(truncated).toBe(true)
+    expect(titleLength(title)).toBe(TITLE_MAX_LENGTH)
+    // 直接比较内容：劈开代理对会得到长度对不上的乱码
+    expect(title).toBe('😀'.repeat(TITLE_MAX_LENGTH))
   })
 })

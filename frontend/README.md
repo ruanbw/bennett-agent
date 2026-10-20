@@ -156,6 +156,10 @@ src/
   打开、错误就地显示（`role="alert"` + `aria-invalid`），按 Enter 即重试；blur 与
   submit 可能同批触发，用 ref 挡住第二次保存。输入框用 `[field-sizing:content]` 按
   内容自适应（`size` 属性作旧浏览器退路），固定 12rem 时 90 字标题只能看见一小截。
+  **长度按 Unicode 码点算（100 字），不用 `maxLength`**：`maxLength` 会在浏览器层面
+  静默截断粘贴内容，还会按 UTF-16 长度劈开 emoji 的代理对。现在在 `onChange` 里截断并
+  提示，`size` / 计数器同一口径。**输入法组合中的 Enter 不算保存**：中文用户按 Enter
+  是在选候选词，`isComposing`（及 `keyCode 229`）时阻止表单提交。
 - **设置面板里的每个数字都要有出处。** 版本号来自 package.json（`vite.config.js` 的
   `define` 注入 `__APP_VERSION__`，唯一读取点是 `lib/app-info.ts`）——此前写死 `v0.1.0`
   而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑

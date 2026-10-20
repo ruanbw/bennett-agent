@@ -19,6 +19,32 @@ export function sortSessions(sessions: readonly SessionRecord[]): SessionRecord[
 }
 
 /**
+ * 会话标题的长度上限（按 Unicode 码点计）。
+ *
+ * 用码点而不是 UTF-16 长度：`"😀".length === 2`，按 `.slice()` 截断会把代理对劈开，
+ * 留下一个孤立代理项（渲染成 �）。上限值与产品语义一致（100 个字符，不是 100 个
+ * 存储单元）。
+ */
+export const TITLE_MAX_LENGTH = 100;
+
+/** 标题的「字数」：按码点计，与 `clampTitle` 的口径一致。 */
+export function titleLength(value: string): number {
+  return Array.from(value).length;
+}
+
+/**
+ * 把超长标题截到上限。
+ *
+ * 不返回布尔之外的信息：调用方只需要「要不要提示用户被截断了」。用码点切片，
+ * 不会劈开 emoji / 组合字符的代理对（组合字符仍可能被切开，但不会产生非法字符串）。
+ */
+export function clampTitle(value: string): { title: string; truncated: boolean } {
+  const chars = Array.from(value);
+  if (chars.length <= TITLE_MAX_LENGTH) return { title: value, truncated: false };
+  return { title: chars.slice(0, TITLE_MAX_LENGTH).join(''), truncated: true };
+}
+
+/**
  * 重命名要写库的字段；标题没有任何变化时返回 null（调用方跳过写库）。
  *
  * 原实现无条件 bump updatedAt：点开重命名、原样保存也会把一条旧会话顶到列表最前。

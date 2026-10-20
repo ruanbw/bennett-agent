@@ -8,6 +8,7 @@ import {
   settingsShortcutLabel,
 } from '../lib/keyboard-shortcuts';
 import { Thread } from './assistant-ui/elements/thread.aui';
+import { clampTitle, titleLength, TITLE_MAX_LENGTH } from '../lib/session-list';
 import { notify } from '../lib/toast';
 import { AccountMenu } from './AccountMenu';
 import { ChatSessionNotices } from './ChatProvider';
@@ -257,24 +258,39 @@ export function ChatContainer({
                 ref={inputRef}
                 type="text"
                 value={editingTitle}
-                onChange={(e) => setEditingTitle(e.target.value)}
+                onChange={(e) => {
+                  // 不用 maxLength 属性：它在浏览器层面静默截断粘贴内容，用户不知道
+                  // 自己丢了字。这里截断并明确提示。
+                  const clamped = clampTitle(e.target.value);
+                  if (clamped.truncated) {
+                    notify('info', `标题最多 ${TITLE_MAX_LENGTH} 字，超出部分已忽略`);
+                  }
+                  setEditingTitle(clamped.title);
+                }}
                 onBlur={handleSaveTitle}
                 onKeyDown={(e) => {
-                  if (e.key === 'Escape') handleCancelEdit();
+                  if (e.key === 'Escape') {
+                    handleCancelEdit();
+                    return;
+                  }
+                  // 输入法组合中按 Enter 是「选词」，不能当成保存：让 form 的 submit
+                  // 不发生，否则中文用户选完候选词标题就被存了半截。
+                  if (e.key === 'Enter' && (e.nativeEvent.isComposing || e.keyCode === 229)) {
+                    e.preventDefault();
+                  }
                 }}
                 /* size 是不支持 field-sizing 的浏览器（Firefox 旧版等）的退路；
                    支持时它被 content 尺寸覆盖 */
-                size={Math.min(Math.max(12, editingTitle.length), 48)}
+                size={Math.min(Math.max(12, titleLength(editingTitle)), 48)}
                 className="h-7 min-w-32 max-w-[min(80vw,28rem)] px-2.5 text-base font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground md:text-sm [field-sizing:content]"
-                maxLength={100}
                 placeholder="输入会话标题..."
                 aria-invalid={saveError ? true : undefined}
                 aria-describedby={saveError ? 'title-save-error' : undefined}
                 autoFocus
               />
-              {editingTitle.length >= 80 && (
+              {titleLength(editingTitle) >= 80 && (
                 <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                  {editingTitle.length}/100
+                  {titleLength(editingTitle)}/{TITLE_MAX_LENGTH}
                 </span>
               )}
               <button
