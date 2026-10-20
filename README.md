@@ -11,6 +11,9 @@
 - 上下文预算：按网关的 `context_window` 估算，超限直接拒绝并锁住输入框，不把上游 400 翻译成「模型不可用」。
 - 每条回答下方显示上游回报的**真实** token 用量，不是估算。
 - 邮箱注册 + 服务端会话 cookie（HttpOnly 不透明 token，非 JWT），登出/改密/封禁即时生效。
+- 跨设备同步：本机变更批量推送到服务端，再按不透明游标增量拉取（无变化时长轮询）。
+  侧边栏的云图标是状态入口——能看到「已同步 / 待上传 / 无法同步 / 失败」、上次同步时间，
+  并对被服务端拒收的内容手动重试；会话仍以本地 IndexedDB 为主，同步是后台补强。
 
 ## 快速开始
 
@@ -73,6 +76,8 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 | `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户（含 `role`） |
 | `GET /api/models` | 可用模型列表（含思考链、上下文窗口等元数据） |
 | `POST /api/chat` · `POST /api/chat/title` | 对话（SSE 流式）/ 生成会话标题 |
+| `POST /api/sync/push` | 批量推送本机变更（行级幂等 upsert，逐行接受或拒绝） |
+| `GET /api/sync/pull` | 按不透明游标增量拉取（`timeout` > 0 时长轮询） |
 | `/api/admin/*` | 提供商与模型管理、用户封禁（`admin` 及以上） |
 | `PATCH /api/admin/users/{id}/role` | 设置用户角色（仅 `superadmin`） |
 

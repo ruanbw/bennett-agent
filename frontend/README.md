@@ -92,6 +92,13 @@ src/
 - **思考链不回放。** `chat-persistence.ts:loadContextMessages` 只回传 `content`。
   思考链只用于展示，回传会放大请求体积，且长度不可控——一旦超过后端的
   `MAX_THINKING_CHARS`，该会话的每次重试都会拿到 422。
+- **同步状态要能解释，也要能恢复。** 侧边栏云图标是入口而不是装饰：面板给出
+  「已同步 / 待上传 / 无法同步 / 失败」的结论、上次同步时间、待上传与被拒数量，并提供
+  「立即同步」与「重新上传被拒内容」。被服务端拒收的行（`too_large` / `quota_exceeded` /
+  `conversation_missing`）会停在 `syncState === 'error'`，自动重试永远不会碰它们；原因
+  持久化在行上的 `syncError` 字段——只留在内存里的话，刷新后用户只会看到一个没有下文的
+  数字。状态优先级与全部措辞在 `lib/sync/status-view.ts`（纯逻辑，有单测），组件只负责
+  渲染与触发 `retryNow` / `retryRejected`。
 - **契约在 `types.ts` 里，与后端逐字段对齐。** 后端对应
   `app/schemas/chat.py` 与 `app/schemas/events.py`。改字段名要两端同时改。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，

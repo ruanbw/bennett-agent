@@ -288,6 +288,12 @@ export interface MessageRecord {
    * **不是时间戳**，不参与任何跨设备比较。
    */
   clientRev?: number;
+  /**
+   * 被服务端拒收的原因码（仅 `syncState === 'error'` 时有值）。
+   * 持久化的理由：刷新页面后同步状态面板仍要能解释「为什么这几条传不上去」，
+   * 只在内存里留原因的话，重启后用户只看到一个没有下文的数字。
+   */
+  syncError?: string | null;
 }
 
 export interface SessionRecord {
@@ -305,6 +311,8 @@ export interface SessionRecord {
   deleted?: boolean;
   syncState?: SyncState;
   clientRev?: number;
+  /** 见 `MessageRecord.syncError`：拒收原因码，仅 `error` 状态时有值。 */
+  syncError?: string | null;
 }
 
 /**

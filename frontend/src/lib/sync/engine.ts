@@ -18,8 +18,9 @@
  *    表级 hook 标成 pending，然后又被推上去 —— 拉/推无限循环。
  * 2. **pending 的行不许被拉到的东西覆盖**（见 `shouldApplyRemote`）。本机还有没推上去
  *    的内容时，服务端那份是旧的。
- * 3. **失败要能被看见**。连续失败只在 console 里打日志等于没发生：`status.lastError`
- *    会挂到侧边栏的角标上。
+ * 3. **失败要能被看见**。连续失败只在 console 里打日志等于没发生：`status.lastError`、
+ *    `status.rejected` 与 `status.rejectedReason` 都会挂到侧边栏的同步面板上，面板同时
+ *    提供「立即同步」与「重新上传被拒内容」两个恢复入口（`retryNow` / `retryRejected`）。
  *
  * ## 为什么不是「每次写库都推一次」
  *
@@ -50,10 +51,14 @@ const BACKFILL_KEY = 'backfill';
 export interface SyncStatus {
   /** 引擎是否在跑（登录后 true）。 */
   running: boolean;
-  /** 本机待推送的行数（会话 + 消息）。 */
+  /** 本机**还会重试**的待推送行数（会话 + 消息）。被拒收的另算在 `rejected`。 */
   pending: number;
   /** 被服务端明确拒绝、停在那里的行数（超长 / 超配额）。 */
   rejected: number;
+  /** 最近一次拒绝原因码（`too_large` / `quota_exceeded` / `conversation_missing`）。 */
+  rejectedReason: string | null;
+  /** 推送请求是否在飞：面板据此说「正在上传」而不是「等待上传」。 */
+  syncing: boolean;
   /** 最近一次失败的可读原因；成功一轮后清空。 */
   lastError: string | null;
   /** 最近一次成功同步完成的时间（毫秒）；从未成功过为 null。 */
@@ -64,6 +69,8 @@ const IDLE_STATUS: SyncStatus = {
   running: false,
   pending: 0,
   rejected: 0,
+  rejectedReason: null,
+  syncing: false,
   lastError: null,
   lastSyncedAt: null,
 };
@@ -82,6 +89,8 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let backoffMs = RETRY_MIN_MS;
 let pumpRunning = false;
 let pushInFlight: Promise<number> | null = null;
+/** 推送在飞计数：并发调用共享同一个 Promise，但每个调用方都必须配平自己的 +1/-1。 */
+let pushActivity = 0;
 
 // ---------------------------------------------------------------------
 // 订阅
@@ -132,7 +141,7 @@ export function startSync(id: string): void {
       cursor = storedCursor;
       await backfillIfNeeded(id);
       if (!isCurrent(gen)) return;
-      await refreshPending();
+      await refreshQueue();
       if (!isCurrent(gen)) return;
       void pump(gen);
     } catch (err) {
@@ -217,7 +226,7 @@ async function kickPush(): Promise<void> {
   const gen = generation;
   try {
     await pushUntilDrained(gen);
-    if (isCurrent(gen)) await refreshPending();
+    if (isCurrent(gen)) await refreshQueue();
   } catch (err) {
     if (!isCurrent(gen)) return;
     reportError(err);
@@ -305,6 +314,7 @@ async function pushUntilDrained(gen: number): Promise<number> {
  */
 async function pushBatch(): Promise<number> {
   if (pushInFlight !== null) return pushInFlight;
+  beginPushActivity();
   pushInFlight = (async () => {
     const [sessions, messages] = await readPending();
     const batch = buildPushBatch(sessions, messages, PUSH_BATCH_ROWS);
@@ -321,7 +331,18 @@ async function pushBatch(): Promise<number> {
     return await pushInFlight;
   } finally {
     pushInFlight = null;
+    endPushActivity();
   }
+}
+
+function beginPushActivity(): void {
+  pushActivity += 1;
+  if (pushActivity === 1) setStatus({ syncing: true });
+}
+
+function endPushActivity(): void {
+  pushActivity = Math.max(0, pushActivity - 1);
+  if (pushActivity === 0) setStatus({ syncing: false });
 }
 
 async function readPending(): Promise<[SessionRecord[], MessageRecord[]]> {
@@ -344,11 +365,15 @@ async function readPending(): Promise<[SessionRecord[], MessageRecord[]]> {
 async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> {
   const rejections = new Map(response.rejected.map((row) => [`${row.kind}:${row.id}`, row.reason]));
   let rejectedRows = 0;
+  let rejectionReason: string | null = null;
 
   await runSyncInternal(async () => {
     for (const row of batch.conversations) {
       const reason = rejections.get(`conversation:${row.id}`);
-      if (await settleRow('conversation', row.id, row.client_rev, reason)) rejectedRows += 1;
+      if (await settleRow('conversation', row.id, row.client_rev, reason)) {
+        rejectedRows += 1;
+        rejectionReason ??= reason ?? null;
+      }
     }
     for (const row of batch.messages) {
       const reason = rejections.get(`message:${row.id}`);
@@ -362,15 +387,21 @@ async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> 
         }
         // 会话根本不存在（或已被服务端判死）：这条消息永远不会成功，停下来并报错，
         // 否则每轮都会「标 pending → 再被判 missing」，形成死循环。
-        await db.messages.update(row.id, { syncState: 'error' });
+        await db.messages.update(row.id, { syncState: 'error', syncError: reason });
         rejectedRows += 1;
+        rejectionReason ??= reason;
         continue;
       }
-      if (await settleRow('message', row.id, row.client_rev, reason)) rejectedRows += 1;
+      if (await settleRow('message', row.id, row.client_rev, reason)) {
+        rejectedRows += 1;
+        rejectionReason ??= reason ?? null;
+      }
     }
   });
 
-  setStatus({ rejected: rejectedRows > 0 ? status.rejected + rejectedRows : status.rejected });
+  // 只记原因，数量由 `refreshQueue` 从库里重算——增量计数在「同一行被重新标记」时
+  // 会漂移，而重算永远不会。
+  if (rejectionReason !== null) setStatus({ rejectedReason: rejectionReason });
 }
 
 /**
@@ -395,13 +426,14 @@ async function settleRow(
     return false;
   }
   if (reason === undefined || reason === 'stale' || reason === 'not_owned' || reason === 'conversation_deleted') {
-    await table.update(id, { syncState: 'synced' });
+    // 顺带清掉上一次的拒收原因：这一行已经不再停在 error 了。
+    await table.update(id, { syncState: 'synced', syncError: null });
     if (reason !== undefined) {
       console.warn(`同步行被服务端忽略 (${kind}=${id} reason=${reason})`);
     }
     return false;
   }
-  await table.update(id, { syncState: 'error' });
+  await table.update(id, { syncState: 'error', syncError: reason ?? null });
   console.warn(`同步行被服务端拒绝 (${kind}=${id} reason=${reason})`);
   return true;
 }
@@ -433,7 +465,7 @@ async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
   await saveCursor(cursor);
   setStatus({ lastSyncedAt: Date.now() });
   if (affected.length > 0) notifyApplied(affected);
-  await refreshPending();
+  await refreshQueue();
   return page.has_more;
 }
 
@@ -556,13 +588,84 @@ export async function countPending(): Promise<number> {
   return countUnsynced();
 }
 
-async function refreshPending(): Promise<void> {
+/**
+ * 从库里重算队列：`pending` 与 `rejected` 分开统计。
+ *
+ * 分开是 UI 的要求：两类行的含义完全不同——pending 会自己好，rejected 永远不会。
+ * 合成一个数字后，角标会在被拒收后一直转圈，用户等多久都不会好。
+ */
+async function refreshQueue(): Promise<void> {
   try {
-    const pending = await countPending();
-    if (pending !== status.pending) setStatus({ pending });
+    const count = async (state: 'pending' | 'error'): Promise<number> =>
+      (await db.sessions.where('syncState').equals(state).count()) +
+      (await db.messages.where('syncState').equals(state).count());
+
+    const [pending, rejected] = await Promise.all([count('pending'), count('error')]);
+    const patch: Partial<SyncStatus> = {};
+    if (pending !== status.pending) patch.pending = pending;
+    if (rejected !== status.rejected) patch.rejected = rejected;
+
+    // 原因从行上读，而不是只留在内存：刷新/重开页面后仍要能解释「为什么传不上去」。
+    // 被拒的行被重试/删掉后原因自然消失，不会拿旧原因解释新状态。
+    const rejectedReason =
+      rejected === 0
+        ? null
+        : ((await db.messages.where('syncState').equals('error').first())?.syncError ??
+          (await db.sessions.where('syncState').equals('error').first())?.syncError ??
+          null);
+    if (rejectedReason !== status.rejectedReason) patch.rejectedReason = rejectedReason;
+
+    if (Object.keys(patch).length > 0) setStatus(patch);
   } catch (err) {
-    console.warn('统计待同步行数失败:', err);
+    console.warn('统计同步队列失败:', err);
   }
+}
+
+/** 立即重试一次（错误横幅与面板的行动入口）。不清 `lastError`：失败原因要留到真正成功。 */
+export function retryNow(): void {
+  if (!started) return;
+  requestPush(0);
+  requestPull();
+}
+
+/**
+ * 把服务端拒收的行重新排进推送队列，返回重新入队的行数（不触发推送）。
+ *
+ * 抽出来是为了能在不启动同步引擎的情况下测：它只改本地标记，不碰网络。
+ */
+export async function requeueRejectedRows(): Promise<number> {
+  let requeued = 0;
+  await runSyncInternal(async () => {
+    // 两张表分开写：`db.sessions` 与 `db.messages` 的 Table 类型不同，
+    // 放进同一个循环会让 `modify` 的联合签名不可调用。
+    requeued += await db.sessions.where('syncState').equals('error').count();
+    await db.sessions
+      .where('syncState')
+      .equals('error')
+      .modify({ syncState: 'pending', syncError: null });
+    requeued += await db.messages.where('syncState').equals('error').count();
+    await db.messages
+      .where('syncState')
+      .equals('error')
+      .modify({ syncState: 'pending', syncError: null });
+  });
+  return requeued;
+}
+
+/**
+ * 把服务端拒收的行重新排进推送队列，返回重新入队的行数。
+ *
+ * 拒收通常来自「单条过大」或「会话配额已满」——用户删掉旧内容、或服务端配额调整之后，
+ * 同样的行就能推上去了。没有这个入口，那些行会永远停在 error，用户除了清空本机数据
+ * 没有任何办法——而 UI 之前连它们存在都不说。
+ */
+export async function retryRejected(): Promise<number> {
+  const requeued = await requeueRejectedRows();
+  if (requeued > 0) {
+    await refreshQueue();
+    requestPush(0);
+  }
+  return requeued;
 }
 
 /**

@@ -34,7 +34,7 @@ vi.mock('./api', () => ({
   },
 }));
 
-const { flushPending } = await import('./engine');
+const { flushPending, requeueRejectedRows } = await import('./engine');
 
 const session = (id: string): SessionRecord => ({ id, title: '标题', createdAt: 1, updatedAt: 1 });
 const message = (id: string, sessionId: string): MessageRecord => ({
@@ -117,5 +117,28 @@ describe('推送回执', () => {
     expect((await db.messages.get('m1'))?.syncState).toBe('error');
     // 第二轮读到「没有 pending」就结束：不会每轮都把这条消息重发一次
     expect(mocks.pushRows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('重新上传被拒内容', () => {
+  it('把两张表里停在 error 的行重新排进队列，修订号不变', async () => {
+    await db.sessions.add({ ...session('s1'), syncState: 'error', clientRev: 4 });
+    await db.messages.add({ ...message('m1', 's1'), syncState: 'error', clientRev: 2 });
+    // 已同步的行不该被顺带重推
+    await db.sessions.add({ ...session('s2'), syncState: 'synced', clientRev: 1 });
+
+    const requeued = await requeueRejectedRows();
+
+    expect(requeued).toBe(2);
+    expect(await db.sessions.get('s1')).toMatchObject({ syncState: 'pending', clientRev: 4 });
+    expect(await db.messages.get('m1')).toMatchObject({ syncState: 'pending', clientRev: 2 });
+    expect((await db.sessions.get('s2'))?.syncState).toBe('synced');
+  });
+
+  it('没有可重试的行时返回 0，不改任何状态', async () => {
+    await db.sessions.add({ ...session('s1'), syncState: 'synced' });
+
+    expect(await requeueRejectedRows()).toBe(0);
+    expect((await db.sessions.get('s1'))?.syncState).toBe('synced');
   });
 });
