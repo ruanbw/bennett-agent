@@ -40,6 +40,7 @@ import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clar
 import { useClarification } from "@/context/clarification-context";
 import { contextExhausted } from "@/lib/chat-message";
 import { readUsage } from "@/lib/context-usage";
+import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
 import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
 
@@ -520,8 +521,10 @@ const AssistantMessage: FC = () => {
       )}
 
       {/* 操作栏容器保持恒定高度 min-h-7，避免出现/消失时导致消息卡片高度变化产生抖动 */}
-      <div className="flex items-center min-h-7 mt-1">
+      {/* 时间紧跟在操作按钮之后：和操作归为一组，而不是飘到容器最右侧 */}
+      <div className="flex items-center min-h-7 mt-1 gap-1">
         <AssistantActionBar />
+        <MessageTimestamp className="ml-1" />
       </div>
     </MessagePrimitive.Root>
   );
@@ -573,6 +576,29 @@ const AssistantActionBar: FC = () => {
   );
 };
 
+/**
+ * 消息时间：不依赖 hover（触屏没有 hover，键盘也不该为了看时间而 Tab 一圈）。
+ * 完整时间放 `title`，视觉上只留时分/日期。
+ */
+const MessageTimestamp: FC<{ className?: string }> = ({ className }) => {
+  const createdAt = useAuiState((s) => s.message.createdAt);
+  const label = formatMessageTime(createdAt);
+  if (!label) return null;
+
+  return (
+    <time
+      dateTime={createdAt.toISOString()}
+      title={formatMessageTimeFull(createdAt)}
+      className={cn(
+        "text-[10px] tabular-nums text-muted-foreground/60 select-none",
+        className,
+      )}
+    >
+      {label}
+    </time>
+  );
+};
+
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -584,6 +610,9 @@ const UserMessage: FC = () => {
         <div className="bg-muted text-foreground max-w-[85%] rounded-2xl rounded-tr-xs px-4 py-2.5 text-sm leading-relaxed wrap-break-word">
           <MessagePrimitive.Parts components={USER_PART_COMPONENTS} />
         </div>
+      </div>
+      <div className="mt-1 flex justify-end pr-1">
+        <MessageTimestamp />
       </div>
     </MessagePrimitive.Root>
   );
