@@ -28,19 +28,20 @@ import {
   ArrowUpIcon,
   CheckIcon,
   CopyIcon,
-  GaugeIcon,
   PlusIcon,
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
 import { type FC, type RefObject, useCallback, useRef } from "react";
+import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
 import { contextExhausted } from "@/lib/chat-message";
+import { readUsage } from "@/lib/context-usage";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
-import type { FallbackState, MessageCustomMetadata, ModelItem, RunError, UsageState } from "@/types";
+import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -265,6 +266,20 @@ const Composer: FC<{
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
 
+  // 整个会话里最近一次回报的用量：上下文会不会被锁、占比多少，只跟最新那次请求有关。
+  // 用量此前挂在每条回答下面，越往上越旧却长得像「当前上下文」，现在统一收进输入框。
+  // selector 必须返回稳定引用，所以这里返回 metadata.custom 原始对象，校验交给 readUsage。
+  const latestUsageMeta = useAuiState((s) => {
+    for (let index = s.thread.messages.length - 1; index >= 0; index -= 1) {
+      const custom = s.thread.messages[index].metadata.custom;
+      if (custom && typeof custom.usage === "object" && custom.usage !== null) return custom;
+    }
+    return null;
+  });
+  const latestUsage = readUsage(latestUsageMeta?.usage);
+  const latestUsageModel =
+    typeof latestUsageMeta?.model === "string" ? latestUsageMeta.model : null;
+
   // 附件暂不支持（后端只接受文本）。有附件时直接禁用发送，
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
@@ -331,8 +346,8 @@ const Composer: FC<{
         />
 
         {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧 */}
-        <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2.5 pt-1">
+          <div className="flex min-w-0 items-center gap-2">
             <ComposerAddAttachment />
             {(models.length > 0 || modelsError) && (
               <ModelSelector
@@ -353,7 +368,14 @@ const Composer: FC<{
           </div>
 
           {/* 发送/停止合并为同一个位置：生成中显示停止，空闲时显示发送 */}
-          <div className="flex items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {/* 上下文用量紧贴发送按钮左侧：它是「能不能继续问」的唯一依据，位置要固定。 */}
+            <ContextUsageIndicator
+              usage={latestUsage}
+              usageModel={latestUsageModel}
+              currentModel={currentModel}
+              modelContextWindow={selectedModel?.context_window ?? null}
+            />
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>
                 <Button
@@ -441,62 +463,10 @@ const readError = (value: unknown): RunError | null => {
     : null;
 };
 
-/** 用量同理：只在结构完整时返回，否则当作没有。 */
-const readUsage = (value: unknown): UsageState | null => {
-  if (!value || typeof value !== "object") return null;
-  const { contextTokens, contextWindow, outputTokens, cacheReadTokens } = value as Partial<UsageState>;
-  if (typeof contextTokens !== "number") return null;
-  return {
-    contextTokens,
-    contextWindow: typeof contextWindow === "number" ? contextWindow : null,
-    outputTokens: typeof outputTokens === "number" ? outputTokens : 0,
-    cacheReadTokens: typeof cacheReadTokens === "number" ? cacheReadTokens : 0,
-  };
-};
-
-/** 用千位分隔与 k/M 缩写把 token 数说人话：1,066 / 1.0M。 */
-const formatTokens = (value: number): string => {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 10_000) return `${Math.round(value / 1000)}k`;
-  return value.toLocaleString("en-US");
-};
-
-/**
- * 真实用量的那一行：上下文用了多少 / 窗口多大。
- *
- * 展示的是**上游回报的数字**而不是估算——它也是用户唯一能预期「什么时候会被锁住」
- * 的依据（锁与拒绝都是按同一个窗口判定的）。缓存命中的部分放进 title，不占主行。
- */
-const UsageLine: FC<{ usage: UsageState }> = ({ usage }) => {
-  const percent =
-    usage.contextWindow && usage.contextWindow > 0
-      ? `（${((usage.contextTokens / usage.contextWindow) * 100).toFixed(1)}%）`
-      : "";
-  const detail = [
-    `本轮输出 ${usage.outputTokens.toLocaleString("en-US")} tokens`,
-    usage.cacheReadTokens > 0 ? `其中缓存命中 ${usage.cacheReadTokens.toLocaleString("en-US")}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  return (
-    <div
-      title={detail}
-      className="text-muted-foreground/70 mt-1 flex items-center gap-1.5 text-[11px] tabular-nums"
-    >
-      <GaugeIcon className="size-3" />
-      上下文 {formatTokens(usage.contextTokens)}
-      {usage.contextWindow ? ` / ${formatTokens(usage.contextWindow)}` : ""}
-      {percent}
-    </div>
-  );
-};
-
 const AssistantMessage: FC = () => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
   const incomplete = useAuiState(isMessageIncomplete);
   const fallback = readFallback(useAuiState((s) => s.message.metadata.custom?.fallback));
-  const usage = readUsage(useAuiState((s) => s.message.metadata.custom?.usage));
   const error = readError(useAuiState((s) => s.message.metadata.custom?.error));
   // 只给最后一条助手消息显示重试：重跑历史回答会覆盖别的轮次（与 Reload 的约束一致）
   const isLast = useAuiState(isLastAssistantMessage);
@@ -534,8 +504,6 @@ const AssistantMessage: FC = () => {
           已切换备用模型：{fallback.fromModel} → {fallback.toModel}
         </div>
       )}
-
-      {usage && <UsageLine usage={usage} />}
 
       {canRetry && (
         <div className="mt-2 flex">

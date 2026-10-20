@@ -152,7 +152,7 @@ export function ModelSelector({
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
       >
         <Cpu size={13} className="text-muted-foreground shrink-0" />
-        <span className="max-w-[120px] sm:max-w-[150px] truncate text-xs font-medium">
+        <span className="max-w-[64px] sm:max-w-[150px] truncate text-xs font-medium">
           {label}
         </span>
         <ChevronDown

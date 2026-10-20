@@ -138,7 +138,8 @@ export function ReasoningEffortSelector({
           className={`shrink-0 ${isOffNow || disabled ? 'text-muted-foreground' : 'text-primary'}`}
           aria-hidden="true"
         />
-        <span className="truncate text-xs">{currentEffort}</span>
+        {/* 窄屏只留图标：底部工具条还要放模型、上下文用量与发送，文字会把它们挤出屏幕 */}
+        <span className="hidden truncate text-xs sm:inline">{currentEffort}</span>
         <ChevronDown
           size={12}
           className={`shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''} ${
