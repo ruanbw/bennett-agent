@@ -6,6 +6,7 @@ import {
   describeAdminError,
   describeFailure,
   formatContextWindow,
+  validateProviderDraft,
   type ProviderDraft,
 } from './admin';
 
@@ -20,6 +21,39 @@ function draft(overrides: Partial<ProviderDraft> = {}): ProviderDraft {
     ...overrides,
   };
 }
+
+describe('validateProviderDraft', () => {
+  it('合法草稿（含首尾空白）通过', () => {
+    expect(validateProviderDraft(draft())).toBeNull();
+  });
+
+  it('名称不能为空', () => {
+    expect(validateProviderDraft(draft({ name: '   ' }))).toEqual({
+      field: 'name',
+      message: '请填写名称',
+    });
+  });
+
+  it('接口地址不能为空', () => {
+    expect(validateProviderDraft(draft({ baseUrl: '  ' }))).toEqual({
+      field: 'baseUrl',
+      message: '请填写接口地址',
+    });
+  });
+
+  it('接口地址只接受 http(s)，与后端规则保持一致', () => {
+    expect(validateProviderDraft(draft({ baseUrl: 'ftp://example.com' }))).toEqual({
+      field: 'baseUrl',
+      message: '接口地址必须以 http:// 或 https:// 开头',
+    });
+    // 后端是大小写敏感的 startswith：本地不能放行一个服务端必拒的写法
+    expect(validateProviderDraft(draft({ baseUrl: 'HTTPS://example.com' }))?.field).toBe('baseUrl');
+  });
+
+  it('校验顺序：先名称、再地址（一次只提示第一条）', () => {
+    expect(validateProviderDraft(draft({ name: '', baseUrl: '' }))?.field).toBe('name');
+  });
+});
 
 describe('buildProviderPayload', () => {
   it('创建时 apiKey 为空就不发 api_key 字段', () => {

@@ -132,6 +132,34 @@ export interface ProviderDraft {
   clearApiKey: boolean;
 }
 
+export type ProviderDraftField = 'name' | 'baseUrl' | 'apiKey';
+
+export interface ProviderDraftIssue {
+  field: ProviderDraftField;
+  message: string;
+}
+
+/**
+ * 表单草稿的本地校验。
+ *
+ * 只拦「一定会在服务端失败」的输入，错误文案直接复用后端那句中文：
+ * 服务端 422 的 detail 形如 `body.base_url: Value error, 必须是以 http:// …`，
+ * 带着英文前缀和字段路径，对管理员没有帮助。
+ *
+ * base_url 的协议判断与后端一样区分大小写（`http://` / `https://`），不要写成
+ * 正则忽略大小写——否则 `HTTP://…` 本地放行、服务端再拒一次英文错误。
+ */
+export function validateProviderDraft(draft: ProviderDraft): ProviderDraftIssue | null {
+  if (!draft.name.trim()) return { field: 'name', message: '请填写名称' };
+
+  const baseUrl = draft.baseUrl.trim();
+  if (!baseUrl) return { field: 'baseUrl', message: '请填写接口地址' };
+  if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+    return { field: 'baseUrl', message: '接口地址必须以 http:// 或 https:// 开头' };
+  }
+  return null;
+}
+
 /**
  * 表单草稿 → 请求体。
  *

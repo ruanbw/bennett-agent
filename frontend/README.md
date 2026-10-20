@@ -268,6 +268,13 @@ src/
   时指示器进入「已满」态且**不显示上一轮的数字**——那是失败前的旧用量，与「已满」矛盾；
   没有用量记录但已锁定时也仍要出现，否则用户只看到输入框变灰。`lib/context-usage.ts` 的
   纯函数有 vitest 覆盖（含「窗口口径 54.7% / 预算口径 97.2%」这条回归）。
+- **管理后台的表单先本地拦错，再谈服务端 422。** 新增 / 编辑提供商时名称必填、接口地址
+  必须是 `http://` 或 `https://` 开头（与后端一样区分大小写）；校验失败把焦点移到对应
+  输入框并挂 `aria-invalid` / `aria-describedby`，而不是把 Pydantic 的
+  `body.base_url: Value error…` 原样丢给管理员。API Key 输入框可显隐（默认密文，
+  `aria-controls` 指向输入框）；编辑时留空 = 不修改、勾选「清除」才发空串，这条语义仍只在
+  `buildProviderPayload` 一处实现。本地校验规则在 `lib/admin.ts:validateProviderDraft`，
+  有 vitest 覆盖。
 - **移动端输入控件不得小于 16px。** iOS Safari 在焦点落到 `font-size < 16px` 的输入控件时
   会把整页放大：用户得手动缩回，视角还会错位。`ui/Input` 基元本来就是
   `text-base md:text-sm`（为此而设），但调用点用 `text-xs` / `text-sm` 覆盖掉，等于绕过它。
