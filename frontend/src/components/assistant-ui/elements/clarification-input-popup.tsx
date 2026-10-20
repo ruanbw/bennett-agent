@@ -144,7 +144,7 @@ export function ClarificationInputPopup({
             onChange={(e) => setCustomText(e.target.value)}
             aria-label="自定义输入"
             placeholder="或手动输入具体要求并回车..."
-            className="flex-1 bg-muted/30 border border-border/70 rounded-xl px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-ring/50 focus:bg-background transition"
+            className="flex-1 bg-muted/30 border border-border/70 rounded-xl px-3 py-1.5 text-base text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-ring/50 focus:bg-background transition md:text-xs"
           />
           <Button
             type="submit"

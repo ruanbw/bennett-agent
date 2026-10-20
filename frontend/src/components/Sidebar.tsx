@@ -412,7 +412,7 @@ export function Sidebar({
                 placeholder="搜索标题与对话内容..."
                 aria-label="搜索历史会话（标题与消息内容）"
                 autoFocus
-                className="w-full bg-foreground/[0.04] rounded-xl pl-8 pr-14 py-2 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring/30"
+                className="w-full bg-foreground/[0.04] rounded-xl pl-8 pr-14 py-2 text-base text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring/30 md:text-xs"
               />
               {search.pending && (
                 <Loader2

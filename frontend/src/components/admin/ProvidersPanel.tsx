@@ -631,7 +631,7 @@ function ProviderCard({
             aria-label={`要添加到 ${provider.name} 的上游模型 ID`}
             spellCheck={false}
             autoComplete="off"
-            className="h-8 min-w-[12rem] flex-1 text-xs"
+            className="h-8 min-w-[12rem] flex-1 md:text-xs"
           />
           <Button
             type="submit"

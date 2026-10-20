@@ -265,7 +265,7 @@ export function ChatContainer({
                 /* size 是不支持 field-sizing 的浏览器（Firefox 旧版等）的退路；
                    支持时它被 content 尺寸覆盖 */
                 size={Math.min(Math.max(12, editingTitle.length), 48)}
-                className="h-7 min-w-32 max-w-[min(80vw,28rem)] px-2.5 text-sm font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground [field-sizing:content]"
+                className="h-7 min-w-32 max-w-[min(80vw,28rem)] px-2.5 text-base font-medium bg-background border border-ring/40 rounded-lg outline-none focus:ring-1 focus:ring-ring/40 text-foreground md:text-sm [field-sizing:content]"
                 maxLength={100}
                 placeholder="输入会话标题..."
                 aria-invalid={saveError ? true : undefined}

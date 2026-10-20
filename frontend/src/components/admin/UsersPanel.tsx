@@ -182,7 +182,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
             placeholder="按邮箱搜索"
             aria-label="按邮箱搜索用户"
             autoComplete="off"
-            className="h-8 pl-8 text-xs"
+            className="h-8 pl-8 md:text-xs"
           />
         </div>
         <Button type="submit" size="sm" disabled={isBusy} className="cursor-pointer">

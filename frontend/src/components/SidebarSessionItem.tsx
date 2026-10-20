@@ -185,7 +185,7 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
             }}
             aria-label="重命名会话"
             autoFocus
-            className="pointer-events-auto flex-1 rounded-lg border border-ring/40 bg-background px-2 py-0.5 text-[13px] text-foreground outline-none focus:ring-1 focus:ring-ring/40"
+            className="pointer-events-auto flex-1 rounded-lg border border-ring/40 bg-background px-2 py-0.5 text-base text-foreground outline-none focus:ring-1 focus:ring-ring/40 md:text-[13px]"
           />
         ) : (
           <div className="min-w-0 flex-1">

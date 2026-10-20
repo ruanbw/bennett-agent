@@ -336,7 +336,7 @@ const Composer: FC<{
           ref={inputRef}
           placeholder={inputPlaceholder}
           disabled={contextLocked}
-          className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed disabled:opacity-60"
+          className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-base leading-relaxed outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm"
           rows={1}
           aria-label="输入消息"
           onKeyDown={(e) => {

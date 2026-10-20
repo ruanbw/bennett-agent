@@ -72,7 +72,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
             onChange={(event) => setCurrent(event.target.value)}
             autoComplete="current-password"
             aria-invalid={error !== null && !current ? true : undefined}
-            className="h-8 text-xs"
+            className="h-8"
           />
         </label>
 
@@ -84,7 +84,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
               value={next}
               onChange={(event) => setNext(event.target.value)}
               autoComplete="new-password"
-              className="h-8 text-xs"
+              className="h-8"
             />
           </label>
           <label className="block">
@@ -94,7 +94,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
               value={confirm}
               onChange={(event) => setConfirm(event.target.value)}
               autoComplete="new-password"
-              className="h-8 text-xs"
+              className="h-8"
             />
           </label>
         </div>
