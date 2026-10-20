@@ -150,6 +150,7 @@ export const Thread: FC<ThreadProps> = ({
   const contextLocked = useAuiState((s) => contextExhausted(s.thread.messages, currentModel));
   // 提问状态来自 context，不再由 ChatProvider 通过 cloneElement 注入
   const clarification = useClarification();
+  const { dismiss: dismissPendingClarification } = clarification;
 
   /**
    * 发送后的焦点回到输入框。
@@ -190,6 +191,12 @@ export const Thread: FC<ThreadProps> = ({
   const focusComposer = useCallback(() => {
     composerInputRef.current?.focus({ preventScroll: true });
   }, []);
+
+  /** 忽略提问后焦点交回输入框：弹层随即卸载，不接管焦点就会落到 body 上。 */
+  const dismissClarification = useCallback(() => {
+    dismissPendingClarification();
+    focusComposer();
+  }, [dismissPendingClarification, focusComposer]);
 
   return (
     <ThreadPrimitive.Root
@@ -294,7 +301,7 @@ export const Thread: FC<ThreadProps> = ({
               <ClarificationInputPopup
                 clarification={clarification.pending}
                 onSubmitAnswer={clarification.answer}
-                onDismiss={clarification.dismiss}
+                onDismiss={dismissClarification}
               />
             )}
 
