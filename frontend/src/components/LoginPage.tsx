@@ -9,8 +9,8 @@
  * 切回登录模式。
  */
 
-import { useCallback, useState, type FormEvent } from 'react';
-import { Loader2 } from 'lucide-react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
+import { Eye, EyeOff, Loader2 } from 'lucide-react';
 
 import { MIN_PASSWORD_LENGTH, modeAfterRegister, type RegisterOutcome } from '../lib/auth';
 import { ThemeSwitcher } from './ThemeSwitcher';
@@ -33,6 +33,9 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // 密码默认隐藏；切换模式时复位（前一屏看过的密码不该在新表单里继续明文显示）
+  const [showPassword, setShowPassword] = useState(false);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
 
   const isRegister = mode === 'register';
 
@@ -60,6 +63,7 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
 
   const switchMode = useCallback(() => {
     setMode((previous) => (previous === 'login' ? 'register' : 'login'));
+    setShowPassword(false);
     // 切换模式后上一条错误（如「邮箱已注册」）不再适用，留着会误导
     onClearError();
   }, [onClearError]);
@@ -91,6 +95,9 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
               type="email"
               name="email"
               autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               autoFocus
               required
               value={email}
@@ -103,16 +110,41 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
             <label htmlFor="auth-password" className="text-sm font-medium">
               密码
             </label>
-            <Input
-              id="auth-password"
-              type="password"
-              name="password"
-              autoComplete={isRegister ? 'new-password' : 'current-password'}
-              required
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              aria-invalid={invalid || undefined}
-            />
+            <div className="relative">
+              <Input
+                ref={passwordInputRef}
+                id="auth-password"
+                /* 显示/隐藏只改 input 的 type，值本身不动 —— 不做「把明文塞进另一个字段」
+                   那种实现，避免密码在 DOM 里多一份副本 */
+                type={showPassword ? 'text' : 'password'}
+                name="password"
+                autoComplete={isRegister ? 'new-password' : 'current-password'}
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                aria-invalid={invalid || undefined}
+                className="pr-10"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPassword((visible) => !visible);
+                  // 点击按钮会让输入框失焦；切完把焦点还回去，用户可以直接继续输入
+                  passwordInputRef.current?.focus();
+                }}
+                aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                aria-pressed={showPassword}
+                aria-controls="auth-password"
+                title={showPassword ? '隐藏密码' : '显示密码'}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 cursor-pointer"
+              >
+                {showPassword ? (
+                  <EyeOff className="size-4" aria-hidden="true" />
+                ) : (
+                  <Eye className="size-4" aria-hidden="true" />
+                )}
+              </button>
+            </div>
             {isRegister ? (
               <p className={tooShort ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
                 至少 {MIN_PASSWORD_LENGTH} 个字符
