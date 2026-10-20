@@ -123,7 +123,7 @@ export function ReasoningEffortSelector({
         }}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        aria-label="思考等级"
+        aria-label={`思考等级：${currentEffort}`}
         title={`reasoning_effort: ${currentEffort}`}
         className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition cursor-pointer shadow-xs text-xs font-mono ${
           disabled
@@ -138,8 +138,13 @@ export function ReasoningEffortSelector({
           className={`shrink-0 ${isOffNow || disabled ? 'text-muted-foreground' : 'text-primary'}`}
           aria-hidden="true"
         />
-        {/* 窄屏只留图标：底部工具条还要放模型、上下文用量与发送，文字会把它们挤出屏幕 */}
-        <span className="hidden truncate text-xs sm:inline">{currentEffort}</span>
+        {/*
+          窄屏不再只留图标：只剩一个大脑图标时，用户不知道当前是 low / medium / high。
+          360px 起显示文字（极窄的 320px 级屏幕仍然隐藏，优先保证不换行挤压发送按钮）。
+        */}
+        <span className="hidden max-w-[3.5rem] truncate text-xs min-[360px]:inline">
+          {currentEffort}
+        </span>
         <ChevronDown
           size={12}
           className={`shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''} ${

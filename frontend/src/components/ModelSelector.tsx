@@ -147,12 +147,18 @@ export function ModelSelector({
         }}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        aria-label="选择模型"
+        /* 名字本身是「当前选了什么」的唯一可见证据，读屏也要能听到 */
+        aria-label={`选择模型：${label}`}
         title={selected ? modelFullLabel(selected.name, selected) : undefined}
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/30 hover:bg-muted text-xs font-medium text-foreground/80 hover:text-foreground transition cursor-pointer shadow-xs"
       >
         <Cpu size={13} className="text-muted-foreground shrink-0" />
-        <span className="max-w-[64px] sm:max-w-[150px] truncate text-xs font-medium">
+        {/*
+          窄屏：64px 只够「DeepSee…」，既看不出型号也看不出版本。按可用宽度分档放宽
+          （360px 起 7rem、380px 起 8rem，够放「DeepSeek V4.1 Flash」），
+          桌面沿用 150px。320px 级极窄屏才退回 64px，避免把工具条挤到换行。
+        */}
+        <span className="max-w-[64px] min-[360px]:max-w-[7rem] min-[380px]:max-w-[8rem] sm:max-w-[150px] truncate text-xs font-medium">
           {label}
         </span>
         <ChevronDown
