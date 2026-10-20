@@ -36,9 +36,11 @@ from fastapi_users_db_sqlalchemy.access_token import (
 )
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -208,6 +210,109 @@ class ProviderModel(Base):
     provider: Mapped[ModelProvider] = relationship(back_populates="models")
 
 
+class SyncCounter(Base):
+    """每用户单调递增的同步版本号（跨设备同步的游标来源）。
+
+    版本号由**服务端**发号，客户端只保存一个不透明游标。三件事必须由它保证：
+
+    1. 单调：`version` 只增不减，任何一行发生变化都取一个新号；
+    2. 单调的来源可原子化：`UPDATE ... SET version = version + 1 ... RETURNING`
+       是一条语句，SQLite 只允许一个写者，因此并发的两次 push 不会拿到同一个号；
+    3. 与业务写入同事务：发号与写行必须一起提交，否则客户端可能拉到
+       「版本号已前进、行还没写」的空洞。
+
+    时间戳不能替代它：客户端时钟跨设备不可比，服务端时间戳在同一毫秒也会重复。
+    """
+
+    __tablename__ = "sync_counter"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        SQLUuid(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class Conversation(Base):
+    """同步用的会话行（浏览器 Dexie 里 `sessions` 的服务端镜像）。
+
+    主键是**客户端生成的** `sess_<uuid>`：同步接口必须幂等，而服务端发主键会让
+    重试变成「每次重试都多一行」。id 全局唯一（uuid v4），不属于某个用户，「是不是
+    我的」由 `user_id` 判定——所有查询都必须带上它。
+
+    `seq_counter` 是消息顺序的发号器：消息的 `seq` 从它取，保证同一个会话内的先后
+    由服务端决定（客户端时钟不可信）。之所以不复用 `version`：`version` 会随每次修改
+    前进（流式中的助手消息每完成一次推送都会变），拿它排序会让消息在列表里跳位。
+
+    `deleted` 是墓碑：删会话必须让其他设备也能删掉，硬删除会让「删掉的会话」在下一
+    次推送时复活。墓碑行永久保留（每行几十字节），消息由外键级联或显式删除清理。
+    """
+
+    __tablename__ = "conversation"
+    __table_args__ = (Index("ix_conversation_pull", "user_id", "version"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        SQLUuid(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: 客户端自己的修订号：服务端据此拒绝「旧内容覆盖新内容」的重放。
+    client_rev: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 消息顺序发号器（每个会话独立，只增不减）。
+    seq_counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 拉取游标用的服务端版本号，任何一行变化都会取新号。
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: 客户端毫秒时间戳，仅用于展示排序（不可作为同步判据）。
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Message(Base):
+    """同步用的消息行（浏览器 Dexie 里 `messages` 的服务端镜像）。
+
+    前端消息形状里 `toolCalls / clarification / fallback / usage / error / partOrder`
+    都是前端私有结构。**整包存 JSON** 而不是逐列建模：拆成列等于以后前端每改一次
+    结构就要一次数据库迁移，而 `app/db.py` 已经明确写着「第二处加列就该换 Alembic」。
+    服务端只需要能校验的东西（归属、顺序、大小），不需要理解聊天语义。
+
+    `seq` 在**插入时**由服务端赋值并且之后不再变（改内容只前进 `version`，不动 seq），
+    这是「同一会话内跨设备看到同一顺序」的唯一依据。
+    """
+
+    __tablename__ = "message"
+    __table_args__ = (
+        Index("ix_message_pull", "user_id", "version"),
+        Index("ix_message_conversation", "conversation_id", "seq"),
+        UniqueConstraint("conversation_id", "seq", name="uq_message_conversation_seq"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("conversation.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: 与 conversation.user_id 冗余一份：拉取时不必 join，索引能直接命中。
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        SQLUuid(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    client_rev: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 def _resolve_database_url(url: str) -> str:
     """把相对的 SQLite 路径固定到项目根目录。
 
@@ -333,8 +438,8 @@ async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnec
 async def create_db_and_tables() -> None:
     """启动时建表 + 补齐列（幂等）。
 
-    新增的 `model_provider` / `provider_model` 两张表由 `create_all` 自动创建；
-    已有表（user / access_token）不会被动到。
+    新增的 `model_provider` / `provider_model` / `conversation` / `message` /
+    `sync_counter` 表由 `create_all` 自动创建；已有表（user / access_token）不会被动到。
 
     **没有引入 Alembic**：迁移需求目前只有「给 user 表加 role 列」这一处，为它引入
     一整套工具链不划算。代价是新增的列改动必须在 `_migrate_user_role_column` 里手写

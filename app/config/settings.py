@@ -244,6 +244,69 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # 跨设备同步
+    # ------------------------------------------------------------------
+    sync_rate_limit_per_minute: int = Field(
+        default=120,
+        ge=0,
+        description=(
+            "单个**账号**每分钟可发起的同步请求数（push + pull 共用一个桶）；0 表示不限流。"
+            "单独一个桶，不扰动对话配额：对话消耗上游额度，同步不消耗。"
+        ),
+    )
+    sync_push_max_rows: int = Field(
+        default=200,
+        ge=1,
+        le=2000,
+        description="单次 push 最多携带的行数（会话 + 消息合计）。客户端按此分批。",
+    )
+    sync_pull_max_rows: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description=(
+            "单次 pull 每个数据流（会话 / 消息）最多返回的行数。注意这不是总量："
+            "游标只有在两路都拉完时才前进，所以分页会在下一次 pull 继续。"
+        ),
+    )
+    sync_pull_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=1024,
+        description=(
+            "单次 pull 响应里消息 payload 的累计上限（字节）。只卡行数挡不住大响应："
+            "500 行 × 256 KB 最坏是 128 MB，一次就能把服务端序列化与浏览器主线程一起拖死。"
+        ),
+    )
+    sync_payload_max_bytes: int = Field(
+        default=256 * 1024,
+        ge=1024,
+        description=(
+            "单条消息 payload 序列化后的上限（字节）。前端把正文、思考链、工具调用与结果"
+            "整包放在 payload 里，所以不能只卡正文字段；超限的行按行拒绝，不影响同批其余行。"
+        ),
+    )
+    sync_max_conversations_per_user: int = Field(
+        default=2000,
+        ge=1,
+        description=("单用户最多保留的会话行数（含墓碑），防止把服务端当无限存储桶。"),
+    )
+    sync_max_messages_per_conversation: int = Field(
+        default=5000,
+        ge=1,
+        description=("单个会话最多保留的消息行数，超出的新行按 quota_exceeded 拒绝。"),
+    )
+    sync_long_poll_seconds: float = Field(
+        default=25.0,
+        ge=0,
+        le=120,
+        description=(
+            "pull 无变更时长轮询的挂起上限（秒），0 表示不挂起（立即返回）。"
+            "挂起连接占用一个协程与一条 HTTP 连接，单进程部署下这个量级可以接受；"
+            "多 worker 时需要用 SSE 或共享 pub/sub 才能正确唤醒。"
+        ),
+    )
+
     @field_validator("app_env", mode="before")
     @classmethod
     def _normalise_app_env(cls, value: object) -> object:
