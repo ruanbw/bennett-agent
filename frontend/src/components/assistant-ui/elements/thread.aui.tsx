@@ -18,6 +18,7 @@ import {
   type ReasoningMessagePartComponent,
   type TextMessagePartComponent,
   ThreadPrimitive,
+  useAui,
   useAuiEvent,
   useAuiState,
 } from "@assistant-ui/react";
@@ -43,6 +44,19 @@ import { readUsage } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
 import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
+
+/**
+ * 空会话的起步建议。
+ *
+ * 每条都对应真实可用的能力（联网搜索 / 方案对比 / 结构化拆解 / 改写），不要写 agent
+ * 做不到的事——示例被点开却答不了，比没有示例更伤。
+ */
+const START_SUGGESTIONS = [
+  "搜索最新行业动态并总结",
+  "对比两种技术方案",
+  "把需求拆成任务清单",
+  "改写这段技术说明",
+] as const;
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -133,6 +147,16 @@ export const Thread: FC<ThreadProps> = ({
     composerInputRef.current?.focus({ preventScroll: true });
   });
 
+  /** 空会话的起步建议：只填入输入框，**不自动发送**（发送会产生费用，也可能不是用户本意）。 */
+  const aui = useAui();
+  const applySuggestion = useCallback(
+    (text: string) => {
+      aui.composer.setText(text);
+      composerInputRef.current?.focus({ preventScroll: true });
+    },
+    [aui],
+  );
+
   /** 滚到底部按钮顺带把焦点交回输入框：去掉 autoFocus 后，这里是「点按钮接着打字」的唯一入口。 */
   const focusComposer = useCallback(() => {
     composerInputRef.current?.focus({ preventScroll: true });
@@ -157,7 +181,8 @@ export const Thread: FC<ThreadProps> = ({
             isEmpty && "justify-center",
           )}
         >
-          {/* 空对话欢迎语 */}
+          {/* 空对话欢迎语 + 起步建议：新用户不知道这个 agent 能做什么（联网搜索 / 澄清 /
+              长上下文），给几条与真实工具能力对应的例子。点击只填入，不直接发送。 */}
           <AuiIf condition={isNewChatView}>
             <div className="flex flex-col items-center justify-center text-center my-auto pb-12 select-none">
               <h2 className="text-2xl font-semibold tracking-tight text-foreground mb-2">
@@ -165,6 +190,22 @@ export const Thread: FC<ThreadProps> = ({
               </h2>
               <p className="text-sm text-muted-foreground max-w-sm">
                 输入您的问题开始对话，所有数据保存在您本地浏览器中。
+              </p>
+
+              <div className="mt-6 grid w-full max-w-md grid-cols-2 gap-2">
+                {START_SUGGESTIONS.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => applySuggestion(suggestion)}
+                    className="cursor-pointer rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-left text-xs leading-relaxed text-foreground/80 transition hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-muted-foreground/70">
+                点击会填入输入框，可先修改再发送
               </p>
             </div>
           </AuiIf>
