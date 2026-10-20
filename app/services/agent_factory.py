@@ -26,7 +26,7 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
 
-from app.config import settings
+from app.config import is_usable_api_key, settings
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.prompts import prompt_manager
 from app.services.fallback_tracker import record_fallback
@@ -95,7 +95,9 @@ def _settings_cache_key() -> tuple[object, ...]:
         settings.model_upstream_timeout,
         # 备用模型会影响装配结果；只在键里放名字（不含密钥）。
         settings.fallback_model_name,
-        bool(settings.tavily_api_key),
+        # 与 `build_tools()` 的启用判定同源：占位 Key 视为未配置，避免缓存键在
+        # 「配置不可用」与「已配置」之间反复切换而装配结果其实完全相同。
+        is_usable_api_key(settings.tavily_api_key),
     )
 
 

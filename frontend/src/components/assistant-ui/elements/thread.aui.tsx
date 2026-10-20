@@ -27,13 +27,21 @@ import {
   ArrowDownIcon,
   ArrowLeftRightIcon,
   ArrowUpIcon,
+  CalendarClockIcon,
   CheckIcon,
   CopyIcon,
+  FlaskConicalIcon,
+  GitCompareArrowsIcon,
+  LightbulbIcon,
+  ListChecksIcon,
+  PenLineIcon,
   PlusIcon,
   RefreshCwIcon,
+  SearchIcon,
   SquareIcon,
+  type LucideIcon,
 } from "lucide-react";
-import { type FC, type RefObject, useCallback, useRef } from "react";
+import { type FC, type RefObject, useCallback, useRef, useState } from "react";
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
@@ -43,20 +51,26 @@ import { contextExhausted } from "@/lib/chat-message";
 import { readUsage } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
+import {
+  availableStartSuggestions,
+  pickStartSuggestions,
+  type StartSuggestionIcon,
+} from "@/lib/start-suggestions";
 import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
 
 /**
- * 空会话的起步建议。
- *
- * 每条都对应真实可用的能力（联网搜索 / 方案对比 / 结构化拆解 / 改写），不要写 agent
- * 做不到的事——示例被点开却答不了，比没有示例更伤。
+ * 起步建议的图标映射。文案与能力裁剪规则在 `lib/start-suggestions`：那是纯数据与
+ * 纯函数，能在 node 环境的 vitest 里直接覆盖；组件只负责把图标名落到具体组件。
  */
-const START_SUGGESTIONS = [
-  "搜索最新行业动态并总结",
-  "对比两种技术方案",
-  "把需求拆成任务清单",
-  "改写这段技术说明",
-] as const;
+const SUGGESTION_ICONS: Record<StartSuggestionIcon, LucideIcon> = {
+  search: SearchIcon,
+  compare: GitCompareArrowsIcon,
+  checklist: ListChecksIcon,
+  rewrite: PenLineIcon,
+  concept: LightbulbIcon,
+  calendar: CalendarClockIcon,
+  test: FlaskConicalIcon,
+};
 
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 && !s.thread.isLoading;
@@ -107,6 +121,8 @@ const USER_PART_COMPONENTS = {
 interface ThreadProps {
   models?: ModelItem[];
   modelsError?: string | null;
+  /** 服务端是否装配了联网搜索；决定起步建议里是否出现搜索示例。 */
+  webSearchAvailable?: boolean;
   currentModel?: string | null;
   currentReasoningEffort?: string;
   onSelectModel?: (modelId: string) => void;
@@ -119,6 +135,7 @@ interface ThreadProps {
 export const Thread: FC<ThreadProps> = ({
   models = [],
   modelsError = null,
+  webSearchAvailable = false,
   currentModel = null,
   currentReasoningEffort = "medium",
   onSelectModel = () => {},
@@ -157,6 +174,18 @@ export const Thread: FC<ThreadProps> = ({
     [aui],
   );
 
+  /**
+   * 建议批次。offset 只在「换一批」时前进；能力清单稍后返回（搜索变为可用）时池子
+   * 变长，`pickStartSuggestions` 自己按当前长度取模，不需要重置。
+   */
+  const [suggestionOffset, setSuggestionOffset] = useState(0);
+  const suggestions = pickStartSuggestions(webSearchAvailable, suggestionOffset);
+  const hasMoreSuggestions =
+    availableStartSuggestions(webSearchAvailable).length > suggestions.length;
+  const cycleSuggestions = useCallback(() => {
+    setSuggestionOffset((offset) => offset + suggestions.length);
+  }, [suggestions.length]);
+
   /** 滚到底部按钮顺带把焦点交回输入框：去掉 autoFocus 后，这里是「点按钮接着打字」的唯一入口。 */
   const focusComposer = useCallback(() => {
     composerInputRef.current?.focus({ preventScroll: true });
@@ -182,7 +211,8 @@ export const Thread: FC<ThreadProps> = ({
           )}
         >
           {/* 空对话欢迎语 + 起步建议：新用户不知道这个 agent 能做什么（联网搜索 / 澄清 /
-              长上下文），给几条与真实工具能力对应的例子。点击只填入，不直接发送。 */}
+              长上下文），给几条与真实工具能力对应的例子。搜索示例只在能力探针确认
+              联网可用时出现；点击只填入，不直接发送。 */}
           <AuiIf condition={isNewChatView}>
             <div className="flex flex-col items-center justify-center text-center my-auto pb-12 select-none">
               <h2 className="text-2xl font-semibold tracking-tight text-foreground mb-2">
@@ -192,21 +222,48 @@ export const Thread: FC<ThreadProps> = ({
                 输入您的问题开始对话，所有数据保存在您本地浏览器中。
               </p>
 
-              <div className="mt-6 grid w-full max-w-md grid-cols-2 gap-2">
-                {START_SUGGESTIONS.map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    onClick={() => applySuggestion(suggestion)}
-                    className="cursor-pointer rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-left text-xs leading-relaxed text-foreground/80 transition hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
-                  >
-                    {suggestion}
-                  </button>
-                ))}
+              <div className="mt-6 w-full max-w-md">
+                <div role="group" aria-label="起步建议" className="grid grid-cols-2 gap-2">
+                  {suggestions.map((suggestion) => {
+                    const Icon = SUGGESTION_ICONS[suggestion.icon];
+                    return (
+                      <button
+                        key={suggestion.id}
+                        type="button"
+                        onClick={() => applySuggestion(suggestion.text)}
+                        className="group flex min-h-[3.25rem] cursor-pointer items-center gap-2 rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-left text-xs leading-relaxed text-foreground/80 transition hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+                      >
+                        <Icon
+                          className="size-3.5 shrink-0 text-muted-foreground/60 transition group-hover:text-primary"
+                          aria-hidden="true"
+                        />
+                        <span>{suggestion.text}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                  <p className="text-[11px] text-muted-foreground/70">
+                    点击会填入输入框，可先修改再发送
+                  </p>
+                  {hasMoreSuggestions && (
+                    <>
+                      <span aria-hidden="true" className="text-[11px] text-muted-foreground/40">
+                        ·
+                      </span>
+                      <button
+                        type="button"
+                        onClick={cycleSuggestions}
+                        aria-label="换一批起步建议"
+                        className="inline-flex cursor-pointer items-center gap-1 rounded text-[11px] text-muted-foreground/70 transition hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+                      >
+                        <RefreshCwIcon className="size-3" aria-hidden="true" />
+                        换一批
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-              <p className="mt-2 text-[11px] text-muted-foreground/70">
-                点击会填入输入框，可先修改再发送
-              </p>
             </div>
           </AuiIf>
 

@@ -18,7 +18,7 @@ import json
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from app.config import settings
+from app.config import is_usable_api_key, settings
 from app.schemas.chat import ChatMessage
 from app.schemas.events import (
     ClarificationRequest,
@@ -55,8 +55,12 @@ def make_snapshot(model_key: str) -> ChatModelSnapshot:
 
 
 def available_requirements() -> dict[str, bool]:
-    """当前环境实际具备的外部能力，用于把对应用例标成 SKIP 而不是 FAIL。"""
-    return {"tavily": bool(settings.tavily_api_key)}
+    """当前环境实际具备的外部能力，用于把对应用例标成 SKIP 而不是 FAIL。
+
+    与 `build_tools()` 共用 `is_usable_api_key`：占位 Key 会被装配逻辑视为未配置，
+    评测也必须按同一口径 SKIP，否则 `requires: [tavily]` 的用例会稳定 FAIL。
+    """
+    return {"tavily": is_usable_api_key(settings.tavily_api_key)}
 
 
 def safe_endpoint(url: str) -> str:

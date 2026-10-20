@@ -1,3 +1,3 @@
-from app.config.settings import Settings, settings
+from app.config.settings import Settings, is_usable_api_key, settings
 
-__all__ = ["Settings", "settings"]
+__all__ = ["Settings", "is_usable_api_key", "settings"]

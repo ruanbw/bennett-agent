@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
+from app.api.capabilities import router as capabilities_router
 from app.api.chat import router as api_router
 from app.api.sync import router as sync_router
 from app.config import settings
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(api_router)
+    app.include_router(capabilities_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
 

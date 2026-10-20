@@ -11,6 +11,7 @@ import { Toaster } from './components/Toaster';
 import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
 import { useAuth } from './hooks/use-auth';
+import { useCapabilities } from './hooks/use-capabilities';
 import { useChatSessions } from './hooks/use-chat-sessions';
 import { useGlobalShortcuts } from './hooks/use-global-shortcuts';
 import { useIsMobileViewport } from './hooks/use-media-query';
@@ -205,6 +206,8 @@ function AuthenticatedShell({
   onLogout,
 }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
+  // 运行时能力只用于裁剪空对话页的起步建议；失败时降级为「无联网搜索」，不阻塞界面
+  const capabilities = useCapabilities();
   const {
     sessions,
     currentSessionId,
@@ -384,6 +387,7 @@ function AuthenticatedShell({
                 }
                 models={models}
                 modelsError={modelsError}
+                webSearchAvailable={capabilities.web_search}
                 currentModel={currentModel}
                 currentReasoningEffort={currentReasoningEffort}
                 onSelectModel={selectModel}

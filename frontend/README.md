@@ -50,8 +50,10 @@ src/
 │   ├── chat-persistence.ts  # Dexie 读写形状
 │   ├── chat-runs.ts         # 编排门面（传输 → 状态 → 持久化）
 │   ├── chat-message.ts      # 记录/run → assistant-ui runtime 消息
+│   ├── capabilities.ts      # 运行时能力探针的客户端（起步建议裁剪）
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
+│   ├── start-suggestions.ts # 空对话页建议池：能力裁剪与「换一批」轮转
 │   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
 │   ├── local-stats.ts       # 本机数据统计 + 字节格式化
@@ -62,6 +64,7 @@ src/
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
+│   ├── use-capabilities.ts  # 启动时拉一次运行时能力（失败降级为无联网搜索）
 │   ├── use-session-search.ts # 搜索防抖/中止/保留旧结果
 │   ├── use-local-stats.ts   # 设置面板打开时读一次本机数据
 │   ├── use-global-shortcuts.ts # 全局快捷键挂载（判定在 lib）
@@ -205,10 +208,13 @@ src/
   `MM-DD HH:mm`，跨年才显示完整日期；完整（含秒）时间放 `title`。判断「今天」用的是
   日历日而不是 24 小时差——凌晨看昨晚 23:50 的消息必须显示日期，否则和「今天 00:10」
   分不清。触屏没有 hover，时间常显在消息下方（助手消息紧跟在操作按钮之后）。
-- **空会话给「起步建议」，但只填入不发送。** 新用户不知道这个 agent 能做什么（联网搜索 /
-  方案对比 / 结构化拆解 / 改写），所以空对话页给 4 条与**真实工具能力**对应的示例；点了
-  只调用 `aui.composer.setText()` 填入并把焦点交给输入框——自动发送会产生费用、也可能不是
-  用户本意。示例不要写 agent 做不到的事：被点开却答不了比没有示例更伤。
+- **空会话的起步建议跟随真实能力，且只填入不发送。** 文案、图标名与能力裁剪都在
+  `lib/start-suggestions.ts`（纯逻辑，有 vitest 覆盖）；`/api/capabilities` 报告联网搜索
+  未装配时，依赖搜索的示例整条撤掉——示例被点开却答不了，比没有示例更伤。「换一批」
+  按顺序轮转（不是随机：随机两次可能抽到同一批，看起来像按钮坏了），每批 4 条、2×2
+  栅格，原生 `<button>` 键盘可触发。点击只调用 `aui.composer.setText()` 填入并把焦点
+  交给输入框——自动发送会产生费用、也可能不是用户本意。能力探测失败按「没有联网搜索」
+  降级，不阻塞对话主流程。
 - **工具调用的折叠条要能自证「在干什么」。** 只显示工具名时，`search_docs` 和
   `fetch_page` 看不出这次查的是什么。`lib/tool-call-view.ts:toolArgsPreview` 优先取主参数
   （`query` / `q` / `question` / `url` …），没有约定字段就取第一个非空字符串，再退回原文；

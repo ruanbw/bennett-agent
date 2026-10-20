@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from pydantic_ai import RunContext
 
-from app.config import settings
+from app.config import is_usable_api_key, settings
 from app.services.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,9 @@ async def tavily_search(
         max_results: 返回的最大结果数量（默认为 5）
     """
     api_key = settings.tavily_api_key
-    if not api_key:
+    # 占位值与空值等价：照抄 .env.example 的 `tvly-your-api-key` 非空但必然 401，
+    # 直接说「未配置」比让模型拿到一条上游错误再复述给用户更有用。
+    if not is_usable_api_key(api_key):
         return "错误: 未配置 Tavily API Key，无法执行联网搜索。"
 
     # 防御 max_results 为 None、非整数或超出范围

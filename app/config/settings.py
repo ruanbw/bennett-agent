@@ -34,6 +34,29 @@ def _is_weak_auth_secret(secret: str) -> bool:
     return bool(_PLACEHOLDER_SECRET_PATTERN.search(secret))
 
 
+#: API Key 的占位词。照抄 `.env.example` 的 `tvly-your-api-key` 时，值非空，工具
+#: 会「看起来已配置」并被装配进 Agent；真正调用时才 401，白烧一轮工具调用与 token。
+#: 识别成「未配置」比让它进装配更诚实，也让能力探针（`/api/capabilities`）不会谎报。
+_PLACEHOLDER_API_KEY_PATTERN = re.compile(
+    r"your[-_ ]?(?:api[-_]?)?key|your[-_ ]?secret|change[-_]?me|replace[-_]?me|placeholder|example",
+    re.IGNORECASE,
+)
+
+
+def is_usable_api_key(value: str | None) -> bool:
+    """配置的 API Key 是否可用：非空白，且不是示例里的占位值。
+
+    只判「有没有配置」，不猜格式或长度——各上游的 key 形状不同，多加校验只会误杀
+    合法密钥。占位值是唯一例外：它非空却在功能上等于没配（见上面的正则）。
+    """
+    if value is None:
+        return False
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    return not _PLACEHOLDER_API_KEY_PATTERN.search(cleaned)
+
+
 # 只有「文件名不依赖 APP_ENV」的文件能参与判定环境名本身：
 # .env.{env} 的文件名由 APP_ENV 决定，读它来选它会形成循环依赖。
 _ENV_NAME_SOURCES = (".env.local", ".env")

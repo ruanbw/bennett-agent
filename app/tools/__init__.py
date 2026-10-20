@@ -12,7 +12,7 @@ pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 
 不要把常数直接写在这里，那正是之前「外层 25s < 内层最坏 40.5s」的成因。
 """
 
-from app.config import settings
+from app.config import is_usable_api_key, settings
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
 from app.tools.current_time import get_current_time as _raw_get_current_time
 from app.tools.guard import TOOL_FAILURE_RESULT, ToolErrorIsolation
@@ -68,7 +68,7 @@ tavily_tool: ManagedTool = registry.register(
     tags=["search", "web"],
     description="使用 Tavily 搜索引擎在互联网上实时搜索最新信息、新闻、网页资料等。",
     timeout=TAVILY_TOOL_TIMEOUT_SECONDS,
-    enabled_checker=lambda: bool(settings.tavily_api_key),
+    enabled_checker=lambda: is_usable_api_key(settings.tavily_api_key),
 )(_raw_tavily_search)
 
 #: **全量**工具列表（含当前配置下不可用的工具）。保留本列表供静态全量探针使用。

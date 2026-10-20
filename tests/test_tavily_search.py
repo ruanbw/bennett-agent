@@ -108,6 +108,20 @@ async def test_missing_api_key_returns_instruction(monkeypatch):
     assert "未配置 Tavily API Key" in result
 
 
+async def test_placeholder_api_key_is_treated_as_missing(monkeypatch, fake_http):
+    """照抄 `.env.example` 的占位值非空，但用它发请求必然 401。
+
+    工具应该在发请求之前就判定「未配置」，而不是让模型拿到一条上游错误再复述给用户。
+    """
+    monkeypatch.setattr(settings, "tavily_api_key", "tvly-dev-your-key-here")
+    client = fake_http(FakeResponse(payload={"results": []}))
+
+    result = await tavily_search(None, "anything")
+
+    assert "未配置 Tavily API Key" in result
+    assert client.calls == []
+
+
 async def test_api_key_comes_only_from_settings(monkeypatch, fake_http):
     """回归（O-3）：此前还有一个 `os.getenv("TAVILY_API_KEY")` 回退。
 
