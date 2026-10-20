@@ -11,6 +11,7 @@ import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
+import { SidebarSearchEmpty } from './SidebarSearchEmpty';
 import { SidebarSessionItem } from './SidebarSessionItem';
 import { SyncStatusButton } from './SyncStatusButton';
 
@@ -162,6 +163,12 @@ export function Sidebar({
         matchText(session.title || '', search.tokens) !== null || search.matches.has(session.id),
     );
   }, [sessions, search.tokens, search.matches]);
+
+  // 清除搜索但不关面板：焦点留在输入框，用户可以立刻重输（Esc 才是关闭）
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    searchInputRef.current?.focus();
+  }, []);
 
   // 按时间分组，长列表更好扫读
   const sessionGroups = useMemo(() => groupSessionsByDate(filteredSessions), [filteredSessions]);
@@ -559,13 +566,16 @@ export function Sidebar({
         }}
       >
         {filteredSessions.length === 0 ? (
-          <div className="text-xs text-muted-foreground text-center py-12">
-            {search.pending
-              ? '正在搜索对话内容…'
-              : search.tokens.length > 0
-                ? '未找到相关对话'
-                : '暂无历史对话'}
-          </div>
+          search.pending ? (
+            <div className="text-xs text-muted-foreground text-center py-12">
+              正在搜索对话内容…
+            </div>
+          ) : search.tokens.length > 0 ? (
+            <SidebarSearchEmpty tokens={search.tokens} onClearSearch={clearSearch} />
+          ) : (
+            // 正常流程里启动时会自动建一个「新对话」，这一分支只在列表短暂为空时出现
+            <div className="text-xs text-muted-foreground text-center py-12">暂无历史对话</div>
+          )
         ) : (
           sessionGroups.map((group, groupIndex) => (
             <section key={group.label}>
