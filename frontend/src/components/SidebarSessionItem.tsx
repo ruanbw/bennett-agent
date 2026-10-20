@@ -1,7 +1,8 @@
-import { memo } from 'react';
+import { memo, type ReactNode } from 'react';
 import { Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2 } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
+import { highlightRanges, type ContentMatch, type TextRange } from '../lib/session-search';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,6 +16,31 @@ function trigger(action: () => void | Promise<unknown>, label: string): void {
   void Promise.resolve(action()).catch((err: unknown) => console.error(`${label}:`, err));
 }
 
+const EMPTY_TOKENS: readonly string[] = [];
+const EMPTY_RANGES: TextRange[] = [];
+
+/** 把纯文本按高亮区间切片渲染；没有区间时原样输出（不产生额外节点）。 */
+function HighlightedText({ text, ranges }: { text: string; ranges: TextRange[] }) {
+  if (ranges.length === 0) return <>{text}</>;
+
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    if (range.start > cursor) nodes.push(text.slice(cursor, range.start));
+    nodes.push(
+      <mark
+        key={`${range.start}-${range.end}`}
+        className="rounded-[3px] bg-amber-400/25 text-inherit"
+      >
+        {text.slice(range.start, range.end)}
+      </mark>,
+    );
+    cursor = range.end;
+  }
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return <>{nodes}</>;
+}
+
 export interface SidebarSessionItemProps {
   session: SessionRecord;
   isActive: boolean;
@@ -23,6 +49,10 @@ export interface SidebarSessionItemProps {
   isSelectMode: boolean;
   isEditing: boolean;
   editingTitle: string;
+  /** 当前搜索词（标题高亮用）。空数组 = 没在搜索。 */
+  searchTokens?: readonly string[];
+  /** 正文命中信息：有值时标题下方多一行片段。 */
+  contentMatch?: ContentMatch | null;
   onEditingTitleChange: (title: string) => void;
   onStartEdit: (session: SessionRecord) => void;
   onSaveEdit: (sessionId: string) => void;
@@ -45,6 +75,10 @@ export interface SidebarSessionItemProps {
  *   键盘用户按 Tab 永远进不到会话列表，读屏也读不出「这是一条可选中的会话」。
  *   内容层 `pointer-events-none`，让点击穿透到下面这层按钮；三点菜单用更高 z-index
  *   保持可点。这样按钮里没有嵌套的可交互元素，语义是干净的。
+ * - **搜索命中要看得见。** 标题里的搜索词用 `<mark>` 高亮；正文命中时标题下方多一行
+ *   片段（片段自带高亮区间，与当前输入无关也能自洽）。片段是视觉信息，所以行名
+ *   （`aria-label`）也要带上「内容命中：…」，否则读屏用户无法解释这条会话为何出现在
+ *   搜索结果里。
  * - **多选模式复用 `<button role="checkbox">`**：原生 Enter/Space 即触发 click，
  *   `aria-checked` 把选中态交给读屏，不需要再手写键盘处理。
  * - **操作菜单不能只在 hover 时出现**。Tailwind 4 的 `hover:` / `group-hover:` 会被包进
@@ -60,6 +94,8 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
   isSelectMode,
   isEditing,
   editingTitle,
+  searchTokens = EMPTY_TOKENS,
+  contentMatch = null,
   onEditingTitleChange,
   onStartEdit,
   onSaveEdit,
@@ -71,6 +107,8 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
 }: SidebarSessionItemProps) {
   const isPinned = Boolean(session.isPinned);
   const title = session.title || '新对话';
+  const titleRanges = searchTokens.length > 0 ? highlightRanges(title, searchTokens) : EMPTY_RANGES;
+  const snippetRanges = contentMatch ? contentMatch.snippet.ranges : EMPTY_RANGES;
 
   const handleActivate = () => {
     if (isSelectMode) onToggleSelect(session.id);
@@ -81,7 +119,11 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
   const stateSuffix = [isPinned ? '已置顶' : '', isRunning ? '正在生成' : '']
     .filter(Boolean)
     .join('，');
-  const rowLabel = stateSuffix ? `${title}（${stateSuffix}）` : title;
+  // 正文命中是视觉信息（标题下一行小字），读屏必须能从行名里听到，否则「为什么这个会话
+  // 会出现在搜索结果里」对读屏用户完全不可解释。片段过长时截断，避免行名变成一段正文。
+  const snippetLabel = contentMatch ? contentMatch.snippet.text.slice(0, 40) : '';
+  const baseLabel = stateSuffix ? `${title}（${stateSuffix}）` : title;
+  const rowLabel = snippetLabel ? `${baseLabel}，内容命中：${snippetLabel}` : baseLabel;
 
   return (
     <div
@@ -141,7 +183,16 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
             className="pointer-events-auto flex-1 rounded-lg border border-ring/40 bg-background px-2 py-0.5 text-[13px] text-foreground outline-none focus:ring-1 focus:ring-ring/40"
           />
         ) : (
-          <span className="flex-1 truncate select-none">{title}</span>
+          <div className="min-w-0 flex-1">
+            <span className="block truncate select-none">
+              <HighlightedText text={title} ranges={titleRanges} />
+            </span>
+            {contentMatch && (
+              <span className="mt-0.5 block truncate text-[11px] leading-4 text-muted-foreground/80 select-none">
+                <HighlightedText text={contentMatch.snippet.text} ranges={snippetRanges} />
+              </span>
+            )}
+          </div>
         )}
 
         {isPinned && !isEditing && !isSelectMode && (

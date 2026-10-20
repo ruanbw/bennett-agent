@@ -1,10 +1,12 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
+import { Loader2, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
+import { matchText } from '../lib/session-search';
 import { visibleSelection } from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
+import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
@@ -91,11 +93,17 @@ export function Sidebar({
     [runningKey],
   );
 
+  // 搜索：标题同步过滤 + 正文异步扫库。候选集合固定为当前会话列表（墓碑会话不在里面）。
+  const sessionIds = useMemo(() => sessions.map((session) => session.id), [sessions]);
+  const search = useSessionContentSearch(searchQuery, sessionIds);
+
   const filteredSessions = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return sessions;
-    return sessions.filter((session) => (session.title || '').toLowerCase().includes(query));
-  }, [sessions, searchQuery]);
+    if (search.tokens.length === 0) return sessions;
+    return sessions.filter(
+      (session) =>
+        matchText(session.title || '', search.tokens) !== null || search.matches.has(session.id),
+    );
+  }, [sessions, search.tokens, search.matches]);
 
   // 按时间分组，长列表更好扫读
   const sessionGroups = useMemo(() => groupSessionsByDate(filteredSessions), [filteredSessions]);
@@ -327,35 +335,62 @@ export function Sidebar({
           </div>
         </div>
 
-        {/* 搜索框：点图标才展开，平时只有图标，不占列表空间 */}
+        {/* 搜索框：点图标才展开，平时只有图标，不占列表空间。
+            搜的是「标题 + 消息正文」：标题同步过滤，正文结果由 useSessionContentSearch 异步补上。 */}
         {searchOpen && (
-          <div className="relative flex items-center">
-            <Search
-              size={13}
-              className="absolute left-3 text-muted-foreground pointer-events-none"
-              aria-hidden="true"
-            />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索历史会话..."
-              aria-label="搜索历史会话"
-              autoFocus
-              className="w-full bg-foreground/[0.04] rounded-xl pl-8 pr-8 py-2 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring/30"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                setSearchQuery('');
-                setSearchOpen(false);
-              }}
-              className="absolute right-2.5 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
-              title="关闭搜索"
-            >
-              <X size={12} aria-hidden="true" />
-              <span className="sr-only">关闭搜索</span>
-            </button>
+          <div className="space-y-1">
+            <div className="relative flex items-center">
+              <Search
+                size={13}
+                className="absolute left-3 text-muted-foreground pointer-events-none"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setSearchQuery('');
+                    setSearchOpen(false);
+                  }
+                }}
+                placeholder="搜索标题与对话内容..."
+                aria-label="搜索历史会话（标题与消息内容）"
+                autoFocus
+                className="w-full bg-foreground/[0.04] rounded-xl pl-8 pr-14 py-2 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring/30"
+              />
+              {search.pending && (
+                <Loader2
+                  size={12}
+                  className="absolute right-7 animate-spin text-muted-foreground"
+                  aria-hidden="true"
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchOpen(false);
+                }}
+                className="absolute right-2.5 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
+                title="关闭搜索"
+              >
+                <X size={12} aria-hidden="true" />
+                <span className="sr-only">关闭搜索</span>
+              </button>
+            </div>
+            {/* 结果数量对读屏播报；视觉上片段本身就说明了命中原因，不再占一行 */}
+            <p role="status" className="px-1 text-[11px] text-muted-foreground">
+              {search.pending
+                ? '正在搜索…'
+                : search.error
+                  ? search.error
+                  : search.tokens.length > 0
+                    ? `${filteredSessions.length} 个对话`
+                    : ''}
+            </p>
           </div>
         )}
 
@@ -406,7 +441,11 @@ export function Sidebar({
       <div className="flex-1 overflow-y-auto pb-2">
         {filteredSessions.length === 0 ? (
           <div className="text-xs text-muted-foreground text-center py-12">
-            {searchQuery ? '未找到相关对话' : '暂无历史对话'}
+            {search.pending
+              ? '正在搜索对话内容…'
+              : search.tokens.length > 0
+                ? '未找到相关对话'
+                : '暂无历史对话'}
           </div>
         ) : (
           sessionGroups.map((group, groupIndex) => (
@@ -447,6 +486,8 @@ export function Sidebar({
                     isSelectMode={isSelectMode}
                     isEditing={editingId === session.id}
                     editingTitle={editingId === session.id ? editingTitle : ''}
+                    searchTokens={search.tokens}
+                    contentMatch={search.matches.get(session.id) ?? null}
                     onEditingTitleChange={handleEditingTitleChange}
                     onStartEdit={startEdit}
                     onSaveEdit={saveEdit}

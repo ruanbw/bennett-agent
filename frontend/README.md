@@ -51,9 +51,11 @@ src/
 │   ├── chat-runs.ts         # 编排门面（传输 → 状态 → 持久化）
 │   ├── chat-message.ts      # 记录/run → assistant-ui runtime 消息
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
+│   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
+│   ├── use-session-search.ts # 搜索防抖/中止/保留旧结果
 │   └── use-media-query.ts   # 响应式媒体查询
 ├── context/                 # theme / clarification
 ├── components/
@@ -105,6 +107,13 @@ src/
   持久化在行上的 `syncError` 字段——只留在内存里的话，刷新后用户只会看到一个没有下文的
   数字。状态优先级与全部措辞在 `lib/sync/status-view.ts`（纯逻辑，有单测），组件只负责
   渲染与触发 `retryNow` / `retryRejected`。
+- **搜索必须搜正文，而且要能看见命中原因。** 侧边栏搜索是「标题 + 消息正文」：标题同步
+  过滤，正文由 `lib/session-search.ts` 走 `sessionId` 索引逐条扫描（只保留每个会话最新一条
+  命中消息的片段），命中行在标题下方显示一行带高亮的小字。多词是 **AND**，且必须在
+  **同一条消息**里都出现——片段要能自证命中原因，跨消息拼出来的命中没有东西可展示。
+  **不搜 `thinking`**：思考链默认折叠且体积不可控，命中它等于给用户一个点开也找不到关键词
+  的会话。输入过程中保留上一次结果（仅同一串词的前后缀变化），否则每敲一个字列表都会
+  先塌掉再弹回来；旧扫描用 `AbortSignal` 中止，慢查询不会覆盖新查询的结果。
 - **契约在 `types.ts` 里，与后端逐字段对齐。** 后端对应
   `app/schemas/chat.py` 与 `app/schemas/events.py`。改字段名要两端同时改。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，
