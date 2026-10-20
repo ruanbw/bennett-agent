@@ -33,6 +33,7 @@ import { db, runSyncInternal } from '../../db';
 import type { MessageRecord, SessionRecord } from '../../types';
 import { notifySessionsChanged } from '../multi-tab';
 import { type PullResponse, type PushResponse, pullRows, pushRows, SyncHttpError } from './api';
+import { createTimeoutStreak, isPullTimeout } from './long-poll';
 import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
 
 /** 本地连续写入（标题占位 → 标题定稿 → 终态落库）合并成一个推送窗口。 */
@@ -87,6 +88,8 @@ let cursor: string | null = null;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let backoffMs = RETRY_MIN_MS;
+/** 长轮询超时的连续计数：单次静默重试，连续多次才染色（见 long-poll.ts）。 */
+const pullTimeouts = createTimeoutStreak();
 let pumpRunning = false;
 let pushInFlight: Promise<number> | null = null;
 /** 推送在飞计数：并发调用共享同一个 Promise，但每个调用方都必须配平自己的 +1/-1。 */
@@ -160,6 +163,7 @@ export function stopSync(): void {
   pushTimer = null;
   retryTimer = null;
   backoffMs = RETRY_MIN_MS;
+  pullTimeouts.reset();
   detachBrowserListeners();
   setStatus({ ...IDLE_STATUS });
 }
@@ -188,6 +192,8 @@ function onVisibilityChange(): void {
 function onOnline(): void {
   if (!started) return;
   backoffMs = RETRY_MIN_MS;
+  // 网络状态刚变过：之前的超时不再代表当前网络，重新按「偶发」计数
+  pullTimeouts.reset();
   requestPush(0);
   void pump(generation);
 }
@@ -241,11 +247,15 @@ async function kickPush(): Promise<void> {
 async function pump(gen: number): Promise<void> {
   if (pumpRunning || !isCurrent(gen)) return;
   pumpRunning = true;
+  // 出错时要能区分「卡在长轮询」与「推不上去」：只有前者允许静默重试
+  let phase: 'push' | 'pull' = 'push';
   try {
     while (isCurrent(gen)) {
+      phase = 'push';
       await pushUntilDrained(gen);
       if (!isCurrent(gen)) return;
 
+      phase = 'pull';
       const hasMore = await pullOnce(gen, isVisible() ? LONG_POLL_SECONDS : 0);
       if (!isCurrent(gen)) return;
       if (hasMore) continue;
@@ -257,6 +267,21 @@ async function pump(gen: number): Promise<void> {
     }
   } catch (err) {
     if (!isCurrent(gen)) return;
+
+    /*
+      长轮询超时 ≠ 同步失败。
+
+      pull 是 25s 的长轮询，客户端给 40s；超过 40s 的典型原因是浏览器把标签页冻结/节流了
+      （定时器在冻结期间不走，恢复时立刻到期），而不是服务器挂了——真正的断网/服务端不可达
+      会很快抛 TypeError 或拿到 5xx。把单次超时染红状态面板会误报「同步失败」，用户以为数据
+      没保存，而下一轮轮询其实就成功了。连续多次才值得上报（见 lib/sync/long-poll.ts）。
+    */
+    if (phase === 'pull' && isPullTimeout(err) && !pullTimeouts.record()) {
+      console.info('同步长轮询超时，静默重试（多半是标签页被冻结或网络栈卡顿）');
+      scheduleRetry(gen, err);
+      return;
+    }
+
     reportError(err);
     scheduleRetry(gen, err);
   } finally {
@@ -458,6 +483,8 @@ async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
     await markAllPending();
     page = await pullRows(null, { limit: PULL_LIMIT });
   }
+  // 成功拿到一页：偶发超时计数清零
+  pullTimeouts.reset();
   if (!isCurrent(gen)) return false;
 
   const affected = await applyPage(page);
