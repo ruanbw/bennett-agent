@@ -7,6 +7,7 @@ import { Input } from '../ui/input';
 import {
   ROLE_LABELS,
   banUser,
+  clampUsersOffset,
   describeFailure,
   listUsers,
   setUserRole,
@@ -47,6 +48,9 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
   const [appliedQuery, setAppliedQuery] = useState('');
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<AdminUserPage | null>(null);
+  // 请求身份：列表「是否在刷新」由它和最近一次完成的请求推导，而不是在 effect 里
+  // setState(true)——那会触发一次级联渲染，React 的 lint 规则也会报。
+  const [completedKey, setCompletedKey] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -57,6 +61,9 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
+  const requestKey = `${appliedQuery}\u0000${offset}\u0000${reloadToken}`;
+  const loading = completedKey !== requestKey;
+
   useEffect(() => {
     let active = true;
 
@@ -64,19 +71,30 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
       try {
         const result = await listUsers({ query: appliedQuery, limit: PAGE_SIZE, offset });
         if (!active) return;
+
+        // 封掉最后一页的唯一用户后，offset 会越过新的最后一页：夹回去重新拉取，
+        // 不要把「永远空着的一页」展示给管理员。
+        const nextOffset = clampUsersOffset(offset, PAGE_SIZE, result.total);
+        if (nextOffset !== offset) {
+          setOffset(nextOffset);
+          return;
+        }
+
         setPage(result);
         setLoadError(null);
+        setCompletedKey(requestKey);
       } catch (err) {
         if (!active) return;
         console.error('加载用户列表失败:', err);
         setLoadError(describeFailure(err));
+        setCompletedKey(requestKey);
       }
     })();
 
     return () => {
       active = false;
     };
-  }, [appliedQuery, offset, reloadToken]);
+  }, [appliedQuery, offset, reloadToken, requestKey]);
 
   const run = useCallback(
     async (key: string, action: () => Promise<void>): Promise<boolean> => {
@@ -149,6 +167,8 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
   const pageIndex = Math.floor(offset / PAGE_SIZE);
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const isBusy = busy !== null;
+  // 列表刷新中也不允许操作：行数据可能马上被替换，别让管理员对着旧行点封禁
+  const controlsDisabled = isBusy || loading;
 
   return (
     <section className="space-y-3" aria-labelledby="admin-users-heading">
@@ -241,11 +261,26 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
           </div>
         )
       ) : page.items.length === 0 ? (
-        <div className="rounded-xl border border-border/70 bg-card/50 px-4 py-10 text-center text-xs text-muted-foreground">
-          {appliedQuery ? `没有匹配「${appliedQuery}」的用户` : '暂无用户'}
+        <div className="flex flex-col items-center gap-2 rounded-xl border border-border/70 bg-card/50 px-4 py-10 text-center text-xs text-muted-foreground">
+          <span>{appliedQuery ? `没有匹配「${appliedQuery}」的用户` : '暂无用户'}</span>
+          {appliedQuery && (
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={handleClearSearch}
+              className="cursor-pointer"
+            >
+              清除搜索
+            </Button>
+          )}
         </div>
       ) : (
-        <ul className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border/70 bg-card/50">
+        <ul
+          aria-busy={loading}
+          className={`divide-y divide-border/70 overflow-hidden rounded-xl border border-border/70 bg-card/50 transition-opacity ${
+            loading ? 'opacity-60' : ''
+          }`}
+        >
           {page.items.map((user) => {
             const self = isSelf(user, currentUserEmail);
             // 封禁：不能封自己，也不能封同级或更高等级（这里只是提前禁用，后端也会拦）
@@ -300,7 +335,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
                     <Button
                       variant="outline"
                       size="xs"
-                      disabled={isBusy || !roleEditable}
+                      disabled={controlsDisabled || !roleEditable}
                       title={roleBlockedReason}
                       onClick={() => setPendingRole({ user, role: nextRole })}
                       aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
@@ -315,7 +350,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
                     <Button
                       variant="destructive"
                       size="xs"
-                      disabled={isBusy || banBlocked}
+                      disabled={controlsDisabled || banBlocked}
                       title={blockedReason}
                       onClick={() => setPendingBan(user)}
                       aria-label={`封禁 ${user.email}`}
@@ -327,7 +362,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
                     <Button
                       variant="outline"
                       size="xs"
-                      disabled={isBusy}
+                      disabled={controlsDisabled}
                       onClick={() => handleUnban(user)}
                       aria-label={`解封 ${user.email}`}
                       className="cursor-pointer"
@@ -343,13 +378,27 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>共 {total} 个用户</span>
+        <span className="inline-flex items-center gap-1.5">
+          {page === null
+            ? loading
+              ? '正在加载用户…'
+              : '共 0 个用户'
+            : total === 0
+              ? '共 0 个用户'
+              : `第 ${offset + 1}–${Math.min(offset + page.items.length, total)} 个，共 ${total} 个`}
+          {loading && page !== null && (
+            <span role="status" className="inline-flex items-center gap-1">
+              <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+              正在刷新…
+            </span>
+          )}
+        </span>
         <div className="flex flex-wrap items-center gap-1.5">
           <Button
             variant="outline"
             size="xs"
             onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            disabled={isBusy || offset === 0}
+            disabled={controlsDisabled || offset === 0}
             aria-label="上一页"
             className="cursor-pointer gap-0.5"
           >
@@ -363,7 +412,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
             variant="outline"
             size="xs"
             onClick={() => setOffset(offset + PAGE_SIZE)}
-            disabled={isBusy || offset + PAGE_SIZE >= total}
+            disabled={controlsDisabled || offset + PAGE_SIZE >= total}
             aria-label="下一页"
             className="cursor-pointer gap-0.5"
           >

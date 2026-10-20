@@ -275,6 +275,12 @@ src/
   `aria-controls` 指向输入框）；编辑时留空 = 不修改、勾选「清除」才发空串，这条语义仍只在
   `buildProviderPayload` 一处实现。本地校验规则在 `lib/admin.ts:validateProviderDraft`，
   有 vitest 覆盖。
+- **用户列表刷新时不允许对旧行操作，页码也要自己夹回最后一页。** `loading` 由「本次请求
+  key」与「最近一次完成的 key」推导，而不是在 effect 里同步 `setState(true)`（会触发
+  级联渲染，React 的 lint 规则也会报）。刷新中禁封禁 / 角色 / 翻页，列表 `aria-busy`
+  并降透明度，底部显示「第 a–b 个，共 N 个」与「正在刷新…」；封掉最后一页唯一用户后，
+  `clampUsersOffset` 把越界 offset 夹回新的最后一页并重新拉取，不会停在一个永远空着的
+  页。搜索无结果时提供「清除搜索」，不用回到顶部找清空按钮。
 - **移动端输入控件不得小于 16px。** iOS Safari 在焦点落到 `font-size < 16px` 的输入控件时
   会把整页放大：用户得手动缩回，视角还会错位。`ui/Input` 基元本来就是
   `text-base md:text-sm`（为此而设），但调用点用 `text-xs` / `text-sm` 覆盖掉，等于绕过它。

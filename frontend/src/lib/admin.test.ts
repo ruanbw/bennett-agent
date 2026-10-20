@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AdminApiError,
   buildProviderPayload,
+  clampUsersOffset,
   describeAdminError,
   describeFailure,
   formatContextWindow,
@@ -52,6 +53,29 @@ describe('validateProviderDraft', () => {
 
   it('校验顺序：先名称、再地址（一次只提示第一条）', () => {
     expect(validateProviderDraft(draft({ name: '', baseUrl: '' }))?.field).toBe('name');
+  });
+});
+
+describe('clampUsersOffset', () => {
+  it('总数不变时不动页码', () => {
+    expect(clampUsersOffset(0, 20, 45)).toBe(0);
+    expect(clampUsersOffset(20, 20, 45)).toBe(20);
+    expect(clampUsersOffset(40, 20, 45)).toBe(40);
+  });
+
+  it('封禁最后一页的唯一用户后夹回最后一页', () => {
+    // 21 个用户时第 2 页只有 1 个；封掉后总数 20，offset=20 越界
+    expect(clampUsersOffset(20, 20, 20)).toBe(0);
+  });
+
+  it('总数变少但当前页仍存在时保留原页码', () => {
+    expect(clampUsersOffset(20, 20, 39)).toBe(20);
+  });
+
+  it('空列表 / 非法分页大小回到第一页', () => {
+    expect(clampUsersOffset(40, 20, 0)).toBe(0);
+    expect(clampUsersOffset(40, 0, 100)).toBe(0);
+    expect(clampUsersOffset(-20, 20, 100)).toBe(0);
   });
 });
 

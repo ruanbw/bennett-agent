@@ -267,6 +267,19 @@ export function listUsers(params: {
   return request<AdminUserPage>(`/api/admin/users${suffix}`);
 }
 
+/**
+ * 把页码偏移夹进「按当前总数仍存在的最后一页」。
+ *
+ * 典型场景：第 2 页只剩 1 个用户，管理员把他封禁后总数从 21 变成 20——原 offset=20
+ * 已经越界，不夹回去就会停在一个永远空着的第 2 页，看起来像「用户被删光了」。
+ * 纯函数便于在 node 环境测试；limit <= 0 属于调用方 bug，按第 0 页处理。
+ */
+export function clampUsersOffset(offset: number, limit: number, total: number): number {
+  if (limit <= 0 || total <= 0) return 0;
+  const lastOffset = (Math.ceil(total / limit) - 1) * limit;
+  return Math.max(0, Math.min(offset, lastOffset));
+}
+
 export function banUser(userId: string): Promise<AdminUser> {
   return request<AdminUser>(`/api/admin/users/${userId}/ban`, { method: 'POST' });
 }
