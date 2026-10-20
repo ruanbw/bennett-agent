@@ -13,6 +13,7 @@ import { useChatSessions } from './hooks/use-chat-sessions';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
+import { downloadMarkdownFile } from './lib/export-markdown';
 import { startSync, stopSync } from './lib/sync/engine';
 import type { ModelItem } from './types';
 
@@ -201,6 +202,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
     setPinned,
     removeSessions,
     clearAllSessions,
+    exportSession,
     selectModel,
     selectReasoningEffort,
   } = useChatSessions({ models, defaultModel });
@@ -271,6 +273,20 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
     [removeSessions]
   );
 
+  /**
+   * 导出整段会话：读库生成 Markdown，再交给浏览器下载。
+   *
+   * 下载动作留在组件层（`downloadMarkdownFile` 需要 DOM），hook 只负责「记录 → 文本」
+   * 这一段纯数据转换——那部分有单测，下载本身没有可断言的状态。
+   */
+  const handleExportSession = useCallback(
+    async (sessionId: string) => {
+      const { filename, markdown } = await exportSession(sessionId);
+      downloadMarkdownFile(filename, markdown);
+    },
+    [exportSession]
+  );
+
   const closeSidebar = useCallback(() => setSidebarOverride(false), []);
   useMobileDrawerA11y(isMobile, isSidebarOpen, closeSidebar);
 
@@ -283,6 +299,7 @@ function AuthenticatedShell({ userEmail, canOpenAdmin, canManageRoles, onLogout 
         onCreateSession={handleCreateSession}
         onUpdateTitle={updateTitle}
         onDeleteSession={handleDeleteSession}
+        onExportSession={handleExportSession}
         onTogglePinSession={togglePin}
         onBatchDelete={removeSessions}
         onBatchTogglePin={setPinned}

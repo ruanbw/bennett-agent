@@ -52,6 +52,7 @@ src/
 │   ├── chat-message.ts      # 记录/run → assistant-ui runtime 消息
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
+│   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
 │   └── constants.ts         # 共享常量与 id 生成
 ├── hooks/
@@ -129,6 +130,12 @@ src/
   会话**过期（401）不清库**：401 不代表用户想换账号，清掉会把没同步的内容直接删了。
   本地库的清空会通过 `bennett:auth` 频道广播，其他标签页收到后重新探测身份并退回加载态
   （整个主界面卸载再重挂，否则旧的会话列表还会挂在内存里）。
+- **导出是用户唯一能把数据带出去的出口，所以格式要诚实。** 会话菜单的「导出为
+  Markdown」读**已经落库**的会话（不读内存里的 run），与刷新后看到的一致；流式中的
+  半截回答也照实导出，并在文件里标「生成被停止 / 回复不完整 / 备用模型 / 本轮失败」。
+  不导出思考链（默认折叠、体积不可控）；工具参数与结果各截到 1000 字符并标注原文长度；
+  围栏长度按正文里最长的反引号串 +1 取，否则工具结果里的 ``` 会提前闭合代码块。
+  文件名去掉路径/保留字符、截到 60 字符，空标题退回 `对话-YYYYMMDD-HHmm.md`。
 - **契约在 `types.ts` 里，与后端逐字段对齐。** 后端对应
   `app/schemas/chat.py` 与 `app/schemas/events.py`。改字段名要两端同时改。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，

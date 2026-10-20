@@ -29,6 +29,8 @@ export interface SidebarProps {
   onCreateSession: () => void | Promise<unknown>;
   onUpdateTitle: (id: string, title: string) => void | Promise<unknown>;
   onDeleteSession: (id: string) => void | Promise<unknown>;
+  /** 导出整段会话为 Markdown；未传时不渲染菜单项（不给出点不动的入口）。 */
+  onExportSession?: (id: string) => void | Promise<unknown>;
   onTogglePinSession: (id: string) => void | Promise<unknown>;
   onBatchDelete: (ids: string[]) => void | Promise<unknown>;
   onBatchTogglePin: (ids: string[], pinned: boolean) => void | Promise<unknown>;
@@ -65,6 +67,7 @@ export function Sidebar({
   onCreateSession,
   onUpdateTitle,
   onDeleteSession,
+  onExportSession,
   onTogglePinSession,
   onBatchDelete,
   onBatchTogglePin,
@@ -207,6 +210,15 @@ export function Sidebar({
       void runAction(() => onTogglePinSession(id), '置顶操作失败，请重试');
     },
     [onTogglePinSession, runAction],
+  );
+
+  // 导出失败（IndexedDB 读不出来等）必须落到界面上：否则用户点了菜单，什么也没发生。
+  const handleExport = useCallback(
+    (session: SessionRecord) => {
+      if (!onExportSession) return;
+      void runAction(() => onExportSession(session.id), '导出失败，请重试');
+    },
+    [onExportSession, runAction],
   );
 
   const handleBatchPin = useCallback(
@@ -512,6 +524,7 @@ export function Sidebar({
                     onSelect={onSelectSession}
                     onToggleSelect={toggleSelect}
                     onTogglePin={handleTogglePin}
+                    onExport={onExportSession ? handleExport : undefined}
                     onRequestDelete={requestDeleteSession}
                   />
                 ))}

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { db } from '../db';
+import { loadSessionMessages } from '../lib/chat-persistence';
 import { DEFAULT_REASONING_EFFORT, newSessionId } from '../lib/constants';
+import {
+  buildConversationMarkdown,
+  exportFileName,
+  type ExportedConversation,
+} from '../lib/export-markdown';
 import { reconcileEffort } from '../lib/reasoning-effort';
 import { pinChange, sortSessions, titleChange } from '../lib/session-list';
 import {
@@ -54,6 +60,8 @@ export interface UseChatSessionsResult {
   setPinned: (sessionIds: string[], pinned: boolean) => Promise<void>;
   removeSessions: (sessionIds: string[]) => Promise<void>;
   clearAllSessions: () => Promise<void>;
+  /** 读库生成一份 Markdown 导出（含文件名）。会话不存在时 reject。 */
+  exportSession: (sessionId: string) => Promise<ExportedConversation>;
   selectModel: (modelId: string) => Promise<void>;
   selectReasoningEffort: (effort: string) => Promise<void>;
   reloadSessions: () => Promise<SessionRecord[]>;
@@ -238,6 +246,32 @@ export function useChatSessions({
   );
 
   // -------------------------------------------------------------------
+  // 导出
+  // -------------------------------------------------------------------
+  /**
+   * 读库生成 Markdown。
+   *
+   * 刻意不读内存里的 run：导出的是**已经落库**的内容，与刷新后看到的一致；流式中的
+   * 半截回答也照实导出，并带上「生成未完成」的标注，不会伪装成完整回答。
+   */
+  const exportSession = useCallback(
+    async (sessionId: string): Promise<ExportedConversation> => {
+      const [session, messages] = await Promise.all([
+        db.sessions.get(sessionId),
+        loadSessionMessages(sessionId),
+      ]);
+      // 墓碑会话（同步用的删除标记）同样不可导出：对用户来说它已经不存在了
+      if (!session || session.deleted) throw new Error('会话不存在或已被删除');
+
+      return {
+        filename: exportFileName(session.title),
+        markdown: buildConversationMarkdown(session, messages),
+      };
+    },
+    [],
+  );
+
+  // -------------------------------------------------------------------
   // 删除：单条、批量、清空共用同一个实现
   // -------------------------------------------------------------------
   const removeSessions = useCallback(
@@ -412,6 +446,7 @@ export function useChatSessions({
     setPinned,
     removeSessions,
     clearAllSessions,
+    exportSession,
     selectModel,
     selectReasoningEffort,
     reloadSessions,

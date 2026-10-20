@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from 'react';
-import { Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2 } from 'lucide-react';
+import { Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2, Download } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { highlightRanges, type ContentMatch, type TextRange } from '../lib/session-search';
@@ -60,6 +60,8 @@ export interface SidebarSessionItemProps {
   onSelect: (id: string) => void;
   onToggleSelect: (id: string) => void;
   onTogglePin: (id: string) => void | Promise<unknown>;
+  /** 导出会话为 Markdown；未传时不渲染该菜单项。 */
+  onExport?: (session: SessionRecord) => void | Promise<unknown>;
   onRequestDelete: (session: SessionRecord) => void;
 }
 
@@ -103,6 +105,7 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
   onSelect,
   onToggleSelect,
   onTogglePin,
+  onExport,
   onRequestDelete,
 }: SidebarSessionItemProps) {
   const isPinned = Boolean(session.isPinned);
@@ -240,6 +243,12 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
                 )}
                 <span>{isPinned ? '取消置顶' : '置顶对话'}</span>
               </DropdownMenuItem>
+              {onExport && (
+                <DropdownMenuItem onClick={() => trigger(() => onExport(session), '导出会话失败')}>
+                  <Download size={14} className="text-muted-foreground" />
+                  <span>导出为 Markdown</span>
+                </DropdownMenuItem>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => onRequestDelete(session)}
