@@ -414,10 +414,11 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       break;
 
     case 'usage':
-      // 真实用量（不是估算）：上下文用了多少、窗口多大、本轮生成多少
+      // 真实用量（不是估算）：上下文用了多少、可用上限多大、本轮生成多少
       run.usage = {
         contextTokens: event.context_tokens,
         contextWindow: event.context_window ?? null,
+        contextLimitTokens: event.context_limit_tokens ?? null,
         outputTokens: event.output_tokens,
         cacheReadTokens: event.cache_read_tokens,
       };

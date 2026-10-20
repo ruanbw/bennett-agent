@@ -34,6 +34,21 @@ export function formatPercent(percent: number): string {
 }
 
 /**
+ * 收起态的 token 格式：k 级保留一位小数。
+ *
+ * `formatTokens` 对 10k 以上直接取整，17,500 与 18,000 都会变成「18k」——进度条已经
+ * 97% 了，收起态却显示「18k / 18k」，看起来像没用量。这里只在收起态补一位小数，
+ * 模型菜单里的窗口徽标仍用整数 k，不受影响。
+ */
+function formatCompactTokens(value: number): string {
+  if (value >= 10_000 && value < 100_000) {
+    const thousands = Math.round((value / 1000) * 10) / 10;
+    return `${thousands}k`;
+  }
+  return formatTokens(value);
+}
+
+/**
  * `metadata.custom.usage` 是运行时透传的任意形状：按鸭子类型取，缺字段/写坏就当没有。
  *
  * 校验放在组件外而不是 `useAuiState` 的 selector 里：selector 必须返回稳定引用，
@@ -41,11 +56,13 @@ export function formatPercent(percent: number): string {
  */
 export function readUsage(value: unknown): UsageState | null {
   if (!value || typeof value !== 'object') return null;
-  const { contextTokens, contextWindow, outputTokens, cacheReadTokens } = value as Partial<UsageState>;
+  const { contextTokens, contextWindow, contextLimitTokens, outputTokens, cacheReadTokens } =
+    value as Partial<UsageState>;
   if (typeof contextTokens !== 'number' || !Number.isFinite(contextTokens)) return null;
   return {
     contextTokens,
     contextWindow: typeof contextWindow === 'number' ? contextWindow : null,
+    contextLimitTokens: typeof contextLimitTokens === 'number' ? contextLimitTokens : null,
     outputTokens: typeof outputTokens === 'number' ? outputTokens : 0,
     cacheReadTokens: typeof cacheReadTokens === 'number' ? cacheReadTokens : 0,
   };
@@ -63,15 +80,31 @@ export interface ContextUsageOptions {
 /** 窗口是从哪来的：当前模型配置 / 上游回报 / 不知道（`null`）。 */
 export type ContextWindowSource = 'model' | 'reported' | null;
 
+/**
+ * 进度条分母的来源。
+ *
+ * - `budget`：后端判定超限时用的真实 prompt 上限（窗口扣掉回答预留与安全余量）。
+ *   这是唯一与「下一轮会不会被拒」对齐的口径；
+ * - `window`：拿不到预算时的退回口径（换模型后预算属于旧模型，不能继续用）；
+ * - `null`：连窗口都不知道，只展示绝对值。
+ */
+export type ContextLimitSource = 'budget' | 'window' | null;
+
 export interface ContextUsageView {
   /** 上一轮请求的真实 prompt token 数 = 当前上下文长度。 */
   contextTokens: number;
-  /** 用于算占比的窗口；不知道时为 null（此时只报绝对值，不编造占比）。 */
+  /** 模型的原始窗口；不知道时为 null。 */
   contextWindow: number | null;
   windowSource: ContextWindowSource;
-  /** 已用占比 0–100；窗口未知时为 null。 */
+  /**
+   * 进度条与「剩余」的分母：优先用后端预算（`contextLimitTokens`），没有预算时退回窗口。
+   * 不知道时为 null（此时不编造占比）。
+   */
+  limitTokens: number | null;
+  limitSource: ContextLimitSource;
+  /** 已用占「可用上限」的比例 0–100；未知时为 null。 */
   usedPercent: number | null;
-  /** 窗口还装得下多少 token；窗口未知时为 null。不会为负。 */
+  /** 还能再装多少 token；未知时为 null。不会为负。 */
   remainingTokens: number | null;
   remainingPercent: number | null;
   /** 命中上游提示缓存的 token（是 `contextTokens` 的子集，不是额外开销）。 */
@@ -80,22 +113,24 @@ export interface ContextUsageView {
   cachePercent: number | null;
   /** 本轮生成的总输出 token（只展示，不参与上下文占比）。 */
   outputTokens: number;
-  /** 收起状态的那一小段字：已用 / 窗口（窗口未知时只有已用）。 */
+  /** 收起状态的那一小段字：已用 / 可用上限（或窗口）。 */
   compactLabel: string;
-  /** 收起状态的 title，鼠标悬停第一层就能看到完整数字。 */
+  /** 收起状态的 aria-label：带占比，窗口与预算口径都写清楚。 */
   summary: string;
 }
 
 /**
  * 把一轮真实用量翻译成展示用的数字。
  *
- * 窗口的取法有个坑：用量是**上一轮**的，而用户可能已经切了模型。这时上游回报的
- * 窗口属于旧模型，拿它算占比会给出错误的安全感（旧模型 1M、新模型 32k，显示 5%
- * 而下一轮直接被锁）。所以：
+ * 两个分母的坑要分开说：
  *
- * 1. 当前模型的窗口已知 → 用它（后端预检也是按它判定的）；
- * 2. 模型没变（或模型 id 不知道）→ 退回上游回报的窗口；
- * 3. 模型变了且新窗口未知 → 认「不知道」，只报绝对值。
+ * 1. **预算 vs 窗口**：后端判定超限用的是「窗口 - 回答预留」再乘安全系数，而
+ *    `contextTokens` 是含系统提示词的**真实** prompt。拿原始窗口当分母会把「已经
+ *    用掉 90% 预算」显示成「才用了 56%」——用户看着还很宽敞，下一轮却被拒。
+ *    所以优先用后端随用量回来的 `contextLimitTokens`。
+ * 2. **切模型**：用量与预算都属于**上一轮回答的那个模型**。切到新模型后不能拿旧
+ *    预算继续算（旧模型 1M、新模型 32k，显示 5% 而下一轮直接被锁），此时退回当前
+ *    模型的窗口；新窗口也不知道就认「不知道」，只报绝对值。
  */
 export function describeContextUsage(
   usage: UsageState | null | undefined,
@@ -113,10 +148,16 @@ export function describeContextUsage(
   const windowSource: ContextWindowSource =
     contextWindow === null ? null : modelWindow !== null ? 'model' : 'reported';
 
+  // 预算只对产生它的那个模型有效；切换模型后必须丢掉，不能把旧模型的余量当成新模型的
+  const budgetLimit = sameModel ? positive(usage.contextLimitTokens) : null;
+  const limitTokens = budgetLimit ?? contextWindow;
+  const limitSource: ContextLimitSource =
+    budgetLimit !== null ? 'budget' : contextWindow !== null ? 'window' : null;
+
   const usedPercent =
-    contextWindow === null ? null : Math.min((contextTokens / contextWindow) * 100, 100);
+    limitTokens === null ? null : Math.min((contextTokens / limitTokens) * 100, 100);
   const remainingTokens =
-    contextWindow === null ? null : Math.max(contextWindow - contextTokens, 0);
+    limitTokens === null ? null : Math.max(limitTokens - contextTokens, 0);
   const remainingPercent = usedPercent === null ? null : Math.max(100 - usedPercent, 0);
 
   const cacheReadTokens = Math.max(Math.round(usage.cacheReadTokens) || 0, 0);
@@ -124,21 +165,26 @@ export function describeContextUsage(
     contextTokens > 0 ? Math.min((Math.min(cacheReadTokens, contextTokens) / contextTokens) * 100, 100) : null;
   const outputTokens = Math.max(Math.round(usage.outputTokens) || 0, 0);
 
-  // 收起状态报「已用 / 窗口」这种绝对值，而不是占比：个位数百分比在小窗口上也能
-  // 一直是 0.1%，看久了没有信息量；占比留给弹层和 title。
+  // 收起状态报「已用 / 分母」这种绝对值，而不是占比：个位数百分比在大窗口上也能
+  // 一直是 0.1%，看久了没有信息量；占比留给弹层和 aria-label。
   const compactLabel =
-    contextWindow === null
-      ? formatTokens(contextTokens)
-      : `${formatTokens(contextTokens)} / ${formatTokens(contextWindow)}`;
+    limitTokens === null
+      ? formatCompactTokens(contextTokens)
+      : `${formatCompactTokens(contextTokens)} / ${formatCompactTokens(limitTokens)}`;
+  const windowNote = contextWindow === null ? '' : `；模型窗口 ${formatTokens(contextWindow)}`;
   const summary =
-    contextWindow === null
+    limitTokens === null
       ? `上下文 ${formatTokens(contextTokens)} tokens（窗口未知）`
-      : `上下文 ${formatTokens(contextTokens)} / ${formatTokens(contextWindow)}（${formatPercent(usedPercent ?? 0)}）`;
+      : limitSource === 'budget'
+        ? `上下文 ${formatTokens(contextTokens)} / 可用上限 ${formatTokens(limitTokens)}（${formatPercent(usedPercent ?? 0)}${windowNote}）`
+        : `上下文 ${formatTokens(contextTokens)} / ${formatTokens(limitTokens)}（${formatPercent(usedPercent ?? 0)}）`;
 
   return {
     contextTokens,
     contextWindow,
     windowSource,
+    limitTokens,
+    limitSource,
     usedPercent,
     remainingTokens,
     remainingPercent,

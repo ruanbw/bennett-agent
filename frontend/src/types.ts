@@ -136,6 +136,14 @@ export interface UsageEvent {
   type: 'usage';
   context_tokens: number;
   context_window?: number | null;
+  /**
+   * 后端判定超限时使用的**真实 prompt** 上限（窗口扣除回答预留、再乘安全系数）。
+   *
+   * 与 `context_tokens` 同口径（都含系统提示词与工具 schema），所以两者相除才是
+   * 「上下文用了多少」。`context_window` 是原始窗口，拿它当分母会严重低估占用。
+   * 可选：旧服务端 / 预算守卫关闭 / 备用模型接手时没有这个数，前端退回窗口口径。
+   */
+  context_limit_tokens?: number | null;
   output_tokens: number;
   cache_read_tokens: number;
 }
@@ -239,6 +247,12 @@ export interface UsageState {
   contextTokens: number;
   /** 该模型的上下文窗口；网关没报时为 null（此时只展示用量，不展示占比）。 */
   contextWindow: number | null;
+  /**
+   * 后端判定超限时使用的真实 prompt 上限（窗口扣除回答预留后乘安全系数）。
+   *
+   * 与 `contextTokens` 同口径，进度条与剩余量都以它为准；缺失时退回 `contextWindow`。
+   */
+  contextLimitTokens: number | null;
   /** 本轮生成的总输出 token。 */
   outputTokens: number;
   /** 上下文里命中上游提示缓存的部分（`contextTokens` 的子集）。 */

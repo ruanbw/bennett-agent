@@ -39,6 +39,7 @@ from app.schemas.events import (
     ThinkingDelta,
     ToolCall,
     ToolResult,
+    Usage,
 )
 from app.services import chat_service
 from app.services.chat_service import CLARIFICATION_TOOL_NAME, translate_event
@@ -436,6 +437,13 @@ def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(caplog):
         ToolCall(tool_call_id="c", tool_name="t", args='{"a":1}'),
         ToolResult(tool_call_id="c", tool_name="t", result="ok"),
         ClarificationRequest(tool_call_id="c", question="选？", options=["A"]),
+        Usage(
+            context_tokens=1_066,
+            context_window=32_000,
+            context_limit_tokens=18_000,
+            output_tokens=20,
+            cache_read_tokens=896,
+        ),
         StreamError(message="出错了"),
         StreamError(message="上下文超了", retryable=False, code="context_overflow"),
     ],
@@ -451,6 +459,27 @@ def test_sse_frame_is_data_only_and_newline_safe(event):
 
     parsed = json.loads(payload)
     assert parsed["type"] == event.type
+
+
+def test_usage_frame_carries_prompt_limit_for_progress_bar():
+    """前端用 `context_limit_tokens` 当进度条分母；丢了它只能退回原始窗口。"""
+    raw = (
+        to_sse_frame(
+            Usage(
+                context_tokens=1_066,
+                context_window=32_000,
+                context_limit_tokens=18_000,
+                output_tokens=20,
+                cache_read_tokens=896,
+            )
+        )
+        .encode()
+        .decode()
+    )
+
+    parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+    assert parsed["context_limit_tokens"] == 18_000
+    assert parsed["context_window"] == 32_000
 
 
 def test_sse_frame_preserves_multiline_content():

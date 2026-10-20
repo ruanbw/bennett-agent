@@ -174,6 +174,11 @@ class ContextBudget:
     `used_tokens` 的口径算出：`used_tokens` 不含固定开销时，这部分已从可用空间里扣掉
     （见 `build_budget`），否则两边会各算一次。
 
+    `prompt_limit_tokens` 是**真实 prompt** 的口径：窗口扣掉回答预留后乘安全系数，
+    不再扣固定开销（真实 prompt 里本来就已经含了它）。前端要把上游回报的
+    `context_tokens`（真实 prompt，含系统提示词与工具 schema）画成进度条时只能用这个
+    分母——拿原始窗口当分母会把「已经用掉 90% 预算」显示成「才用了 56%」。
+
     `basis` 说明 `used_tokens` 是怎么来的：`estimate`（从零估算整份历史）还是
     `anchor`（沿用上一轮的真实用量 + 只估算新增消息）。两者相差可能很大，所以它
     必须跟着日志和文案走，否则现场无法解释「为什么这次判得比上次宽」。
@@ -185,6 +190,7 @@ class ContextBudget:
     reserve_tokens: int
     overhead_tokens: int
     limit_tokens: int
+    prompt_limit_tokens: int
     used_tokens: int
     basis: Literal["estimate", "anchor"] = "estimate"
 
@@ -221,6 +227,8 @@ def build_budget(
     """
     reserve_tokens = resolve_reserve_tokens(context_window, max_output_tokens)
     overhead_outside_used = 0 if used_tokens_include_overhead else overhead_tokens
+    # 真实 prompt 的口径：固定开销已经在 used_tokens/上限里，只扣回答预留
+    prompt_limit_tokens = max(int((context_window - reserve_tokens) * settings.context_safety_ratio), 0)
     available = context_window - reserve_tokens - overhead_outside_used
     limit_tokens = max(int(available * settings.context_safety_ratio), 0)
     return ContextBudget(
@@ -230,6 +238,7 @@ def build_budget(
         reserve_tokens=reserve_tokens,
         overhead_tokens=overhead_tokens,
         limit_tokens=limit_tokens,
+        prompt_limit_tokens=prompt_limit_tokens,
         used_tokens=used_tokens,
         basis=basis,
     )

@@ -296,7 +296,13 @@ describe('本轮模型的落库（上下文锁按模型区分）', () => {
 })
 
 describe('真实用量的落库', () => {
-  const usage = { contextTokens: 1066, contextWindow: 1048000, outputTokens: 2, cacheReadTokens: 896 }
+  const usage = {
+    contextTokens: 1066,
+    contextWindow: 1048000,
+    contextLimitTokens: 648000,
+    outputTokens: 2,
+    cacheReadTokens: 896,
+  }
 
   it('saveFinal 把用量写进记录（刷新后「上下文用了多少」仍然可见）', async () => {
     await saveFinal('m1', makeRun({ usage, sawDone: true, finished: true }))
@@ -313,7 +319,13 @@ describe('真实用量的落库', () => {
 })
 
 describe('真实用量锚点（给服务端的上下文预算用）', () => {
-  const usage = { contextTokens: 1065, contextWindow: 1048000, outputTokens: 2, cacheReadTokens: 896 }
+  const usage = {
+    contextTokens: 1065,
+    contextWindow: 1048000,
+    contextLimitTokens: 648000,
+    outputTokens: 2,
+    cacheReadTokens: 896,
+  }
 
   /** 14 条贴满单条上限的记录（合计 420k 字符，必然触发总量裁剪）；usageOn 指定谁带用量。 */
   const bigHistory = (usageOn: Record<string, number>): MessageRecord[] =>

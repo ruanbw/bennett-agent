@@ -199,6 +199,8 @@ def test_limit_applies_the_safety_ratio():
 
     assert budget.reserve_tokens == 20_000
     assert budget.limit_tokens == int((100_000 - 20_000 - 1_000) * 0.9)
+    # 真实 prompt 口径的上限：不再扣固定开销（真实 prompt 里本来就含它）
+    assert budget.prompt_limit_tokens == int((100_000 - 20_000) * 0.9)
 
     at_limit = build_budget(
         model="m",
@@ -219,6 +221,20 @@ def test_overhead_is_only_deducted_when_used_excludes_it():
 
     assert included.limit_tokens == int((100_000 - 8_000) * 0.9)
     assert excluded.limit_tokens == int((100_000 - 8_000 - 1_000) * 0.9)
+    # 两种口径的「真实 prompt 上限」相同：固定开销已经包含在真实 prompt 里
+    assert included.prompt_limit_tokens == excluded.prompt_limit_tokens == int((100_000 - 8_000) * 0.9)
+
+
+def test_prompt_limit_does_not_shrink_with_estimate_overhead():
+    """用量事件里的上限是给下一轮用的：下一轮走锚点口径，不再扣固定开销。
+
+    前端拿它当分母画「上下文占用」；如果这里错误地扣了 overhead，进度条会比后端
+    实际判定更乐观/悲观（两种都不对，必须是同一个数）。
+    """
+    estimate = build_budget("m", 32_000, 8_000, 0, 5_000, used_tokens_include_overhead=False)
+
+    assert estimate.limit_tokens == int((32_000 - 8_000 - 5_000) * 0.9)
+    assert estimate.prompt_limit_tokens == int((32_000 - 8_000) * 0.9)
 
 
 def test_safety_ratio_is_configurable(monkeypatch):
@@ -349,6 +365,7 @@ def test_overflow_message_carries_numbers_and_actions():
         reserve_tokens=100_000,
         overhead_tokens=1_000,
         limit_tokens=810_000,
+        prompt_limit_tokens=810_000,
         used_tokens=900_000,
     )
 

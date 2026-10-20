@@ -605,6 +605,13 @@ async def stream_chat_events(
                         # 窗口取自已解析的快照，不重新查库：同一请求里解析与用量必须是
                         # 同一份配置，否则管理员中途改配置会让两个数字互相矛盾。
                         context_window=snapshot.context_window_for(answered_by),
+                        # 前端拿「真实 prompt / 可用上限」画进度条，分母必须是后端判定
+                        # 超限时用的那个上限，而不是原始窗口（预留了回答空间后往往差很远）。
+                        # 备用模型接手时预算是按主模型算的，不能冒充备用模型的上限，留空
+                        # 让前端退回窗口口径。
+                        context_limit_tokens=(
+                            budget.prompt_limit_tokens if budget is not None and answered_by == model_name else None
+                        ),
                         output_tokens=usage.output_tokens,
                         cache_read_tokens=usage.cache_read_tokens,
                     )

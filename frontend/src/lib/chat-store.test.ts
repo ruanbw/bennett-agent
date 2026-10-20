@@ -263,6 +263,7 @@ describe('事件折叠', () => {
         type: 'usage',
         context_tokens: 1066,
         context_window: 1048000,
+        context_limit_tokens: 648000,
         output_tokens: 2,
         cache_read_tokens: 896,
       }),
@@ -273,6 +274,7 @@ describe('事件折叠', () => {
     expect(run.usage).toEqual({
       contextTokens: 1066,
       contextWindow: 1048000,
+      contextLimitTokens: 648000,
       outputTokens: 2,
       cacheReadTokens: 896,
     })
@@ -280,17 +282,19 @@ describe('事件折叠', () => {
     expect(run.content).toBe('答')
   })
 
-  it('用量里的窗口缺失（网关没报）时按 null 记，而不是编一个数', () => {
+  it('用量里的窗口与预算上限缺失时按 null 记，而不是编一个数', () => {
     start('a')
     applyEvent('a', {
       type: 'usage',
       context_tokens: 1066,
       context_window: null,
+      context_limit_tokens: null,
       output_tokens: 2,
       cache_read_tokens: 0,
     })
 
     expect(getRun('a')!.usage?.contextWindow).toBeNull()
+    expect(getRun('a')!.usage?.contextLimitTokens).toBeNull()
   })
 
   it('INCOMPLETE 追加中断提示并标记不完整', () => {

@@ -474,6 +474,7 @@ const Composer: FC<{
               usageModel={latestUsageModel}
               currentModel={currentModel}
               modelContextWindow={selectedModel?.context_window ?? null}
+              locked={contextLocked}
             />
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>

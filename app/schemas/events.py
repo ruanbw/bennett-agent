@@ -100,6 +100,10 @@ class Usage(BaseModel):
     - `context_tokens` 是**本轮最后一次**模型请求的 prompt token 数，也就是当前
       上下文的长度。一轮里如有工具调用会有多次请求，累加值会把上下文算大
       （每次请求都重发一遍历史），所以此处不提供累加值。
+    - `context_window` 是该模型的原始窗口；`context_limit_tokens` 才是后端判定
+      超限时使用的上限（窗口扣除为回答预留的空间、再乘安全系数）。两者不同：
+      32k 窗口的模型可能只剩 19k 能放历史，前端拿原始窗口算占比会严重低估占用。
+      没有上下文预算（守卫关闭 / 窗口未知 / 备用模型接手）时为 null。
     - `output_tokens` 是本轮生成的总输出（含工具调用之间的中间输出）。
     - `cache_read_tokens` 是上下文里命中上游缓存的部分，是 `context_tokens` 的
       子集，不是额外开销。
@@ -110,6 +114,7 @@ class Usage(BaseModel):
     type: Literal["usage"] = "usage"
     context_tokens: int
     context_window: int | None = None
+    context_limit_tokens: int | None = None
     output_tokens: int = 0
     cache_read_tokens: int = 0
 

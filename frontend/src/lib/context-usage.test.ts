@@ -11,6 +11,7 @@ import type { UsageState } from '../types';
 const usage = (overrides: Partial<UsageState> = {}): UsageState => ({
   contextTokens: 851,
   contextWindow: 1_000_000,
+  contextLimitTokens: null,
   outputTokens: 123,
   cacheReadTokens: 0,
   ...overrides,
@@ -69,6 +70,7 @@ describe('readUsage', () => {
     expect(readUsage({ contextTokens: 20 })).toEqual({
       contextTokens: 20,
       contextWindow: null,
+      contextLimitTokens: null,
       outputTokens: 0,
       cacheReadTokens: 0,
     });
@@ -87,6 +89,8 @@ describe('describeContextUsage', () => {
     expect(view.contextTokens).toBe(851);
     expect(view.contextWindow).toBe(1_000_000);
     expect(view.windowSource).toBe('reported');
+    expect(view.limitTokens).toBe(1_000_000);
+    expect(view.limitSource).toBe('window');
     expect(view.usedPercent).toBeCloseTo(0.0851, 4);
     expect(view.remainingTokens).toBe(999_149);
     expect(view.remainingPercent).toBeCloseTo(99.9149, 3);
@@ -94,7 +98,49 @@ describe('describeContextUsage', () => {
     expect(view.summary).toBe('上下文 851 / 1.0M（<0.1%）');
   });
 
-  it('当前模型窗口已知时优先用它（后端预检就是按它判定的）', () => {
+  it('预算上限优先于原始窗口：后端按「窗口 - 回答预留」判定，前端必须同一口径', () => {
+    // 32k 窗口、18k 可用上限：851 tokens 在窗口口径下是 2.7%，在预算口径下是 4.7%。
+    // 测试更极端的占比：17.5k 在窗口口径下 54.7%（看起来还很宽敞），
+    // 预算口径 97.2%（下一轮随时会被拒）。
+    const view = describeContextUsage(
+      usage({ contextWindow: 32_000, contextLimitTokens: 18_000, contextTokens: 17_500 }),
+      { currentModel: 'auto/x', usageModel: 'auto/x', modelContextWindow: 32_000 },
+    )!;
+
+    expect(view.limitTokens).toBe(18_000);
+    expect(view.limitSource).toBe('budget');
+    expect(view.contextWindow).toBe(32_000);
+    expect(view.usedPercent).toBeCloseTo((17_500 / 18_000) * 100, 6);
+    expect(view.remainingTokens).toBe(500);
+    expect(view.compactLabel).toBe('17.5k / 18k');
+    expect(view.summary).toContain('可用上限 18k');
+    expect(view.summary).toContain('模型窗口 32k');
+  });
+
+  it('切模型后丢掉旧模型的预算上限（不能拿旧余量给新模型算占比）', () => {
+    const view = describeContextUsage(
+      usage({ contextWindow: 1_000_000, contextLimitTokens: 18_000 }),
+      { currentModel: 'auto/new', usageModel: 'auto/old', modelContextWindow: 32_000 },
+    )!;
+
+    expect(view.limitTokens).toBe(32_000);
+    expect(view.limitSource).toBe('window');
+    expect(view.usedPercent).toBeCloseTo((851 / 32_000) * 100, 6);
+  });
+
+  it('切模型且新窗口未知时，旧预算与新窗口都不可用，只报绝对值', () => {
+    const view = describeContextUsage(
+      usage({ contextWindow: 1_000_000, contextLimitTokens: 18_000 }),
+      { currentModel: 'auto/new', usageModel: 'auto/old', modelContextWindow: null },
+    )!;
+
+    expect(view.limitTokens).toBeNull();
+    expect(view.limitSource).toBeNull();
+    expect(view.usedPercent).toBeNull();
+    expect(view.compactLabel).toBe('851');
+  });
+
+  it('拿不到预算时，当前模型窗口已知就按它算（而不是上游回报的旧窗口）', () => {
     const view = describeContextUsage(usage({ contextWindow: 1_000_000 }), {
       currentModel: 'auto/x',
       usageModel: 'auto/x',
