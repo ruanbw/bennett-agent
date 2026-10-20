@@ -53,6 +53,7 @@ src/
 │   ├── capabilities.ts      # 运行时能力探针的客户端（起步建议裁剪）
 │   ├── reasoning-effort.ts  # 思考等级词表与归一化的唯一权威
 │   ├── session-search.ts    # 会话搜索：AND 词表 / 片段截取 / 高亮偏移
+│   ├── session-grouping.ts  # 会话时间分组：本地日历日边界 / 组内排序 / 午夜刷新
 │   ├── start-suggestions.ts # 空对话页建议池：能力裁剪与「换一批」轮转
 │   ├── export-markdown.ts   # 会话导出：Markdown 生成 + 文件名清理
 │   ├── local-owner.ts       # 本地缓存归属：换账号先清库
@@ -66,6 +67,7 @@ src/
 │   ├── use-chat-sessions.ts # 会话 CRUD + 当前模型/等级
 │   ├── use-capabilities.ts  # 启动时拉一次运行时能力（失败降级为无联网搜索）
 │   ├── use-session-search.ts # 搜索防抖/中止/保留旧结果
+│   ├── use-midnight-refresh.ts # 过本地午夜时推进分组用的「现在」
 │   ├── use-local-stats.ts   # 设置面板打开时读一次本机数据
 │   ├── use-global-shortcuts.ts # 全局快捷键挂载（判定在 lib）
 │   └── use-media-query.ts   # 响应式媒体查询
@@ -132,6 +134,14 @@ src/
   冻结/节流（定时器暂停，恢复时立刻到期），而真正的断网会很快抛 `TypeError` 或拿到 5xx。
   单次超时静默重试、**连续 3 次**才染色（`lib/sync/long-poll.ts`，有单测），否则用户会看到
   一个假的「同步失败」而实际上下一轮就成功了。成功一次即清零计数。
+- **时间分组按本地日历日算，标题吸顶，过午夜会自己更新。** 「今天 / 昨天 / 7 天内 /
+  30 天内」的边界用 `new Date(y, m, d - n)` 推，不从今天零点减 24 小时的整数倍：
+  DST 切换日只有 23/25 小时，减固定毫秒会把边界挪一小时。组内由
+  `groupSessionsByDate` 自己按最近活动倒序排一次（同步拉回的增量、批量取消置顶等路径
+  不保证已排序），不依赖调用方先跑 `sortSessions`。分组标签依赖「今天是哪一天」，
+  `useMidnightRefresh` 在本地午夜与标签页重新可见时推进 `now`，否则挂机过夜后昨天
+  创建的会话会一直挂在「今天」下面。长列表里分组标题用 `sticky top-0` 吸顶并显示
+  条数（读屏带「N 个会话」），滚到「7 天内」时仍能看出当前段。
 - **搜索必须搜正文，而且要能看见命中原因。** 侧边栏搜索是「标题 + 消息正文」：标题同步
   过滤，正文由 `lib/session-search.ts` 走 `sessionId` 索引逐条扫描（只保留每个会话最新一条
   命中消息的片段），命中行在标题下方显示一行带高亮的小字。多词是 **AND**，且必须在

@@ -7,6 +7,7 @@ import { SEARCH_SHORTCUT_KEYS, searchShortcutLabel } from '../lib/keyboard-short
 import { matchText } from '../lib/session-search';
 import { visibleSelection } from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
+import { useMidnightRefresh } from '../hooks/use-midnight-refresh';
 import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
@@ -170,8 +171,13 @@ export function Sidebar({
     searchInputRef.current?.focus();
   }, []);
 
-  // 按时间分组，长列表更好扫读
-  const sessionGroups = useMemo(() => groupSessionsByDate(filteredSessions), [filteredSessions]);
+  // 按时间分组，长列表更好扫读。now 会在本地午夜 / 标签页重新可见时前进：
+  // 挂机过夜后「今天」不能还挂着昨天创建的会话。
+  const now = useMidnightRefresh();
+  const sessionGroups = useMemo(
+    () => groupSessionsByDate(filteredSessions, now),
+    [filteredSessions, now],
+  );
 
   // 批量操作只作用于「可见且被选中」的集合：搜索藏起来的选中项不会被顺带删除，
   // 确认弹窗的数量也因此等于实际删除集合。
@@ -579,9 +585,20 @@ export function Sidebar({
         ) : (
           sessionGroups.map((group, groupIndex) => (
             <section key={group.label}>
-              <div className="flex items-center justify-between pl-4 pr-2.5 pt-4 pb-1">
-                <h3 className="text-[11px] font-medium text-muted-foreground/70 select-none">
+              {/*
+                分组标题吸顶：长列表滚到「7 天内」时仍能看出当前段。
+                背景必须不透明（bg-sidebar），否则下面的会话条目会从字缝里透出来；
+                z-30 要高于条目内容层与悬停操作按钮的 z-20（同 z-index 下后出现的元素
+                会盖住标题）。右侧操作菜单是 portal 到 body 的，不受这个层叠顺序影响。
+              */}
+              <div className="sticky top-0 z-30 flex items-center justify-between bg-sidebar pl-4 pr-2.5 pt-4 pb-1">
+                <h3 className="flex items-baseline gap-1.5 text-[11px] font-medium text-muted-foreground/70 select-none">
                   {group.label}
+                  {/* 计数用 sr-only 补单位：读屏听到「今天 3 个会话」，而不是孤零零的数字 */}
+                  <span aria-hidden="true" className="text-[10px] font-normal tabular-nums text-muted-foreground/40">
+                    {group.sessions.length}
+                  </span>
+                  <span className="sr-only">{group.sessions.length} 个会话</span>
                 </h3>
                 {/* 多选管理入口挂在第一个分组标题右侧 */}
                 {groupIndex === 0 && !searchOpen && (
