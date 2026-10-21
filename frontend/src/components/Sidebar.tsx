@@ -438,6 +438,7 @@ export function Sidebar({
               aria-label="搜索对话"
               aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
               aria-expanded={searchOpen}
+              aria-controls={searchOpen ? 'sidebar-search-panel' : undefined}
             >
               <Search size={16} aria-hidden="true" />
             </button>
@@ -472,7 +473,7 @@ export function Sidebar({
         {/* 搜索框：点图标才展开，平时只有图标，不占列表空间。
             搜的是「标题 + 消息正文」：标题同步过滤，正文结果由 useSessionContentSearch 异步补上。 */}
         {searchOpen && (
-          <div className="space-y-1">
+          <div id="sidebar-search-panel" className="space-y-1">
             <div className="relative flex items-center">
               <Search
                 size={13}
@@ -527,7 +528,7 @@ export function Sidebar({
                   setSearchOpen(false);
                   searchToggleRef.current?.focus();
                 }}
-                className="absolute right-2.5 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
+                className="absolute right-2.5 -m-1 rounded-md p-1 text-muted-foreground hover:text-foreground cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
                 title="关闭搜索"
               >
                 <X size={12} aria-hidden="true" />
@@ -602,6 +603,13 @@ export function Sidebar({
 
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             if (index === -1) return; // 焦点还在搜索框：由输入框自己处理 ↓
+            // 在第一条结果按 ↑ 回到搜索框：允许键盘用户在输入与结果之间来回，而不用
+            // 先记住「按 Esc 只是回搜索框」这条隐藏规则。
+            if (event.key === 'ArrowUp' && index === 0) {
+              event.preventDefault();
+              searchInputRef.current?.focus();
+              return;
+            }
             event.preventDefault();
             buttons[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
             return;
