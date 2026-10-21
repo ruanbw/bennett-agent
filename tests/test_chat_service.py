@@ -248,3 +248,69 @@ def test_timeout_is_classified_as_service_unavailable():
 def test_unclassifiable_errors_fall_back_to_the_generic_message(error):
     """取不到属性、类型不对、或状态码不在表里，都必须走通用分支而不是猜。"""
     assert chat_service.upstream_error_message(error) == "生成异常，请重试"
+
+
+# ---------------------------------------------------------------------
+# 会话标题
+# ---------------------------------------------------------------------
+def _title_snapshot(*, target, registry_managed: bool):
+    """标题只用到 key / target / registry_managed，其余字段给空值即可。"""
+    from app.services.model_service import ChatModelSnapshot
+
+    return ChatModelSnapshot(
+        key="auto/x",
+        target=target,
+        context_window=None,
+        max_output_tokens=None,
+        fallback_key=None,
+        fallback_context_window=None,
+        known_ids=None,
+        registry_managed=registry_managed,
+    )
+
+
+@pytest.mark.asyncio
+async def test_title_falls_back_to_first_line_when_model_fails(monkeypatch):
+    """模型不可用时用首行兜底，且清掉 Markdown 标题记号。"""
+    snapshot = _title_snapshot(target=None, registry_managed=True)
+
+    title = await chat_service.generate_title_from_prompt(snapshot, "# 帮我写个排序函数\n要求稳定")
+
+    assert title == "帮我写个排序函数"
+
+
+@pytest.mark.asyncio
+async def test_title_cleans_model_output_before_returning(monkeypatch):
+    """模型输出带引号/前缀/句号时，落库前必须清洗——否则侧边栏会显示「标题：…」。"""
+    snapshot = _title_snapshot(target=object(), registry_managed=False)
+
+    class _Result:
+        output = "「标题：向量数据库选型。」"
+
+    class _Agent:
+        async def run(self, _prompt):
+            return _Result()
+
+    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+
+    title = await chat_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
+
+    assert title == "向量数据库选型"
+
+
+@pytest.mark.asyncio
+async def test_empty_model_title_falls_back_instead_of_storing_blank(monkeypatch):
+    snapshot = _title_snapshot(target=object(), registry_managed=False)
+
+    class _Result:
+        output = "   "
+
+    class _Agent:
+        async def run(self, _prompt):
+            return _Result()
+
+    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+
+    title = await chat_service.generate_title_from_prompt(snapshot, "帮我分析这份财报")
+
+    assert title == "帮我分析这份财报"

@@ -74,6 +74,11 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 一个不存在的工具——白烧一轮 token，用户看到的是「工具不存在」。
 `tests/test_agent_factory.py` 锁住「挂上的工具都出现在提示词里」这条一致性。
 
+会话标题同样是模型输出，落库前要清洗（引号、「标题：」前缀、尾随句号、换行）并按
+**码点**截断——与前端 `clampTitle` 同一口径，否则同一个标题在两端长度不同。清洗与兜底
+在 `app/services/title_text.py`（纯函数，`tests/test_title_text.py` 覆盖）；模型不可用或
+返回空内容时退回「首条消息首行」，并去掉 Markdown 的 `#` 记号。
+
 ## 评测
 
 `evals/` 是一套**行为回归**用例：改提示词、换模型、动工具定义之后跑一遍，就知道哪些

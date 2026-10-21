@@ -48,6 +48,7 @@ from app.schemas.events import (
 from app.services.agent_factory import build_agent, build_title_agent
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
 from app.services.model_service import ChatModelSnapshot
+from app.services.title_text import fallback_title, normalize_title
 from app.services.token_budget import overflow_message, resolve_context_budget
 from app.services.upstream_errors import (
     is_retryable_for_user,
@@ -67,8 +68,6 @@ MAX_TITLE_INPUT_CHARS = 500
 MAX_TITLE_CHARS = 20
 FALLBACK_TITLE_CHARS = 15
 DEFAULT_TITLE = "新对话"
-
-_TITLE_QUOTE_CHARS = "\"'“”‘’"
 
 #: 单轮对话的**总**时长预算（秒）。上游超时是「空闲」语义（多久没收到数据），
 #: 只约束单次等待；叠加 SDK 默认的 2 次重试与网关侧重试后，单轮仍可能被拖到十几分钟。
@@ -681,6 +680,9 @@ async def generate_title_from_prompt(snapshot: ChatModelSnapshot, prompt: str) -
 
     与对话流共用同一份 `ChatModelSnapshot`：标题接口原本在 API 层解析一次模型，进到
     这里又查一遍库，同样是重复的全量扫描。
+
+    模型输出要先清洗（引号、「标题：」前缀、尾随句号、换行）再截断：此前只剥引号，
+    「标题：向量数据库选型」会原样出现在侧边栏。清洗与截断在 `title_text`，纯函数可测。
     """
     model_name = snapshot.key
     try:
@@ -688,9 +690,11 @@ async def generate_title_from_prompt(snapshot: ChatModelSnapshot, prompt: str) -
             raise RuntimeError(f"模型不可用: {model_name}")
         agent = build_title_agent(model_name, target=snapshot.target)
         result = await agent.run(f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}")
-        title = result.output.strip().strip(_TITLE_QUOTE_CHARS)
-        return title[:MAX_TITLE_CHARS] if title else DEFAULT_TITLE
+        title = normalize_title(result.output, MAX_TITLE_CHARS)
+        if title:
+            return title
+        logger.info("标题模型返回空内容，回退到首行截断 (model=%s)", model_name)
     except Exception:
         logger.warning("生成会话标题失败，回退到截断首行 (model=%s)", model_name, exc_info=True)
-        cleaned = prompt.strip().split("\n")[0][:FALLBACK_TITLE_CHARS]
-        return cleaned or DEFAULT_TITLE
+
+    return fallback_title(prompt, FALLBACK_TITLE_CHARS) or DEFAULT_TITLE
