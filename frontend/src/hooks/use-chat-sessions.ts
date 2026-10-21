@@ -20,7 +20,12 @@ import {
   requestSessionMessagesReload,
   setSessionsChangedHandler,
 } from '../lib/chat-runs';
-import { SESSIONS_CHANGED_DEBOUNCE_MS, subscribeSessionsChanged } from '../lib/multi-tab';
+import {
+  SESSIONS_CHANGED_DEBOUNCE_MS,
+  notifySessionsChanged as broadcastSessionsChanged,
+  subscribeSessionsChanged,
+} from '../lib/multi-tab';
+import { notify } from '../lib/toast';
 import { requestPush, subscribeApplied } from '../lib/sync/engine';
 import type { ModelItem, SessionRecord } from '../types';
 
@@ -127,40 +132,6 @@ export function useChatSessions({
     return () => setSessionsChangedHandler(null);
   }, [reloadSessions]);
 
-  /**
-   * 其他标签页的改动：列表重读，必要时连当前会话的消息一起重读。
-   *
-   * 列表重读合并到一个窗口里：对方可能短时间里连着发几条通知（两个会话先后生成结束），
-   * 而列表只认「最新一次」的结果，逐条重读等于把整表扫几遍。
-   *
-   * 消息只在「通知的就是当前会话」且「本页没有在跑的 run」时才重读：本页自己流出的内容
-   * 只存在内存里，拿库里的旧快照盖回去会让回复凭空回退；本页 run 的收尾本来就会走同一条
-   * 回读，不需要别人代劳。
-   */
-  const remoteReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    const unsubscribe = subscribeSessionsChanged(({ sessionId }) => {
-      if (remoteReloadTimerRef.current === null) {
-        remoteReloadTimerRef.current = setTimeout(() => {
-          remoteReloadTimerRef.current = null;
-          void reloadSessions();
-        }, SESSIONS_CHANGED_DEBOUNCE_MS);
-      }
-
-      // 选中会话用 ref 读而不是闭包捕获：通知可能在用户切走之后才到达
-      if (sessionId !== currentSessionIdRef.current) return;
-      if (isRunActive(sessionId)) return;
-      void requestSessionMessagesReload(sessionId);
-    });
-
-    return () => {
-      unsubscribe();
-      if (remoteReloadTimerRef.current !== null) {
-        clearTimeout(remoteReloadTimerRef.current);
-        remoteReloadTimerRef.current = null;
-      }
-    };
-  }, [reloadSessions]);
 
   // -------------------------------------------------------------------
   // 创建 / 切换
@@ -181,6 +152,8 @@ export function useChatSessions({
 
     await db.sessions.add(session);
     requestPush();
+    // 只给本页刷新是旧行为：别的标签页要等到下一次同步拉取才知道多了一个会话
+    broadcastSessionsChanged(session.id);
     sessionsRef.current = [session, ...sessionsRef.current];
     setSessions((prev) => [session, ...prev]);
     // 守卫式更新：只有当前选中仍是「创建前」的值才切到新会话。用户在等待写入期间
@@ -214,6 +187,7 @@ export function useChatSessions({
       if (!changes) return;
       await db.sessions.update(sessionId, changes);
       requestPush();
+      broadcastSessionsChanged(sessionId);
       await reloadSessions();
     },
     [reloadSessions],
@@ -229,6 +203,7 @@ export function useChatSessions({
 
       await db.sessions.update(sessionId, pinChange(!session.isPinned));
       requestPush();
+      broadcastSessionsChanged(sessionId);
       await reloadSessions();
     },
     [reloadSessions],
@@ -245,6 +220,7 @@ export function useChatSessions({
         }
       });
       requestPush();
+      for (const id of sessionIds) broadcastSessionsChanged(id);
       await reloadSessions();
     },
     [reloadSessions],
@@ -328,6 +304,8 @@ export function useChatSessions({
         }
       });
       requestPush();
+      // 其他标签页必须立刻知道：否则它们会停在一个已经不存在的会话上（发消息写孤儿数据）
+      for (const id of sessionIds) broadcastSessionsChanged(id);
 
       for (const id of sessionIds) {
         abortChatRun(id);
@@ -348,6 +326,75 @@ export function useChatSessions({
   );
 
   /**
+   * 当前选中的会话已经不存在（被其他标签页/其他设备删掉）时收尾。
+   *
+   * 不能因为本页还在生成就原地不动：该会话的落库从此都是 no-op（行已不存在），页面会
+   * 永久停在一个不存在的会话上，继续发消息还会写出孤儿消息。中止本轮、切走，是唯一
+   * 自洽的选择。返回是否真的做了恢复（调用方据此决定后续动作）。
+   */
+  const recoverFromMissingCurrentSession = useCallback(
+    async (list: SessionRecord[]): Promise<boolean> => {
+      const current = currentSessionIdRef.current;
+      if (!current) return false;
+      if (list.some((session) => session.id === current)) return false;
+
+      if (isRunActive(current)) abortChatRun(current);
+      removeSessionRun(current);
+      notify('info', '这个会话已在其他标签页删除');
+      if (list.length > 0) selectSession(list[0].id, list);
+      else await createSession();
+      return true;
+    },
+    [selectSession, createSession],
+  );
+
+  /**
+   * 其他标签页的改动：列表重读，必要时连当前会话的消息一起重读。
+   *
+   * 列表重读合并到一个窗口里：对方可能短时间里连着发几条通知（两个会话先后生成结束），
+   * 而列表只认「最新一次」的结果，逐条重读等于把整表扫几遍。
+   *
+   * 消息只在「通知的就是当前会话」且「本页没有在跑的 run」时才重读：本页自己流出的内容
+   * 只存在内存里，拿库里的旧快照盖回去会让回复凭空回退；本页 run 的收尾本来就会走同一条
+   * 回读，不需要别人代劳。
+   */
+  const remoteReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const unsubscribe = subscribeSessionsChanged(({ sessionId }) => {
+      if (remoteReloadTimerRef.current === null) {
+        remoteReloadTimerRef.current = setTimeout(() => {
+          remoteReloadTimerRef.current = null;
+          void reloadSessions();
+        }, SESSIONS_CHANGED_DEBOUNCE_MS);
+      }
+
+      // 选中会话用 ref 读而不是闭包捕获：通知可能在用户切走之后才到达
+      if (sessionId !== currentSessionIdRef.current) return;
+      if (isRunActive(sessionId)) return;
+
+      // 别的标签页**删掉**了当前会话：与本地删除一样切走。只重读消息不够——会话本身
+      // 已经不在列表里，用户会停在一个不存在的会话上继续发消息。
+      void (async () => {
+        const record = await db.sessions.get(sessionId);
+        if (record && !record.deleted) {
+          void requestSessionMessagesReload(sessionId);
+          return;
+        }
+        const list = await reloadSessions();
+        await recoverFromMissingCurrentSession(list);
+      })();
+    });
+
+    return () => {
+      unsubscribe();
+      if (remoteReloadTimerRef.current !== null) {
+        clearTimeout(remoteReloadTimerRef.current);
+        remoteReloadTimerRef.current = null;
+      }
+    };
+  }, [reloadSessions, recoverFromMissingCurrentSession]);
+
+  /**
    * 同步层拉到了本机没有的内容：重读列表，必要时重读当前会话的消息。
    *
    * 跨标签页走 `subscribeSessionsChanged`；这里是**同标签页**的那条路——BroadcastChannel
@@ -360,24 +407,15 @@ export function useChatSessions({
     return subscribeApplied((sessionIds: string[]) => {
       void (async () => {
         const list = await reloadSessions();
+        if (await recoverFromMissingCurrentSession(list)) return;
+
         const current = currentSessionIdRef.current;
         if (!current) return;
-
-        if (!list.some((session) => session.id === current)) {
-          // 会话在别的设备被删了。这里**不能**因为本页还在生成就原地不动：
-          // 该会话的落库从此都是 no-op（行已不存在），页面会永久停在一个不存在的会话上，
-          // 继续发消息还会写出孤儿消息。中止本轮、切走，是唯一自洽的选择。
-          if (isRunActive(current)) abortChatRun(current);
-          if (list.length > 0) selectSession(list[0].id, list);
-          else await createSession();
-          return;
-        }
-
         if (!sessionIds.includes(current) || isRunActive(current)) return;
         void requestSessionMessagesReload(current);
       })();
     });
-  }, [reloadSessions, selectSession, createSession]);
+  }, [reloadSessions, recoverFromMissingCurrentSession]);
 
   const clearAllSessions = useCallback(async (): Promise<void> => {
     const removedIds = sessionsRef.current.map((session) => session.id);
@@ -391,6 +429,7 @@ export function useChatSessions({
       }
     });
     requestPush();
+    for (const id of removedIds) broadcastSessionsChanged(id);
 
     for (const id of removedIds) {
       abortChatRun(id);
@@ -423,6 +462,7 @@ export function useChatSessions({
         updatedAt: Date.now(),
       });
       requestPush();
+      broadcastSessionsChanged(currentSessionId);
       setSessions((prev) =>
         prev.map((session) =>
           session.id === currentSessionId
@@ -446,6 +486,7 @@ export function useChatSessions({
         updatedAt: Date.now(),
       });
       requestPush();
+      broadcastSessionsChanged(currentSessionId);
       setSessions((prev) =>
         prev.map((session) =>
           session.id === currentSessionId ? { ...session, reasoningEffort: nextEffort } : session,
