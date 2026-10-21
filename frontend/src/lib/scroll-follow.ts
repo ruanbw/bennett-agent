@@ -23,3 +23,13 @@ export function isNearScrollBottom(
   const distance = metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight;
   return distance <= threshold;
 }
+
+/**
+ * 点「回到底部」后要不要顺手聚焦输入框。
+ *
+ * 桌面端这是「滚到底接着打字」的捷径；触屏上聚焦会立刻弹出软键盘，用户只是想看
+ * 最新消息，键盘挡住半屏内容。粗指针（`pointer: coarse`）时不抢焦点。
+ */
+export function shouldFocusComposerAfterScrollToBottom(isCoarsePointer: boolean): boolean {
+  return !isCoarsePointer;
+}

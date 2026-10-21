@@ -133,6 +133,10 @@ src/
   计时、展开状态与跟随状态——上一轮读到一半的位置不该带到下一轮。直播计时的起点用
   run 上的 `thinkingStartedAt`，不用 `thinkingMs`（正文出现前恒为 0）：切到别的会话
   再回来时组件会重挂载，只有开始时间能让计时接着走而不是从 0 重来。
+- **「回到底部」在触屏上不抢焦点。** 桌面端点它顺手把光标放回输入框，方便继续打字；
+  触屏用户只是想看最新消息，聚焦会立刻弹出软键盘挡住半屏内容。按
+  `pointer: coarse` 判断（`scroll-follow.ts:shouldFocusComposerAfterScrollToBottom`），
+  移动端点击区域也放大到接近 44px。
 - **不要只靠 hover 暴露操作。** Tailwind 4 会把 `hover:` / `group-hover:` 包进
   `@media (hover: hover)`，触屏上永远不生效。会话条目的「…」菜单、历史消息的复制 /
   重新生成都同时挂了 `pointer-coarse:`（触屏）与 `focus-within:` / `group-focus-within:`

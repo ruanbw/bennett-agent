@@ -8,6 +8,7 @@ import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.a
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { shouldFocusComposerAfterScrollToBottom } from "@/lib/scroll-follow";
 import {
   ActionBarPrimitive,
   AuiIf,
@@ -190,10 +191,19 @@ export const Thread: FC<ThreadProps> = ({
     setSuggestionOffset((offset) => offset + suggestions.length);
   }, [suggestions.length]);
 
-  /** 滚到底部按钮顺带把焦点交回输入框：去掉 autoFocus 后，这里是「点按钮接着打字」的唯一入口。 */
+  /** 去掉 autoFocus 后，桌面端「点按钮接着打字」靠这里把焦点交回输入框。 */
   const focusComposer = useCallback(() => {
     composerInputRef.current?.focus({ preventScroll: true });
   }, []);
+
+  /** 触屏上点「回到底部」只是要读最新消息，抢焦点会弹出软键盘挡住内容。 */
+  const handleScrollToBottom = useCallback(() => {
+    const coarse = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+    if (!shouldFocusComposerAfterScrollToBottom(coarse)) return;
+    // 滚到底后按钮会立刻 disabled/invisible；同步 focus 会被这次状态更新清掉，
+    // 等这一轮 DOM 更新结束再把焦点交给输入框。
+    window.setTimeout(() => focusComposer(), 0);
+  }, [focusComposer]);
 
   /** 忽略提问后焦点交回输入框：弹层随即卸载，不接管焦点就会落到 body 上。 */
   const dismissClarification = useCallback(() => {
@@ -297,7 +307,7 @@ export const Thread: FC<ThreadProps> = ({
                 className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-gradient-to-t from-background to-transparent"
               />
             )}
-            <ThreadScrollToBottom onClick={focusComposer} />
+            <ThreadScrollToBottom onClick={handleScrollToBottom} />
 
             {/* 输入框正上方弹出的意图澄清浮层卡片：提交后即刻消失 */}
             {clarification.pending && (
@@ -340,8 +350,9 @@ const ThreadScrollToBottom: FC<{ onClick?: () => void }> = ({ onClick }) => {
         tooltip="滚动到底部"
         variant="outline"
         onClick={onClick}
-        // 靠右对齐输入框右边缘：之前是 self-center（居中），会盖在消息正文中轴线上
-        className="absolute -top-12 right-4 z-10 rounded-full p-2.5 bg-background shadow-md border hover:bg-muted disabled:invisible"
+        // 靠右对齐输入框右边缘：之前是 self-center（居中），会盖在消息正文中轴线上。
+        // size-11：触屏上要有接近 44px 的点击区域，桌面缩到 32px。
+        className="absolute -top-12 right-4 z-10 size-11 rounded-full bg-background p-0 shadow-md border hover:bg-muted disabled:invisible md:size-8"
       >
         <ArrowDownIcon size={14} />
       </TooltipIconButton>
