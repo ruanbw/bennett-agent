@@ -38,8 +38,19 @@ describe('ClarificationInputPopup', () => {
     const html = render(options, false);
 
     expect(html).toContain('展开更多（还有 2 个）');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-controls=');
+    expect(html).not.toContain('收起选项');
     expect(html.match(/<button/g)).toHaveLength(9);
     expect(html).not.toContain('选项9');
+  });
+
+  it('正好 8 个选项时不出现展开入口', () => {
+    const options = Array.from({ length: 8 }, (_, i) => `选项${i}`);
+    const html = render(options, false);
+
+    expect(html).not.toContain('展开更多');
+    expect(html.match(/<button/g)).toHaveLength(8);
   });
 
   it('清洗后没有有效选项时，即便后端禁止自定义也要给输入框', () => {

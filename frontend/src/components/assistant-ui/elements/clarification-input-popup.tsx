@@ -2,6 +2,7 @@ import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { HelpCircle, Send, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
+  MAX_VISIBLE_CLARIFICATION_OPTIONS,
   sanitizeClarificationOptions,
   shouldShowCustomInput,
   visibleClarificationOptions,
@@ -25,6 +26,7 @@ export function ClarificationInputPopup({
 }: ClarificationInputPopupProps) {
   const { question, allowCustomInput = true } = clarification;
   const questionId = useId();
+  const optionsId = useId();
   // 选项直出模型：空串会变成点了没反应的药丸，重复文本会撞 React key，长列表会撑破
   // sticky 输入区。清洗与截断的规则在 lib/clarification-options，这里只做绑定。
   const options = useMemo(
@@ -128,7 +130,10 @@ export function ClarificationInputPopup({
 
       {/* 候选选项列表：药丸单选按钮，点击后立即提交并消失 */}
       {visible.length > 0 && (
-        <div className="flex flex-wrap content-start gap-1.5 mb-2 max-h-48 overflow-y-auto overscroll-contain pr-1">
+        <div
+          id={optionsId}
+          className="flex flex-wrap content-start gap-1.5 mb-2 max-h-48 overflow-y-auto overscroll-contain pr-1"
+        >
           {visible.map((opt, index) => (
             <button
               // 清洗后文本已唯一，拼上位置既是稳定 key，也避免同文本再次撞车
@@ -137,19 +142,23 @@ export function ClarificationInputPopup({
               type="button"
               disabled={submitted}
               onClick={() => handleSelectOption(opt)}
-              className="inline-flex max-w-full items-center px-3 py-1.5 rounded-full text-xs font-medium border border-border/80 bg-muted/40 hover:bg-primary hover:text-primary-foreground hover:border-primary text-foreground transition-all cursor-pointer shadow-2xs hover:shadow-xs active:scale-95"
+              className="inline-flex max-w-full items-center px-3 py-1.5 rounded-full text-xs font-medium border border-border/80 bg-muted/40 hover:bg-primary hover:text-primary-foreground hover:border-primary text-foreground transition-all cursor-pointer shadow-2xs hover:shadow-xs active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
             >
               <span className="text-left whitespace-normal break-words">{opt}</span>
             </button>
           ))}
-          {hiddenCount > 0 && (
+          {/* 展开后按钮保留为「收起」：若展开即卸载按钮，键盘焦点会掉回 body，
+              用户要重新 Tab 一遍才能到新出现的选项。 */}
+          {options.length > MAX_VISIBLE_CLARIFICATION_OPTIONS && (
             <button
               type="button"
               disabled={submitted}
-              onClick={() => setShowAllOptions(true)}
-              className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium border border-dashed border-border/80 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all cursor-pointer"
+              aria-expanded={showAllOptions}
+              aria-controls={optionsId}
+              onClick={() => setShowAllOptions((value) => !value)}
+              className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium border border-dashed border-border/80 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
             >
-              展开更多（还有 {hiddenCount} 个）
+              {showAllOptions ? '收起选项' : `展开更多（还有 ${hiddenCount} 个）`}
             </button>
           )}
         </div>

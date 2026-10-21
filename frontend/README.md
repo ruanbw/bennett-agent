@@ -115,7 +115,9 @@ src/
   （`max-h-48`）各自限高滚动，「展开更多」后仍在同一个滚动区里；弹层整体再兜一层
   `max-h-[75dvh]`，极端矮窗口下滚弹层而不是把 composer 推出去。选项/自定义输入提交
   用 ref + state 双重闸门，双击或同一事件循环里的两次点击只会发一轮（state 在 React
-  提交前拦不住第二次）。忽略提问后焦点交回 composer，不留在一个刚卸载的浮层上。
+  提交前拦不住第二次）。「展开更多」展开后保留为「收起选项」（`aria-expanded` /
+  `aria-controls`），不能直接卸载按钮——那会把键盘焦点丢回 body，用户要重新 Tab 才能
+  到新出现的选项。忽略提问后焦点交回 composer，不留在一个刚卸载的浮层上。
 - **思考链不回放。** `chat-persistence.ts:loadContextMessages` 只回传 `content`。
   思考链只用于展示，回传会放大请求体积，且长度不可控——一旦超过后端的
   `MAX_THINKING_CHARS`，该会话的每次重试都会拿到 422。
