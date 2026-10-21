@@ -134,7 +134,15 @@ function renderNotices(message: MessageRecord): string[] {
 }
 
 function renderToolCall(toolCall: ToolCallRecord): string[] {
-  const status = toolCall.status === 'running' ? '进行中' : '完成';
+  const outcomeLabel =
+    toolCall.outcome === 'failed'
+      ? '失败'
+      : toolCall.outcome === 'denied'
+        ? '被拒绝'
+        : toolCall.outcome === 'interrupted'
+          ? '已中断'
+          : '完成';
+  const status = toolCall.status === 'running' ? '进行中' : outcomeLabel;
   const lines = ['<details>', `<summary>工具调用 · ${toolCall.toolName} · ${status}</summary>`, ''];
 
   const args = toolCall.argsText?.trim();

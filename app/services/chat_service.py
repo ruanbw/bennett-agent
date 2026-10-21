@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
+    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -203,6 +204,24 @@ def _stringify(value: Any) -> str:  # noqa: ANN401
         return str(value)
 
 
+_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
+
+
+def _tool_outcome(part: Any) -> str:  # noqa: ANN401
+    """取工具结果的执行结果，供前端区分「成功」与「失败」。
+
+    pydantic-ai 的 `ToolReturnPart.outcome` 会标出成功/失败/拒绝/中断；这是**结构化**
+    信号，比在前端猜「结果字符串是不是以『错误』开头」可靠。`RetryPromptPart` 没有
+    outcome，但它本身就是参数校验失败后的重试提示，按 failed 处理。
+    """
+    outcome = getattr(part, "outcome", None)
+    if outcome in _TOOL_OUTCOMES:
+        return outcome
+    if isinstance(part, RetryPromptPart):
+        return "failed"
+    return "success"
+
+
 def _serialize_tool_args(args: Any) -> str:  # noqa: ANN401
     """工具入参保持字符串形态：前端原样展示，格式化交给展示层。"""
     if isinstance(args, str):
@@ -384,6 +403,7 @@ def translate_event(
             tool_call_id=getattr(part, "tool_call_id", "") or "",
             tool_name=tool_name,
             result=_stringify(part.content),
+            outcome=_tool_outcome(part),
         )
         return
 

@@ -98,11 +98,16 @@ export interface ToolCallEvent {
   args: string;
 }
 
+/** 工具执行结果；`success` 以外的值不应被渲染成绿色成功。 */
+export type ToolOutcome = 'success' | 'failed' | 'denied' | 'interrupted';
+
 export interface ToolResultEvent {
   type: 'tool_result';
   tool_call_id: string;
   tool_name: string;
   result: string;
+  /** 旧服务端不返回该字段，视为 success（与修复前一致）。 */
+  outcome?: ToolOutcome;
 }
 
 export interface ClarificationEvent {
@@ -209,6 +214,8 @@ export interface ToolCallRecord {
   argsText: string;
   result?: string;
   status: 'running' | 'complete';
+  /** 服务端给的执行结果；老记录没有该字段 → success。 */
+  outcome?: ToolOutcome;
 }
 
 /**

@@ -176,6 +176,27 @@ describe('事件折叠', () => {
     ])
   })
 
+  it('失败 outcome 落到工具记录上，成功则不写该字段', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'tool_result',
+      tool_call_id: 'c1',
+      tool_name: 't',
+      result: '工具执行失败',
+      outcome: 'failed',
+    })
+    applyEvent('a', {
+      type: 'tool_result',
+      tool_call_id: 'c2',
+      tool_name: 't',
+      result: 'ok',
+      outcome: 'success',
+    })
+
+    expect(getRun('a')!.toolCalls[0]).toMatchObject({ outcome: 'failed', result: '工具执行失败' })
+    expect(getRun('a')!.toolCalls[1].outcome).toBeUndefined()
+  })
+
   it('clarification 事件落成前端形状', () => {
     start('a')
     applyEvent('a', {

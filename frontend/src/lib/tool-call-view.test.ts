@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  failedToolResult,
   formatToolDuration,
   formatUnknownValue,
   previewToolText,
   resolveToolCallViewStatus,
   TOOL_TEXT_PREVIEW_LIMIT,
   toolArgsPreview,
+  toolResultForDisplay,
 } from './tool-call-view'
 
 describe('resolveToolCallViewStatus', () => {
@@ -32,6 +34,36 @@ describe('resolveToolCallViewStatus', () => {
     expect(resolveToolCallViewStatus({ type: 'requires-action', reason: 'tool-calls' }, undefined)).toBe(
       'requires-action',
     )
+  })
+
+  it('服务端的失败 outcome 覆盖「有 result 就完成」', () => {
+    expect(
+      resolveToolCallViewStatus({ type: 'complete' }, toolResultForDisplay('failed', '工具执行失败')),
+    ).toBe('failed')
+    expect(
+      resolveToolCallViewStatus({ type: 'complete' }, toolResultForDisplay('denied', '被拒绝')),
+    ).toBe('denied')
+    expect(
+      resolveToolCallViewStatus({ type: 'complete' }, toolResultForDisplay('interrupted', '中断')),
+    ).toBe('interrupted')
+  })
+})
+
+describe('toolResultForDisplay', () => {
+  it('成功结果保持原样，不改变旧行为', () => {
+    expect(toolResultForDisplay(undefined, '原始结果')).toBe('原始结果')
+    expect(toolResultForDisplay('success', '原始结果')).toBe('原始结果')
+  })
+
+  it('失败结果包成可识别的对象，正文不丢', () => {
+    const wrapped = toolResultForDisplay('failed', '工具执行失败（内部错误）')
+
+    expect(failedToolResult(wrapped)).toEqual({
+      __toolOutcome: 'failed',
+      message: '工具执行失败（内部错误）',
+    })
+    expect(failedToolResult('普通字符串')).toBeNull()
+    expect(failedToolResult({ some: 'object' })).toBeNull()
   })
 })
 

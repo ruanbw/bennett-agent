@@ -188,6 +188,22 @@ describe('buildConversationMarkdown', () => {
     expect(markdown).toContain('search_docs · 进行中');
   });
 
+  it('失败 / 被拒绝的工具调用不冒充完成', () => {
+    const failed = build([
+      assistantMessage({
+        toolCalls: [toolCall({ status: 'complete', outcome: 'failed', result: '工具执行失败' })],
+      }),
+    ]);
+    expect(failed).toContain('search_docs · 失败');
+
+    const denied = build([
+      assistantMessage({
+        toolCalls: [toolCall({ status: 'complete', outcome: 'denied', result: '被拒绝' })],
+      }),
+    ]);
+    expect(denied).toContain('search_docs · 被拒绝');
+  });
+
   it('超长工具参数截断并标注原文长度', () => {
     const args = 'x'.repeat(MAX_TOOL_TEXT_CHARS + 500);
     const markdown = build([assistantMessage({ toolCalls: [toolCall({ argsText: args })] })]);

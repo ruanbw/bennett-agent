@@ -3,6 +3,7 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertCircleIcon,
+  BanIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleMinusIcon,
@@ -24,6 +25,7 @@ import { cn } from "@/lib/utils";
 import {
   formatToolDuration,
   formatUnknownValue,
+  failedToolResult,
   previewToolText,
   resolveToolCallViewStatus,
   toolArgsPreview,
@@ -96,6 +98,8 @@ const statusIconMap: Record<ToolCallViewStatus, React.ElementType> = {
   incomplete: XCircleIcon,
   "requires-action": AlertCircleIcon,
   interrupted: CircleMinusIcon,
+  failed: XCircleIcon,
+  denied: BanIcon,
 };
 
 /** 触发条的无障碍状态文案：可见文案只有「未完成」一档，这里给出完整语义。 */
@@ -105,6 +109,8 @@ const STATUS_ARIA_LABEL: Record<ToolCallViewStatus, string> = {
   incomplete: "未完成",
   "requires-action": "等待处理",
   interrupted: "未完成，工具没有返回结果",
+  failed: "执行失败",
+  denied: "被拒绝",
 };
 
 function ToolFallbackDuration({
@@ -147,6 +153,8 @@ function ToolFallbackTrigger({
   const preview = useMemo(() => toolArgsPreview(argsText), [argsText]);
   const isRunning = viewStatus === "running";
   const isInterrupted = viewStatus === "interrupted";
+  const isFailed = viewStatus === "failed";
+  const isDenied = viewStatus === "denied";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 
@@ -168,6 +176,8 @@ function ToolFallbackTrigger({
           "aui-tool-fallback-trigger-icon size-4 shrink-0",
           isCancelled && "text-muted-foreground",
           isInterrupted && "text-amber-600 dark:text-amber-400",
+          isFailed && "text-destructive",
+          isDenied && "text-amber-600 dark:text-amber-400",
           isRunning && "animate-spin [animation-duration:0.6s]",
         )}
       />
@@ -177,6 +187,8 @@ function ToolFallbackTrigger({
           "aui-tool-fallback-trigger-label-wrapper inline-block text-start leading-none",
           isCancelled && "text-muted-foreground line-through",
           isInterrupted && "text-amber-700 dark:text-amber-400",
+          isFailed && "text-destructive",
+          isDenied && "text-amber-700 dark:text-amber-400",
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
@@ -191,12 +203,15 @@ function ToolFallbackTrigger({
           {preview}
         </span>
       )}
-      {isInterrupted && (
+      {(isInterrupted || isFailed || isDenied) && (
         <span
           data-slot="tool-fallback-trigger-status"
-          className="aui-tool-fallback-trigger-status text-amber-700 dark:text-amber-400 text-xs"
+          className={cn(
+            "aui-tool-fallback-trigger-status text-xs",
+            isFailed ? "text-destructive" : "text-amber-700 dark:text-amber-400",
+          )}
         >
-          未完成
+          {isInterrupted ? "未完成" : isFailed ? "失败" : "被拒绝"}
         </span>
       )}
       <ToolFallbackDuration />
@@ -304,9 +319,33 @@ function ToolFallbackResult({
   result?: unknown;
 }) {
   // 带缩进的 JSON.stringify 只跟 result 有关，不要跟着无关的父级重渲染一起跑
-  const text = useMemo(() => (result === undefined ? "" : formatUnknownValue(result, 2)), [result]);
+  const text = useMemo(() => {
+    const failure = failedToolResult(result);
+    if (failure) return failure.message || "工具没有返回内容";
+    return result === undefined ? "" : formatUnknownValue(result, 2);
+  }, [result]);
+  const failure = failedToolResult(result);
 
   if (result === undefined) return null;
+
+  if (failure) {
+    return (
+      <div
+        data-slot="tool-fallback-result"
+        className={cn("aui-tool-fallback-result", className)}
+        {...props}
+      >
+        <p className="aui-tool-fallback-result-header text-destructive text-xs font-semibold">
+          {failure.__toolOutcome === "denied"
+            ? "Denied reason:"
+            : failure.__toolOutcome === "interrupted"
+              ? "Interrupted:"
+              : "Error:"}
+        </p>
+        <ToolFallbackText text={text} className="aui-tool-fallback-result-content mt-1 w-full" />
+      </div>
+    );
+  }
 
   return (
     <div

@@ -33,13 +33,14 @@ from typing import Any
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
 logger = logging.getLogger(__name__)
 
-#: 回灌给模型的失败文案。刻意写成「结果」而不是抛错：模型据此调整策略，
+#: 回灌给模型的失败文案。用 `ToolFailed` 交给模型（而不是把异常原文塞进上下文）：
+#: 它会被落成一条 `outcome='failed'` 的工具结果，模型据此调整策略，
 #: 同时避免把内部异常原文（可能含 URL / 密钥上下文）放进上下文。
 #: 「不要原样重复调用」是给模型的约束：同一 bug 再调一次大概率还是失败，
 #: 重复调用只会白烧 token，并且让带副作用的工具执行两次。
@@ -73,4 +74,7 @@ class ToolErrorIsolation(AbstractCapability[None]):
             call.tool_call_id,
             exc_info=error,
         )
-        return TOOL_FAILURE_RESULT
+        # 用 ToolFailed 而不是直接 return 字符串：pydantic-ai 会把它落成
+        # `ToolReturnPart(outcome='failed')`，模型看到的仍是「失败结果」，而前端能
+        # 拿到结构化的 failed 信号——return 普通字符串会被标成 success。
+        raise ToolFailed(TOOL_FAILURE_RESULT)

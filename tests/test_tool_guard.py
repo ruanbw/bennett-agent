@@ -5,12 +5,12 @@
 """
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
 from app.services.agent_factory import build_agent
-from app.tools.guard import ToolErrorIsolation
+from app.tools.guard import TOOL_FAILURE_RESULT, ToolErrorIsolation
 
 
 def test_build_agent_installs_tool_error_isolation():
@@ -35,3 +35,19 @@ async def test_guard_explicitly_reraises_model_retry():
         )
 
     assert excinfo.value is retry
+
+
+async def test_guard_turns_unexpected_error_into_tool_failed():
+    """普通异常要以 ToolFailed 收尾：pydantic-ai 才会落成 outcome='failed'。"""
+    guard = ToolErrorIsolation()
+
+    with pytest.raises(ToolFailed) as excinfo:
+        await guard.on_tool_execute_error(
+            None,
+            call=ToolCallPart(tool_name="t", args={}),
+            tool_def=ToolDefinition(name="t"),
+            args={},
+            error=RuntimeError("boom"),
+        )
+
+    assert excinfo.value.message == TOOL_FAILURE_RESULT

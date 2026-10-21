@@ -50,12 +50,18 @@ class ToolCall(BaseModel):
 
 
 class ToolResult(BaseModel):
-    """工具调用返回。"""
+    """工具调用返回。
+
+    `outcome` 是 pydantic-ai 给的结构化执行结果：工具抛错被隔离、
+    权限拒绝、中断，都与「成功返回一段文字」语义不同。前端据此显示失败状态，
+    而不是把隔离后的错误文案当成一次成功的工具调用。
+    """
 
     type: Literal["tool_result"] = "tool_result"
     tool_call_id: str
     tool_name: str
     result: str
+    outcome: Literal["success", "failed", "denied", "interrupted"] = "success"
 
 
 class ClarificationRequest(BaseModel):

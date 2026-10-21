@@ -28,6 +28,7 @@ import {
   type Run,
   type RunError,
   type ToolCallRecord,
+  type ToolOutcome,
 } from '../types';
 
 type Listener = () => void;
@@ -361,7 +362,13 @@ export function setRunError(sessionId: string, error: RunError): void {
 // ---------------------------------------------------------------------
 function upsertToolCall(
   run: Run,
-  event: { tool_call_id: string; tool_name: string; args?: string; result?: string },
+  event: {
+    tool_call_id: string;
+    tool_name: string;
+    args?: string;
+    result?: string;
+    outcome?: ToolOutcome;
+  },
   status: ToolCallRecord['status'],
 ): void {
   const existing = run.toolCalls.find((call) => call.toolCallId === event.tool_call_id);
@@ -369,7 +376,12 @@ function upsertToolCall(
   if (existing) {
     existing.status = status;
     if (event.args !== undefined) existing.argsText = event.args;
-    if (status === 'complete') existing.result = event.result;
+    if (status === 'complete') {
+      existing.result = event.result;
+      // success 不落字段：老记录/旧服务端没有 outcome，默认就是成功
+      existing.outcome =
+        event.outcome && event.outcome !== 'success' ? event.outcome : undefined;
+    }
     return;
   }
 
@@ -379,6 +391,10 @@ function upsertToolCall(
     argsText: event.args || '',
     result: status === 'complete' ? event.result : undefined,
     status,
+    outcome:
+      status === 'complete' && event.outcome && event.outcome !== 'success'
+        ? event.outcome
+        : undefined,
   });
 }
 

@@ -7,6 +7,7 @@
  */
 
 import type { ToolCallMessagePartStatus } from '@assistant-ui/react';
+import type { ToolOutcome } from '../types';
 
 /** 超过这个长度先只渲染前一段，是否铺开交给「展开全部」按钮。 */
 export const TOOL_TEXT_PREVIEW_LIMIT = 2000;
@@ -17,13 +18,50 @@ export const TOOL_TEXT_PREVIEW_LIMIT = 2000;
  * 运行时只给四种；`interrupted` 是本层补的第五种：工具调用停在半途（点停止、
  * 断流、丢帧）时 result 永远缺席，但消息级 status 仍可能被写成 complete，
  * 直接沿用就会画出绿色对勾，让用户误信工具已经执行成功。
+ *
+ * `failed` / `denied` 来自服务端的工具结果 outcome：被异常隔离器降级成「失败结果」
+ * 或权限拒绝时，result 仍然存在——只看 result 是否缺席会把它画成成功。
  */
 export type ToolCallViewStatus =
   | 'running'
   | 'complete'
   | 'incomplete'
   | 'requires-action'
-  | 'interrupted';
+  | 'interrupted'
+  | 'failed'
+  | 'denied';
+
+/**
+ * 失败结果的展示包装。
+ *
+ * assistant-ui 的 tool-call 部件只把 result 交给渲染层，没有「结果状态」这一列；
+ * 用带私有键的对象把 outcome 和正文一起带到 ToolFallback，避免在前端按文案猜
+ * 「以『错误』开头就是失败」。
+ */
+export interface FailedToolResult {
+  __toolOutcome: Exclude<ToolOutcome, 'success'>;
+  message: string;
+}
+
+export function toolResultForDisplay(
+  outcome: ToolOutcome | undefined,
+  result: string | undefined,
+): unknown {
+  if (!outcome || outcome === 'success') return result;
+  return { __toolOutcome: outcome, message: result ?? '' } satisfies FailedToolResult;
+}
+
+/** 识别展示包装；普通工具结果（字符串/对象）不会命中原样返回。 */
+export function failedToolResult(result: unknown): FailedToolResult | null {
+  if (!result || typeof result !== 'object') return null;
+  const candidate = result as Partial<FailedToolResult>;
+  const outcome = candidate.__toolOutcome;
+  if (outcome !== 'failed' && outcome !== 'denied' && outcome !== 'interrupted') return null;
+  return {
+    __toolOutcome: outcome,
+    message: typeof candidate.message === 'string' ? candidate.message : '',
+  };
+}
 
 /**
  * 判定展示状态：只有拿到 result 才允许显示完成。
@@ -35,6 +73,13 @@ export function resolveToolCallViewStatus(
   status: ToolCallMessagePartStatus | undefined,
   result: unknown,
 ): ToolCallViewStatus {
+  const failure = failedToolResult(result);
+  if (failure) {
+    if (failure.__toolOutcome === 'denied') return 'denied';
+    if (failure.__toolOutcome === 'interrupted') return 'interrupted';
+    return 'failed';
+  }
+
   if (status?.type === 'running') return 'running';
   if (status?.type === 'incomplete') return 'incomplete';
   if (status?.type === 'requires-action') return 'requires-action';

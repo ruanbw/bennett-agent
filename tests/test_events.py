@@ -146,6 +146,25 @@ def test_function_tool_result_uses_part_content():
     assert isinstance(events[0], ToolResult)
     assert events[0].result == "搜索结果"
     assert events[0].tool_name == "tavily_search"
+    assert events[0].outcome == "success"
+
+
+def test_tool_result_carries_failed_outcome():
+    """被隔离的工具异常必须保留 failed 信号，前端才不会画成绿色成功。"""
+    event = FunctionToolResultEvent(
+        part=ToolReturnPart(
+            tool_name="tavily_search",
+            content="工具执行失败（内部错误）",
+            tool_call_id="call-2",
+            outcome="failed",
+        ),
+    )
+
+    out = translate(event)[0]
+
+    assert isinstance(out, ToolResult)
+    assert out.outcome == "failed"
+    assert out.result == "工具执行失败（内部错误）"
 
 
 def test_non_string_tool_result_is_serialised():
@@ -157,12 +176,15 @@ def test_non_string_tool_result_is_serialised():
 
 
 def test_retry_prompt_result_is_translated():
-    """工具报错走 RetryPromptPart，前端同样要能展示。"""
+    """工具报错走 RetryPromptPart，前端同样要能展示，并标成失败。"""
     event = FunctionToolResultEvent(
         part=RetryPromptPart(content="参数不合法", tool_name="t", tool_call_id="c"),
     )
 
-    assert isinstance(translate(event)[0], ToolResult)
+    out = translate(event)[0]
+
+    assert isinstance(out, ToolResult)
+    assert out.outcome == "failed"
 
 
 # ---------------------------------------------------------------------

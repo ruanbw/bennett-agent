@@ -10,6 +10,7 @@
  */
 
 import { newId } from './constants';
+import { toolResultForDisplay } from './tool-call-view';
 import type {
   ClarificationState,
   MessageCustomMetadata,
@@ -42,7 +43,9 @@ function buildToolParts(toolCalls: ToolCallRecord[] | undefined): RuntimePart[] 
         toolName: call.toolName || 'tool',
         toolCallId: call.toolCallId || newId('call'),
         argsText: call.argsText || '',
-        result: call.result,
+        // 失败结果包一层带 outcome 的对象：运行时只看 result 是否存在，直接丢字符串
+        // 会把隔离后的工具异常画成绿色成功。
+        result: toolResultForDisplay(call.outcome, call.result),
         // 刻意不传 status：它不在 `ThreadMessageLike` 的 tool-call 形状里，运行时也
         // 不读（见 @assistant-ui/core 的 auto-status.js），而是从 result 是否存在
         // 自行推导 running / complete。传入只会被静默忽略。
