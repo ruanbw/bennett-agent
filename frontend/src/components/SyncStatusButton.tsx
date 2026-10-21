@@ -208,7 +208,8 @@ export function SyncStatusButton() {
             type="button"
             size="sm"
             variant={status.rejected > 0 ? 'ghost' : 'outline'}
-            disabled={!status.running || requeueing}
+            // 断网时点它只会再失败一次：面板已经说明「恢复后会自动继续」，这里禁掉
+            disabled={!status.running || requeueing || status.offline === true}
             onClick={() => retryNow()}
             className={cn('text-[11px]', status.rejected > 0 ? 'ml-auto' : '')}
           >

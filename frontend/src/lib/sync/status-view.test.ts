@@ -191,3 +191,39 @@ describe('失败原因翻译', () => {
     expect(describeSyncFailure(error)).toBe('同步请求失败（HTTP 500）');
   });
 });
+
+describe('离线状态', () => {
+  const offlineStatus = (overrides: Partial<SyncStatus> = {}): SyncStatus =>
+    status({ offline: true, ...overrides });
+
+  it('断网时先说「离线」，而不是让用户去排查「同步失败」', () => {
+    const view = describeSyncStatus(offlineStatus());
+
+    expect(view.headline).toBe('离线');
+    expect(view.tone).toBe('warning');
+    expect(view.detail).toContain('恢复后会自动继续');
+  });
+
+  it('离线时不给「立即同步」入口（点了只会再失败一次）', () => {
+    expect(describeSyncStatus(offlineStatus()).canRetry).toBe(false);
+  });
+
+  it('离线且有待推送的行时说明「先留在设备上」', () => {
+    const view = describeSyncStatus(offlineStatus({ pending: 3 }));
+
+    expect(view.detail).toContain('3 条');
+    expect(view.detail).toContain('留在设备上');
+  });
+
+  it('离线优先于 lastError：断网时残留的失败原因不该抢戏', () => {
+    const view = describeSyncStatus(offlineStatus({ lastError: '请求超时，请重试' }));
+
+    expect(view.headline).toBe('离线');
+  });
+
+  it('恢复在线后回到正常分支', () => {
+    const view = describeSyncStatus(offlineStatus({ offline: false }));
+
+    expect(view.headline).not.toBe('离线');
+  });
+});

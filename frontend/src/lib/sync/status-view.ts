@@ -111,11 +111,15 @@ export function describeSyncFailure(err: unknown): string {
 }
 
 /**
- * 状态优先级：错误 > 被拒 > 待推送 > 首次同步 > 已同步。
+ * 状态优先级：离线 > 错误 > 被拒 > 待推送 > 首次同步 > 已同步。
  *
  * 错过的顺序会直接误导：既有 `lastError` 又有待推送行时先说「N 条待同步」，
  * 用户会以为只是慢了一点；而被服务端明确拒收的行永远不会自己好，
  * 必须比「还在排队」更靠前。
+ *
+ * 离线排在错误前面：断网时任何请求都会失败，把原因说成「同步失败」等于让用户去排查
+ * 一个不存在的问题，还诱导他点「立即同步」再失败一次。离线是一个**会自动恢复**的状态，
+ * 面板只需说明「恢复后会继续」。
  */
 export function describeSyncStatus(status: SyncStatus): SyncStatusView {
   const unsynced = status.pending + status.rejected;
@@ -127,6 +131,20 @@ export function describeSyncStatus(status: SyncStatus): SyncStatusView {
       detail: '登录后会在后台自动同步对话。',
       canRetry: false,
       badgeCount: 0,
+    };
+  }
+
+  if (status.offline) {
+    return {
+      tone: 'warning',
+      headline: '离线',
+      detail:
+        unsynced > 0
+          ? `网络已断开，${unsynced} 条本机修改先留在设备上，恢复后会继续同步。`
+          : '网络已断开，恢复后会自动继续同步。',
+      // 断网时点「立即同步」只会再失败一次：不给这个入口
+      canRetry: false,
+      badgeCount: status.pending,
     };
   }
 

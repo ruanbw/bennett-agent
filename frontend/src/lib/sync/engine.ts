@@ -72,6 +72,14 @@ export interface SyncStatus {
   /** 最近一次成功同步完成的时间（毫秒）；从未成功过为 null。 */
   lastSyncedAt: number | null;
   /**
+   * 浏览器报告网络断开（`navigator.onLine === false`）。
+   *
+   * 与 `lastError` 分开：断网不是「同步失败」，它没有需要用户排查的原因，恢复后会自动
+   * 继续。混成一句「同步失败」会让用户以为数据出问题了，还会让他去点「立即同步」——
+   * 那在断网时只会再失败一次。
+   */
+  offline?: boolean;
+  /**
    * 本次会话里有多少行本机修改被服务器上更新版本覆盖（推送被判 `stale`）。
    *
    * `stale` 的处理是「标 synced，等下一轮 pull 用服务端版本盖掉本地」——本机那次修改
@@ -88,6 +96,7 @@ const IDLE_STATUS: SyncStatus = {
   syncing: false,
   lastError: null,
   lastSyncedAt: null,
+  offline: false,
   superseded: 0,
 };
 
@@ -149,7 +158,7 @@ export function startSync(id: string): void {
   started = true;
   generation += 1;
   const gen = generation;
-  setStatus({ running: true, lastError: null });
+  setStatus({ running: true, lastError: null, offline: !isOnline() });
   attachBrowserListeners();
 
   void (async () => {
@@ -191,6 +200,17 @@ function isVisible(): boolean {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden';
 }
 
+/**
+ * 浏览器是否认为自己在线。
+ *
+ * 拿不到 `navigator`（SSR / 测试环境）时按**在线**处理：那只是「不知道」，不是断网证据；
+ * 猜成离线会让同步在正常环境里静默停摆。
+ */
+function isOnline(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  return navigator.onLine !== false;
+}
+
 // ---------------------------------------------------------------------
 // 浏览器事件
 // ---------------------------------------------------------------------
@@ -204,23 +224,41 @@ function onVisibilityChange(): void {
   }
 }
 
+function onOffline(): void {
+  if (!started) return;
+  // 断网期间不要继续打：请求必然失败，还会把「同步失败」染到面板上。
+  // 定时器也清掉，等 `online` 事件重新排队（隐藏标签页里 setTimeout 本就不准）。
+  if (pushTimer !== null) clearTimeout(pushTimer);
+  if (retryTimer !== null) clearTimeout(retryTimer);
+  pushTimer = null;
+  retryTimer = null;
+  setStatus({ offline: true, lastError: null });
+}
+
 function onOnline(): void {
   if (!started) return;
   backoffMs = RETRY_MIN_MS;
   // 网络状态刚变过：之前的超时不再代表当前网络，重新按「偶发」计数
   pullTimeouts.reset();
+  setStatus({ offline: false });
   requestPush(0);
   void pump(generation);
 }
 
 function attachBrowserListeners(): void {
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange);
-  if (typeof window !== 'undefined') window.addEventListener('online', onOnline);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+  }
 }
 
 function detachBrowserListeners(): void {
   if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange);
-  if (typeof window !== 'undefined') window.removeEventListener('online', onOnline);
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('online', onOnline);
+    window.removeEventListener('offline', onOffline);
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -261,6 +299,8 @@ async function kickPush(): Promise<void> {
 
 async function pump(gen: number): Promise<void> {
   if (pumpRunning || !isCurrent(gen)) return;
+  // 断网时不发请求：pull 是 25s 长轮询，失败要等超时/拒绝；等 `online` 事件再继续
+  if (!isOnline()) return;
   pumpRunning = true;
   // 出错时要能区分「卡在长轮询」与「推不上去」：只有前者允许静默重试
   let phase: 'push' | 'pull' = 'push';
@@ -348,6 +388,12 @@ function reportError(err: unknown): void {
   // 面板上显示的是翻译后的中文结论，不是 `err.message`：长轮询超时会拿到英文
   // 「signal timed out」，HTTP 失败会漏出「HTTP 500」，两种都不告诉用户能做什么。
   console.warn('同步失败:', err);
+  // 已经确认断网时别把这次失败写进面板：原因就摆在那儿，写成「同步失败」只会让人去点
+  // 「立即同步」再失败一次。
+  if (!isOnline()) {
+    setStatus({ offline: true, lastError: null });
+    return;
+  }
   setStatus({ lastError: describeSyncFailure(err) });
 }
 
@@ -375,6 +421,8 @@ async function pushUntilDrained(gen: number): Promise<number> {
  */
 async function pushBatch(): Promise<number> {
   if (pushInFlight !== null) return pushInFlight;
+  // 断网：本机行原样留着，恢复后由 `online` 事件重新排队
+  if (!isOnline()) return 0;
   beginPushActivity();
   pushInFlight = (async () => {
     const [sessions, messages] = await readPending();

@@ -142,3 +142,45 @@ describe('重新上传被拒内容', () => {
     expect((await db.sessions.get('s1'))?.syncState).toBe('synced');
   });
 });
+
+describe('断网', () => {
+  /** 用 stubGlobal 换掉 navigator.onLine（node 环境默认没有 navigator）。 */
+  const setOnline = (online: boolean) => {
+    vi.stubGlobal('navigator', { onLine: online });
+  };
+
+  it('断网时 flushPending 不发请求，本机行原样留着', async () => {
+    setOnline(false);
+    await db.sessions.add(session('s1'));
+
+    const pending = await flushPending(500);
+
+    expect(mocks.pushRows).not.toHaveBeenCalled();
+    expect(pending).toBe(1);
+    expect((await db.sessions.get('s1'))?.syncState).toBe('pending');
+  });
+
+  it('恢复在线后同一批行能被推上去', async () => {
+    setOnline(false);
+    await db.sessions.add(session('s1'));
+    await flushPending(500);
+    expect(mocks.pushRows).not.toHaveBeenCalled();
+
+    setOnline(true);
+    mocks.pushRows.mockResolvedValueOnce(accepted(1));
+    await flushPending(2_000);
+
+    expect(mocks.pushRows).toHaveBeenCalledTimes(1);
+    expect((await db.sessions.get('s1'))?.syncState).toBe('synced');
+  });
+
+  it('没有 navigator（SSR/测试）时按在线处理，不能静默停摆', async () => {
+    vi.stubGlobal('navigator', undefined);
+    await db.sessions.add(session('s1'));
+    mocks.pushRows.mockResolvedValueOnce(accepted(1));
+
+    await flushPending(2_000);
+
+    expect(mocks.pushRows).toHaveBeenCalledTimes(1);
+  });
+});
