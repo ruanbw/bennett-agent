@@ -32,6 +32,13 @@ export interface ExportConversationOptions {
 export interface ExportedConversation {
   filename: string;
   markdown: string;
+  /**
+   * 归档里实际写入的会话数。
+   *
+   * 批量导出会跳过墓碑会话（用户已经删掉的那些），所以「选中 6 个」不等于「导出 6 个」。
+   * 提示文案必须用这个数字，否则删完会话再导出会看到对不上的计数。
+   */
+  sessionCount?: number;
 }
 
 function pad2(value: number): string {
@@ -260,22 +267,35 @@ export function archiveFileName(now: number = Date.now()): string {
  * 不逐个触发下载：浏览器会拦截「连续多个下载」并要求用户确认，选中 20 个会话就是
  * 20 次确认。一个文件更接近用户真正想要的「备份」，也方便一次性搜索/归档。
  *
- * 每段会话的标题降为 `##`，正文标题跟着降一级；会话之间用 `---` 分隔。
+ * 每段会话的标题降为 `##`，正文标题跟着降一级；会话之间用 `---` 分隔。归档头除了会话数
+ * 还写总消息数与时间范围——判断「这份备份是否覆盖我要的那段时间」只看会话数不够。
  */
 export function buildArchiveMarkdown(
   entries: readonly ArchiveEntry[],
   { exportedAt = Date.now() }: ExportConversationOptions = {},
 ): string {
+  const messageCount = entries.reduce(
+    (sum, entry) => sum + entry.messages.filter(hasRenderableContent).length,
+    0,
+  );
+  // 时间范围取会话的创建/更新时间：消息可能为空（空会话也要能看出它属于哪段时间）
+  const stamps = entries.flatMap((entry) => [entry.session.createdAt, entry.session.updatedAt]);
+  const validStamps = stamps.filter((value) => Number.isFinite(value) && value > 0);
+  const rangeStart = validStamps.length > 0 ? Math.min(...validStamps) : null;
+  const rangeEnd = validStamps.length > 0 ? Math.max(...validStamps) : null;
+
   const lines: string[] = [
     '# Bennett 对话导出',
     '',
     '> 导出自 Bennett Agent',
     `> 导出时间：${formatTimestamp(exportedAt)}`,
     `> 会话数：${entries.length}`,
-    '',
-    '---',
-    '',
+    `> 消息数：${messageCount}`,
   ];
+  if (rangeStart !== null && rangeEnd !== null) {
+    lines.push(`> 时间范围：${formatTimestamp(rangeStart)} → ${formatTimestamp(rangeEnd)}`);
+  }
+  lines.push('', '---', '');
 
   if (entries.length === 0) {
     lines.push('（没有可导出的会话。）', '');

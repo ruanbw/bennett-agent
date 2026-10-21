@@ -300,7 +300,11 @@ export function useChatSessions({
       if (entries.length === 0) throw new Error('没有可导出的会话');
 
       entries.sort((a, b) => (b.session.updatedAt || 0) - (a.session.updatedAt || 0));
-      return { filename: archiveFileName(), markdown: buildArchiveMarkdown(entries) };
+      return {
+        filename: archiveFileName(),
+        markdown: buildArchiveMarkdown(entries),
+        sessionCount: entries.length,
+      };
     },
     [],
   );

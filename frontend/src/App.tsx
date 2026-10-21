@@ -309,7 +309,11 @@ function AuthenticatedShell({
   const handleExportSession = useCallback(
     async (sessionId: string) => {
       const { filename, markdown } = await exportSession(sessionId);
-      downloadMarkdownFile(filename, markdown);
+      if (!downloadMarkdownFile(filename, markdown)) {
+        // 没有 DOM（SSR/测试环境）时下载根本不会发生：不能报「已导出」
+        notify('error', '导出失败：当前环境不支持下载');
+        return;
+      }
       // 下载动作本身在下载栏里可见，但用户点完菜单后没有任何页面内反馈；给一条确认
       notify('success', `已导出 ${filename}`);
     },
@@ -319,9 +323,14 @@ function AuthenticatedShell({
   /** 批量导出：合并成一个归档文件（逐个下载会被浏览器拦截并要求多次确认）。 */
   const handleExportSessions = useCallback(
     async (sessionIds: string[]) => {
-      const { filename, markdown } = await exportSessions(sessionIds);
-      downloadMarkdownFile(filename, markdown);
-      notify('success', `已导出 ${sessionIds.length} 个会话（${filename}）`);
+      const { filename, markdown, sessionCount } = await exportSessions(sessionIds);
+      if (!downloadMarkdownFile(filename, markdown)) {
+        notify('error', '导出失败：当前环境不支持下载');
+        return;
+      }
+      // 用归档里实际写入的会话数：墓碑会话会被跳过，「选中 N 个」可能大于真实导出数
+      const exported = sessionCount ?? sessionIds.length;
+      notify('success', `已导出 ${exported} 个会话（${filename}）`);
     },
     [exportSessions]
   );

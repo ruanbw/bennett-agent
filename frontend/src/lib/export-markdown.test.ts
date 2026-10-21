@@ -259,6 +259,8 @@ describe('buildArchiveMarkdown', () => {
     expect(markdown.startsWith('# Bennett 对话导出\n')).toBe(true);
     expect(markdown).toContain('> 导出时间：2026-10-21 12:00');
     expect(markdown).toContain('> 会话数：2');
+    expect(markdown).toContain('> 消息数：2');
+    expect(markdown).toContain('> 时间范围：2026-10-21 09:00 → 2026-10-21 11:00');
     expect(markdown).toContain('## 会话一');
     expect(markdown).toContain('### 你 · 2026-10-21 10:00');
     expect(markdown).toContain('## 会话二');
@@ -290,10 +292,22 @@ describe('buildArchiveMarkdown', () => {
     );
   });
 
-  it('没有任何会话时给出明确说明', () => {
+  it('没有任何会话时给出明确说明，且不编造时间范围', () => {
     const markdown = buildArchiveMarkdown([], { exportedAt: at(12) });
     expect(markdown).toContain('> 会话数：0');
+    expect(markdown).toContain('> 消息数：0');
+    expect(markdown).not.toContain('> 时间范围：');
     expect(markdown).toContain('（没有可导出的会话。）');
+  });
+
+  it('消息数只算可渲染消息（与每段会话里的「消息数」口径一致）', () => {
+    const empty = assistantMessage({ content: '   ', toolCalls: [], stopped: false });
+    const markdown = buildArchiveMarkdown([entry('混合', [userMessage(), empty])], {
+      exportedAt: at(12),
+    });
+
+    expect(markdown).toContain('> 消息数：1');
+    expect(markdown).toContain('> 最后更新：2026-10-21 11:00 · 消息数：1');
   });
 });
 
