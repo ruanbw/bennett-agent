@@ -39,6 +39,11 @@ import {
   createTimeoutStreak,
   isPullTimeout,
 } from './long-poll';
+import {
+  CURSOR_RESET_DELAY_MS,
+  SyncCursorLoopError,
+  createCursorResetGuard,
+} from './cursor-reset';
 import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
 // 只取运行时函数；status-view 对 engine 只有 `import type`，不构成运行时循环依赖
 import { describeSyncFailure } from './status-view';
@@ -114,6 +119,8 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let backoffMs = RETRY_MIN_MS;
 /** 长轮询超时的连续计数：单次静默重试，连续多次才染色（见 long-poll.ts）。 */
 const pullTimeouts = createTimeoutStreak();
+/** 游标连续失效的守卫：超过阈值就停下来报错，而不是无限「拉→410→全量拉」（见 cursor-reset.ts）。 */
+const cursorResets = createCursorResetGuard();
 let pumpRunning = false;
 let pushInFlight: Promise<number> | null = null;
 /** 推送在飞计数：并发调用共享同一个 Promise，但每个调用方都必须配平自己的 +1/-1。 */
@@ -188,6 +195,7 @@ export function stopSync(): void {
   retryTimer = null;
   backoffMs = RETRY_MIN_MS;
   pullTimeouts.reset();
+  cursorResets.reset();
   detachBrowserListeners();
   setStatus({ ...IDLE_STATUS });
 }
@@ -559,21 +567,44 @@ async function settleRow(
 /** 返回是否还有下一页。 */
 async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
   let page: PullResponse;
-  try {
-    page = await pullRows(cursor, { timeoutSeconds, limit: PULL_LIMIT });
-  } catch (err) {
-    if (!(err instanceof SyncHttpError) || !err.isCursorReset) throw err;
-    // 游标失效（服务端回滚 / 格式升级）：丢掉它，从头拉一次全量
-    console.warn('同步游标失效，改为全量重新同步:', err.message);
-    cursor = null;
-    await saveCursor(null);
-    // 服务端被回滚/换库时，本机那些「已同步」的行在服务端可能根本不存在。
-    // 只重置游标会把它们永久留在本机，所以顺带标脏，让下一轮 push 补回去。
-    await markAllPending();
-    page = await pullRows(null, { limit: PULL_LIMIT });
+  // 游标失效一次就重拉；连续失效累计到阈值后停下（见 cursor-reset.ts）。
+  // 循环放在这里而不是让 pump 反复重入：pump 的 4xx 分类把 410 当「可恢复」，
+  // 重入只会把「拉→410→全量拉」的节奏摊到多轮里，仍然是一次次白打请求。
+  for (;;) {
+    try {
+      page = await pullRows(cursor, { timeoutSeconds, limit: PULL_LIMIT });
+      break;
+    } catch (err) {
+      if (!(err instanceof SyncHttpError) || !err.isCursorReset) throw err;
+
+      const decision = cursorResets.record();
+      if (decision.action === 'giveup') {
+        // 全量重拉之后游标仍然不被认：再拉下去就是死循环（实测能一秒打出几十个请求，
+        // 最后把自己的账号打成 429）。停下来，把结论交给面板与「立即同步」。
+        console.error(`同步游标连续 ${decision.attempt} 次失效，停止自动重试:`, err.message);
+        throw new SyncCursorLoopError(decision.attempt);
+      }
+
+      console.warn(
+        `同步游标失效（连续第 ${decision.attempt} 次），改从头重新拉取:`,
+        err.message,
+      );
+      cursor = null;
+      await saveCursor(null);
+      // 服务端被回滚/换库时，本机那些「已同步」的行在服务端可能根本不存在。
+      // 只重置游标会把它们永久留在本机，所以**首次**失效时顺带标脏，让下一轮 push 补回去；
+      // 连续失效时不重复标脏——那会把整库反复推上去，是这场风暴的主要放大器。
+      if (decision.markAllPending) await markAllPending();
+      // 即使只失效一次也别立刻把下一轮请求打出去：给服务端与网络一点空隙
+      await new Promise((resolve) => setTimeout(resolve, CURSOR_RESET_DELAY_MS));
+      if (!isCurrent(gen)) return false;
+      // 下一轮循环无条件从头拉（cursor 已被置空）
+      timeoutSeconds = 0;
+    }
   }
-  // 成功拿到一页：偶发超时计数清零
+  // 成功拿到一页：偶发超时与游标失效计数都清零
   pullTimeouts.reset();
+  cursorResets.reset();
   if (!isCurrent(gen)) return false;
 
   const affected = await applyPage(page);

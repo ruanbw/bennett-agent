@@ -10,6 +10,7 @@
 
 import { describeConnectionFailure } from '../connection-failure';
 import { SyncHttpError } from './api';
+import { SyncCursorLoopError } from './cursor-reset';
 import type { SyncStatus } from './engine';
 
 export type SyncTone = 'idle' | 'ok' | 'busy' | 'warning' | 'error';
@@ -107,6 +108,10 @@ export function formatAbsoluteTime(at: number): string {
  */
 export function describeSyncFailure(err: unknown): string {
   if (err instanceof SyncHttpError) return err.message;
+  // 游标反复失效不是网络问题：给用户一句能对上现象的话，并指出唯一有效的动作
+  if (err instanceof SyncCursorLoopError) {
+    return '同步游标反复失效（服务端数据可能被回滚或换过库），已停止自动重试。请点「立即同步」重试，或重新登录。';
+  }
   return describeConnectionFailure(err).message;
 }
 

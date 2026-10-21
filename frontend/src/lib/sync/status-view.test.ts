@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { SyncHttpError } from './api';
+import { SyncCursorLoopError } from './cursor-reset';
 import type { SyncStatus } from './engine';
 import {
   describePendingCount,
@@ -225,5 +226,16 @@ describe('离线状态', () => {
     const view = describeSyncStatus(offlineStatus({ offline: false }));
 
     expect(view.headline).not.toBe('离线');
+  });
+});
+
+describe('游标反复失效', () => {
+  it('给出一句能对上现象的话，并指出唯一有效的动作', () => {
+    const message = describeSyncFailure(new SyncCursorLoopError(4));
+
+    expect(message).toContain('同步游标反复失效');
+    expect(message).toContain('立即同步');
+    // 不能被翻译成「网络」「服务器不可用」这类误导性结论
+    expect(message).not.toContain('检查网络');
   });
 });
