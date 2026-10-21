@@ -20,6 +20,7 @@
  */
 
 import { NOTIFY_COALESCE_MS } from './constants';
+import { describeErrorLabel, readKnownErrorCode } from './run-error';
 import {
   TRANSPORT_INCOMPLETE,
   type ChatEvent,
@@ -37,10 +38,11 @@ type Listener = () => void;
  * 服务端事件是外部输入：失败分类只接受本版认识的取值。
  *
  * 新版服务端加了新分类而前端还没发版时，不能把一个协议外的字符串带进 run（它会进
- * 落库、进 metadata，然后被渲染层当判据）。认不出就是「未分类」。
+ * 落库、进 metadata，然后被渲染层当判据）。认不出就是「未分类」——白名单在
+ * `lib/run-error.ts`，与展示口径同一处维护。
  */
 function readErrorCode(value: unknown): ErrorCode | null {
-  return value === 'context_overflow' ? value : null;
+  return readKnownErrorCode(value);
 }
 
 /**
@@ -468,9 +470,9 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       // 结构化记录供「重试」按钮与分类提示使用；正文里的提示保留，历史/复制时仍能看出这轮失败
       const code = readErrorCode(event.code);
       run.error = { message: event.message, retryable: event.retryable === true, code };
-      // 上下文超限不是故障，而是一个需要用户换个会话的状态：标签跟着换，正文仍用
-      // 服务端给的文案（里面带用量、上限与动作）。
-      run.content += `\n\n> ⚠️ **${code === 'context_overflow' ? '上下文已满' : '错误'}**: ${event.message}`;
+      // 分类决定这条提示的标题：「上下文已满」不是故障而是状态，「模型不可用」是配置
+      // 变更的结果——两种都不该被写成泛泛的「错误」。正文仍用服务端给的文案。
+      run.content += `\n\n> ⚠️ **${describeErrorLabel(code)}**: ${event.message}`;
       break;
     }
 

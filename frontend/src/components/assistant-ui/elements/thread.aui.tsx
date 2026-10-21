@@ -47,6 +47,7 @@ import { type FC, type RefObject, useCallback, useEffect, useRef, useState } fro
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
+import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
@@ -665,7 +666,7 @@ const readError = (value: unknown): RunError | null => {
   if (!value || typeof value !== "object") return null;
   const { message, retryable, code } = value as Partial<RunError>;
   return typeof message === "string"
-    ? { message, retryable: retryable === true, code: code === "context_overflow" ? code : null }
+    ? { message, retryable: retryable === true, code: readKnownErrorCode(code) }
     : null;
 };
 
@@ -676,8 +677,15 @@ const AssistantMessage: FC = () => {
   const error = readError(useAuiState((s) => s.message.metadata.custom?.error));
   // 只给最后一条助手消息显示重试：重跑历史回答会覆盖别的轮次（与 Reload 的约束一致）
   const isLast = useAuiState(isLastAssistantMessage);
-  // 上下文超限即使被标成可重试也不给按钮：重试的请求只会更长，必然再超一次
-  const canRetry = isLast && error?.retryable === true && error.code !== "context_overflow";
+  // 上下文超限即使被标成可重试也不给按钮：重试的请求只会更长，必然再超一次；
+  // 模型不可用同理——同一个模型已经不在配置里，重试只会再拿一次同样的结论。
+  const canRetry =
+    isLast &&
+    error?.retryable === true &&
+    error.code !== "context_overflow" &&
+    error.code !== "model_unavailable";
+  // 分类能给出确定动作时补一行「下一步」：只说「出错了」用户不知道该动哪里
+  const errorHint = error ? describeErrorHint(error.code) : "";
 
   return (
     <MessagePrimitive.Root
@@ -709,6 +717,10 @@ const AssistantMessage: FC = () => {
           <ArrowLeftRightIcon className="size-3" />
           已切换备用模型：{fallback.fromModel} → {fallback.toModel}
         </div>
+      )}
+
+      {errorHint && (
+        <p className="text-muted-foreground/80 mt-1 text-[11px] leading-relaxed">{errorHint}</p>
       )}
 
       {canRetry && (

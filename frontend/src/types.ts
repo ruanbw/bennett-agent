@@ -156,11 +156,16 @@ export interface UsageEvent {
 /**
  * 失败分类。
  *
- * `context_overflow`：上下文超出模型窗口。重试必然同样失败（历史只会更长），
- * 用户只能新建会话或换窗口更大的模型——所以既不给「重试」按钮，也不能只说
- * 「出错了」。
+ * - `context_overflow`：上下文超出模型窗口。重试必然同样失败（历史只会更长），
+ *   用户只能新建会话或换窗口更大的模型——所以既不给「重试」按钮，也不能只说「出错了」。
+ * - `model_unavailable`：数据库配置里这个模型已停用或不存在。刷新模型列表就能看到真实
+ *   清单，重试同一个模型同样失败。
+ * - `internal_error`：服务端自己出错了（查库失败、模板渲染失败等），**没有**关于模型的
+ *   确定结论；已附关联 ID，可重试。
+ *
+ * 展示口径（标题 / 下一步建议）在 `lib/run-error.ts`，认不出的取值一律当未分类。
  */
-export type ErrorCode = 'context_overflow';
+export type ErrorCode = 'context_overflow' | 'model_unavailable' | 'internal_error';
 
 export interface StreamErrorEvent {
   type: 'error';

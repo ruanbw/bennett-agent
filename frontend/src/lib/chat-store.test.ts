@@ -264,6 +264,32 @@ describe('事件折叠', () => {
     expect(getRun('a')!.error?.code).toBe('context_overflow')
   })
 
+  it('模型不可用的提示换标签，重试按钮也不再给（换模型才有用）', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'error',
+      message: '模型已停用或不存在，请刷新模型列表后重试',
+      retryable: false,
+      code: 'model_unavailable',
+    })
+
+    expect(getRun('a')!.content).toContain('**模型不可用**:')
+    expect(getRun('a')!.error?.code).toBe('model_unavailable')
+  })
+
+  it('服务端内部错误带上分类，方便界面区分「查库失败」与「模型被停用」', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'error',
+      message: '请求处理失败，请重试（错误编号 abc123）',
+      retryable: true,
+      code: 'internal_error',
+    })
+
+    expect(getRun('a')!.content).toContain('**服务端错误**:')
+    expect(getRun('a')!.error?.code).toBe('internal_error')
+  })
+
   it('未知的 code 不落进 run（不让协议外的字符串影响渲染判断）', () => {
     start('a')
     const run = getRun('a')!
