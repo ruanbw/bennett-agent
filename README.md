@@ -246,6 +246,18 @@ IPv6（带端口的丢掉端口：`no_proxy` 是按主机绕过代理），并�
 `SameSite=None` 必须配 `AUTH_COOKIE_SECURE=true`，否则浏览器直接丢弃 cookie，这个组合在
 启动时就会报错。
 
+## SQLite 连接参数
+
+`app/db.py:apply_sqlite_pragmas` 在**每条连接**上设置：`foreign_keys=ON`（SQLite 默认关，
+不开级联删除失效）、`journal_mode=WAL`（读写不互相阻塞）、`synchronous=NORMAL`（WAL 下
+官方推荐：只在检查点 fsync，掉电最多丢最后几个事务；默认 `FULL` 每次提交都 fsync，会拖慢
+流式落库，`OFF` 则真会坏库）、`busy_timeout=5000`。
+
+`PRAGMA journal_mode=WAL` **可能静默失败**：数据库文件放在网络文件系统（NFS/SMB）或不支持
+的容器卷上时会退回 `delete`，一切照常工作、只是并发读写开始互相阻塞（表现为「回答流式中
+查列表会卡住」）。启动时会 `check_journal_mode()` 复查一次，不是 `wal` 就打出明确告警——
+把 README 里「不要把 SQLite 放在 NFS 上」那条从约定变成可观测的信号。
+
 ## 数据库结构漂移
 
 项目**没有 Alembic**：`create_all` 只建缺失的表，对已存在的表一个字节都不改。所以给

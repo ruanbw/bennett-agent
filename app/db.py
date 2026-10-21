@@ -349,21 +349,57 @@ engine = create_async_engine(DATABASE_URL)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 
+def apply_sqlite_pragmas(dbapi_connection) -> None:  # noqa: ANN001 - DBAPI connection
+    """给一个 SQLite 连接设置本项目需要的 PRAGMA（幂等）。
+
+    SQLite 的 PRAGMA 是**每连接**生效，不是数据库级的持久设置。
+
+        - `foreign_keys=ON`：SQLite 默认关闭外键约束，不开则级联删除失效。
+        - `journal_mode=WAL`：读写不互相阻塞，避免流式对话期间的写锁卡住读请求。
+          **注意它不是每个文件都能生效**：网络文件系统/某些容器卷会静默退回
+          `delete` 模式（见 `check_journal_mode`）。
+        - `synchronous=NORMAL`：WAL 下这是官方推荐的搭配。默认的 `FULL` 每次提交都
+          fsync，而 WAL + NORMAL 只在检查点 fsync——掉电最多丢最后几个事务（对聊天
+          记录可接受），换来的是流式落库不再被磁盘拖慢。`OFF` 绝对不能用：那是真会坏库。
+        - `busy_timeout=5000`：并发写入时排队等待而不是立刻抛 `database is locked`。
+
+    独立成模块级函数（而不是只做事件回调）：测试可以直接拿一条裸 `sqlite3` 连接调用它，
+    不用去动全局 engine。
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
 if engine.dialect.name == "sqlite":
 
     @event.listens_for(engine.sync_engine, "connect")
     def _apply_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
-        """SQLite 的 PRAGMA 是**每连接**生效，不是数据库级的持久设置。
+        apply_sqlite_pragmas(dbapi_connection)
 
-        - `foreign_keys=ON`：SQLite 默认关闭外键约束，不开则级联删除失效。
-        - `journal_mode=WAL`：读写不互相阻塞，避免流式对话期间的写锁卡住读请求。
-        - `busy_timeout=5000`：并发写入时排队等待而不是立刻抛 `database is locked`。
-        """
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
+
+async def check_journal_mode(conn) -> str:  # noqa: ANN001 - AsyncConnection
+    """返回数据库当前实际使用的日志模式（小写）。
+
+    为什么要在启动时查一次：`PRAGMA journal_mode=WAL` **可能静默失败**——SQLite 在网络
+    文件系统（NFS/SMB）、某些只读挂载或容器卷上会返回 `delete`，而不是报错。此时一切
+    照常工作，只是并发读写开始互相阻塞，表现为「流式回答进行中查列表会卡住」，而日志里
+    没有任何线索。README 已经写明「SQLite 文件不要放在 NFS 上」，这条检查就是把它变成
+    可观测的。
+
+    查询失败不抛：这是诊断信息，不该让服务起不来。
+    """
+    try:
+        row = (await conn.exec_driver_sql("PRAGMA journal_mode")).fetchone()
+    except Exception:  # noqa: BLE001 - 诊断失败不影响启动
+        logger.warning("读取 SQLite journal_mode 失败，跳过 WAL 检查", exc_info=True)
+        return ""
+    return str(row[0]).lower() if row else ""
 
 
 async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnection
@@ -510,6 +546,14 @@ async def create_db_and_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _migrate_user_role_column(conn)
         await _warn_on_missing_columns(conn)
+        mode = await check_journal_mode(conn)
+        if mode and mode != "wal":
+            logger.warning(
+                "SQLite 未启用 WAL（当前 journal_mode=%s）。常见原因是数据库文件放在网络文件系统"
+                "（NFS/SMB）或不受支持的容器卷上：读写会互相阻塞，流式对话期间查列表可能卡住。"
+                "请把数据库放到本地磁盘。",
+                mode,
+            )
 
     logger.info("数据库就绪: %s", DATABASE_URL)
 
