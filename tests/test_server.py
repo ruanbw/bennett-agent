@@ -5,6 +5,7 @@
 """
 
 import logging
+from importlib.metadata import PackageNotFoundError
 
 from app import server
 from app.config import settings
@@ -107,3 +108,95 @@ def test_generated_auth_routes_document_their_contract():
 
     logout = spec["paths"]["/api/auth/logout"]["post"]
     assert "失效" in logout["description"]
+
+
+# ---------------------------------------------------------------------
+# OpenAPI：版本只有单一来源、会话是 cookie 要在文档里声明
+# ---------------------------------------------------------------------
+def test_openapi_version_matches_the_package_version():
+    """此前写死 `1.0.0`，与 pyproject 的 `0.1.0` 各说各话——版本是诊断信息，只能有一个来源。"""
+    from app.version import APP_VERSION
+
+    spec = server.create_app().openapi()
+
+    assert spec["info"]["version"] == APP_VERSION
+    assert spec["info"]["version"] != "1.0.0"
+
+
+def test_version_falls_back_to_pyproject_when_metadata_is_missing(monkeypatch):
+    """源码树直跑时没有包元数据：退回 pyproject 的 [project].version，而不是 0.0.0+unknown。"""
+    from app import version as version_module
+
+    monkeypatch.setattr(
+        version_module,
+        "version",
+        lambda _name: (_ for _ in ()).throw(PackageNotFoundError("not installed")),
+    )
+
+    assert version_module.get_app_version() == version_module._version_from_pyproject()
+    assert version_module.get_app_version() != version_module.UNKNOWN_VERSION
+
+
+def test_version_is_unknown_only_when_no_source_exists(tmp_path, monkeypatch):
+    from app import version as version_module
+
+    monkeypatch.setattr(
+        version_module,
+        "version",
+        lambda _name: (_ for _ in ()).throw(PackageNotFoundError("not installed")),
+    )
+
+    assert version_module._version_from_pyproject(tmp_path / "missing.toml") is None
+
+
+def test_openapi_declares_the_cookie_session_scheme():
+    """文档要能一眼看出「凭据是一个 cookie」：否则 /docs 里没有 Authorize 入口，客户端生成器
+    也不知道把凭据放哪。"""
+    from app.config import settings
+
+    spec = server.create_app().openapi()
+    schemes = spec["components"]["securitySchemes"]
+
+    # 复用 fastapi-users 已声明的方案，不能再造一个等价的
+    assert list(schemes) == ["APIKeyCookie"]
+    scheme = schemes["APIKeyCookie"]
+    assert scheme["type"] == "apiKey"
+    assert scheme["in"] == "cookie"
+    assert scheme["name"] == settings.auth_cookie_name
+    assert "HttpOnly" in scheme["description"]
+
+
+def test_openapi_marks_session_endpoints_but_not_the_public_ones():
+    """公开端点若被标上认证要求，客户端生成器会在登录前就伸手要凭据（死循环）。"""
+    spec = server.create_app().openapi()
+
+    assert spec["paths"]["/api/chat"]["post"]["security"] == [{"APIKeyCookie": []}]
+    assert spec["paths"]["/api/models"]["get"]["security"] == [{"APIKeyCookie": []}]
+    assert spec["paths"]["/api/sync/pull"]["get"]["security"] == [{"APIKeyCookie": []}]
+    assert spec["paths"]["/api/auth/login"]["post"].get("security") is None
+    assert spec["paths"]["/api/auth/register"]["post"].get("security") is None
+
+
+def test_every_operation_outside_the_public_list_requires_the_cookie():
+    """新增一个公开端点必须显式改清单，而不是悄悄多出一个没有认证说明的接口。"""
+    spec = server.create_app().openapi()
+
+    missing = []
+    for path, methods in spec["paths"].items():
+        if path in server._PUBLIC_PATHS:
+            continue
+        for method, operation in methods.items():
+            if method.lower() not in server._HTTP_METHODS:
+                continue
+            if operation.get("security") != [{"APIKeyCookie": []}]:
+                missing.append(f"{method.upper()} {path}")
+
+    assert not missing, f"这些端点没写认证要求：{missing}"
+
+
+def test_public_path_list_does_not_contain_ghost_endpoints():
+    """清单里写一个不存在的路径等于给后来者挖坑：它永远不会被校验到。"""
+    spec = server.create_app().openapi()
+
+    ghosts = sorted(path for path in server._PUBLIC_PATHS if path not in spec["paths"])
+    assert not ghosts, f"公开端点清单里有不存在的路径：{ghosts}"

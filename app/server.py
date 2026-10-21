@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
@@ -22,6 +23,7 @@ from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
 from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
+from app.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +166,71 @@ _API_TAGS = [
 ]
 
 
+#: 不需要登录、因而不该在文档里标「需要 cookie 会话」的端点。
+#:
+#: 这份清单是**刻意显式**的：新增一个公开端点时必须改这里，`tests/test_server.py` 会
+#: 逼你做这个决定，而不是悄悄多出一个没有任何认证说明的接口。
+_PUBLIC_PATHS = frozenset({"/api/auth/register", "/api/auth/login"})
+
+#: OpenAPI 里的 HTTP 方法（`paths` 下还有 `parameters` 这类非方法键，必须过滤掉）。
+_HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+
+def _install_cookie_security_scheme(app: FastAPI) -> None:
+    """在 OpenAPI 里声明「会话是一个 cookie」。
+
+    此前文档只在描述里写着「要求 HttpOnly cookie 会话」：`/docs` 里没有 Authorize 入口，
+    也没法一眼看出哪些端点要登录、登录后浏览器会自动带哪个 cookie。声明成
+    `apiKey in: cookie` 之后，Swagger UI 会把需要认证的端点标出来，客户端生成器也能
+    据此知道凭据放在哪里。
+
+    公开端点（注册/登录/健康检查）**不加** `security`：给它们标上认证要求会让客户端
+    生成器在登录前就去要凭据，形成死循环。
+    """
+
+    def custom_openapi() -> dict:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+            tags=_API_TAGS,
+        )
+        schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+        # fastapi-users 已经声明了 `APIKeyCookie`（`in: cookie`，名字取自 transport）。
+        # 再补一个等价的 `cookieAuth` 只会让文档里出现两个意义相同的方案，客户端生成器
+        # 还要用户二选一——复用它，只把说明补成中文。
+        scheme_name = "APIKeyCookie"
+        scheme = schemes.setdefault(
+            scheme_name,
+            {
+                "type": "apiKey",
+                "in": "cookie",
+                "name": settings.auth_cookie_name,
+            },
+        )
+        scheme["description"] = (
+            "登录成功后由服务端写入的 HttpOnly 会话 cookie（不透明 token，非 JWT）。"
+            "浏览器会自动携带；用 curl 调试时需要 `-c/-b` 保存与回传。"
+        )
+
+        for path, methods in schema.get("paths", {}).items():
+            if path in _PUBLIC_PATHS:
+                continue
+            for method, operation in methods.items():
+                if method.lower() not in _HTTP_METHODS:
+                    continue
+                operation["security"] = [{scheme_name: []}]
+
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
 def create_app() -> FastAPI:
     docs_enabled = _api_docs_enabled()
     app = FastAPI(
@@ -173,13 +240,16 @@ def create_app() -> FastAPI:
             "除注册与登录外，所有 `/api/*` 都要求 HttpOnly cookie 会话；"
             "接口文档默认只在非 production 环境暴露，可用 `ENABLE_API_DOCS=true` 显式打开。"
         ),
-        version="1.0.0",
+        # 版本号只有一个来源（已安装包的元数据），不再与 pyproject 里的值各说各话
+        version=APP_VERSION,
         openapi_tags=_API_TAGS,
         lifespan=lifespan,
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
     )
+
+    _install_cookie_security_scheme(app)
 
     # 前端与后端不同源（Vite 跑在自己的端口上），跨域是常态而非例外
     cors_origins = settings.get_cors_origins()

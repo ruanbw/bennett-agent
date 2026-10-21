@@ -167,6 +167,18 @@ production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。`/d
 auth / chat / capabilities / sync / admin 分组，每组都有用途与权限说明；`tests/test_server.py`
 锁住「没有端点落在未声明的 tag 下」，避免新增路由时漏分组。
 
+**会话是一个 cookie，文档里也这么说。** 此前只在描述里写着「要求 HttpOnly cookie 会话」：
+OpenAPI 里没有 `securitySchemes` 的说明文字，也没有逐端点的 `security`，生成的客户端不知道
+凭据放哪、哪些端点要先登录。现在复用 fastapi-users 已声明的 `APIKeyCookie` 方案（`in: cookie`、
+名字取自 `AUTH_COOKIE_NAME`）并把说明补成中文，除 `/api/auth/register`、`/api/auth/login`
+之外的每个操作都标上它——**公开端点刻意不标**：给它们加认证要求会让客户端生成器在登录前
+就去要凭据（死循环）。公开清单 `_PUBLIC_PATHS` 是显式的，测试会拦住「清单里写了不存在的
+路径」与「新端点悄悄没有认证说明」两种情况。
+
+`/openapi.json` 的 `info.version` 也不再写死 `1.0.0`：`app/version.py` 优先取已安装包的
+元数据，源码树直跑时退回 `pyproject.toml` 的 `[project].version`，两者都没有才用
+`0.0.0+unknown`——版本是诊断信息（用户报障第一句往往是「我这是哪个版本」），只能有一个来源。
+
 ## 项目结构
 
 ```text
