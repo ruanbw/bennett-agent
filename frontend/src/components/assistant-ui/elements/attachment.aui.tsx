@@ -37,8 +37,10 @@ import {
   attachmentPreviewTitle,
   attachmentRemoveLabel,
   attachmentTileLabel,
+  attachmentUnsupportedMessage,
   attachmentUploadError,
 } from "@/lib/attachment-labels";
+import { notify } from "@/lib/toast";
 import { useAttachmentSrc } from "@/hooks/use-attachment-src";
 import { cn } from "@/lib/utils";
 
@@ -286,22 +288,27 @@ export const ComposerAttachments: FC = () => {
 };
 
 /**
- * 附件入口：后端只接受文本，因此**明确禁用**而不是打开文件选择器再拦发送。
+ * 附件入口：后端只接受文本，因此不打开文件选择器。
  *
- * 此前按钮可点、选完文件后才在上方显示「不会发送」的提示：用户已经完成了一次
- * 无效操作。保留按钮（而不是隐藏）是为了让入口位置稳定，并用 aria-label 说明原因；
- * 粘贴/拖拽仍然会经过 `ComposerAttachments` 的提示与发送阻断，作为最后一道保险。
+ * 用 `aria-disabled` 而不是原生 `disabled`：原生 disabled 按钮不进 Tab 顺序，
+ * 键盘/读屏用户根本发现不了这个入口，也听不到「为什么不能用」。保留可聚焦，
+ * 点击（或 Enter/Space）只弹一条说明，既阻止了白选文件，也让原因可被发现。
  */
 export const ComposerAddAttachment: FC = () => {
   return (
     <TooltipIconButton
       tooltip="附件暂不支持（后端只接受文本）"
+      title="附件暂不支持（后端只接受文本）"
       side="bottom"
       variant="ghost"
       size="icon"
-      disabled
-      className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 pointer-coarse:size-8 rounded-full active:scale-[0.96] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-40"
-      aria-label="附件暂不支持"
+      aria-disabled="true"
+      onClick={(event) => {
+        event.preventDefault();
+        notify("info", attachmentUnsupportedMessage(1));
+      }}
+      className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 pointer-coarse:size-8 rounded-full opacity-40 hover:opacity-60 focus-visible:opacity-100 active:scale-[0.96] motion-reduce:transition-none cursor-not-allowed"
+      aria-label="附件暂不支持：后端只接受文本"
     >
       <PlusIcon className="aui-attachment-add-icon size-4" />
     </TooltipIconButton>
