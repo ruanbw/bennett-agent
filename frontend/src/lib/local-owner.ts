@@ -25,6 +25,7 @@
  */
 
 import { clearAllLocalData, db } from '../db';
+import { clearComposerDrafts } from './composer-draft';
 import { notifyAccountSwitched } from './multi-tab';
 
 /** syncMeta 里的归属键。与同步引擎的 `cursor` / `backfill` 同表、不冲突。 */
@@ -71,6 +72,8 @@ async function claimOnce(userId: string): Promise<ClaimResult> {
   if (cleared) {
     console.warn(`本地缓存属于 ${previousOwner ?? '未知账号'}，切换为 ${userId} 前已清空`);
     await clearAllLocalData();
+    // 草稿在 localStorage，不在 IndexedDB；不删会在新账号的输入框里露出上一个人的文本。
+    clearComposerDrafts();
   }
   await writeOwner(userId);
   // 写完全新归属再通知其他标签页：它们收到通知会立刻重新探测并认领，必须能读到新归属。

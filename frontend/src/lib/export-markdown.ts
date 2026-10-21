@@ -26,6 +26,22 @@ export const MAX_TOOL_TEXT_CHARS = 1000;
 /** 文件名主干长度上限：留出 `.md` 与不同文件系统的余量。 */
 export const MAX_FILENAME_CHARS = 60;
 
+/**
+ * 转义会改变 Markdown/HTML 结构的字符。
+ *
+ * 导出文件本身是 `.md`，但用户会用 VS Code / Typora / 浏览器之类**允许原始 HTML**
+ * 的查看器打开。工具名、会话标题、提问选项都来自模型/服务端，含 `<script>` 或
+ * `</summary><img onerror=...>` 时会在这些查看器里执行（L-09）。正文保持 Markdown
+ * 语义不动，只对「插进 HTML 结构/标题行」的片段做最小转义。
+ */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export interface ExportConversationOptions {
   /** 导出时刻（毫秒）。测试注固定值，生产用当前时间。 */
   exportedAt?: number;
@@ -72,8 +88,9 @@ function timestampSlug(ms: number): string {
  */
 export function exportFileName(title: string, now: number = Date.now()): string {
   const cleaned = (title || '')
-    // 控制字符（用 Unicode 分类而不是字面量区间：字面量会触发 no-control-regex）
-    .replace(/\p{Cc}/gu, ' ')
+    // 控制字符与格式字符（Cf 包含 U+202E 等 bidi 控制符：可让文件名视觉反转）
+    // 用 Unicode 分类而不是字面量区间：字面量会触发 no-control-regex
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
     // 路径分隔符与 Windows 不允许的字符
     .replace(/[\\/:*?"<>|]/g, '-')
     .replace(/\s+/g, ' ')
@@ -126,10 +143,10 @@ function hasRenderableContent(message: MessageRecord): boolean {
 }
 
 function renderClarification(question: string, options: readonly string[]): string[] {
-  const lines = [`> **提问：** ${question}`];
+  const lines = [`> **提问：** ${escapeHtml(question)}`];
   if (options.length > 0) {
     lines.push('>');
-    options.forEach((option, index) => lines.push(`> ${index + 1}. ${option}`));
+    options.forEach((option, index) => lines.push(`> ${index + 1}. ${escapeHtml(option)}`));
   }
   return lines;
 }
@@ -141,12 +158,14 @@ function renderNotices(message: MessageRecord): string[] {
   else if (message.incomplete) notices.push('> ⚠ 回复不完整（连接中断或生成异常）。');
   if (message.fallback) {
     // 带上切换原因：导出是事后复盘用的，只说「切过」等于把最重要的信息留给猜测
-    const reason = message.fallback.reason ? `（${message.fallback.reason}）` : '';
+    const reason = message.fallback.reason ? `（${escapeHtml(message.fallback.reason)}）` : '';
     notices.push(
-      `> ⇄ 本轮由备用模型完成：${message.fallback.fromModel} → ${message.fallback.toModel}${reason}`,
+      `> ⇄ 本轮由备用模型完成：${escapeHtml(message.fallback.fromModel)} → ${escapeHtml(
+        message.fallback.toModel,
+      )}${reason}`,
     );
   }
-  if (message.error) notices.push(`> ✕ 本轮失败：${message.error.message}`);
+  if (message.error) notices.push(`> ✕ 本轮失败：${escapeHtml(message.error.message)}`);
   return notices;
 }
 
@@ -199,7 +218,7 @@ function renderToolCall(toolCall: ToolCallRecord): string[] {
   // 耗时与界面上折叠条右侧的「2.2s」同一口径（`formatToolDuration`）：导出文件里没有
   // 这个数，事后就无法判断一步工具调用是「秒回」还是「卡了一分钟」。
   const duration = toolCallDuration(toolCall);
-  const summary = `工具调用 · ${toolCall.toolName} · ${status}${duration ? ` · ${duration}` : ''}`;
+  const summary = `工具调用 · ${escapeHtml(toolCall.toolName)} · ${status}${duration ? ` · ${duration}` : ''}`;
   const lines = ['<details>', `<summary>${summary}</summary>`, ''];
 
   const args = toolCall.argsText?.trim();
@@ -237,7 +256,7 @@ function renderConversation(
   const title = session.title?.trim() || '未命名对话';
   const heading = (level: number): string => '#'.repeat(level);
 
-  const lines: string[] = [`${heading(titleLevel)} ${title}`, ''];
+  const lines: string[] = [`${heading(titleLevel)} ${escapeHtml(title)}`, ''];
 
   if (meta === 'full') {
     lines.push(

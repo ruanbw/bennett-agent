@@ -32,6 +32,8 @@ export interface DraftEntry {
 export interface DraftStorage {
   getItem: (key: string) => string | null;
   setItem: (key: string, value: string) => void;
+  /** 可选：不支持 removeItem 的实现用写入空对象代替。 */
+  removeItem?: (key: string) => void;
 }
 
 /** 取 localStorage；访问本身抛异常时返回 null（与 `theme-context.getThemeStorage` 同口径）。 */
@@ -120,5 +122,25 @@ export function writeDraft(
   } catch (err) {
     // 配额满 / 隐私模式：草稿存不下就算了，不能影响用户继续打字
     console.warn('保存输入框草稿失败:', err);
+  }
+}
+
+/**
+ * 清空全部草稿（登出 / 换账号时调用）。
+ *
+ * 草稿存在 localStorage，而 `clearAllLocalData()` 只清 IndexedDB；不删这个键的话，
+ * 登出后按 F12 仍能读到上一个人没发送的敏感文本（L-06）。
+ */
+export function clearComposerDrafts(storage: DraftStorage | null = getDraftStorage()): void {
+  if (!storage) return;
+  try {
+    if (typeof storage.removeItem === 'function') {
+      storage.removeItem(COMPOSER_DRAFT_KEY);
+    } else {
+      // 老实现/测试替身没有 removeItem：写一个空对象，readDrafts 会当成没有草稿
+      storage.setItem(COMPOSER_DRAFT_KEY, '{}');
+    }
+  } catch (err) {
+    console.warn('清空输入框草稿失败:', err);
   }
 }

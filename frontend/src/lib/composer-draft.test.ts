@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   COMPOSER_DRAFT_KEY,
   MAX_DRAFT_CHARS,
+  clearComposerDrafts,
   MAX_DRAFTS,
   readDraft,
   readDrafts,
@@ -18,6 +19,9 @@ function makeStorage(initial: Record<string, string> = {}, options: { failWrites
     setItem: (key: string, value: string) => {
       if (options.failWrites) throw new Error('QuotaExceededError');
       data.set(key, value);
+    },
+    removeItem: (key: string) => {
+      data.delete(key);
     },
   };
 }
@@ -89,5 +93,36 @@ describe('输入框草稿', () => {
 
     const failingWrite = makeStorage({}, { failWrites: true });
     expect(() => writeDraft(failingWrite, 's1', '内容')).not.toThrow();
+  });
+});
+
+describe('clearComposerDrafts（L-06）', () => {
+  it('登出后草稿不再可读', () => {
+    const storage = makeStorage();
+    writeDraft(storage, 's1', '没发送的敏感文本', 1_000);
+
+    clearComposerDrafts(storage);
+
+    expect(readDraft(storage, 's1')).toBe('');
+    expect(storage.data.has(COMPOSER_DRAFT_KEY)).toBe(false);
+  });
+
+  it('存储不支持 removeItem 时退化为写空对象，不抛错', () => {
+    const storage = makeStorage({ [COMPOSER_DRAFT_KEY]: JSON.stringify({ s1: { text: 'x', at: 1 } }) });
+
+    clearComposerDrafts(storage);
+
+    expect(readDrafts(storage)).toEqual({});
+  });
+
+  it('存储访问抛错时不影响登出流程', () => {
+    const storage = {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('SecurityError');
+      },
+    };
+
+    expect(() => clearComposerDrafts(storage)).not.toThrow();
   });
 });

@@ -5,6 +5,7 @@ import {
   buildPushBatch,
   fromConversationRow,
   fromMessageRow,
+  sanitizeMessagePayload,
   shouldApplyRemote,
   toConversationPushRow,
   toMessagePushRow,
@@ -225,5 +226,65 @@ describe('buildPushBatch', () => {
     const first = buildPushBatch(sessions, messages, 2);
     expect(first.conversations).toHaveLength(2);
     expect(first.messages).toEqual([]);
+  });
+});
+
+
+describe('sanitizeMessagePayload（L-08）', () => {
+  it('坏掉的 thinking / 非数组 partOrder 被丢弃，不让 React 渲染对象', () => {
+    const payload = sanitizeMessagePayload({
+      content: 'ok',
+      thinking: { a: 1 },
+      thinkingMs: 'soon',
+      partOrder: ['text', 'bogus', 42],
+    });
+
+    expect(payload.content).toBe('ok');
+    expect(payload.thinking).toBeUndefined();
+    expect(payload.thinkingMs).toBeUndefined();
+    expect(payload.partOrder).toEqual(['text']);
+  });
+
+  it('结构不完整的工具调用 / 澄清 / 用量 / 错误整条丢弃', () => {
+    const payload = sanitizeMessagePayload({
+      toolCalls: [
+        { toolCallId: 'c1', toolName: 'search', argsText: '{}', status: 'complete', outcome: 'success' },
+        { toolCallId: 'c2', toolName: 'search' },
+        { toolCallId: 'c3', toolName: 'x', argsText: '{}', status: 'weird' },
+      ],
+      clarification: { toolCallId: 'c1', question: { evil: true }, options: ['a', 1], allowCustomInput: true },
+      usage: { contextTokens: '100' },
+      error: { message: 42 },
+    });
+
+    expect(payload.toolCalls).toEqual([
+      { toolCallId: 'c1', toolName: 'search', argsText: '{}', status: 'complete', outcome: 'success' },
+    ]);
+    expect(payload.clarification).toBeUndefined();
+    expect(payload.usage).toBeUndefined();
+    expect(payload.error).toBeUndefined();
+  });
+
+  it('合法的嵌套结构原样保留', () => {
+    const payload = sanitizeMessagePayload({
+      content: '回答',
+      toolCalls: [{ toolCallId: 'c1', toolName: 'search', argsText: '{}', status: 'running' }],
+      clarification: { toolCallId: 'c1', question: '选哪个？', options: ['A', 'B'], allowCustomInput: false },
+      fallback: { fromModel: 'a', toModel: 'b', reason: '上游 503' },
+      usage: { contextTokens: 10, contextWindow: 100, contextLimitTokens: 80, outputTokens: 2, cacheReadTokens: 0 },
+      error: { message: '失败', retryable: true, code: 'internal_error' },
+    });
+
+    expect(payload.content).toBe('回答');
+    expect(payload.toolCalls?.[0].status).toBe('running');
+    expect(payload.clarification?.question).toBe('选哪个？');
+    expect(payload.fallback?.reason).toBe('上游 503');
+    expect(payload.usage?.contextWindow).toBe(100);
+    expect(payload.error?.retryable).toBe(true);
+  });
+
+  it('payload 不是对象时返回空对象，而不是抛错', () => {
+    expect(sanitizeMessagePayload(null)).toEqual({});
+    expect(sanitizeMessagePayload('[]')).toEqual({});
   });
 });

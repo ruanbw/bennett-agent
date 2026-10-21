@@ -5,7 +5,19 @@
  * 会话 id 怎么对应），抽出来才能在 node 环境的 vitest 里直接钉住。
  */
 
-import type { ChatRole, MessageRecord, SessionRecord, SyncState } from '../../types';
+import type {
+  ChatRole,
+  ClarificationState,
+  FallbackState,
+  MessageRecord,
+  PartKind,
+  RunError,
+  SessionRecord,
+  SyncState,
+  ToolCallRecord,
+  ToolOutcome,
+  UsageState,
+} from '../../types';
 
 /** push 上行（不带服务端版本号）。字段名是线上契约（snake_case）。 */
 export interface ConversationPushRow {
@@ -108,9 +120,150 @@ export function fromConversationRow(row: ConversationRow, local?: SessionRecord)
   };
 }
 
+const TOOL_OUTCOMES: readonly ToolOutcome[] = ['success', 'failed', 'denied', 'interrupted'];
+const PART_KINDS: readonly PartKind[] = ['tool-call', 'reasoning', 'text'];
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function sanitizeToolCalls(value: unknown): ToolCallRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const calls: ToolCallRecord[] = [];
+  for (const item of value) {
+    const raw = asRecord(item);
+    if (!raw) continue;
+    const toolCallId = typeof raw.toolCallId === 'string' ? raw.toolCallId : undefined;
+    const toolName = typeof raw.toolName === 'string' ? raw.toolName : undefined;
+    const argsText = typeof raw.argsText === 'string' ? raw.argsText : undefined;
+    const status = raw.status === 'running' || raw.status === 'complete' ? raw.status : undefined;
+    if (!toolCallId || !toolName || argsText === undefined || !status) continue;
+
+    const call: ToolCallRecord = { toolCallId, toolName, argsText, status };
+    if (typeof raw.result === 'string') call.result = raw.result;
+    if (TOOL_OUTCOMES.includes(raw.outcome as ToolOutcome)) call.outcome = raw.outcome as ToolOutcome;
+    const startedAt = asFiniteNumber(raw.startedAt);
+    const finishedAt = asFiniteNumber(raw.finishedAt);
+    if (startedAt !== undefined) call.startedAt = startedAt;
+    if (finishedAt !== undefined) call.finishedAt = finishedAt;
+    calls.push(call);
+  }
+  return calls;
+}
+
+function sanitizeClarification(value: unknown): ClarificationState | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const toolCallId = typeof raw.toolCallId === 'string' ? raw.toolCallId : undefined;
+  const question = typeof raw.question === 'string' ? raw.question : undefined;
+  const allowCustomInput = typeof raw.allowCustomInput === 'boolean' ? raw.allowCustomInput : undefined;
+  const options = Array.isArray(raw.options)
+    ? raw.options.filter((option): option is string => typeof option === 'string')
+    : undefined;
+  if (toolCallId === undefined || question === undefined || allowCustomInput === undefined || !options) {
+    return undefined;
+  }
+  return { toolCallId, question, options, allowCustomInput };
+}
+
+function sanitizeFallback(value: unknown): FallbackState | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const fromModel = typeof raw.fromModel === 'string' ? raw.fromModel : undefined;
+  const toModel = typeof raw.toModel === 'string' ? raw.toModel : undefined;
+  if (fromModel === undefined || toModel === undefined) return undefined;
+  const reason = typeof raw.reason === 'string' ? raw.reason : raw.reason === null ? null : undefined;
+  return reason === undefined ? { fromModel, toModel } : { fromModel, toModel, reason };
+}
+
+function sanitizeUsage(value: unknown): UsageState | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const contextTokens = asFiniteNumber(raw.contextTokens);
+  const outputTokens = asFiniteNumber(raw.outputTokens);
+  const cacheReadTokens = asFiniteNumber(raw.cacheReadTokens);
+  if (contextTokens === undefined || outputTokens === undefined || cacheReadTokens === undefined) return undefined;
+  const nullableNumber = (input: unknown): number | null =>
+    typeof input === 'number' && Number.isFinite(input) ? input : null;
+  return {
+    contextTokens,
+    contextWindow: nullableNumber(raw.contextWindow),
+    contextLimitTokens: nullableNumber(raw.contextLimitTokens),
+    outputTokens,
+    cacheReadTokens,
+  };
+}
+
+function sanitizeError(value: unknown): RunError | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const message = typeof raw.message === 'string' ? raw.message : undefined;
+  const retryable = typeof raw.retryable === 'boolean' ? raw.retryable : undefined;
+  if (message === undefined || retryable === undefined) return undefined;
+  const error: RunError = {
+    message,
+    retryable,
+    code: typeof raw.code === 'string' ? (raw.code as RunError['code']) : null,
+  };
+  if (typeof raw.retryAfterAt === 'number' && Number.isFinite(raw.retryAfterAt)) {
+    error.retryAfterAt = raw.retryAfterAt;
+  } else if (raw.retryAfterAt === null) {
+    error.retryAfterAt = null;
+  }
+  return error;
+}
+
+/**
+ * 把服务端下发的 `payload` 收敛成本地认识的结构。
+ *
+ * 服务端只保证 payload 是一个 JSON object：换设备/被攻陷的后端/旧客户端都可能塞进
+ * 形状不对的字段。此前 `...payload` 直接铺进 `MessageRecord`，一个
+ * `thinking: {a: 1}` 或 `clarification.question: {...}` 就会让 React 在渲染
+ * 「对象不能作为子节点」时抛错、整个会话白屏（L-08）。
+ *
+ * 这里逐字段做类型守卫：坏字段丢弃（或回退到安全默认值），未知字段一律不进来。
+ */
+export function sanitizeMessagePayload(value: unknown): Partial<MessageRecord> {
+  const raw = asRecord(value);
+  if (!raw) return {};
+
+  const sanitized: Partial<MessageRecord> = {};
+  if (typeof raw.content === 'string') sanitized.content = raw.content;
+  if (typeof raw.thinking === 'string' || raw.thinking === null) sanitized.thinking = raw.thinking;
+  if (typeof raw.thinkingMs === 'number' && Number.isFinite(raw.thinkingMs)) {
+    sanitized.thinkingMs = raw.thinkingMs;
+  }
+  if (typeof raw.stopped === 'boolean') sanitized.stopped = raw.stopped;
+  if (typeof raw.incomplete === 'boolean') sanitized.incomplete = raw.incomplete;
+  if (typeof raw.model === 'string' || raw.model === null) sanitized.model = raw.model;
+
+  const toolCalls = sanitizeToolCalls(raw.toolCalls);
+  if (toolCalls !== undefined) sanitized.toolCalls = toolCalls;
+  const clarification = sanitizeClarification(raw.clarification);
+  if (clarification !== undefined) sanitized.clarification = clarification;
+  const fallback = sanitizeFallback(raw.fallback);
+  if (fallback !== undefined) sanitized.fallback = fallback;
+  const usage = sanitizeUsage(raw.usage);
+  if (usage !== undefined) sanitized.usage = usage;
+  const error = sanitizeError(raw.error);
+  if (error !== undefined) sanitized.error = error;
+  if (Array.isArray(raw.partOrder)) {
+    sanitized.partOrder = raw.partOrder.filter((kind): kind is PartKind =>
+      PART_KINDS.includes(kind as PartKind),
+    );
+  }
+  return sanitized;
+}
+
 /** 服务端行 → 本地消息。 */
 export function fromMessageRow(row: MessageRow, local?: MessageRecord): MessageRecord {
-  const payload = row.payload as Partial<MessageRecord>;
+  const payload = sanitizeMessagePayload(row.payload);
   return {
     ...local,
     ...payload,

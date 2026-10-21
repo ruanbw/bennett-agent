@@ -12,6 +12,7 @@ import { apiFetch, bumpAuthEpoch, readErrorDetail } from './api';
 import { MIN_PASSWORD_LENGTH } from './constants';
 import { abortAllRuns } from './chat-runs';
 import { flushPending, stopSync } from './sync/engine';
+import { clearComposerDrafts } from './composer-draft';
 
 /** 当前登录用户。字段与后端 `UserRead` 对齐（snake_case 是线上契约）。 */
 export interface AuthUser {
@@ -366,6 +367,10 @@ export async function logoutAndClearLocalData(): Promise<LogoutResult> {
   } catch (err) {
     console.error('清理本地会话数据失败:', err);
   }
+
+  // 草稿在 localStorage，不在 IndexedDB 里：必须单独清，否则登出后仍能读到
+  // 上一个人没发送的文本（L-06）。
+  clearComposerDrafts();
 
   return {
     serverConfirmed,

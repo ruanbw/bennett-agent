@@ -16,6 +16,7 @@ import {
   buildArchiveMarkdown,
   buildConversationMarkdown,
   downloadMarkdownFile,
+  escapeHtml,
   exportFileName,
   fencedBlock,
   formatTimestamp,
@@ -458,5 +459,48 @@ describe('备用模型切换原因', () => {
 
     expect(markdown).toContain('gw/primary → gw/backup');
     expect(markdown).not.toContain('gw/backup（');
+  });
+});
+
+describe('导出内容的 HTML 转义（L-09）', () => {
+  it('escapeHtml 覆盖四个危险字符', () => {
+    expect(escapeHtml('&<>"')).toBe('&amp;&lt;&gt;&quot;');
+  });
+
+  it('会话标题与工具名里的 HTML 被转义，不会在允许原始 HTML 的查看器里执行', () => {
+    const evil = '<img src=x onerror=alert(1)>';
+    const markdown = buildConversationMarkdown(
+      { title: evil, createdAt: at(9), updatedAt: at(11) },
+      [userMessage(), assistantMessage({ toolCalls: [toolCall({ toolName: `</summary>${evil}` })] })],
+      { exportedAt: at(12) },
+    );
+
+    expect(markdown).not.toContain('<img');
+    expect(markdown).not.toContain('</summary><img');
+    expect(markdown).toContain('&lt;img');
+  });
+
+  it('澄清提问与选项同样转义', () => {
+    const markdown = build([
+      userMessage(),
+      assistantMessage({
+        clarification: {
+          toolCallId: 'c1',
+          question: '<script>alert(1)</script>',
+          options: ['<b>A</b>', 'B'],
+          allowCustomInput: true,
+        },
+      }),
+    ]);
+
+    expect(markdown).not.toContain('<script>');
+    expect(markdown).toContain('&lt;script&gt;');
+  });
+
+  it('文件名过滤 bidi 控制符，避免视觉反转', () => {
+    const name = exportFileName('发票\u202Egnp.exe');
+
+    expect(name).not.toContain('\u202E');
+    expect(name.endsWith('.md')).toBe(true);
   });
 });
