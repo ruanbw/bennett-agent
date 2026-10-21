@@ -16,7 +16,7 @@
  * 因此把原因交给调用方展示，而不是静默清空列表。
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { parseSearchQuery, searchSessionContent, type ContentMatch } from '../lib/session-search';
 
@@ -32,6 +32,8 @@ export interface SessionContentSearch {
   pending: boolean;
   /** 扫描失败的可读原因；成功一轮后清空。 */
   error: string | null;
+  /** 重新扫一遍当前词表（错误态里的「重新搜索」）。 */
+  retry: () => void;
 }
 
 interface SearchResult {
@@ -60,6 +62,9 @@ export function useSessionContentSearch(
   const idsKey = sessionIds.join('\u0000');
 
   const [result, setResult] = useState<SearchResult>(EMPTY_RESULT);
+  // 失败后重试：只递增这个计数，effect 的其余依赖不变也能重新跑一轮
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((count) => count + 1), []);
 
   useEffect(() => {
     if (!tokensKey) return undefined;
@@ -85,14 +90,14 @@ export function useSessionContentSearch(
       controller.abort();
       clearTimeout(timer);
     };
-  }, [tokensKey, idsKey, tokens, sessionIds]);
+  }, [tokensKey, idsKey, tokens, sessionIds, attempt]);
 
   if (tokensKey === '') {
-    return { tokens, matches: EMPTY_MATCHES, pending: false, error: null };
+    return { tokens, matches: EMPTY_MATCHES, pending: false, error: null, retry };
   }
 
   const pending = result.key !== tokensKey;
   const matches = isRelatedQuery(result.key, tokensKey) ? result.matches : EMPTY_MATCHES;
 
-  return { tokens, matches, pending, error: pending ? null : result.error };
+  return { tokens, matches, pending, error: pending ? null : result.error, retry };
 }

@@ -20,7 +20,7 @@ import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
-import { SidebarSearchEmpty } from './SidebarSearchEmpty';
+import { SidebarSearchEmpty, SidebarSearchError } from './SidebarSearchEmpty';
 import { SidebarSessionItem } from './SidebarSessionItem';
 import { SyncStatusButton } from './SyncStatusButton';
 
@@ -620,6 +620,12 @@ export function Sidebar({
             <div className="text-xs text-muted-foreground text-center py-12">
               正在搜索对话内容…
             </div>
+          ) : search.error ? (
+            <SidebarSearchError
+              message={search.error}
+              onRetry={search.retry}
+              onClearSearch={clearSearch}
+            />
           ) : search.tokens.length > 0 ? (
             <SidebarSearchEmpty tokens={search.tokens} onClearSearch={clearSearch} />
           ) : (

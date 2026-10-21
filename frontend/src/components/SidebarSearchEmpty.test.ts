@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
-import { SidebarSearchEmpty } from './SidebarSearchEmpty';
+import { SidebarSearchEmpty, SidebarSearchError } from './SidebarSearchEmpty';
 
 const render = (tokens: string[]) =>
   renderToStaticMarkup(
@@ -26,6 +26,15 @@ function findElementByProp(node: unknown, prop: string): ElementLike | null {
   const element = node as ElementLike;
   if (element.props?.[prop]) return element;
   return findElementByProp(element.props?.children, prop);
+}
+
+/** 同一 prop 可能命中多个节点（错误态有两个按钮）。 */
+function collectElementsByProp(node: unknown, prop: string): ElementLike[] {
+  if (!node || typeof node !== 'object') return [];
+  if (Array.isArray(node)) return node.flatMap((child) => collectElementsByProp(child, prop));
+  const element = node as ElementLike;
+  const own = element.props?.[prop] ? [element] : [];
+  return own.concat(collectElementsByProp(element.props?.children, prop));
 }
 
 describe('SidebarSearchEmpty', () => {
@@ -69,6 +78,7 @@ describe('SidebarSearchEmpty', () => {
   it('没有词表时仍然渲染（调用方只在有词时挂载，这里保证兜底不崩）', () => {
     const html = render([]);
 
+    expect(html).toContain('没有匹配的对话');
     expect(html).toContain('清除搜索');
   });
 
@@ -80,6 +90,44 @@ describe('SidebarSearchEmpty', () => {
 
     expect(button).not.toBeNull();
     (button!.props as { onClick: () => void }).onClick();
+    expect(onClearSearch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SidebarSearchError', () => {
+  const renderError = () =>
+    renderToStaticMarkup(
+      createElement(SidebarSearchError, {
+        message: '搜索对话内容失败',
+        onRetry: vi.fn(),
+        onClearSearch: vi.fn(),
+      }),
+    );
+
+  it('显示失败原因与两个出口，不伪装成「没有命中」', () => {
+    const html = renderError();
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('搜索对话内容失败');
+    expect(html).toContain('重新搜索');
+    expect(html).toContain('清除搜索');
+    expect(html).not.toContain('没有同时包含');
+  });
+
+  it('两个按钮分别接到重试与清除回调', () => {
+    const onRetry = vi.fn();
+    const onClearSearch = vi.fn();
+    const tree = SidebarSearchError({
+      message: '搜索对话内容失败',
+      onRetry,
+      onClearSearch,
+    });
+    const buttons = collectElementsByProp(tree, 'onClick');
+
+    expect(buttons).toHaveLength(2);
+    (buttons[0].props as { onClick: () => void }).onClick();
+    (buttons[1].props as { onClick: () => void }).onClick();
+    expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onClearSearch).toHaveBeenCalledTimes(1);
   });
 });
