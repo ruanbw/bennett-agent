@@ -18,6 +18,12 @@ export interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;
+  /**
+   * 外部原因暂时不能确认（例如还在核对「有没有未同步内容」）。
+   *
+   * 与内部的 `pending` 分开：`pending` 是「已经按过确认」，这里只是「还不能按」。
+   */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
 }
 
@@ -45,6 +51,7 @@ export function ConfirmDialog({
   confirmLabel = '确认',
   cancelLabel = '取消',
   destructive = false,
+  confirmDisabled = false,
   onConfirm,
 }: ConfirmDialogProps) {
   const [pending, setPending] = useState(false);
@@ -61,7 +68,7 @@ export function ConfirmDialog({
   const handleConfirm = () => {
     // 一次性 guard：确认到下次打开之间不再响应（disabled 属性已挡掉真实双击，
     // 这里再挡一层键盘/程序化触发）
-    if (pending) return;
+    if (pending || confirmDisabled) return;
     setPending(true);
     onOpenChange(false);
     onConfirm();
@@ -82,7 +89,7 @@ export function ConfirmDialog({
           <Button
             variant={destructive ? 'destructive' : 'default'}
             onClick={handleConfirm}
-            disabled={pending}
+            disabled={pending || confirmDisabled}
           >
             {confirmLabel}
           </Button>

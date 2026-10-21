@@ -54,6 +54,13 @@ function DropdownMenuContent({
   );
 }
 
+const itemClassName = cn(
+  "relative flex cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs outline-none transition-colors",
+  "hover:bg-accent hover:text-accent-foreground data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
+  "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+  "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+);
+
 function DropdownMenuItem({
   className,
   ...props
@@ -61,13 +68,30 @@ function DropdownMenuItem({
   return (
     <MenuPrimitive.Item
       data-slot="dropdown-menu-item"
-      className={cn(
-        "relative flex cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs outline-none transition-colors",
-        "hover:bg-accent hover:text-accent-foreground data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
-        "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-        "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-        className,
-      )}
+      className={cn(itemClassName, className)}
+      {...props}
+    />
+  );
+}
+
+function DropdownMenuRadioGroup({ ...props }: MenuPrimitive.RadioGroup.Props) {
+  return <MenuPrimitive.RadioGroup data-slot="dropdown-menu-radio-group" {...props} />;
+}
+
+/**
+ * 单选菜单项：读屏会念 `menuitemradio` 与选中状态。
+ *
+ * 三个主题如果继续用普通 `Item` + 视觉上的 Check 图标，读屏只能听到「浅色 / 深色 /
+ * 跟随系统」，无法知道当前选的是哪个。
+ */
+function DropdownMenuRadioItem({
+  className,
+  ...props
+}: MenuPrimitive.RadioItem.Props) {
+  return (
+    <MenuPrimitive.RadioItem
+      data-slot="dropdown-menu-radio-item"
+      className={cn(itemClassName, className)}
       {...props}
     />
   );
@@ -111,6 +135,8 @@ export {
   DropdownMenuPortal,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuLabel,
   DropdownMenuGroup,

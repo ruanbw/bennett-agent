@@ -33,10 +33,13 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { useTheme } from '../context/theme-context';
+import { normalizeThemePreference, useTheme } from '../context/theme-context';
+import { logoutWarning } from '../lib/logout-warning';
 import { countPending } from '../lib/sync/engine';
 
 export interface AccountMenuProps {
@@ -62,11 +65,27 @@ export function AccountMenu({
   collapsed = false,
 }: AccountMenuProps) {
   const [confirming, setConfirming] = useState(false);
-  const [unsynced, setUnsynced] = useState(0);
+  // null = 还在数；数字 = 已数清；countFailed 时数字不可信
+  const [unsynced, setUnsynced] = useState<number | null>(null);
+  const [countFailed, setCountFailed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const { theme, setTheme } = useTheme();
 
   const nickname = email ? email.split('@')[0] : '未登录';
+
+  const openLogoutConfirm = useCallback(() => {
+    // 先把数量清空：弹窗要显示「正在检查」并禁用确认，不能在数量回来前给出
+    // 「没有未同步内容」的错误结论——那是数据丢失前最后一句提示。
+    setUnsynced(null);
+    setCountFailed(false);
+    setConfirming(true);
+    void countPending()
+      .then((count) => setUnsynced(count))
+      .catch((err) => {
+        console.warn('读取待同步数量失败:', err);
+        setCountFailed(true);
+      });
+  }, []);
 
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
@@ -117,40 +136,50 @@ export function AccountMenu({
               否则直接抛「MenuGroupContext is missing」把整棵树打挂 */}
           <DropdownMenuGroup>
             <DropdownMenuLabel>外观主题</DropdownMenuLabel>
-            <DropdownMenuItem onClick={() => setTheme('light')} className="justify-between">
-              <div className="flex items-center gap-2.5">
-                <Sun className="size-4 text-amber-500" />
-                <span>浅色</span>
-              </div>
-              {theme === 'light' && <Check className="size-3.5 text-primary" />}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setTheme('dark')} className="justify-between">
-              <div className="flex items-center gap-2.5">
-                <Moon className="size-4 text-sky-400" />
-                <span>深色</span>
-              </div>
-              {theme === 'dark' && <Check className="size-3.5 text-primary" />}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setTheme('system')} className="justify-between">
-              <div className="flex items-center gap-2.5">
-                <Laptop className="size-4 text-muted-foreground" />
-                <span>跟随系统</span>
-              </div>
-              {theme === 'system' && <Check className="size-3.5 text-primary" />}
-            </DropdownMenuItem>
+            <DropdownMenuRadioGroup
+              value={theme}
+              onValueChange={(value) => setTheme(normalizeThemePreference(value))}
+            >
+              <DropdownMenuRadioItem
+                value="light"
+                closeOnClick
+                className="justify-between"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Sun className="size-4 text-amber-500" />
+                  <span>浅色</span>
+                </div>
+                {theme === 'light' && <Check className="size-3.5 text-primary" />}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem
+                value="dark"
+                closeOnClick
+                className="justify-between"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Moon className="size-4 text-sky-400" />
+                  <span>深色</span>
+                </div>
+                {theme === 'dark' && <Check className="size-3.5 text-primary" />}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem
+                value="system"
+                closeOnClick
+                className="justify-between"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Laptop className="size-4 text-muted-foreground" />
+                  <span>跟随系统</span>
+                </div>
+                {theme === 'system' && <Check className="size-3.5 text-primary" />}
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
           </DropdownMenuGroup>
 
           <DropdownMenuSeparator />
 
           <DropdownMenuItem
-            onClick={() => {
-              // 打开确认框时查一次待同步行数：登出会清空本机数据，未同步的内容会永久丢失，
-              // 这件事必须在用户按下「登出」之前说清楚。
-              void countPending()
-                .then(setUnsynced)
-                .catch(() => setUnsynced(0));
-              setConfirming(true);
-            }}
+            onClick={openLogoutConfirm}
             disabled={loggingOut}
             className="text-destructive hover:bg-destructive/10 data-[highlighted]:bg-destructive/10 data-[highlighted]:text-destructive"
           >
@@ -168,13 +197,11 @@ export function AccountMenu({
         open={confirming}
         onOpenChange={setConfirming}
         title="登出？"
-        description={
-          unsynced > 0
-            ? `有 ${unsynced} 条内容尚未同步到服务器，登出会清空本机数据，这些内容将无法恢复。`
-            : '登出会清空本机保存的会话记录，之后需要重新输入邮箱和密码才能继续对话。'
-        }
+        description={logoutWarning(unsynced, countFailed)}
         confirmLabel="登出"
         destructive
+        // 数量还没数清就不许确认：默认文案不能替用户宣布「没有未同步内容」
+        confirmDisabled={unsynced === null && !countFailed}
         onConfirm={() => {
           setConfirming(false);
           void handleLogout();

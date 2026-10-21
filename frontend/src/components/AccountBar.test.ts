@@ -116,6 +116,11 @@ describe('菜单内容只有一份（AccountMenu）', () => {
     expect(html).toContain('深色');
     expect(html).toContain('跟随系统');
     expect(html).toContain('退出登录');
+
+    // 主题是单选菜单项，不只是「带勾的三个普通项」：读屏要能知道当前选中哪个
+    expect(html.match(/role="menuitemradio"/g)).toHaveLength(3);
+    expect(html.match(/aria-checked="true"/g)).toHaveLength(1);
+    expect(html.match(/aria-checked="false"/g)).toHaveLength(2);
   });
 });
 
