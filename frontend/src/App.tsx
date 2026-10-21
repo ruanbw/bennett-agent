@@ -18,6 +18,7 @@ import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
 import { describeConnectionFailure } from './lib/connection-failure';
+import { ModelListShapeError, readModelListResponse } from './lib/models-response';
 import { downloadMarkdownFile } from './lib/export-markdown';
 import { resolveDrawerRestoreTarget, trapTabIndex } from './lib/focus-trap';
 import { notify } from './lib/toast';
@@ -66,13 +67,18 @@ function useModels() {
         const res = await apiFetch('/api/models');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        const data = await res.json();
+        // 外部 JSON 必须先校验再进 state：直接把 `data.models` 塞进去，格式一变
+        // （字符串、对象、字段改名）就会在渲染时抛 `models.map is not a function`，
+        // 整个应用被 ErrorBoundary 兜住——真正坏的其实只是模型菜单。
+        const { models, defaultModel, dropped } = await readModelListResponse(res);
         if (!active) return;
 
-        const models = data.models ?? [];
+        if (dropped > 0) {
+          console.warn(`模型列表里有 ${dropped} 条格式不合法，已忽略`);
+        }
         setState({
           models,
-          defaultModel: data.default_model ?? null,
+          defaultModel,
           modelsError: models.length > 0 ? null : '模型列表为空',
         });
       } catch (err) {
@@ -80,9 +86,14 @@ function useModels() {
         console.error('获取模型列表失败:', err);
         // 浏览器原始报错（Failed to fetch / HTTP 500）不是给用户看的：翻译成能行动的话。
         // 不认识的异常退化为「请求失败，请稍后重试」，菜单里的「重试」按钮仍然可用。
+        // 形状错误单独一句：`describeConnectionFailure` 会把它的内部描述原样透传，
+        // 而「models 字段不是数组（收到 string）」不是给用户看的。
         setState((prev) => ({
           ...prev,
-          modelsError: describeConnectionFailure(err).message,
+          modelsError:
+            err instanceof ModelListShapeError
+              ? '模型列表返回格式异常，请重试；若一直失败请联系管理员'
+              : describeConnectionFailure(err).message,
         }));
       } finally {
         // 只有最新一次拉取才结算：旧请求已被 cleanup 标成过期，它的完成不代表

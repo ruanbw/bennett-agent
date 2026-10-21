@@ -259,6 +259,16 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   失败会把结论写进消息正文并挂到 `run.error` 上——消息区因此出现「重试」按钮，刷新后
   仍在；没收到任何输出时按「本轮失败」收尾，不叠加「回复不完整」。`/api/models` 拉取
   失败也用同一套翻译，菜单空态显示可读原因而不是一句 HTTP 500。
+- **崩溃页要给人话，技术原文折叠收起。** 边界此前直接把 `error.message` 贴在页面上：
+  `Cannot read properties of undefined (reading 'content')`、`Failed to fetch dynamically
+  imported module` 用户读不懂，也不知道该做什么。`lib/error-boundary-text.ts` 的
+  `describeCrash` 按错误名与稳定片段分成三类结论（资源加载失败→刷新载入新版本 /
+  数据与预期不一致→重试 / 通用），技术原文放进默认收起的「查看错误详情」，供反馈时复制。
+- **外部 JSON 先校验再进 state。** `/api/models` 的 `models` 变成字符串或对象时，此前
+  `data.models ?? []` 直接塞进 state，渲染时抛 `models.map is not a function`——整个应用
+  被 ErrorBoundary 兜住，真正坏的只是模型菜单。`lib/models-response.ts` 逐条校验（缺 `id`
+  的条目丢掉并计数），`models` 不是数组时抛 `ModelListShapeError`，App 把它翻成
+  「模型列表返回格式异常，请重试」显示在菜单里，其余界面照常可用。
 - **服务端的失败分类要全部认下来，别只认一种。** `StreamError.code` 有三种取值
   （`context_overflow` / `model_unavailable` / `internal_error`），此前前端只认第一种，
   另外两种被当成「未分类」丢掉，于是「模型已被管理员停用」与「服务端查库失败」在界面上
