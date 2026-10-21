@@ -226,6 +226,11 @@ IPv6（带端口的丢掉端口：`no_proxy` 是按主机绕过代理），并�
 参数无关，重试只是白烧 token 并把这一轮拖到超时。计数在 ContextVar 里按轮次累计
 （`collect_tool_failures()`，由 `chat_service` 在重试循环外层开启），并发请求互不串扰。
 
+**网络/超时不算「工具坏了」。** `is_transient_tool_error` 把 `httpx.TransportError`、
+`asyncio.TimeoutError` 归为暂时性故障：第 1 次回给模型「可以再试一次」（而不是「停止
+调用这个工具」——让模型因为一次抖动放弃一个还能用的工具是错的），达到阈值后照旧升级；
+日志级别也分开，网络抖动 WARNING、工具 bug ERROR，否则线上告警全是上游抖动。
+
 ## 联网搜索工具
 
 `tavily_search` 只在配置了可用的 `TAVILY_API_KEY` 时才装配（占位 Key 视为未配置）。

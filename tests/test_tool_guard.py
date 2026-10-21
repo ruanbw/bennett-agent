@@ -13,9 +13,11 @@ from app.services.agent_factory import build_agent
 from app.tools.guard import (
     ESCALATE_AFTER_FAILURES,
     TOOL_FAILURE_RESULT,
+    TRANSIENT_FAILURE_RESULT,
     ToolErrorIsolation,
     collect_tool_failures,
     failure_result_message,
+    is_transient_tool_error,
     record_tool_failure,
 )
 
@@ -125,3 +127,65 @@ async def _capture_guard_failure(guard, tool_name):
             error=RuntimeError("boom"),
         )
     return excinfo.value.message
+
+
+# ---------------------------------------------------------------------
+# 网络/超时不算「工具坏了」：可以再试一次，但不许无限重试
+# ---------------------------------------------------------------------
+def test_transient_errors_are_recognised():
+    """连接失败/读超时/自己包的 TimeoutError 都是暂时性的。"""
+    import asyncio
+
+    import httpx
+
+    assert is_transient_tool_error(httpx.ConnectError("refused"))
+    assert is_transient_tool_error(httpx.ReadTimeout("slow"))
+    assert is_transient_tool_error(asyncio.TimeoutError())
+    assert is_transient_tool_error(TimeoutError())
+
+
+def test_permanent_errors_are_not_transient():
+    """参数错误、形状错误、自定义异常：重试多少次都一样，按确定性故障处理。"""
+    assert not is_transient_tool_error(ValueError("bad arg"))
+    assert not is_transient_tool_error(KeyError("missing"))
+    assert not is_transient_tool_error(RuntimeError("boom"))
+
+
+def test_transient_first_failure_says_retry_not_give_up():
+    message = failure_result_message("tavily_search", 1, transient=True)
+
+    assert "再试一次" in message
+    assert "不要原样重复调用" not in message
+    assert "失败 1 次" not in message
+
+
+def test_transient_failure_still_escalates_after_the_threshold():
+    """允许再试一次，但不是无限重试：达到阈值后仍然要求停止调用这个工具。"""
+    message = failure_result_message("tavily_search", ESCALATE_AFTER_FAILURES, transient=True)
+
+    assert "tavily_search" in message
+    assert "停止调用" in message
+
+
+def test_permanent_first_failure_keeps_the_old_wording():
+    assert failure_result_message("get_current_time", 1) == TOOL_FAILURE_RESULT
+
+
+async def test_guard_logs_transient_failures_at_warning(caplog):
+    """网络抖动记 WARNING（预期内），工具 bug 记 ERROR——否则线上告警全是上游抖动。"""
+    import asyncio
+    import logging
+
+    guard = ToolErrorIsolation()
+
+    with caplog.at_level(logging.DEBUG, logger="app.tools.guard"), pytest.raises(ToolFailed) as excinfo:
+        await guard.on_tool_execute_error(
+            None,
+            call=ToolCallPart(tool_name="tavily_search", args={}),
+            tool_def=ToolDefinition(name="tavily_search"),
+            args={},
+            error=asyncio.TimeoutError(),
+        )
+
+    assert excinfo.value.message == TRANSIENT_FAILURE_RESULT
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]

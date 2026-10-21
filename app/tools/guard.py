@@ -28,12 +28,14 @@ pydantic-ai 的 `on_tool_execute_error` 在实现上**已经**把 `ModelRetry` �
 （如 `tavily_search`）也不受影响——这里只兜「漏网抛出来」的那一类。
 """
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+import httpx
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
@@ -58,6 +60,30 @@ TOOL_FAILURE_RESULT = (
 #: 参数无关，重试只是白烧 token、把这一轮拖到超时。第二次失败起明确告诉它「这个工具
 #: 本轮已经坏了，停止调用」，并把次数写出来，模型才更容易改走「如实告知用户」。
 ESCALATE_AFTER_FAILURES = 2
+
+#: 升级文案里那句「继续调用它不会成功」只对**确定性**故障成立。
+#: 网络抖动、上游超时、连接被重置都是暂时性的：第二次失败时告诉模型「停止调用这个工具」
+#: 会让它白白放弃一个其实还可用的工具。这类失败可以再试一次，但也不能无限重试。
+TRANSIENT_FAILURE_RESULT = (
+    "工具暂时失败（网络或上游超时），本次没有取得结果。可以再试一次；"
+    "若仍然失败，请换一种方式继续，或如实告知用户该步骤没有完成。"
+)
+
+
+def is_transient_tool_error(error: BaseException) -> bool:
+    """这次失败是不是「过一会儿可能就好了」的类型。
+
+    只认网络/超时这一类：`httpx.TransportError` 覆盖连接失败、读超时、连接重置，
+    `asyncio.TimeoutError` 覆盖自己用 `asyncio.wait_for` 包的调用。其余一概按确定性
+    故障处理——宁可对 bug 强硬（停止调用），也不要把「参数错了」当成网络的锅反复重试。
+
+    注意顺序：`httpx.TimeoutException` 是 `TransportError` 的子类，这里只需判后者；
+    但 `Tavily` 之类自己 catch 后重新抛 `TimeoutError` 的路径也要认，两行都保留。
+    """
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    return isinstance(error, httpx.TransportError)
+
 
 #: 本轮的工具失败计数（工具名 → 次数）。与 `fallback_tracker` 同一个套路：
 #: ContextVar 是 task-local 的，并发请求各持一份；`None` 表示当前上下文没开收集
@@ -85,11 +111,17 @@ def record_tool_failure(tool_name: str) -> int:
     return counts[tool_name]
 
 
-def failure_result_message(tool_name: str, failures: int) -> str:
+def failure_result_message(tool_name: str, failures: int, *, transient: bool = False) -> str:
     """给模型的失败文案：第一次用基础版，之后升级为「停止调用这个工具」。
 
     纯函数，便于单测；`tool_name` 会出现在升级文案里，让模型明确知道该放弃哪个工具。
+
+    `transient=True`（网络/超时）**不升级成「停止调用」**：那种故障过一会儿可能就好了，
+    让模型因此放弃一个还能用的工具是错的。文案改为「可以再试一次」——上限仍是
+    `ESCALATE_AFTER_FAILURES` 次之后转成强硬版，避免无限重试把这一轮拖到超时。
     """
+    if transient and failures < ESCALATE_AFTER_FAILURES:
+        return TRANSIENT_FAILURE_RESULT
     if failures < ESCALATE_AFTER_FAILURES:
         return TOOL_FAILURE_RESULT
     return (
@@ -118,14 +150,19 @@ class ToolErrorIsolation(AbstractCapability[None]):
         # 参数可能是用户数据（搜索词、提问内容），只记工具名与异常。
         # traceback 必须留全，否则工具 bug 会从此变成一条「静默的失败结果」。
         failures = record_tool_failure(call.tool_name)
-        logger.error(
-            "工具执行失败 (tool=%s, tool_call_id=%s, 本轮第 %d 次)",
+        transient = is_transient_tool_error(error)
+        # 网络/超时是预期内的（上游抖动），记 WARNING；其它异常是工具本身的 bug，记 ERROR。
+        # 两者都要 traceback：没有它，工具 bug 会退化成一条「静默的失败结果」。
+        logger.log(
+            logging.WARNING if transient else logging.ERROR,
+            "工具执行失败 (tool=%s, tool_call_id=%s, 本轮第 %d 次, transient=%s)",
             call.tool_name,
             call.tool_call_id,
             failures,
+            transient,
             exc_info=error,
         )
         # 用 ToolFailed 而不是直接 return 字符串：pydantic-ai 会把它落成
         # `ToolReturnPart(outcome='failed')`，模型看到的仍是「失败结果」，而前端能
         # 拿到结构化的 failed 信号——return 普通字符串会被标成 success。
-        raise ToolFailed(failure_result_message(call.tool_name, failures))
+        raise ToolFailed(failure_result_message(call.tool_name, failures, transient=transient))
