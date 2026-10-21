@@ -9,6 +9,7 @@
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';
 import { apiFetch, readErrorDetail } from './api';
 import { ChatRequestError } from './chat-request-error';
+import { parseRetryAfterSeconds } from './retry-after';
 
 const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
@@ -189,13 +190,6 @@ async function requestError(response: Response): Promise<ChatRequestError> {
 
   const detail = await readErrorDetail(response);
   return new ChatRequestError(response.status, detail);
-}
-
-/** `Retry-After` 的秒数形式（HTTP-date 形式网关不用，解析不出就退回「稍后」）。 */
-function parseRetryAfterSeconds(header: string | null): number | null {
-  if (header === null) return null;
-  const seconds = Number.parseInt(header.trim(), 10);
-  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 /**

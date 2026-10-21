@@ -33,6 +33,7 @@ import { db, runSyncInternal } from '../../db';
 import type { MessageRecord, SessionRecord } from '../../types';
 import { notifySessionsChanged } from '../multi-tab';
 import { type PullResponse, type PushResponse, pullRows, pushRows, SyncHttpError } from './api';
+import { retryDelayMs } from '../retry-after';
 import { createTimeoutStreak, isPullTimeout } from './long-poll';
 import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
 
@@ -292,10 +293,14 @@ async function pump(gen: number): Promise<void> {
   }
 }
 
+/** 服务端 `Retry-After` 最多听 5 分钟：异常大的头不能把同步挂死，但 17s 这类要照等。 */
+const RETRY_AFTER_MAX_MS = 5 * 60_000;
+
 function scheduleRetry(gen: number, err: unknown): void {
   if (!isRetryable(err) || !isCurrent(gen)) return;
   if (retryTimer !== null) clearTimeout(retryTimer);
-  const delay = backoffMs;
+  const retryAfterSeconds = err instanceof SyncHttpError ? err.retryAfterSeconds : null;
+  const delay = retryDelayMs(retryAfterSeconds, backoffMs, RETRY_AFTER_MAX_MS);
   backoffMs = Math.min(backoffMs * 2, RETRY_MAX_MS);
   retryTimer = setTimeout(() => {
     retryTimer = null;
@@ -303,7 +308,7 @@ function scheduleRetry(gen: number, err: unknown): void {
   }, delay);
 }
 
-/** 4xx 里除了游标问题都是「请求本身不对」：重试只会一直撞同一面墙。 */
+/** 4xx 里除了游标/限流都是「请求本身不对」：重试只会一直撞同一面墙。 */
 function isRetryable(err: unknown): boolean {
   if (err instanceof SyncHttpError) return !err.isFatal;
   return true;

@@ -9,6 +9,7 @@
  */
 
 import { apiFetch, readErrorDetail } from '../api';
+import { parseRetryAfterSeconds } from '../retry-after';
 import type { ConversationPushRow, ConversationRow, MessagePushRow, MessageRow } from './mapping';
 
 export interface PushRejection {
@@ -51,12 +52,20 @@ export class SyncHttpError extends Error {
   readonly status: number;
   /** 服务端在 detail 末尾附带的机器可读 code（如 `invalid_cursor`）。 */
   readonly code: string | null;
+  /** 429 时服务端要求等待的秒数；其它响应或没有该头时为 null。 */
+  readonly retryAfterSeconds: number | null;
 
-  constructor(message: string, status: number, code: string | null) {
+  constructor(
+    message: string,
+    status: number,
+    code: string | null,
+    retryAfterSeconds: number | null = null,
+  ) {
     super(message);
     this.name = 'SyncHttpError';
     this.status = status;
     this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 
   /** 游标失效：客户端应丢弃游标做一次全量拉取。 */
@@ -64,9 +73,14 @@ export class SyncHttpError extends Error {
     return this.status === 410 || this.code === 'invalid_cursor';
   }
 
-  /** 4xx 且不是游标问题：请求本身有问题，重试不会成功。 */
+  /**
+   * 4xx 且不是游标/限流问题：请求本身有问题，重试不会成功。
+   *
+   * 429 必须排除：限流是暂时状态，服务端还会在 `Retry-After` 里给出恢复时间。
+   * 把它当 fatal 等于一次限流就让同步永久停下，只能等用户手动点重试。
+   */
   get isFatal(): boolean {
-    return this.status >= 400 && this.status < 500 && !this.isCursorReset;
+    return this.status >= 400 && this.status < 500 && this.status !== 429 && !this.isCursorReset;
   }
 }
 
@@ -79,7 +93,12 @@ function extractCode(detail: string): string | null {
 async function toError(response: Response): Promise<SyncHttpError> {
   const detail = await readErrorDetail(response).catch(() => '');
   const message = detail || `同步请求失败（HTTP ${response.status}）`;
-  return new SyncHttpError(message, response.status, extractCode(detail));
+  return new SyncHttpError(
+    message,
+    response.status,
+    extractCode(detail),
+    parseRetryAfterSeconds(response.headers.get('Retry-After')),
+  );
 }
 
 export async function pushRows(body: PushBody): Promise<PushResponse> {
