@@ -338,7 +338,9 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   当前模型被管理员停用后，`/api/models` 会移除它，但会话里仍保存旧 id：列表**非空**
   且查不到当前 id 时，触发器转琥珀色并带警告图标，菜单顶部说明「继续发送会被拒绝」并
   给出一键「切到默认模型」。列表为空（加载中/失败）时**不**下「不可用」结论。这条
-  推导在 `lib/model-selection.ts`，有 vitest 覆盖。
+  推导在 `lib/model-selection.ts`，有 vitest 覆盖。列表支持**首字母跳转**
+  （`findModelByPrefix`）：同名路由常常有好几条，按 ↓ 一路数过去很累；输入法组合中的
+  按键不参与，没有命中就保持当前位置。
 - **上下文进度条的分母是预算上限，不是模型窗口。** 后端判定超限用的是「窗口 - 回答预留」
   再乘安全系数（`app/services/token_budget.py`），32k 窗口可能只剩 19k 放历史。用量事件
   因此带 `context_limit_tokens`，`lib/context-usage.ts` 优先拿它当分母；拿原始窗口当分母会

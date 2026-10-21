@@ -4,7 +4,7 @@ import { AlertCircle, Check, ChevronDown, Cpu, RefreshCw } from 'lucide-react';
 import type { ModelItem } from '@/types';
 import { formatTokens } from '@/lib/context-usage';
 import { modelFullLabel, modelSubtitle } from '@/lib/model-identity';
-import { readModelSelection } from '@/lib/model-selection';
+import { findModelByPrefix, readModelSelection } from '@/lib/model-selection';
 
 export interface ModelSelectorProps {
   models?: ModelItem[];
@@ -103,6 +103,19 @@ export function ModelSelector({
     } else if (event.key === 'End') {
       event.preventDefault();
       setActiveIndex(models.length - 1);
+    } else if (
+      event.key.length === 1 &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      // 首字母跳转：同名路由常常有好几条，键盘用户按 ↓ 一路数过去很累
+      const target = findModelByPrefix(models, event.key, activeIndex);
+      if (target >= 0) {
+        event.preventDefault();
+        setActiveIndex(target);
+      }
     }
   };
 

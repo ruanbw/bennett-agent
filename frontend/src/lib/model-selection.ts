@@ -33,3 +33,36 @@ export function readModelSelection(
     defaultModel: models.find((model) => model.is_default) ?? null,
   };
 }
+
+/**
+ * 模型列表的首字母跳转。
+ *
+ * 同一提供商下经常有多条同名路由（`DeepSeek V4.1 Flash` × 4），键盘用户按 ↓ 一路
+ * 数过去很累。这里按「展示名或第二行标签」的首字母跳转，从当前位置之后找、找不到再
+ * 从列表头开始（与原生 `<select>` 的行为一致）。
+ *
+ * 只接受单个可见字符：方向键、Tab、Enter 由调用方先处理掉；输入法组合中的按键由调用方
+ * 过滤。没有命中时返回 -1，调用方保持当前位置不变。
+ */
+export function findModelByPrefix(
+  models: readonly { name: string; provider?: string | null; model_id?: string | null }[],
+  char: string,
+  fromIndex: number,
+): number {
+  if (models.length === 0) return -1;
+  const needle = char.trim().toLowerCase();
+  if (needle.length !== 1) return -1;
+
+  const matches = (index: number): boolean => {
+    const model = models[index];
+    const haystacks = [model.name, model.provider ?? '', model.model_id ?? ''];
+    return haystacks.some((value) => value.trim().toLowerCase().startsWith(needle));
+  };
+
+  const start = Math.max(0, fromIndex);
+  for (let offset = 1; offset <= models.length; offset += 1) {
+    const index = (start + offset) % models.length;
+    if (matches(index)) return index;
+  }
+  return -1;
+}

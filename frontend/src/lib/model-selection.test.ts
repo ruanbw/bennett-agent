@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { readModelSelection } from './model-selection';
+import { findModelByPrefix, readModelSelection } from './model-selection';
 import type { ModelItem } from '../types';
 
 const model = (id: string, overrides: Partial<ModelItem> = {}): ModelItem => ({
@@ -47,5 +47,33 @@ describe('readModelSelection', () => {
 
   it('没有任何条目带 is_default 时不猜第一条', () => {
     expect(readModelSelection([model('auto/a'), model('auto/b')], 'auto/a').defaultModel).toBeNull();
+  });
+});
+
+describe('findModelByPrefix', () => {
+  const list = [
+    model('auto/a', { name: 'DeepSeek V4.1 Flash' }),
+    model('auto/b', { name: 'Gemini 3.8 Flash' }),
+    model('auto/c', { name: 'Kimi K3' }),
+    model('auto/d', { name: 'DeepSeek R2', provider: '备用网关' }),
+  ];
+
+  it('从当前位置之后找，找不到再从列表头绕回', () => {
+    expect(findModelByPrefix(list, 'g', 0)).toBe(1);
+    expect(findModelByPrefix(list, 'd', 1)).toBe(3);
+    // 当前已在最后一条：从头找
+    expect(findModelByPrefix(list, 'd', 3)).toBe(0);
+  });
+
+  it('大小写不敏感，也能按提供商与上游 model_id 匹配', () => {
+    expect(findModelByPrefix(list, 'K', 0)).toBe(2);
+    expect(findModelByPrefix([model('x', { name: 'X', provider: '备用网关' })], '备', 0)).toBe(0);
+  });
+
+  it('多字符、空白与没有命中都返回 -1，让调用方保持不动', () => {
+    expect(findModelByPrefix(list, 'gz', 0)).toBe(-1);
+    expect(findModelByPrefix(list, ' ', 0)).toBe(-1);
+    expect(findModelByPrefix(list, 'z', 0)).toBe(-1);
+    expect(findModelByPrefix([], 'd', 0)).toBe(-1);
   });
 });
