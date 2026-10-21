@@ -373,3 +373,56 @@ describe('按码点截断（emoji 不会被劈成半个字符）', () => {
     expect(markdown).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 });
+
+describe('本轮用量', () => {
+  const withUsage = (usage: Partial<NonNullable<MessageRecord['usage']>>) =>
+    assistantMessage({
+      usage: {
+        contextTokens: 12_400,
+        contextWindow: 1_000_000,
+        contextLimitTokens: 18_000,
+        outputTokens: 320,
+        cacheReadTokens: 8_000,
+        ...usage,
+      },
+    });
+
+  it('每一轮都写出用量的三个数（存档要能说明「这次为什么这么贵」）', () => {
+    const markdown = build([withUsage({})]);
+
+    expect(markdown).toContain('> 用量：上下文 12k tokens · 输出 320 tokens · 缓存命中 8,000');
+  });
+
+  it('没有缓存命中时不写「缓存命中 0」', () => {
+    const markdown = build([withUsage({ cacheReadTokens: 0 })]);
+
+    expect(markdown).toContain('输出 320 tokens');
+    expect(markdown).not.toContain('缓存命中');
+  });
+
+  it('上游没报用量（老记录）时整行都不出现', () => {
+    const markdown = build([assistantMessage()]);
+
+    expect(markdown).not.toContain('用量：');
+  });
+
+  it('归档头给出输出 token 合计（只有输出是可加的，上下文不是）', () => {
+    const entries: ArchiveEntry[] = [
+      { session, messages: [userMessage(), withUsage({ outputTokens: 320 })] },
+      { session: { ...session, title: '第二个会话' }, messages: [withUsage({ outputTokens: 180 })] },
+    ];
+
+    const markdown = buildArchiveMarkdown(entries, { exportedAt: at(12) });
+
+    expect(markdown).toContain('> 输出 token 合计：500');
+    expect(markdown).not.toContain('上下文 token 合计');
+  });
+
+  it('没有任何用量时不编造合计行', () => {
+    const markdown = buildArchiveMarkdown([{ session, messages: [assistantMessage()] }], {
+      exportedAt: at(12),
+    });
+
+    expect(markdown).not.toContain('输出 token 合计');
+  });
+});

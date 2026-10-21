@@ -18,6 +18,7 @@
  */
 
 import type { MessageRecord, SessionRecord, ToolCallRecord } from '../types';
+import { formatTokens } from './context-usage';
 import { formatToolDuration } from './tool-call-view';
 
 /** 工具参数/结果各自的截断上限（字符）。 */
@@ -159,6 +160,25 @@ function toolCallDuration(toolCall: ToolCallRecord): string {
   return formatToolDuration(elapsed);
 }
 
+/**
+ * 本轮真实用量的那一行；上游没报用量时返回空数组。
+ *
+ * 界面上的用量只保留**最后一轮**（进度条答的是「现在还剩多少」），导出则是给人翻的
+ * 存档：每一轮消耗了多少 token、缓存命中了多少，事后才说得清「这次为什么这么贵」。
+ * 数字口径与界面完全一致（`contextTokens` 是最后一次请求的 prompt，不是整轮累加）。
+ */
+function renderUsage(message: MessageRecord): string[] {
+  const usage = message.usage;
+  if (!usage || !Number.isFinite(usage.contextTokens) || usage.contextTokens <= 0) return [];
+
+  const parts = [
+    `上下文 ${formatTokens(usage.contextTokens)} tokens`,
+    `输出 ${formatTokens(usage.outputTokens ?? 0)} tokens`,
+  ];
+  if (usage.cacheReadTokens > 0) parts.push(`缓存命中 ${formatTokens(usage.cacheReadTokens)}`);
+  return [`> 用量：${parts.join(' · ')}`];
+}
+
 function renderToolCall(toolCall: ToolCallRecord): string[] {
   const outcomeLabel =
     toolCall.outcome === 'failed'
@@ -253,6 +273,9 @@ function renderConversation(
       lines.push(...renderToolCall(toolCall), '');
     }
 
+    const usage = renderUsage(message);
+    if (usage.length > 0) lines.push(...usage, '');
+
     lines.push('---', '');
   }
 
@@ -315,6 +338,12 @@ export function buildArchiveMarkdown(
     `> 会话数：${entries.length}`,
     `> 消息数：${messageCount}`,
   ];
+  // 只有「输出」是可加的：`contextTokens` 是每次请求的 prompt 规模，累加没有意义。
+  const outputTokens = entries.reduce(
+    (sum, entry) => sum + entry.messages.reduce((inner, message) => inner + (message.usage?.outputTokens ?? 0), 0),
+    0,
+  );
+  if (outputTokens > 0) lines.push(`> 输出 token 合计：${formatTokens(outputTokens)}`);
   if (rangeStart !== null && rangeEnd !== null) {
     lines.push(`> 时间范围：${formatTimestamp(rangeStart)} → ${formatTimestamp(rangeEnd)}`);
   }
