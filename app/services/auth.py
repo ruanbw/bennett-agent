@@ -45,6 +45,7 @@ from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.exceptions import InvalidPasswordException
+from fastapi_users_db_sqlalchemy.access_token import SQLAlchemyAccessTokenDatabase
 from sqlalchemy import func, select
 
 from app.config import settings
@@ -196,8 +197,58 @@ async def get_user_manager(user_db: SQLAlchemyUserDatabase = Depends(get_user_db
 
 fastapi_users = FastAPIUsers[User, uuid.UUID](get_user_manager, [auth_backend])
 
-#: 端点网关依赖：未登录或账号已停用 → 401。
-current_active_user = fastapi_users.current_user(active=True)
+
+async def _read_user_from_token(token: str | None) -> User | None:
+    """用**独立短会话**校验 cookie token，返回已加载的用户对象。
+
+    为什么不复用 fastapi-users 的 `current_user` 依赖：它内部依赖 `get_user_db`
+    → `get_async_session`，而后者是请求级 `yield` 依赖，**要到响应结束才释放**。
+    `/api/chat`（SSE）与 `/api/sync/pull`（长轮询）会因此把一条数据库连接占住
+    几十秒到十分钟；连接池（QueuePool 5+10）被占满后，所有需要数据库的请求都会
+    在 30s 后抛 `QueuePool TimeoutError`，全站 5xx（H-01）。
+
+    这里改成「开一个短会话 → 读 token / 用户 → 立即关闭」，用户对象被 detach
+    后属性（id / email / role / hashed_password / is_active…）已经加载，流式期间
+    不再占用任何连接。语义与框架依赖保持一致：无效 token、过期、用户不存在、
+    账号停用都返回 None。
+
+    注意 `DatabaseStrategy.read_token` 会按 `lifetime_seconds` 过滤过期的
+    `access_token` 行——这里必须复用同一策略，而不是自己写一条 `token ==` 的
+    查询，否则过期会话会继续有效。
+    """
+    if not token:
+        return None
+
+    lifetime = settings.session_lifetime_seconds
+    if lifetime <= 0:
+        # 与 get_database_strategy 的防御同源：0 会让框架认为「不检查过期」
+        raise ValueError(
+            f"session_lifetime_seconds 必须 >=60，当前为 {lifetime}：0/负值会让服务端会话永不过期，请设 >=60。"
+        )
+
+    async with async_session_maker() as session:
+        strategy = DatabaseStrategy(
+            SQLAlchemyAccessTokenDatabase(session, AccessToken),
+            lifetime_seconds=lifetime,
+        )
+        user_manager = UserManager(SQLAlchemyUserDatabase(session, User))
+        return await strategy.read_token(token, user_manager)
+
+
+async def current_active_user(request: Request) -> User:
+    """端点认证依赖：从 HttpOnly cookie 解析当前用户；未登录/已停用 → 401。
+
+    **不声明任何数据库 `Depends`**：认证只在一个短会话里完成，流式与长轮询请求
+    不再持有请求级连接（见 `_read_user_from_token` 的说明）。
+    """
+    user = await _read_user_from_token(request.cookies.get(settings.auth_cookie_name))
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
 
 
 async def current_admin(user: User = Depends(current_active_user)) -> User:  # noqa: B008

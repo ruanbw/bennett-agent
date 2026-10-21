@@ -542,3 +542,53 @@ async def test_tombstone_with_equal_client_rev_is_still_applied(env):
     page = await sync_service.pull(env.alice, 0)
     assert [(row.id, row.deleted) for row in page.conversations] == [("sess_a", True)]
     assert page.messages == []
+
+
+async def test_tombstones_have_their_own_quota(env, monkeypatch):
+    """墓碑不能无限增长：否则客户端能靠 deleted=true 的新 id 把磁盘写满（H-02）。"""
+    monkeypatch.setattr(settings, "sync_max_tombstones_per_user", 2)
+
+    result = await sync_service.push(
+        env.alice,
+        PushRequest(conversations=[conversation(f"sess_gone_{index}", deleted=True) for index in range(3)]),
+    )
+
+    assert result.accepted.conversations == 2
+    assert [(row.id, row.reason) for row in result.rejected] == [("sess_gone_2", "quota_exceeded")]
+
+
+async def test_tombstones_do_not_consume_live_conversation_quota(env, monkeypatch):
+    """删掉的会话不该永久占着「会话数」配额，否则删满一次就再也建不了新会话。"""
+    monkeypatch.setattr(settings, "sync_max_conversations_per_user", 1)
+    monkeypatch.setattr(settings, "sync_max_tombstones_per_user", 10)
+
+    first = await sync_service.push(
+        env.alice,
+        PushRequest(conversations=[conversation("sess_gone", deleted=True)]),
+    )
+    second = await sync_service.push(
+        env.alice,
+        PushRequest(conversations=[conversation("sess_live")]),
+    )
+
+    assert first.rejected == []
+    assert second.rejected == []
+    assert second.accepted.conversations == 1
+
+
+async def test_concurrent_pushes_cannot_break_conversation_quota(env, monkeypatch):
+    """先 COUNT 再 INSERT 的配额检查在并发下会双双通过；push 串行锁必须堵住。"""
+    monkeypatch.setattr(settings, "sync_max_conversations_per_user", 1)
+
+    await asyncio.gather(
+        sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_a")])),
+        sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_b")])),
+    )
+
+    async with env.maker() as session:
+        live = await session.scalar(
+            select(func.count())
+            .select_from(Conversation)
+            .where(Conversation.user_id == env.alice, Conversation.deleted.is_(False))
+        )
+    assert live == 1

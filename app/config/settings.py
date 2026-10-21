@@ -192,6 +192,16 @@ class Settings(BaseSettings):
             "因此不会提前掉长长的流式输出。0 表示不限制。"
         ),
     )
+    max_request_body_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1024,
+        description=(
+            "单个 HTTP 请求体的硬上限（字节）。没有这一道时，任意已登录用户（注册开放）"
+            "都能用超大 body 把进程内存打满：Starlette/uvicorn 默认不限制请求体，"
+            "而同步接口的单条 payload 校验发生在 JSON **完整解析之后**。超限返回 413，"
+            "且不会把 body 读进内存。反向代理上建议再配一层更小的值。"
+        ),
+    )
 
     # ------------------------------------------------------------------
     # 上下文窗口预算
@@ -327,7 +337,16 @@ class Settings(BaseSettings):
     sync_max_conversations_per_user: int = Field(
         default=2000,
         ge=1,
-        description=("单用户最多保留的会话行数（含墓碑），防止把服务端当无限存储桶。"),
+        description=("单用户最多保留的**未删除**会话行数，防止把服务端当无限存储桶。"),
+    )
+    sync_max_tombstones_per_user: int = Field(
+        default=5000,
+        ge=1,
+        description=(
+            "单用户最多保留的墓碑（已删除会话）行数。墓碑是删除信号，但此前**不计入任何配额**："
+            "客户端可以无限推送 deleted=true 的新 id，把 SQLite 文件写到磁盘满。"
+            "墓碑超过此上限后，新墓碑按 quota_exceeded 逐行拒绝；已有的删除动作不受影响。"
+        ),
     )
     sync_max_messages_per_conversation: int = Field(
         default=5000,

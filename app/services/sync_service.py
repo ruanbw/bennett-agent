@@ -356,6 +356,34 @@ async def _next_seq(session: AsyncSession, conversation_id: str) -> int:
 # push
 # ---------------------------------------------------------------------
 
+#: 单进程内的 push 串行锁。
+#:
+#: 配额（会话数 / 单会话消息数）是「先 COUNT 再 INSERT」，两个并发请求各自在
+#: 自己的事务里读到同一个旧计数，就会同时突破上限（SQLite 单写者只保证写入
+#: 串行，不保证「读到的计数在写时仍然有效」）。把整个 push 串起来之后，计数与
+#: 插入之间不再有第二个写者。多 worker 部署下这把锁只覆盖单进程，但 SQLite
+#: 文件本身就是单机部署形态（见 app/db.py 的说明）；需要多实例时应换库并用
+#: 数据库约束/行锁实现配额。
+_push_lock: asyncio.Lock | None = None
+_push_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_push_lock() -> asyncio.Lock:
+    """取当前事件循环的 push 锁；loop 变了就重建（测试每个用例一个新 loop）。"""
+    global _push_lock, _push_lock_loop
+    loop = asyncio.get_running_loop()
+    if _push_lock is None or _push_lock_loop is not loop:
+        _push_lock = asyncio.Lock()
+        _push_lock_loop = loop
+    return _push_lock
+
+
+def reset_push_lock() -> None:
+    """清空 push 锁（测试用；与 `reset_notifier` 同口径）。"""
+    global _push_lock, _push_lock_loop
+    _push_lock = None
+    _push_lock_loop = None
+
 
 async def push(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     """批量写入（幂等 upsert），逐行拒绝坏数据。"""
@@ -363,13 +391,14 @@ async def push(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     if total > settings.sync_push_max_rows:
         raise TooManyRows(f"单次最多推送 {settings.sync_push_max_rows} 行，本次 {total} 行")
 
-    try:
-        return await _push_once(user_id, request)
-    except IntegrityError:
-        # 同一批 id 被并发推送（首次推送与重试同时在飞）。upsert 本身幂等，
-        # 整批重放一次就落到已有行上了；第二次还撞就说明是真故障，往上抛。
-        logger.warning("并发推送撞主键，整批重放一次 (user=%s rows=%d)", user_id, total)
-        return await _push_once(user_id, request)
+    async with _get_push_lock():
+        try:
+            return await _push_once(user_id, request)
+        except IntegrityError:
+            # 同一批 id 被并发推送（首次推送与重试同时在飞）。upsert 本身幂等，
+            # 整批重放一次就落到已有行上了；第二次还撞就说明是真故障，往上抛。
+            logger.warning("并发推送撞主键，整批重放一次 (user=%s rows=%d)", user_id, total)
+            return await _push_once(user_id, request)
 
 
 async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
@@ -396,10 +425,27 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         deleted_ids: set[str] = {
             row_id for row_id, meta in existing_conversations.items() if meta.user_id == user_id and meta.deleted
         }
-        quota_left = settings.sync_max_conversations_per_user - int(
-            await session.scalar(select(func.count()).select_from(Conversation).where(Conversation.user_id == user_id))
+        # 活会话与墓碑分开计数：墓碑是删除信号，不占「会话数」配额，但必须有
+        # 自己的上限——此前墓碑完全不计配额，客户端可以无限推送 deleted=true 的
+        # 新 id，把 SQLite 文件写到磁盘满（H-02）。
+        live_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(Conversation)
+                .where(Conversation.user_id == user_id, Conversation.deleted.is_(False))
+            )
             or 0
         )
+        tombstone_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(Conversation)
+                .where(Conversation.user_id == user_id, Conversation.deleted.is_(True))
+            )
+            or 0
+        )
+        quota_left = settings.sync_max_conversations_per_user - live_count
+        tombstone_left = settings.sync_max_tombstones_per_user - tombstone_count
 
         for row in sorted(conversation_rows, key=lambda item: item.id):
             current = existing_conversations.get(row.id)
@@ -434,6 +480,12 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                     rejected.append(_reject("conversation", row.id, "quota_exceeded"))
                     continue
                 quota_left -= 1
+            else:
+                # 新墓碑：占用墓碑配额（已有的删除动作是「更新行」，不在此分支）。
+                if tombstone_left <= 0:
+                    rejected.append(_reject("conversation", row.id, "quota_exceeded"))
+                    continue
+                tombstone_left -= 1
 
             version = await _next_version(session, user_id)
             statement = (

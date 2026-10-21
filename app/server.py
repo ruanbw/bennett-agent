@@ -20,6 +20,7 @@ from app.api.chat import router as api_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
+from app.middleware import MaxBodySizeMiddleware
 from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
@@ -260,6 +261,10 @@ def create_app() -> FastAPI:
             'CORS 配置无效：cors_allow_credentials=True 时 cors_allowed_origins 不能包含 "*"，'
             "浏览器会拒绝该组合；请改成具体来源（如 https://app.example.com）。"
         )
+
+    # 请求体上限必须在 CORS **之前**注册（后注册的更外层），这样 413 响应同样
+    # 带上 CORS 头，跨域前端能读到具体错误。
+    app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
 
     app.add_middleware(
         CORSMiddleware,
