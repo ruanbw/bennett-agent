@@ -19,6 +19,7 @@ import { apiFetch } from './lib/api';
 import { canAccessAdmin, isSuperadmin } from './lib/auth';
 import { describeConnectionFailure } from './lib/connection-failure';
 import { downloadMarkdownFile } from './lib/export-markdown';
+import { resolveDrawerRestoreTarget, trapTabIndex } from './lib/focus-trap';
 import { notify } from './lib/toast';
 import { startSync, stopSync } from './lib/sync/engine';
 import type { ModelItem } from './types';
@@ -154,20 +155,25 @@ export interface AuthenticatedShellProps {
 
 /** 抽屉根节点与首个可聚焦控件的选择器。 */
 const SIDEBAR_DRAWER_SELECTOR = 'aside[aria-label="历史对话侧边栏"]';
+/** 重新展开侧边栏的入口（抽屉收起后出现）：关闭抽屉时把焦点还给这里。 */
+const DRAWER_REOPEN_SELECTOR = 'button[aria-label="展开侧边栏"]';
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * 移动端抽屉的键盘/读屏可达性：打开时把焦点移进抽屉、Esc 关闭。
+ * 移动端抽屉的键盘/读屏可达性：打开时把焦点移进抽屉、Tab 在抽屉内循环、Esc 关闭、
+ * 关闭后把焦点还给打开它的那个按钮。
  *
  * 遮罩只挡住了鼠标，`inert` 也只解决背景不可达；焦点若不跟着进抽屉，键盘用户仍会
- * 停在看不见的背景控件上，读屏也不会知道抽屉出现了。
+ * 停在看不见的背景控件上，读屏也不会知道抽屉出现了。Tab 不循环的话焦点会跑到地址栏
+ * 或背景里被 inert 的控件上，用户以为抽屉坏了。
  */
 function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => void): void {
   useEffect(() => {
     if (!isMobile || !isOpen) return undefined;
 
     const drawer = document.querySelector<HTMLElement>(SIDEBAR_DRAWER_SELECTOR);
+    const previouslyFocused = document.activeElement;
     // 焦点已经在抽屉里就不动它：搜索框的 autoFocus 比本 effect 先执行，胶囊工具栏的
     // 「搜索」就是靠它把光标直接放进入口；无条件聚焦第一个控件会把这个位置抢回去。
     const active = document.activeElement;
@@ -180,15 +186,45 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      // 抽屉里弹出的确认框是 portal 到 body 的独立弹层：焦点在弹层里时 Esc 只该关它
+      // 抽屉里弹出的确认框是 portal 到 body 的独立弹层：焦点在弹层里时
+      // Esc 只该关它，Tab 也该由弹层自己管（它是模态的）
       const target = event.target;
       if (target instanceof Element && target.closest('[role="dialog"], [role="alertdialog"]')) return;
-      onClose();
+
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+
+      if (event.key !== 'Tab' || !drawer) return;
+      const focusable = [...drawer.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+        (element) => element.offsetParent !== null || element === document.activeElement,
+      );
+      const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const next = trapTabIndex(focusable.length, currentIndex, event.shiftKey);
+      if (next === null) return;
+      event.preventDefault();
+      focusable[next]?.focus({ preventScroll: true });
     };
 
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      // 关闭后把焦点还给打开抽屉的按钮：否则焦点落在已被移除的节点上，退回 <body>。
+      //
+      // 必须延后一拍：cleanup 发生在 React 提交之前，此时「展开侧边栏」按钮还没被重新
+      // 渲染出来（打开抽屉时它被卸载了），当场查 DOM 只能拿到 null。
+      setTimeout(() => {
+        // 这一拍之内抽屉又被打开了（快速连点）：焦点已经在抽屉里，不要再抢
+        if (document.querySelector(SIDEBAR_DRAWER_SELECTOR)) return;
+        const toRestore = resolveDrawerRestoreTarget(
+          previouslyFocused,
+          drawer,
+          document.querySelector<HTMLElement>(DRAWER_REOPEN_SELECTOR),
+        );
+        if (toRestore instanceof HTMLElement) toRestore.focus({ preventScroll: true });
+      }, 0);
+    };
   }, [isMobile, isOpen, onClose]);
 }
 
