@@ -43,3 +43,12 @@ export function createTimeoutStreak(threshold: number = MAX_SILENT_PULL_TIMEOUTS
     },
   };
 }
+
+/**
+ * 静默重试的等待时间。
+ *
+ * 长轮询超时后**不能**沿用指数退避：`scheduleRetry` 每失败一次把 backoff 翻倍，
+ * 标签页被冻结几次之后就要等 60s 才发下一次请求——用户切回来看到「已同步」却再也
+ * 不同步了。超时多半只是这一跳卡住，短暂停顿后立刻重试即可。
+ */
+export const PULL_TIMEOUT_RETRY_MS = 2_000;

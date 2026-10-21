@@ -34,8 +34,14 @@ import type { MessageRecord, SessionRecord } from '../../types';
 import { notifySessionsChanged } from '../multi-tab';
 import { type PullResponse, type PushResponse, pullRows, pushRows, SyncHttpError } from './api';
 import { retryDelayMs } from '../retry-after';
-import { createTimeoutStreak, isPullTimeout } from './long-poll';
+import {
+  PULL_TIMEOUT_RETRY_MS,
+  createTimeoutStreak,
+  isPullTimeout,
+} from './long-poll';
 import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
+// 只取运行时函数；status-view 对 engine 只有 `import type`，不构成运行时循环依赖
+import { describeSyncFailure } from './status-view';
 
 /** 本地连续写入（标题占位 → 标题定稿 → 终态落库）合并成一个推送窗口。 */
 const PUSH_DEBOUNCE_MS = 400;
@@ -287,7 +293,8 @@ async function pump(gen: number): Promise<void> {
     */
     if (phase === 'pull' && isPullTimeout(err) && !pullTimeouts.record()) {
       console.info('同步长轮询超时，静默重试（多半是标签页被冻结或网络栈卡顿）');
-      scheduleRetry(gen, err);
+      // 固定短延迟重试：超时不该放大退避，否则冻结几次后同步就慢到形同停摆
+      scheduleTimeoutRetry(gen);
       return;
     }
 
@@ -316,6 +323,21 @@ function scheduleRetry(gen: number, err: unknown): void {
   }, delay);
 }
 
+/**
+ * 长轮询超时后的重试：固定短延迟，**不碰退避**。
+ *
+ * 走 `scheduleRetry` 会让 backoff 每次翻倍：标签页被冻结几次之后就变成 60s 才发一次
+ * 请求，用户切回来看到「已同步」却再也不同步了。超时只是这一跳卡住，短暂停顿即可。
+ */
+function scheduleTimeoutRetry(gen: number): void {
+  if (!isCurrent(gen)) return;
+  if (retryTimer !== null) clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void pump(gen);
+  }, PULL_TIMEOUT_RETRY_MS);
+}
+
 /** 4xx 里除了游标/限流都是「请求本身不对」：重试只会一直撞同一面墙。 */
 function isRetryable(err: unknown): boolean {
   if (err instanceof SyncHttpError) return !err.isFatal;
@@ -323,9 +345,10 @@ function isRetryable(err: unknown): boolean {
 }
 
 function reportError(err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
+  // 面板上显示的是翻译后的中文结论，不是 `err.message`：长轮询超时会拿到英文
+  // 「signal timed out」，HTTP 失败会漏出「HTTP 500」，两种都不告诉用户能做什么。
   console.warn('同步失败:', err);
-  setStatus({ lastError: message });
+  setStatus({ lastError: describeSyncFailure(err) });
 }
 
 // ---------------------------------------------------------------------

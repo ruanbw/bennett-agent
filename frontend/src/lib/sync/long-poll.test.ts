@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAX_SILENT_PULL_TIMEOUTS,
+  PULL_TIMEOUT_RETRY_MS,
   createTimeoutStreak,
   isPullTimeout,
 } from './long-poll';
@@ -49,5 +50,11 @@ describe('createTimeoutStreak', () => {
     streak.reset();
 
     expect(streak.record()).toBe(false);
+  });
+});
+
+describe('超时重试的等待时间', () => {
+  it('固定短延迟，不随退避增长（退避翻倍会让冻结几次后同步慢到形同停摆）', () => {
+    expect(PULL_TIMEOUT_RETRY_MS).toBeLessThanOrEqual(5_000);
   });
 });

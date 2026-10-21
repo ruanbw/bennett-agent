@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import { SyncHttpError } from './api';
 import type { SyncStatus } from './engine';
 import {
   describePendingCount,
   describeSuperseded,
+  describeSyncFailure,
   describeRejectionReason,
   describeSyncStatus,
   formatRelativeTime,
@@ -167,5 +169,25 @@ describe('本机修改被覆盖的说明', () => {
     expect(text).toContain('2 处');
     expect(text).toContain('其他设备');
     expect(text).toContain('以服务器上的为准');
+  });
+});
+
+describe('失败原因翻译', () => {
+  it('长轮询超时不再把英文 err.message 甩给用户', () => {
+    const timeout = new Error('signal timed out');
+    timeout.name = 'TimeoutError';
+
+    const text = describeSyncFailure(timeout);
+    expect(text).toContain('超时');
+    expect(text).not.toContain('signal timed out');
+  });
+
+  it('断网按网络中断说明', () => {
+    expect(describeSyncFailure(new TypeError('Failed to fetch'))).toContain('网络连接中断');
+  });
+
+  it('SyncHttpError 用服务端给的中文 detail（已带原因）', () => {
+    const error = new SyncHttpError('同步请求失败（HTTP 500）', 500, null);
+    expect(describeSyncFailure(error)).toBe('同步请求失败（HTTP 500）');
   });
 });

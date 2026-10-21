@@ -8,6 +8,8 @@
  * 与引擎分开的另一层原因：这里能在 node 环境直接测，不需要 IndexedDB / 网络。
  */
 
+import { describeConnectionFailure } from '../connection-failure';
+import { SyncHttpError } from './api';
 import type { SyncStatus } from './engine';
 
 export type SyncTone = 'idle' | 'ok' | 'busy' | 'warning' | 'error';
@@ -91,6 +93,21 @@ export function formatRelativeTime(at: number | null, now: number): string {
 /** 面板里「上次同步」的 tooltip 用精确时间，避免相对时间含糊。 */
 export function formatAbsoluteTime(at: number): string {
   return new Date(at).toLocaleString('zh-CN', { hour12: false });
+}
+
+/**
+ * 把同步失败翻译成用户能读的一句话。
+ *
+ * 引擎此前直接把 `err.message` 塞进 `status.lastError`：长轮询超时时面板上写的是
+ * 「同步失败 signal timed out」——英文、且不说明「这是超时、可以重试」。HTTP 失败同理，
+ * 会漏出「HTTP 500」这类原始信息。这里复用对话侧的 `describeConnectionFailure`：
+ * 超时 → 「请求超时，请重试」、断网 → 「网络连接中断…」、5xx → 「服务器暂时不可用…」。
+ *
+ * `SyncHttpError` 自带服务端给的 detail（已是中文、且带原因），优先用它。
+ */
+export function describeSyncFailure(err: unknown): string {
+  if (err instanceof SyncHttpError) return err.message;
+  return describeConnectionFailure(err).message;
 }
 
 /**
