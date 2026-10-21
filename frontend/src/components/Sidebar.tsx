@@ -130,8 +130,8 @@ export function Sidebar({
     searchInputRef.current?.focus();
   }, [searchRequest]);
 
-  /** 搜索结果里当前可聚焦的行按钮（DOM 顺序 = 渲染顺序）。 */
-  const resultRowButtons = useCallback((): HTMLElement[] => {
+  /** 当前可聚焦的会话行按钮（DOM 顺序 = 渲染顺序）。 */
+  const sessionRowButtons = useCallback((): HTMLElement[] => {
     const root = asideRef.current;
     if (!root) return [];
     return [...root.querySelectorAll<HTMLElement>('[data-session-id] > button[aria-label]')];
@@ -597,28 +597,40 @@ export function Sidebar({
       <div
         className="flex-1 overflow-y-auto pb-2"
         onKeyDown={(event) => {
-          // 只在「搜索中」接管方向键：普通列表里 ↑↓ 应该滚动，而不是劫持焦点
-          if (!searchOpen) return;
-          const buttons = resultRowButtons();
+          const buttons = sessionRowButtons();
           const index = buttons.indexOf(document.activeElement as HTMLElement);
 
+          // 方向键在会话行之间移动：每行内部还有置顶/导出/删除等多个按钮，逐个 Tab
+          // 过去很长；列表本身按「一行一项」阅读，用方向键更顺手。只在焦点已经落在
+          // 某一行时接管，输入框与悬停操作按钮里的方向键不受影响。
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            if (index === -1) return; // 焦点还在搜索框：由输入框自己处理 ↓
-            // 在第一条结果按 ↑ 回到搜索框：允许键盘用户在输入与结果之间来回，而不用
-            // 先记住「按 Esc 只是回搜索框」这条隐藏规则。
-            if (event.key === 'ArrowUp' && index === 0) {
+            if (index >= 0) {
+              // 搜索中：第一条结果按 ↑ 回到搜索框，键盘用户不必记住「Esc 只是回搜索框」
+              if (event.key === 'ArrowUp' && index === 0 && searchOpen) {
+                event.preventDefault();
+                searchInputRef.current?.focus();
+                return;
+              }
+              const next = buttons[index + (event.key === 'ArrowDown' ? 1 : -1)];
+              if (!next) return; // 到了列表两端：交回浏览器（继续滚动页面）
               event.preventDefault();
-              searchInputRef.current?.focus();
+              next.focus();
               return;
             }
+            if (!searchOpen) return; // 焦点不在行上（例如在分组标题里）：不劫持
+            return; // 搜索框自己处理 ↓
+          }
+
+          // Home / End 跳到列表两端：会话多时省掉一路方向键
+          if ((event.key === 'Home' || event.key === 'End') && index >= 0 && buttons.length > 0) {
             event.preventDefault();
-            buttons[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
+            buttons[event.key === 'Home' ? 0 : buttons.length - 1]?.focus();
             return;
           }
 
           // 在结果里按 Esc：先退回搜索框（搜索仍然开着），再按一次才关闭搜索。
           // 直接关闭会让输入框立刻卸载，焦点掉到 body 上——两段式 Esc 更符合预期。
-          if (event.key === 'Escape' && index >= 0) {
+          if (event.key === 'Escape' && searchOpen && index >= 0) {
             event.preventDefault();
             searchInputRef.current?.focus();
           }
