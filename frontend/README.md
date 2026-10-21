@@ -210,7 +210,10 @@ src/
   仍然成立的状态留在页面内联条上（会自动消失的提示会让人错过）；一次动作的结果
   （导出完成、新建会话失败）没有持久位置可放，才用 `lib/toast.ts` + `Toaster`。
   同语气同文案去重并重置倒计时、最多 3 条、错误停 8s（成功 4s）；可达性上逐条用
-  `role="status"`（错误才用 `role="alert"`），容器不设 `aria-live`。
+  `role="status"`（错误才用 `role="alert"`），容器不设 `aria-live`。悬停或用键盘把焦点
+  移进提示条时暂停倒计时（`pauseToast` / `resumeToast`，按剩余时间续跑），否则错误
+  提示读到一半就消失。提示条固定在**顶栏下方右侧**：底部右下角是发送按钮，toast
+  盖上去会既挡视线又挡点击；顶部居中又会压住可编辑标题。
 - **请求没完成时，用户要看到「为什么」和「下一步」。** fetch 的原始拒绝信息因浏览器而异
   （Chrome「Failed to fetch」、Safari「Load failed」），直接拼出来既不是中文也不可行动。
   `lib/connection-failure.ts` 按结构化字段分类：5xx / 超时 / 断网可重试，4xx 不承诺

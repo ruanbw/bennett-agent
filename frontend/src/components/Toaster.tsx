@@ -1,5 +1,5 @@
 /**
- * 提示条渲染层：固定视口底部，不拦截点击（除了每条自己的关闭按钮）。
+ * 提示条渲染层：固定视口顶部右侧（顶栏下方），不拦截点击（除了每条自己的关闭按钮）。
  *
  * 可达性：
  * - 绝不用 `role="alert"` 的容器包住所有提示——那会把每条都当紧急打断。
@@ -12,7 +12,7 @@ import { CheckCircle2, CircleAlert, Info, X } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
 
 import { cn } from '../lib/utils';
-import { dismissToast, getToasts, subscribeToasts, type ToastTone } from '../lib/toast';
+import { dismissToast, getToasts, pauseToast, resumeToast, subscribeToasts, type ToastTone } from '../lib/toast';
 
 const TONE_STYLES: Record<ToastTone, { icon: typeof Info; className: string }> = {
   success: {
@@ -35,8 +35,11 @@ export function Toaster() {
 
   return (
     <div
-      // pointer-events-none：容器铺满底部但不挡操作；每条自己恢复可点
-      className="pointer-events-none fixed inset-x-0 bottom-4 z-[60] flex flex-col items-center gap-2 px-4 sm:inset-x-auto sm:right-4 sm:items-end"
+      // 顶栏下方右侧：底部右下角是发送按钮，toast 盖住它既挡视线也挡点击；顶部居中
+      // 又会压住可编辑标题。右侧在聊天页没有常驻控件，且管理员页的「新增」按钮在
+      // 它下方，不会被短暂遮挡。
+      // pointer-events-none：容器不挡操作；每条自己恢复可点。
+      className="pointer-events-none fixed inset-x-0 top-16 z-[60] flex flex-col items-end gap-2 px-4"
     >
       {toasts.map((toast) => {
         const { icon: Icon, className } = TONE_STYLES[toast.tone];
@@ -44,6 +47,11 @@ export function Toaster() {
           <div
             key={toast.id}
             role={toast.tone === 'error' ? 'alert' : 'status'}
+            // 悬停 / 键盘焦点进入时暂停倒计时：错误提示只有 8s，读到一半消失等于没提示。
+            onMouseEnter={() => pauseToast(toast.id)}
+            onMouseLeave={() => resumeToast(toast.id)}
+            onFocusCapture={() => pauseToast(toast.id)}
+            onBlurCapture={() => resumeToast(toast.id)}
             className={cn(
               'pointer-events-auto flex w-full max-w-sm items-start gap-2 rounded-xl border px-3 py-2 text-xs shadow-lg',
               className,
@@ -54,7 +62,7 @@ export function Toaster() {
             <button
               type="button"
               onClick={() => dismissToast(toast.id)}
-              className="shrink-0 cursor-pointer opacity-60 transition hover:opacity-100"
+              className="shrink-0 cursor-pointer rounded opacity-60 transition hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current"
               aria-label="关闭提示"
             >
               <X className="size-3.5" aria-hidden="true" />

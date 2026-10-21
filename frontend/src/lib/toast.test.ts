@@ -14,6 +14,8 @@ import {
   dismissToast,
   getToasts,
   notify,
+  pauseToast,
+  resumeToast,
   subscribeToasts,
 } from './toast';
 
@@ -120,6 +122,52 @@ describe('dismiss', () => {
     expect(getToasts()).toHaveLength(0);
 
     // 计时器已取消：推进时间不会再来一次空通知（也不会抛错）
+    vi.advanceTimersByTime(TOAST_DURATION_MS.error * 2);
+    expect(getToasts()).toHaveLength(0);
+  });
+});
+
+describe('暂停与恢复', () => {
+  it('悬停时暂停：读再久也不消失，离开后只补剩余时间', () => {
+    const id = notify('error', '失败');
+    vi.advanceTimersByTime(3_000);
+
+    pauseToast(id);
+    vi.advanceTimersByTime(60_000);
+    expect(getToasts()).toHaveLength(1);
+
+    resumeToast(id);
+    vi.advanceTimersByTime(TOAST_DURATION_MS.error - 3_000 - 1);
+    expect(getToasts()).toHaveLength(1);
+    vi.advanceTimersByTime(2);
+    expect(getToasts()).toHaveLength(0);
+  });
+
+  it('重复 pause/resume 不会叠加或重置成满时长', () => {
+    const id = notify('info', '一');
+    vi.advanceTimersByTime(2_000);
+
+    pauseToast(id);
+    pauseToast(id);
+    vi.advanceTimersByTime(60_000);
+    resumeToast(id);
+    resumeToast(id);
+
+    vi.advanceTimersByTime(TOAST_DURATION_MS.info - 2_000 - 1);
+    expect(getToasts()).toHaveLength(1);
+    vi.advanceTimersByTime(2);
+    expect(getToasts()).toHaveLength(0);
+  });
+
+  it('暂停期间关闭后不会留下计时器', () => {
+    const id = notify('error', '失败');
+    pauseToast(id);
+
+    dismissToast(id);
+    expect(getToasts()).toHaveLength(0);
+
+    pauseToast(id);
+    resumeToast(id);
     vi.advanceTimersByTime(TOAST_DURATION_MS.error * 2);
     expect(getToasts()).toHaveLength(0);
   });

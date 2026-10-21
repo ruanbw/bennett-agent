@@ -34,26 +34,38 @@ export const TOAST_DURATION_MS: Record<ToastTone, number> = {
 let sequence = 0;
 let toasts: ToastItem[] = [];
 const listeners = new Set<() => void>();
-const timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+interface ToastTimer {
+  tone: ToastTone;
+  /** 暂停时为 null，避免误 clear 一个已经结束的句柄。 */
+  handle: ReturnType<typeof setTimeout> | null;
+  deadline: number;
+  remaining: number;
+}
+
+const timers = new Map<string, ToastTimer>();
 
 function emit(): void {
   for (const listener of [...listeners]) listener();
 }
 
 function clearTimer(id: string): void {
-  const timer = timers.get(id);
-  if (timer !== undefined) {
-    clearTimeout(timer);
-    timers.delete(id);
-  }
+  const entry = timers.get(id);
+  if (!entry) return;
+  if (entry.handle !== null) clearTimeout(entry.handle);
+  timers.delete(id);
 }
 
-function scheduleDismiss(id: string, tone: ToastTone): void {
+function scheduleDismiss(id: string, tone: ToastTone, duration = TOAST_DURATION_MS[tone]): void {
   clearTimer(id);
-  timers.set(
-    id,
-    setTimeout(() => dismissToast(id), TOAST_DURATION_MS[tone]),
-  );
+  const wait = Math.max(0, duration);
+  const entry: ToastTimer = {
+    tone,
+    deadline: Date.now() + wait,
+    remaining: wait,
+    handle: setTimeout(() => dismissToast(id), wait),
+  };
+  timers.set(id, entry);
 }
 
 function setToasts(next: ToastItem[]): void {
@@ -72,6 +84,22 @@ export function subscribeToasts(listener: () => void): () => void {
 /** 当前提示（引用只在变化时更新，可直接作为快照）。 */
 export function getToasts(): ToastItem[] {
   return toasts;
+}
+
+/** 暂停一条提示的倒计时（鼠标悬停或键盘焦点进入时调用）。 */
+export function pauseToast(id: string): void {
+  const entry = timers.get(id);
+  if (!entry || entry.handle === null) return;
+  clearTimeout(entry.handle);
+  entry.handle = null;
+  entry.remaining = Math.max(0, entry.deadline - Date.now());
+}
+
+/** 恢复倒计时：从暂停时剩下的时间继续，不重新给满时长。 */
+export function resumeToast(id: string): void {
+  const entry = timers.get(id);
+  if (!entry || entry.handle !== null) return;
+  scheduleDismiss(id, entry.tone, entry.remaining);
 }
 
 /**
