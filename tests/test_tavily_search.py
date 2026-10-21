@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from app.config import settings
+from app.tools.tavily_cache import reset_search_cache
 from app.tools.tavily_search import (
     MAX_ITEM_CHARS,
     MAX_QUERY_CHARS,
@@ -31,6 +32,14 @@ from app.tools.tavily_search import (
 # `app/tools/__init__.py` 里 re-export 了一个**同名函数**，会把子模块名遮蔽掉，
 # 那样拿到的是函数而不是模块。
 module = importlib.import_module("app.tools.tavily_search")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_cache():
+    """搜索结果缓存是进程级单例：不清空的话，前一个用例的结果会被后一个用例命中。"""
+    reset_search_cache()
+    yield
+    reset_search_cache()
 
 
 class FakeResponse:
@@ -559,3 +568,63 @@ async def test_error_messages_echo_the_normalised_query(fake_http):
     result = await tavily_search(None, "多行\n关键词")
 
     assert "多行 关键词" in result
+
+
+# ---------------------------------------------------------------------
+# 结果缓存：省配额，但不把失败或过时结果当成事实
+# ---------------------------------------------------------------------
+_OK_PAYLOAD = {
+    "answer": "Python 3.13 于 2024 年发布。",
+    "results": [{"title": "Python 3.13", "url": "https://example.com/a", "content": "新特性：自由线程"}],
+}
+
+
+async def test_same_query_twice_hits_the_cache(fake_http):
+    """同一轮里模型换个措辞再问一次很常见：第二次不该再花一次配额。"""
+    client = fake_http(response=FakeResponse(payload=_OK_PAYLOAD))
+
+    first = await tavily_search(None, "Python 3.13 新特性")
+    second = await tavily_search(None, "python 3.13 新特性 ")  # 大小写/空白不影响命中
+
+    assert first == second
+    assert len(client.calls) == 1
+    assert "Python 3.13" in first
+
+
+async def test_cache_is_keyed_by_max_results(fake_http):
+    client = fake_http(response=FakeResponse(payload=_OK_PAYLOAD))
+
+    await tavily_search(None, "python", max_results=5)
+    await tavily_search(None, "python", max_results=10)
+
+    assert len(client.calls) == 2
+    assert [call[1]["json"]["max_results"] for call in client.calls] == [5, 10]
+
+
+async def test_different_queries_are_not_shared(fake_http):
+    client = fake_http(response=FakeResponse(payload=_OK_PAYLOAD))
+
+    await tavily_search(None, "python 3.13")
+    await tavily_search(None, "rust 1.80")
+
+    assert len(client.calls) == 2
+
+
+async def test_failed_search_is_not_cached(fake_http):
+    """失败往往是瞬时的：缓存它等于把一次抖动固定成十分钟的「搜不到」。"""
+    # 第一次调用的两次尝试都超时（工具自身重试 1 次），第二次调用拿到正常结果
+    client = fake_http(
+        outcomes=[
+            httpx.TimeoutException("slow"),
+            httpx.TimeoutException("slow"),
+            FakeResponse(payload=_OK_PAYLOAD),
+        ],
+    )
+
+    first = await tavily_search(None, "python")
+    second = await tavily_search(None, "python")
+
+    assert "超时" in first
+    assert "Python 3.13" in second
+    # 失败的两次没有写进缓存，第三次才真的打到上游
+    assert len(client.calls) == 3

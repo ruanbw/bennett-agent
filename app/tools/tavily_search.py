@@ -9,6 +9,7 @@ from pydantic_ai import RunContext
 
 from app.config import is_usable_api_key, settings
 from app.services.http_client import get_http_client
+from app.tools.tavily_cache import search_cache
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,14 @@ async def tavily_search(
         "include_answer": True,
     }
 
+    # 同一轮里模型换个措辞再问一次、或用户重问同一个问题，都不必再花一次配额。
+    # 只缓存成功结果（见 tavily_cache 的模块说明）。
+    clipped_results = max(MAX_RESULTS_FLOOR, min(safe_max_results, MAX_RESULTS_CEILING))
+    cached = search_cache.get(query, clipped_results)
+    if cached is not None:
+        logger.debug("Tavily 搜索命中缓存 (query=%r, max_results=%d)", query, clipped_results)
+        return cached
+
     try:
         response = await _post_with_retry(payload)
     except httpx.TimeoutException:
@@ -148,7 +157,9 @@ async def tavily_search(
         return f"联网搜索响应解析失败 (HTTP {response.status_code})。上游错误信息: {_safe_body(response.text)}"
 
     try:
-        return _format_results(json_data, query)
+        formatted = _format_results(json_data, query)
+        search_cache.put(query, clipped_results, formatted)
+        return formatted
     except Exception:
         # 形状防御之后的最后一道：格式化无论如何不该把异常抛出工具——逃出去会把
         # 整轮回答变成 StreamError。
