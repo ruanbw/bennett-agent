@@ -335,6 +335,12 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   切换登录/注册模式时复位为隐藏——前一屏看过的密码不该在新表单里继续明文显示。
   邮箱字段加 `autoCapitalize=none` / `autoCorrect=off` / `spellCheck=false`，避免移动端
   把邮箱首字母自动大写。
+- **`aria-invalid` 只标「本地能确定错在哪个字段」的那个框。** 此前两个输入框共用一句
+  `aria-invalid={密码太短 || 服务端报错}`：服务端说「该邮箱已注册」时密码框也被标成无效，
+  读屏用户会被指到一个其实没问题的字段。现在 `lib/auth-form.ts:readAuthFieldState` 分开
+  推导——密码太短（仅注册模式）才让密码框 `aria-invalid`；服务端错误是对整个表单的结论，
+  只用 `aria-describedby="auth-error"` 关联到两个框；「至少 8 个字符」的提示 id 只挂
+  密码框，不挂邮箱。有 vitest 覆盖。
 - **模型菜单要标出上下文窗口，并说明「默认」与「已不可用」。** 上下文用满时的提示就是
   「换一个窗口更大的模型」，所以候选列表必须能直接看到窗口大小（`/api/models` 的
   `context_window`，网关没报时隐藏这个徽标，不要编造）。徽标复用 `formatTokens`

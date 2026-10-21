@@ -51,4 +51,14 @@ describe('LoginPage', () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain('邮箱或密码错误');
   });
+
+  it('服务端错误不把输入框标成 aria-invalid，只用 describedby 关联', () => {
+    const html = render({ error: '该邮箱已注册' });
+
+    // 服务端只给了一句结论，不能冒充「邮箱/密码哪个字段填错了」。
+    // 注意 Input 的 class 里带 `aria-invalid:` 变体，只能断言属性本身。
+    expect(html).not.toContain('aria-invalid="true"');
+    expect(html).toContain('aria-describedby="auth-error"');
+    expect(html).toContain('id="auth-error"');
+  });
 });

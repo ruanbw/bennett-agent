@@ -13,6 +13,7 @@ import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 
 import { MIN_PASSWORD_LENGTH, modeAfterRegister, type RegisterOutcome } from '../lib/auth';
+import { readAuthFieldState } from '../lib/auth-form';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -40,7 +41,15 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
   const isRegister = mode === 'register';
 
   // 密码长度本地先拦一道，免得用户要等一次往返才知道太短；真正的校验在服务端。
-  const tooShort = isRegister && password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
+  // 字段级状态（哪个框该被标红、要不要挂 describedby）单独推导：服务端错误是对整个
+  // 表单的结论，不能顺手把密码框也标成无效。
+  const fields = readAuthFieldState({
+    mode,
+    password,
+    error,
+    minPasswordLength: MIN_PASSWORD_LENGTH,
+  });
+  const tooShort = fields.passwordInvalid;
   const canSubmit = email.trim().length > 0 && password.length > 0 && !tooShort && !pending;
 
   const handleSubmit = useCallback(
@@ -67,8 +76,6 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
     // 切换模式后上一条错误（如「邮箱已注册」）不再适用，留着会误导
     onClearError();
   }, [onClearError]);
-
-  const invalid = tooShort || Boolean(error);
 
   // 高度交给 .app-shell（100dvh）：iOS Safari 的 100vh 是含地址栏的大视口，会把底部内容顶出可视区
   return (
@@ -102,7 +109,8 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
               required
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              aria-invalid={invalid || undefined}
+              aria-invalid={fields.emailInvalid || undefined}
+              aria-describedby={fields.emailDescribedBy || undefined}
             />
           </div>
 
@@ -122,7 +130,8 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
                 required
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                aria-invalid={invalid || undefined}
+                aria-invalid={fields.passwordInvalid || undefined}
+                aria-describedby={fields.passwordDescribedBy || undefined}
                 className="pr-10"
               />
               <button
@@ -146,7 +155,10 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
               </button>
             </div>
             {isRegister ? (
-              <p className={tooShort ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+              <p
+                id="auth-password-hint"
+                className={tooShort ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}
+              >
                 至少 {MIN_PASSWORD_LENGTH} 个字符
               </p>
             ) : null}
@@ -160,7 +172,7 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
 
           {/* role=alert：错误是异步出现的，屏幕阅读器需要被主动告知 */}
           {error ? (
-            <p role="alert" className="text-sm text-destructive">
+            <p id="auth-error" role="alert" className="text-sm text-destructive">
               {error}
             </p>
           ) : null}
