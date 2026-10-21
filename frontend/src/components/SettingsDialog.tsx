@@ -93,10 +93,10 @@ export function SettingsPanel({
     <div className="space-y-5 py-1">
       {/* 账号信息区块 */}
       <div className="space-y-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <User className="size-3.5" />
           <span>当前账号</span>
-        </h4>
+        </h3>
         <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-muted/40 p-3">
           <Avatar size="default" className="border border-border/80">
             <AvatarFallback className="bg-primary/10 text-primary font-medium text-xs">
@@ -121,10 +121,10 @@ export function SettingsPanel({
 
       {/* 外观设置区块 */}
       <div className="space-y-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <Sun className="size-3.5" />
           <span>外观与主题</span>
-        </h4>
+        </h3>
         <div role="group" aria-label="外观主题" className="grid grid-cols-3 gap-2">
           {THEME_OPTIONS.map(({ value, label, description, Icon }) => {
             const isActive = theme === value;
@@ -168,19 +168,19 @@ export function SettingsPanel({
 
       {/* 修改密码：成功会让所有设备下线，由 App 统一退回登录页 */}
       <div className="space-y-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <KeyRound className="size-3.5" />
           <span>修改密码</span>
-        </h4>
+        </h3>
         <PasswordChangeForm onPasswordChanged={onPasswordChanged} />
       </div>
 
       {/* 本机数据区块：数据默认只存浏览器，用户应该能知道自己存了多少 */}
       <div className="space-y-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <HardDrive className="size-3.5" />
           <span>本机数据</span>
-        </h4>
+        </h3>
         <div className="rounded-lg border border-border/70 bg-muted/40 p-3 space-y-1.5 text-xs">
           <div className="flex justify-between items-center">
             <span className="text-muted-foreground">会话</span>
@@ -211,10 +211,10 @@ export function SettingsPanel({
 
       {/* 关于 Bennett Agent 区块 */}
       <div className="space-y-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <Info className="size-3.5" />
           <span>关于系统</span>
-        </h4>
+        </h3>
         <div className="rounded-lg border border-border/70 bg-muted/40 p-3 space-y-1.5 text-xs">
           <div className="flex justify-between items-center">
             <span className="text-muted-foreground">应用版本</span>
@@ -251,19 +251,26 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto">
+      {/*
+        内容比一屏高：此前整块 `overflow-y-auto`，滚动时标题和「完成」一起滚走——
+        在小窗口里想关掉它得先滚到底。改成「头尾固定、只有中间滚动」，
+        `min-h-0` 是让 flex 子项真的能被压缩并出现滚动条（默认 min-height:auto 会撑开）。
+      */}
+      <DialogContent className="sm:max-w-md max-h-[85vh] flex flex-col gap-3 overflow-hidden">
         <DialogHeader>
           <DialogTitle>设置</DialogTitle>
-          <DialogDescription>管理你的外观偏好与账号信息</DialogDescription>
+          <DialogDescription>账号、外观、本机数据与系统信息</DialogDescription>
         </DialogHeader>
 
-        <SettingsPanel
-          userEmail={userEmail}
-          userRole={userRole}
-          open={open}
-          capabilities={capabilities}
-          onPasswordChanged={onPasswordChanged}
-        />
+        <div className="-mr-1 min-h-0 flex-1 overflow-y-auto pr-1">
+          <SettingsPanel
+            userEmail={userEmail}
+            userRole={userRole}
+            open={open}
+            capabilities={capabilities}
+            onPasswordChanged={onPasswordChanged}
+          />
+        </div>
 
         <DialogFooter>
           <Button variant="default" size="sm" onClick={() => onOpenChange(false)}>

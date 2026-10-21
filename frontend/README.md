@@ -307,6 +307,11 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   （`formatStorageUsage`），用户才知道离上限多远；拿不到 quota 就只显示占用，不编造
   百分比；usage 超过 quota 时夹到 100%。设置面板挂在 `App` 而不是 `AccountBar`：
   侧边栏收起时 AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
+  面板内容比一屏高，弹层改成「头尾固定、只有中间滚动」：此前整块 `overflow-y-auto`，
+  滚动时标题与「完成」一起滚走，小窗口里想关掉它得先滚到底。弹层是 `flex flex-col`
+  + `max-h-[85vh]`，中间层 `min-h-0 flex-1 overflow-y-auto`（`min-h-0` 不能省，默认
+  `min-height:auto` 会把 flex 子项撑开、滚动条不出现）。区块标题是 `h3`：对话框标题是
+  `h2`，此前用 `h4` 会让读屏的标题导航出现断层。
 - **改密 = 踢掉所有会话。** 设置面板的「修改密码」调用 `POST /api/auth/change-password`
   （验当前密码 → 新密码走与注册同一条 `validate_password` → `UserManager.update` 触发
   `on_after_update` 删掉该账号全部 access_token）。成功后客户端**不能**再假装已登录：
