@@ -29,6 +29,9 @@ pydantic-ai 的 `on_tool_execute_error` 在实现上**已经**把 `ModelRetry` �
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from pydantic_ai import RunContext
@@ -49,6 +52,52 @@ TOOL_FAILURE_RESULT = (
     "不要原样重复调用同一个工具；请换一种方式继续，或如实告知用户该步骤失败。"
 )
 
+#: 同一轮里同一个工具失败到这个次数后换一条**更强硬的**文案。
+#:
+#: 一句「不要原样重复调用」不足以让模型停手：它常换一组参数再试，而工具里的 bug 与
+#: 参数无关，重试只是白烧 token、把这一轮拖到超时。第二次失败起明确告诉它「这个工具
+#: 本轮已经坏了，停止调用」，并把次数写出来，模型才更容易改走「如实告知用户」。
+ESCALATE_AFTER_FAILURES = 2
+
+#: 本轮的工具失败计数（工具名 → 次数）。与 `fallback_tracker` 同一个套路：
+#: ContextVar 是 task-local 的，并发请求各持一份；`None` 表示当前上下文没开收集
+#: （CLI 直接跑 Agent、单测直接调钩子），此时不做升级，只返回基础文案。
+_failure_counts: ContextVar[dict[str, int] | None] = ContextVar("tool_failure_counts", default=None)
+
+
+@contextmanager
+def collect_tool_failures() -> Iterator[dict[str, int]]:
+    """在一轮对话的上下文里开始统计工具失败；退出时复位。"""
+    counts: dict[str, int] = {}
+    token = _failure_counts.set(counts)
+    try:
+        yield counts
+    finally:
+        _failure_counts.reset(token)
+
+
+def record_tool_failure(tool_name: str) -> int:
+    """记一次失败并返回该工具**本轮累计**失败次数；没有收集器时返回 1。"""
+    counts = _failure_counts.get()
+    if counts is None:
+        return 1
+    counts[tool_name] = counts.get(tool_name, 0) + 1
+    return counts[tool_name]
+
+
+def failure_result_message(tool_name: str, failures: int) -> str:
+    """给模型的失败文案：第一次用基础版，之后升级为「停止调用这个工具」。
+
+    纯函数，便于单测；`tool_name` 会出现在升级文案里，让模型明确知道该放弃哪个工具。
+    """
+    if failures < ESCALATE_AFTER_FAILURES:
+        return TOOL_FAILURE_RESULT
+    return (
+        f"工具 {tool_name} 本轮已连续失败 {failures} 次（内部错误），继续调用它不会成功。"
+        "请立即停止调用这个工具，改用其它方式完成用户的请求；若做不到，就直接向用户说明"
+        "这一步没能完成以及原因，不要编造结果。"
+    )
+
 
 class ToolErrorIsolation(AbstractCapability[None]):
     """把工具的意外异常转成「失败结果」，让本轮对话继续。"""
@@ -68,13 +117,15 @@ class ToolErrorIsolation(AbstractCapability[None]):
 
         # 参数可能是用户数据（搜索词、提问内容），只记工具名与异常。
         # traceback 必须留全，否则工具 bug 会从此变成一条「静默的失败结果」。
+        failures = record_tool_failure(call.tool_name)
         logger.error(
-            "工具执行失败 (tool=%s, tool_call_id=%s)",
+            "工具执行失败 (tool=%s, tool_call_id=%s, 本轮第 %d 次)",
             call.tool_name,
             call.tool_call_id,
+            failures,
             exc_info=error,
         )
         # 用 ToolFailed 而不是直接 return 字符串：pydantic-ai 会把它落成
         # `ToolReturnPart(outcome='failed')`，模型看到的仍是「失败结果」，而前端能
         # 拿到结构化的 failed 信号——return 普通字符串会被标成 success。
-        raise ToolFailed(TOOL_FAILURE_RESULT)
+        raise ToolFailed(failure_result_message(call.tool_name, failures))

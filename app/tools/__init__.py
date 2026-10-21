@@ -15,7 +15,13 @@ pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 
 from app.config import is_usable_api_key, settings
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
 from app.tools.current_time import get_current_time as _raw_get_current_time
-from app.tools.guard import TOOL_FAILURE_RESULT, ToolErrorIsolation
+from app.tools.guard import (
+    ESCALATE_AFTER_FAILURES,
+    TOOL_FAILURE_RESULT,
+    ToolErrorIsolation,
+    collect_tool_failures,
+    failure_result_message,
+)
 from app.tools.registry import (
     ManagedTool,
     RiskLevel,
@@ -100,7 +106,10 @@ __all__ = [
     "ALL_TOOLS",
     "ManagedTool",
     "RiskLevel",
+    "ESCALATE_AFTER_FAILURES",
     "TOOL_FAILURE_RESULT",
+    "collect_tool_failures",
+    "failure_result_message",
     "ToolCategory",
     "ToolErrorIsolation",
     "ToolRegistry",

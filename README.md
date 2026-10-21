@@ -148,6 +148,18 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 工具异常隔离
+
+工具是外部边界（网络、第三方 SDK、上游返回的形状）：`app/tools/guard.py` 用 pydantic-ai
+的 `on_tool_execute_error` 把意外异常降级成一条 `outcome=failed` 的工具结果，整轮继续，
+模型可以换工具或如实告知用户；异常原文只进日志。`ModelRetry` 是控制流，原样上抛
+（重试语义的第二道保险）。
+
+同一个工具在一轮里失败多次时文案会升级：第 2 次起明确写「本轮已连续失败 N 次，请立即
+停止调用这个工具」——只说「不要原样重复调用」时模型常换个参数再试，而工具里的 bug 与
+参数无关，重试只是白烧 token 并把这一轮拖到超时。计数在 ContextVar 里按轮次累计
+（`collect_tool_failures()`，由 `chat_service` 在重试循环外层开启），并发请求互不串扰。
+
 ## 联网搜索工具
 
 `tavily_search` 只在配置了可用的 `TAVILY_API_KEY` 时才装配（占位 Key 视为未配置）。

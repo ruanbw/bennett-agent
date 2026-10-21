@@ -57,6 +57,7 @@ from app.services.upstream_errors import (
 )
 from app.services.usage import extract_turn_usage
 from app.tools.ask_user_clarification import normalize_clarification
+from app.tools.guard import collect_tool_failures
 
 logger = logging.getLogger(__name__)
 
@@ -579,8 +580,9 @@ async def stream_chat_events(
     deadline = loop.time() + TOTAL_STREAM_BUDGET_SECONDS
     attempt = 0
 
-    # 收集器必须覆盖整个重试循环：切换发生在 agent 内部，却要在本层翻译成事件。
-    with collect_fallbacks() as fallbacks:
+    # 收集器必须覆盖整个重试循环：切换与工具失败计数都发生在 agent 内部，
+    # 却要在本层翻译成事件 / 决定给模型的文案。
+    with collect_fallbacks() as fallbacks, collect_tool_failures():
         while True:
             attempt += 1
             # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。
