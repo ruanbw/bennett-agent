@@ -19,11 +19,19 @@ SYSTEM_PROMPT_TEMPLATE = "system_prompt.jinja"
 
 
 def render_system_prompt(**overrides):
+    """按 `agent_factory.render_system_prompt` 的口径准备变量。
+
+    三个工具开关都由 `tools` 派生（生产代码也是这么做的）：模板里的条件分支与真实装配
+    必须同源，否则「挂了工具却没写进提示词」或反过来都会发生。
+    """
+    tools = overrides.pop("tools", ["ask_user_clarification", "get_current_time"])
     kwargs = {
         "app_env": "development",
         "assistant_name": "Bennett",
-        "tools": ["ask_user_clarification", "get_current_time"],
-        "web_search": False,
+        "tools": tools,
+        "web_search": "tavily_search" in tools,
+        "clarification": "ask_user_clarification" in tools,
+        "current_time": "get_current_time" in tools,
     }
     kwargs.update(overrides)
     return prompt_manager.render(SYSTEM_PROMPT_TEMPLATE, **kwargs)
@@ -49,6 +57,8 @@ def test_default_filter_still_works_with_strict_undefined():
         app_env="production",
         tools=[],
         web_search=False,
+        clarification=False,
+        current_time=False,
     )
 
     assert "Bennett" in rendered

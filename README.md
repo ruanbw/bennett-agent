@@ -90,6 +90,15 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 一个不存在的工具——白烧一轮 token，用户看到的是「工具不存在」。
 `tests/test_agent_factory.py` 锁住「挂上的工具都出现在提示词里」这条一致性。
 
+**三个工具条款都按真实装配渲染**（不只是搜索）：澄清提问与当前时间此前是模板里写死的
+段落，一旦某个工具被停用，模型就会去调用一个不存在的工具。现在
+`clarification` / `current_time` / `web_search` 都由 `tools` 列表派生，没挂时换成
+「本轮没有澄清提问工具：说明你的假设再作答」/「无法取得真实时间：明确说明，不要猜」。
+另外补了两条行为约束：**用用户提问的语言作答**（此前写死「优先使用中文」，英文提问也会
+收到中文回答）、**工具失败要如实说明**（不编造结果、不把报错原文当事实）。模板开着
+`trim_blocks`，条件分支写不好会把几条规则挤成一行，`test_prompt_rules_stay_one_per_line`
+把「八条规则各自成行」钉住。
+
 会话标题同样是模型输出，落库前要清洗（引号、「标题：」前缀、尾随句号、换行）并按
 **码点**截断——与前端 `clampTitle` 同一口径，否则同一个标题在两端长度不同。清洗与兜底
 在 `app/services/title_text.py`（纯函数，`tests/test_title_text.py` 覆盖）；模型不可用或

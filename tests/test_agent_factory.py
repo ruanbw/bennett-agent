@@ -170,10 +170,16 @@ def test_agent_prompt_lists_exactly_the_tools_it_is_built_with():
     for name in mounted:
         assert name in instructions, f"工具 {name} 挂上了却没写进提示词"
 
-    # 没挂 tavily 时提示词不能教模型去调用它
+    # 没挂哪个工具，就不能在提示词里「请调用」它——三个工具都按真实装配渲染
     if "tavily_search" not in mounted:
         assert "请调用 `tavily_search`" not in instructions
         assert "本轮**没有**联网搜索工具" in instructions
+    if "ask_user_clarification" not in mounted:
+        assert "请调用 `ask_user_clarification`" not in instructions
+        assert "本轮没有澄清提问工具" in instructions
+    if "get_current_time" not in mounted:
+        assert "先调用 `get_current_time`" not in instructions
+        assert "没有时间工具" in instructions
 
 
 # ---------------------------------------------------------------------
@@ -358,3 +364,58 @@ def test_title_agent_also_uses_the_no_retry_provider(monkeypatch):
 
     assert build_agent("openai/gpt-4o").model.client.max_retries == 0
     assert build_title_agent("openai/gpt-4o").model.client.max_retries == 0
+
+
+# ---------------------------------------------------------------------
+# 系统提示词：按真实装配渲染、语言跟随用户、工具失败要如实说明
+# ---------------------------------------------------------------------
+def _render(tools: list[str]) -> str:
+    from app.services.agent_factory import render_system_prompt
+
+    return render_system_prompt(tools)
+
+
+def test_prompt_without_any_tool_does_not_teach_calling_one():
+    """一个工具都没挂时，四条工具相关规则全部换成「说明限制」的版本。"""
+    text = _render([])
+
+    assert "本轮没有挂载任何工具。" in text
+    assert "本轮没有任何工具可用" in text
+    assert "本轮没有澄清提问工具" in text
+    assert "本轮**没有**联网搜索工具" in text
+    assert "没有时间工具" in text
+    for tool in ("tavily_search", "ask_user_clarification", "get_current_time"):
+        assert "请调用 `" + tool + "`" not in text
+        assert "先调用 `" + tool + "`" not in text
+
+
+def test_prompt_with_only_the_time_tool_keeps_gaps_honest():
+    text = _render(["get_current_time"])
+
+    assert "先调用 `get_current_time`" in text
+    assert "本轮没有澄清提问工具" in text
+    assert "本轮**没有**联网搜索工具" in text
+
+
+def test_prompt_asks_to_match_the_users_language():
+    """此前写死「优先使用中文」：用英文提问也会收到中文回答。"""
+    text = _render(["get_current_time"])
+
+    assert "用用户提问时所用的语言作答" in text
+    assert "英文提问就用英文" in text
+
+
+def test_prompt_requires_honest_reporting_of_tool_failures():
+    """工具失败时不许编造结果、也不许把报错原文当事实——这条以前只写在代码注释里。"""
+    text = _render([])
+
+    assert "工具调用失败时" in text
+    assert "不要编造工具结果" in text
+
+
+def test_prompt_rules_stay_one_per_line():
+    """模板开了 trim_blocks：条件分支写不好会把几条规则挤成一行（改模板时最容易踩的坑）。"""
+    lines = _render(["ask_user_clarification", "get_current_time", "tavily_search"]).splitlines()
+
+    numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)}]
+    assert len(numbered) == 8, numbered

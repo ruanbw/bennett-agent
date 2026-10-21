@@ -42,6 +42,12 @@ SYSTEM_PROMPT_TEMPLATE = "system_prompt.jinja"
 
 #: 联网搜索工具名。提示词里「可以联网」这句话与它的装配状态绑定，单点定义避免拼错。
 WEB_SEARCH_TOOL_NAME = "tavily_search"
+#: 澄清工具名。提示词的第 3 条同样与它是否挂载绑定：没挂时教模型「调用 ask_user_clarification」
+#: 只会换回一次「工具不存在」，白烧一轮 token。
+CLARIFICATION_TOOL_NAME = "ask_user_clarification"
+#: 当前时间工具名。纯本地计算、目前始终挂载，但提示词仍然按真实装配渲染——
+#: 「模板里写死的工具名」正是第 4 条修过的那类漂移。
+CURRENT_TIME_TOOL_NAME = "get_current_time"
 
 TITLE_SYSTEM_INSTRUCTION = (
     "你是一个会话标题生成助手。根据用户的问题或指令，概括出极简的会话标题。"
@@ -276,6 +282,8 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         assistant_name=settings.assistant_name,
         tools=names,
         web_search=WEB_SEARCH_TOOL_NAME in names,
+        clarification=CLARIFICATION_TOOL_NAME in names,
+        current_time=CURRENT_TIME_TOOL_NAME in names,
     )
 
 
