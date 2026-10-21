@@ -5,8 +5,9 @@ import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
 import { SEARCH_SHORTCUT_KEYS, searchShortcutLabel } from '../lib/keyboard-shortcuts';
 import { matchText } from '../lib/session-search';
-import { visibleSelection } from '../lib/session-list';
+import { clampTitle, TITLE_MAX_LENGTH, visibleSelection } from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
+import { notify } from '../lib/toast';
 import { useMidnightRefresh } from '../hooks/use-midnight-refresh';
 import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
@@ -96,6 +97,8 @@ export function Sidebar({
   const editingTitleRef = useRef('');
   // 标记本次编辑是取消：避免卸载/blur 时又触发一次保存
   const cancelEditRef = useRef(false);
+  // Enter 与 blur 可能在同一轮事件里先后到达；ref 在 setState 之前就挡住第二次保存
+  const savingEditRef = useRef(false);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -209,14 +212,20 @@ export function Sidebar({
   // -------------------------------------------------------------------
   const startEdit = useCallback((session: SessionRecord) => {
     cancelEditRef.current = false;
+    savingEditRef.current = false;
     editingTitleRef.current = session.title;
     setEditingId(session.id);
     setEditingTitle(session.title);
   }, []);
 
   const handleEditingTitleChange = useCallback((title: string) => {
-    editingTitleRef.current = title;
-    setEditingTitle(title);
+    // 与顶栏标题编辑器同一口径：不靠 maxLength 静默截断，超限明确提示；按码点截断。
+    const clamped = clampTitle(title);
+    if (clamped.truncated) {
+      notify('info', `标题最多 ${TITLE_MAX_LENGTH} 字，超出部分已忽略`);
+    }
+    editingTitleRef.current = clamped.title;
+    setEditingTitle(clamped.title);
   }, []);
 
   const saveEdit = useCallback(
@@ -226,16 +235,21 @@ export function Sidebar({
         setEditingId(null);
         return;
       }
+      if (savingEditRef.current) return;
       const title = editingTitleRef.current.trim();
       setEditingId(null);
       if (!title) return;
-      void runAction(() => onUpdateTitle(sessionId, title), '重命名失败，请重试');
+      savingEditRef.current = true;
+      void runAction(() => onUpdateTitle(sessionId, title), '重命名失败，请重试').finally(() => {
+        savingEditRef.current = false;
+      });
     },
     [onUpdateTitle, runAction],
   );
 
   const cancelEdit = useCallback(() => {
     cancelEditRef.current = true;
+    savingEditRef.current = false;
     setEditingId(null);
   }, []);
 

@@ -177,6 +177,8 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
             onBlur={() => onSaveEdit(session.id)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
+                // 输入法组合中的 Enter 是选词，不是保存：否则中文用户标题只存了半截
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                 event.preventDefault();
                 onSaveEdit(session.id);
               }

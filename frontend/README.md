@@ -230,7 +230,9 @@ src/
   **长度按 Unicode 码点算（100 字），不用 `maxLength`**：`maxLength` 会在浏览器层面
   静默截断粘贴内容，还会按 UTF-16 长度劈开 emoji 的代理对。现在在 `onChange` 里截断并
   提示，`size` / 计数器同一口径。**输入法组合中的 Enter 不算保存**：中文用户按 Enter
-  是在选候选词，`isComposing`（及 `keyCode 229`）时阻止表单提交。
+  是在选候选词，`isComposing`（及 `keyCode 229`）时阻止表单提交。侧边栏行内重命名也
+  走同一套 `clampTitle` + 超限提示 + 输入法早退；它没有保存/取消按钮，blur 保存与
+  Enter 可能同批触发，用 `savingEditRef` 挡住第二次写库。
 - **设置面板里的每个数字都要有出处。** 版本号来自 package.json（`vite.config.js` 的
   `define` 注入 `__APP_VERSION__`，唯一读取点是 `lib/app-info.ts`）——此前写死 `v0.1.0`
   而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑
