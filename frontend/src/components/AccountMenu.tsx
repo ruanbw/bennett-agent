@@ -39,8 +39,10 @@ import {
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
 import { normalizeThemePreference, useTheme } from '../context/theme-context';
+import { SETTINGS_SHORTCUT_KEYS, settingsShortcutLabel } from '../lib/keyboard-shortcuts';
 import { logoutWarning } from '../lib/logout-warning';
 import { countPending } from '../lib/sync/engine';
+import { notify } from '../lib/toast';
 
 export interface AccountMenuProps {
   /** 触发器节点（必须是可聚焦的按钮；base-ui 的 Trigger 用 render 接管它）。 */
@@ -92,7 +94,10 @@ export function AccountMenu({
     try {
       await onLogout();
     } catch (err) {
+      // useAuth.logout 自身不 reject（服务端未确认会作为 error 带回登录页）；
+      // 这里兜住外部注入实现抛错的情况，不能让菜单关掉后界面零反馈。
       console.error('登出失败:', err);
+      notify('error', '登出失败，请重试');
     } finally {
       setLoggingOut(false);
     }
@@ -117,9 +122,18 @@ export function AccountMenu({
 
           <DropdownMenuSeparator />
 
-          <DropdownMenuItem onClick={() => onOpenSettings()}>
-            <Settings className="size-4 text-muted-foreground" />
-            <span>设置</span>
+          <DropdownMenuItem
+            onClick={() => onOpenSettings()}
+            aria-keyshortcuts={SETTINGS_SHORTCUT_KEYS}
+            className="justify-between"
+          >
+            <span className="flex items-center gap-2">
+              <Settings className="size-4 text-muted-foreground" />
+              <span>设置</span>
+            </span>
+            <span className="font-mono text-[10px] text-muted-foreground/60">
+              {settingsShortcutLabel()}
+            </span>
           </DropdownMenuItem>
 
           {/* 入口只对管理员可见；权限本身仍由后端裁决 */}

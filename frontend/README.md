@@ -164,7 +164,9 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   `lib/logout-warning.ts`，有 vitest 覆盖。
   登录页 `ThemeSwitcher` 与设置面板的主题卡片同样不能只靠颜色/图标表达选中：两者都用
   `role="group"` + `aria-pressed`，卡片补 `focus-visible` ring；三处入口（登录页、设置、
-  账号菜单）各自可测。
+  账号菜单）各自可测。菜单里的「设置」直接显示当前平台的 `⌘,` / `Ctrl+,` 并带
+  `aria-keyshortcuts`；收起态头像触发器补 `focus-visible` ring；外部注入的 `onLogout`
+  若 reject，弹一条「登出失败，请重试」而不是只留控制台一行。
 - **同步状态要能解释，也要能恢复。** 侧边栏云图标是入口而不是装饰：面板给出
   「已同步 / 待上传 / 无法同步 / 失败」的结论、上次同步时间、待上传与被拒数量，并提供
   「立即同步」与「重新上传被拒内容」。被服务端拒收的行（`too_large` / `quota_exceeded` /

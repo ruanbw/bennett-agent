@@ -242,7 +242,7 @@ export function ChatContainer({
                   trigger={
                     <button
                       type="button"
-                      className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                      className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       title={`账号：${account.email ?? '未登录'}`}
                       aria-label="账号与设置菜单"
                     >
