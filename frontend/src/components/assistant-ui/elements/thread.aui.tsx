@@ -148,6 +148,8 @@ export const Thread: FC<ThreadProps> = ({
   onCreateSession,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
+  // 输入框已有内容时收起建议：否则点示例会 setText 覆盖用户刚打的草稿
+  const composerEmpty = useAuiState((s) => s.composer.isEmpty);
   const isRunning = useAuiState(isThreadRunning);
   // 上下文已满：输入框锁住并给出「新建会话」。服务端每轮都会拒绝，这里只是不让用户
   // 白点一次发送，并把他直接送到唯一的出路（推导规则见 lib/chat-message.ts）。
@@ -239,51 +241,53 @@ export const Thread: FC<ThreadProps> = ({
                 今天有什么可以帮您？
               </h2>
               <p className="text-sm text-muted-foreground max-w-sm">
-                输入您的问题开始对话，所有数据保存在您本地浏览器中。
+                输入您的问题开始对话。对话先保存在本机，登录账号会同步到服务器。
               </p>
 
-              <div className="mt-6 w-full max-w-md">
-                <div role="group" aria-label="起步建议" className="grid grid-cols-2 gap-2">
-                  {suggestions.map((suggestion) => {
-                    const Icon = SUGGESTION_ICONS[suggestion.icon];
-                    return (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        onClick={() => applySuggestion(suggestion.text)}
-                        className="group flex min-h-[3.25rem] cursor-pointer items-center gap-2 rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-left text-xs leading-relaxed text-foreground/80 transition hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
-                      >
-                        <Icon
-                          className="size-3.5 shrink-0 text-muted-foreground/60 transition group-hover:text-primary"
-                          aria-hidden="true"
-                        />
-                        <span>{suggestion.text}</span>
-                      </button>
-                    );
-                  })}
+              {composerEmpty && (
+                <div className="mt-6 w-full max-w-md">
+                  <div role="group" aria-label="起步建议" className="grid grid-cols-2 gap-2">
+                    {suggestions.map((suggestion) => {
+                      const Icon = SUGGESTION_ICONS[suggestion.icon];
+                      return (
+                        <button
+                          key={suggestion.id}
+                          type="button"
+                          onClick={() => applySuggestion(suggestion.text)}
+                          className="group flex min-h-[3.25rem] cursor-pointer items-center gap-2 rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-left text-xs leading-relaxed text-foreground/80 transition hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+                        >
+                          <Icon
+                            className="size-3.5 shrink-0 text-muted-foreground/60 transition group-hover:text-primary"
+                            aria-hidden="true"
+                          />
+                          <span>{suggestion.text}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                    <p className="text-[11px] text-muted-foreground/70">
+                      点击会填入输入框，可先修改再发送
+                    </p>
+                    {hasMoreSuggestions && (
+                      <>
+                        <span aria-hidden="true" className="text-[11px] text-muted-foreground/40">
+                          ·
+                        </span>
+                        <button
+                          type="button"
+                          onClick={cycleSuggestions}
+                          aria-label="换一批起步建议"
+                          className="inline-flex cursor-pointer items-center gap-1 rounded text-[11px] text-muted-foreground/70 transition hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+                        >
+                          <RefreshCwIcon className="size-3" aria-hidden="true" />
+                          换一批
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
-                  <p className="text-[11px] text-muted-foreground/70">
-                    点击会填入输入框，可先修改再发送
-                  </p>
-                  {hasMoreSuggestions && (
-                    <>
-                      <span aria-hidden="true" className="text-[11px] text-muted-foreground/40">
-                        ·
-                      </span>
-                      <button
-                        type="button"
-                        onClick={cycleSuggestions}
-                        aria-label="换一批起步建议"
-                        className="inline-flex cursor-pointer items-center gap-1 rounded text-[11px] text-muted-foreground/70 transition hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
-                      >
-                        <RefreshCwIcon className="size-3" aria-hidden="true" />
-                        换一批
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </AuiIf>
 
