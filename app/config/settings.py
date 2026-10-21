@@ -176,6 +176,15 @@ class Settings(BaseSettings):
         ge=0,
         description=("单个**来源 IP** 每分钟可发起的登录/注册请求数；0 表示不限流。挡的是密码暴力破解与批量注册。"),
     )
+    change_password_rate_limit_per_minute: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "单个**账号**每分钟可发起的改密请求数；0 表示不限流。改密要验证当前密码，"
+            "每次验证是约 65ms 的 Argon2 计算：不限流时任意注册用户都能用它打满 CPU，"
+            "被盗会话也能借此高速爆破当前密码（绕过登录端点的 IP 限流）。"
+        ),
+    )
     trusted_proxy_headers: str = Field(
         default="",
         description=(

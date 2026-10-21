@@ -102,3 +102,59 @@ async def test_success_returns_204_and_updates_through_user_manager():
     assert manager.updates[0].password == "new-password"
     # 走的是 UserManager.update：会话失效在 on_after_update 里，路由不重复实现
     assert user.hashed_password == "rehashed"
+
+
+# ---------------------------------------------------------------------
+# M-04：哈希必须离开事件循环；失败尝试必须限流
+# ---------------------------------------------------------------------
+async def test_password_verification_runs_in_a_worker_thread():
+    """Argon2 是 CPU 密集调用：跑在事件循环线程上会阻塞所有请求。"""
+    import threading
+
+    manager = _FakeUserManager()
+    main_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def record_thread(plain: str, hashed: str):  # noqa: ANN202, ARG001
+        seen.append(threading.get_ident())
+        return True, None
+
+    manager.password_helper.verify_and_update = record_thread  # type: ignore[method-assign]
+
+    await change_password(_payload(), None, _FakeUser(), manager)
+
+    assert seen, "没有调用密码校验"
+    assert seen[0] != main_thread, "密码校验仍在事件循环线程执行"
+
+
+async def test_change_password_attempts_are_rate_limited_per_account(monkeypatch):
+    from app.api.auth import enforce_change_password_rate_limit, reset_change_password_limiter
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "change_password_rate_limit_per_minute", 2)
+    reset_change_password_limiter()
+    user = _FakeUser()
+
+    try:
+        await enforce_change_password_rate_limit(user)
+        await enforce_change_password_rate_limit(user)
+        with pytest.raises(HTTPException) as excinfo:
+            await enforce_change_password_rate_limit(user)
+        assert excinfo.value.status_code == 429
+        assert excinfo.value.headers and "Retry-After" in excinfo.value.headers
+    finally:
+        reset_change_password_limiter()
+
+
+async def test_change_password_rate_limit_can_be_disabled(monkeypatch):
+    from app.api.auth import enforce_change_password_rate_limit, reset_change_password_limiter
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "change_password_rate_limit_per_minute", 0)
+    reset_change_password_limiter()
+    user = _FakeUser()
+    try:
+        for _ in range(20):
+            await enforce_change_password_rate_limit(user)
+    finally:
+        reset_change_password_limiter()

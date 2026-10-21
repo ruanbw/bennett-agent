@@ -26,10 +26,12 @@
 
 import logging
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi_users.exceptions import InvalidPasswordException
 
-from app.api.rate_limit import enforce_auth_rate_limit
+from app.api.rate_limit import SlidingWindowLimiter, enforce_auth_rate_limit, limiter_with, too_many
+from app.config import settings
 from app.db import User
 from app.schemas.user import PasswordChangeRequest, UserCreate, UserRead, UserUpdate
 from app.services.auth import (
@@ -107,10 +109,46 @@ _localize_generated_routes(_register_router)
 router.include_router(_register_router)
 
 
+#: 改密限流桶。与登录的 IP 桶分开：这里按**账号**计数，挡的是「拿到会话后
+#: 反复验证当前密码」与「用 Argon2 打满 CPU」。
+_change_password_limiter: SlidingWindowLimiter | None = None
+
+
+def get_change_password_limiter() -> SlidingWindowLimiter:
+    """取改密限流器；配额变化时重建（测试改 settings 后立即生效）。"""
+    global _change_password_limiter
+    _change_password_limiter = limiter_with(
+        _change_password_limiter,
+        max(settings.change_password_rate_limit_per_minute, 1),
+    )
+    return _change_password_limiter
+
+
+def reset_change_password_limiter() -> None:
+    """清空改密计数（测试用；与 `SlidingWindowLimiter.reset` 同口径）。"""
+    global _change_password_limiter
+    _change_password_limiter = None
+
+
+async def enforce_change_password_rate_limit(
+    user: User = Depends(current_active_user),  # noqa: B008
+) -> None:
+    """按账号限制改密尝试次数。
+
+    声明了 `current_active_user`，所以即使配额配成 0 提前 return，登录要求依然成立。
+    """
+    if settings.change_password_rate_limit_per_minute <= 0:
+        return
+    allowed, retry_after = get_change_password_limiter().check(f"user:{user.id}")
+    if not allowed:
+        raise too_many(retry_after, limit=get_change_password_limiter().limit)
+
+
 @router.post(
     "/change-password",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="修改当前账号密码",
+    dependencies=[Depends(enforce_change_password_rate_limit)],
 )
 async def change_password(
     payload: PasswordChangeRequest,
@@ -130,12 +168,19 @@ async def change_password(
        `delete_user_access_tokens`），包括发起请求的这一个：改密的语义就是「之前所有
        登录态都不再可信」。客户端随后会拿到 401 并回到登录页。
 
-    不额外挂 IP 限流：这是已认证端点，且验证的是 8 位以上的真实密码——暴力破解不成立，
-    而共用登录的限流桶反而会让「登录 + 改密」在 NAT 后面误伤。
+    4. **按账号限流**（`enforce_change_password_rate_limit`），且密码校验放进线程池。
+       此前这个端点没有限流，而每次错误密码验证都是一次约 65ms 的 Argon2 计算、还
+       直接跑在事件循环线程上：任意注册用户都能用它打满 CPU；被盗会话也能绕过登录
+       端点的 IP 限流、以约 15 次/秒爆破当前密码。
     """
     # verify_and_update 是框架自带的校验入口：bcrypt 升级时它还会返回重算后的哈希，
     # 但本路由马上会整行重写密码，不需要在这里落库。
-    valid, _ = user_manager.password_helper.verify_and_update(payload.current_password, user.hashed_password)
+    # Argon2 是 CPU 密集调用，必须放进 worker 线程，否则一次改密就能阻塞整个事件循环。
+    valid, _ = await anyio.to_thread.run_sync(
+        user_manager.password_helper.verify_and_update,
+        payload.current_password,
+        user.hashed_password,
+    )
     if not valid:
         # 400 而不是 401：401 会被前端的全局处理当成「会话过期」直接登出，
         # 而这里只是表单里填错了当前密码，用户应当留在原地重试。
