@@ -225,11 +225,13 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   读失败说成「确实没有这条会话」。错误态用 `SidebarSearchError` 显示原因，并通过
   `useSessionContentSearch.retry` 原地重试，另有清除搜索出口。
 - **快捷键只认修饰键 + 物理键位，并且必须可发现。** `⌘K` / `Ctrl+K` 打开搜索，
-  `⌘,` / `Ctrl+,` 打开设置，判定统一在 `lib/keyboard-shortcuts.ts`：Meta 与 Ctrl 都认、
+  `⌘,` / `Ctrl+,` 打开设置，`Esc` 在生成中停止生成。判定统一在
+  `lib/keyboard-shortcuts.ts` 与 `lib/stop-generation.ts`（都是纯函数、有 vitest）：Meta 与 Ctrl 都认、
   不认 Alt/Shift、输入法组合中不抢键、优先看 `event.code`（俄文等非 Latin 布局下
   `event.key` 不是 `k`）。入口按钮同时挂 `title`（平台化提示）与 `aria-keyshortcuts`，
   否则快捷键只有作者知道。搜索已经打开时再按 `⌘K` 要主动聚焦输入框——`autoFocus`
-  只在挂载那一次生效。
+  只在挂载那一次生效。停止按钮（`title="停止生成（Esc）"`）与一次点击/按键结束后都会
+  把焦点交回输入框：它在生成结束时被换回发送按钮，不接管焦点就会掉到 `<body>`。
 - **toast 只装「动作反馈」，不装持续状态。** 同步失败、落库失败、上下文已满这些刷新后
   仍然成立的状态留在页面内联条上（会自动消失的提示会让人错过）；一次动作的结果
   （导出完成、新建会话失败）没有持久位置可放，才用 `lib/toast.ts` + `Toaster`。

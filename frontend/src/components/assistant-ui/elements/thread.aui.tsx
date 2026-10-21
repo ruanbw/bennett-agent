@@ -9,6 +9,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-ic
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { shouldFocusComposerAfterScrollToBottom } from "@/lib/scroll-follow";
+import { shouldStopOnEscape } from "@/lib/stop-generation";
 import {
   ActionBarPrimitive,
   AuiIf,
@@ -42,7 +43,7 @@ import {
   SquareIcon,
   type LucideIcon,
 } from "lucide-react";
-import { type FC, type RefObject, useCallback, useRef, useState } from "react";
+import { type FC, type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
@@ -214,6 +215,48 @@ export const Thread: FC<ThreadProps> = ({
     dismissPendingClarification();
     focusComposer();
   }, [dismissPendingClarification, focusComposer]);
+
+  /**
+   * 生成中按 Esc 停止。
+   *
+   * 「停止」按钮在生成结束时被换回发送按钮，点完/按完它就不在 DOM 里了——浏览器把焦点
+   * 退回 `<body>`，键盘用户得从头 Tab 一遍。所以停止后延后一拍把焦点交回输入框，这也
+   * 是用户接下来最可能操作的地方。判定（输入法、弹层、已被处理的按键）在
+   * `lib/stop-generation.ts`，有问题时可以直接单测。
+   */
+  const stopGeneration = useCallback(() => {
+    aui.thread.cancelRun();
+    window.setTimeout(() => composerInputRef.current?.focus({ preventScroll: true }), 0);
+  }, [aui]);
+
+  useEffect(() => {
+    if (!isRunning) return undefined;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target;
+      const inModal =
+        target instanceof Element && target.closest('[role="dialog"], [role="alertdialog"]') !== null;
+      if (
+        !shouldStopOnEscape({
+          isRunning: true,
+          // KeyboardEvent 上 isComposing 只在部分浏览器存在，读 nativeEvent 会更稳
+          isComposing: event.isComposing,
+          hasOpenOverlay:
+            document.querySelector('[role="dialog"], [role="alertdialog"], [role="listbox"], [role="menu"]') !== null,
+          defaultPrevented: event.defaultPrevented,
+          inModal,
+        })
+      ) {
+        return;
+      }
+      event.preventDefault();
+      stopGeneration();
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isRunning, stopGeneration]);
 
   return (
     <ThreadPrimitive.Root
@@ -534,8 +577,14 @@ const Composer: FC<{
                   variant="destructive"
                   size="icon"
                   className="size-8 pointer-coarse:size-10 rounded-xl cursor-pointer"
-                  title="停止生成"
+                  title="停止生成（Esc）"
                   aria-label="停止生成"
+                  aria-keyshortcuts="Escape"
+                  // 停止后这个按钮会被换回发送按钮，焦点本来会掉到 body；
+                  // 延后一拍交回输入框，键盘用户可以接着改问题。
+                  onClick={() => {
+                    window.setTimeout(() => inputRef?.current?.focus({ preventScroll: true }), 0);
+                  }}
                 >
                   <SquareIcon className="size-3.5 fill-current" />
                 </Button>
