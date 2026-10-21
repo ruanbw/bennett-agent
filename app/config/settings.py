@@ -150,8 +150,11 @@ class Settings(BaseSettings):
     assistant_name: str = Field(default="Bennett", description="助手名称")
     tavily_api_key: str | None = Field(default=None, description="Tavily 网页搜索 API Key")
     cors_allowed_origins: str = Field(
-        default="http://localhost:5173,http://127.0.0.1:5173",
-        description="逗号分隔的 CORS 允许来源，默认开发端口；设为 * 时允许任意源",
+        default="",
+        description=(
+            "逗号分隔的 CORS 允许来源；留空时开发环境回退本地前端端口，production 不回退"
+            "（跨域部署必须显式配置）。设为 * 时允许任意源，但不能与凭据同开。"
+        ),
     )
     cors_allow_credentials: bool = Field(
         default=False,
@@ -371,11 +374,32 @@ class Settings(BaseSettings):
         return self
 
     def get_cors_origins(self) -> list[str]:
+        """解析 CORS 来源列表。
+
+        留空时**只有非 production** 回退本地前端端口。此前默认值直接写死两个
+        localhost，生产环境忘了配置就会允许本地页面带凭据读生产 API；同源部署不需要
+        CORS，让 production 留空返回空列表更安全。
+
+        同时把常见的配置笔误收掉：尾斜杠（浏览器 Origin 从不带斜杠）、重复项、
+        `http://` 这种只剩协议的坏值；保留 `*`。
+        """
         default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
-        if not self.cors_allowed_origins or not self.cors_allowed_origins.strip():
-            return default_origins
-        origins = [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
-        return origins or default_origins
+        raw = (self.cors_allowed_origins or "").strip()
+        if not raw:
+            return default_origins if self.app_env != "production" else []
+
+        origins: list[str] = []
+        for item in raw.split(","):
+            origin = item.strip().rstrip("/")
+            # 只剩协议（http://）或空项不是合法 Origin；静默跳过比放一个永远匹配不上的值好
+            if not origin or origin.endswith(":"):
+                continue
+            if origin not in origins:
+                origins.append(origin)
+
+        if origins:
+            return origins
+        return default_origins if self.app_env != "production" else []
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),

@@ -27,10 +27,12 @@ HttpOnly 会话 cookie 开箱即用，不需要任何 CORS 配置（`src/lib/api
 `credentials: 'include'` 在同源下与默认行为一致）。
 
 直连后端（改端口、或从别的机器访问）时，把 `VITE_API_BASE_URL` 填成完整地址，并让后端
-把前端来源加进 `CORS_ALLOWED_ORIGINS`（默认已包含 `http://localhost:5173` 与
-`http://127.0.0.1:5173`）、把 `CORS_ALLOW_CREDENTIALS` 设为 true（默认 false，不开浏览器
-会拦掉带 cookie 的跨域响应）；此时 `CORS_ALLOWED_ORIGINS` 不能含 `*`，否则后端拒绝启动。
-本地覆盖写 `.env.local`（已忽略）。
+把前端来源加进 `CORS_ALLOWED_ORIGINS`：development 留空会自动允许
+`http://localhost:5173` 与 `http://127.0.0.1:5173`，production 留空则**不开放跨域**
+（同源部署不需要；跨域部署必须显式配置，避免生产默认信任 localhost）；再把
+`CORS_ALLOW_CREDENTIALS` 设为 true（默认 false，不开浏览器会拦掉带 cookie 的跨域响应）；
+此时 `CORS_ALLOWED_ORIGINS` 不能含 `*`，否则后端拒绝启动。尾斜杠会被自动去掉、重复项
+去重——浏览器 Origin 从不带斜杠。本地覆盖写 `.env.local`（已忽略）。
 
 事实边界：会话 cookie 的 `SameSite` 目前固定为 `Lax`（`app/services/auth.py`），因此只支持
 跨 origin 但**同 site** 的直连（如 `localhost:5173` 调 `localhost:8000`，端口不同不影响

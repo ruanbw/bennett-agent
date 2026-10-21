@@ -351,10 +351,39 @@ def test_cors_origins_blank_falls_back_to_defaults(raw):
     ]
 
 
+def test_cors_origins_blank_in_production_does_not_fall_back_to_localhost():
+    """生产环境留空就是「不开放跨域」：悄悄放行 localhost 会让本地页面带凭据读生产 API。"""
+    config = Settings(
+        app_env="production",
+        auth_secret="x" * 40,
+        auth_cookie_secure=True,
+        cors_allowed_origins="",
+        _env_file=None,
+    )
+
+    assert config.get_cors_origins() == []
+
+
 def test_cors_origins_trims_whitespace_and_drops_empty_entries():
     config = Settings(cors_allowed_origins=" http://a.example ,, http://b.example ", _env_file=None)
 
     assert config.get_cors_origins() == ["http://a.example", "http://b.example"]
+
+
+def test_cors_origins_strips_trailing_slashes_and_deduplicates():
+    """浏览器 Origin 从不带斜杠；配置里手滑带的斜杠不能让它永远匹配不上。"""
+    config = Settings(
+        cors_allowed_origins="http://a.example/ , http://b.example//, http://a.example",
+        _env_file=None,
+    )
+
+    assert config.get_cors_origins() == ["http://a.example", "http://b.example"]
+
+
+def test_cors_origins_skips_protocol_only_garbage():
+    config = Settings(cors_allowed_origins="http://, ,https://b.example/", _env_file=None)
+
+    assert config.get_cors_origins() == ["https://b.example"]
 
 
 def test_cors_origins_wildcard_is_preserved():
