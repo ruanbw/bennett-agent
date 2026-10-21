@@ -22,6 +22,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
 
 from app.config import settings
+from app.config.logging_setup import configure_logging
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.db import create_db_and_tables, engine
 from app.services.agent_factory import build_agent, render_system_prompt
@@ -245,10 +246,9 @@ async def _run_cli() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-    )
+    # 级别、格式与第三方噪音抑制都在 `app/config/logging_setup`：uvicorn 会自己装 handler
+    # 且 propagate=False，只在这里 basicConfig 的话日志会出现两套格式。
+    configure_logging()
     # 越早清理越好：坏 no_proxy 会让所有 trust_env 的 HTTP 客户端在构造阶段就失败
     # （见 app/config/proxy_env.py）。放在参数解析之前，配置有问题时先留下清晰日志。
     sanitize_no_proxy_env()
@@ -271,6 +271,10 @@ def main() -> None:
             host=args.host,
             port=args.port,
             reload=False,
+            # 不要 uvicorn 的 dictConfig：它在启动时会把 `uvicorn*` 三个 logger 的 handler
+            # 换成自己那套（`INFO:     ...`），`configure_logging()` 设置的格式与
+            # 「关掉访问日志」都会被覆盖。传 None 表示「日志已经配好了，别动」。
+            log_config=None,
             # uvicorn 默认 proxy_headers=True 且 forwarded_allow_ips=127.0.0.1：本机连接
             # （包括反向代理）可以凭 X-Forwarded-For 直接改写 request.client.host，
             # 于是「只信 app/api/rate_limit.py 里显式配置的 trusted_proxy_headers」的

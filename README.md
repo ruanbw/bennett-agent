@@ -141,3 +141,15 @@ main.py       CLI 与 --web 入口
 ```
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
+
+## 日志
+
+`LOG_LEVEL`（默认 INFO）与 `LOG_ACCESS`（默认关闭）控制输出，配置在
+`app/config/logging_setup.py`：
+
+- uvicorn 会在自己的 `dictConfig` 里给 `uvicorn` / `uvicorn.error` / `uvicorn.access`
+  装上 handler 且 `propagate=False`，所以只调 `logging.basicConfig` 会出现两套格式；
+  这里显式替换这三个 logger 的 handler。
+- 访问日志默认关闭：SSE 长连接与前端轮询会把它变成噪音，真正的 WARNING 会被淹没。
+- **DEBUG 下第三方库仍压在 WARNING**：httpx / openai 会逐条打印请求头，里面就是
+  `Authorization: Bearer <key>`——那不是「日志多」，而是把凭据写进日志文件。
