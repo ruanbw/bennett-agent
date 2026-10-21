@@ -96,6 +96,36 @@ export function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** 查询词是字面量：`[` / `(` 等不能被当成正则语法。 */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface TokenHit {
+  index: number;
+  length: number;
+}
+
+/**
+ * 找出一个查询词在原文里的所有命中位置（大小写不敏感）。
+ *
+ * 用带 `i` 的正则而不是「把整段文本 toLowerCase 后 indexOf」：后者在 `İ` 这类
+ * 小写后长度会变的字符上会让**整段文本**的高亮偏移失效（旧实现直接放弃全部高亮），
+ * 正则的 `match.index` 始终落在原文坐标系里。匹配仍是子串字面量语义。
+ */
+function scanToken(text: string, token: string, limit: number): TokenHit[] {
+  if (!token) return [];
+  const pattern = new RegExp(escapeRegExp(token), 'gi');
+  const hits: TokenHit[] = [];
+  let match: RegExpExecArray | null;
+  while (hits.length < limit && (match = pattern.exec(text)) !== null) {
+    hits.push({ index: match.index, length: match[0].length });
+    // 空匹配会原地打转；查询词解析阶段已过滤空词，这里只是防御
+    if (match[0].length === 0) pattern.lastIndex += 1;
+  }
+  return hits;
+}
+
 /**
  * AND 匹配：所有词都出现才算命中。
  *
@@ -104,25 +134,14 @@ export function collapseWhitespace(text: string): string {
  */
 export function matchText(text: string, tokens: readonly string[]): TextMatch | null {
   if (tokens.length === 0 || !text) return null;
-  const lower = text.toLowerCase();
   const firstPositions: number[] = [];
   let count = 0;
 
   for (const token of tokens) {
-    const first = lower.indexOf(token);
-    if (first === -1) return null;
-    firstPositions.push(first);
-
-    let from = first;
-    let seen = 0;
-    while (seen < COUNT_LIMIT) {
-      const at = lower.indexOf(token, from);
-      if (at === -1) break;
-      count += 1;
-      seen += 1;
-      // +token.length：同一位置上的自重叠（如 "aaa" 里的 "aa"）不重复计数
-      from = at + token.length;
-    }
+    const hits = scanToken(text, token, COUNT_LIMIT);
+    if (hits.length === 0) return null;
+    firstPositions.push(hits[0].index);
+    count += hits.length;
   }
 
   return { firstPositions, count };
@@ -131,22 +150,16 @@ export function matchText(text: string, tokens: readonly string[]): TextMatch | 
 /**
  * 计算高亮区间（大小写不敏感），已排序且合并重叠。
  *
- * 大小写转换改变了字符串长度（`ß` → `ss`）时直接放弃高亮：偏移量与原文对不上，
- * 宁可不高亮也不能把标记打错位置。
+ * 区间始终基于原文偏移（见 `scanToken`），所以不会出现「大小写折叠改变长度后整段
+ * 错位」的问题；重叠词由 `mergeRanges` 合并。
  */
 export function highlightRanges(text: string, tokens: readonly string[]): TextRange[] {
   if (!text || tokens.length === 0) return [];
-  const lower = text.toLowerCase();
-  if (lower.length !== text.length) return [];
 
   const ranges: TextRange[] = [];
   for (const token of tokens) {
-    let from = 0;
-    for (let i = 0; i < MAX_HIGHLIGHTS_PER_TOKEN; i += 1) {
-      const at = lower.indexOf(token, from);
-      if (at === -1) break;
-      ranges.push({ start: at, end: at + token.length });
-      from = at + token.length;
+    for (const hit of scanToken(text, token, MAX_HIGHLIGHTS_PER_TOKEN)) {
+      ranges.push({ start: hit.index, end: hit.index + hit.length });
     }
   }
   return mergeRanges(ranges);

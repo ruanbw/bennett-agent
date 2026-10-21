@@ -66,6 +66,11 @@ describe('matchText', () => {
     expect(matchText('abc', [])).toBeNull();
     expect(matchText('', ['a'])).toBeNull();
   });
+
+  it('首次位置基于原文，不受小写后长度变化影响', () => {
+    // İ 的小写是 i + 组合点（长度 +1）：旧的 toLowerCase 偏移会把位置算成 10
+    expect(matchText('İstanbul 向量', ['向量'])?.firstPositions).toEqual([9]);
+  });
 });
 
 describe('highlightRanges', () => {
@@ -85,6 +90,19 @@ describe('highlightRanges', () => {
 
   it('没有任何命中时返回空数组', () => {
     expect(highlightRanges('无关文本', ['向量'])).toEqual([]);
+  });
+
+  it('文本里有小写后变长的字符（İ）也仍然按原文偏移高亮', () => {
+    const text = 'İstanbul 向量';
+
+    expect(highlightRanges(text, ['向量'])).toEqual([{ start: 9, end: 11 }]);
+    expect(highlightRanges(text, ['向量']).map((range) => text.slice(range.start, range.end))).toEqual([
+      '向量',
+    ]);
+  });
+
+  it('查询词里的正则元字符按字面量匹配', () => {
+    expect(highlightRanges('a[b]c', ['[b]'])).toEqual([{ start: 1, end: 4 }]);
   });
 });
 
