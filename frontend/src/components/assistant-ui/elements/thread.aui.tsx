@@ -469,6 +469,9 @@ const Composer: FC<{
 
   return (
     <ComposerPrimitive.Root
+      // 窗口级「拖文件到别处」的兜底靠这个标记区分「输入框内」与「界面其它地方」
+      // （见 lib/file-drop.ts）：框内自己处理并给更具体的提示，框外才拦浏览器导航。
+      data-slot="aui_composer-root"
       className="relative flex w-full flex-col"
       onSubmit={(e) => {
         if (blocked) {

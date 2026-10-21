@@ -13,6 +13,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { useAuth } from './hooks/use-auth';
 import { useCapabilities } from './hooks/use-capabilities';
 import { useChatSessions } from './hooks/use-chat-sessions';
+import { useForeignFileDropGuard } from './hooks/use-foreign-file-drop-guard';
 import { useGlobalShortcuts } from './hooks/use-global-shortcuts';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
@@ -504,6 +505,10 @@ export function App() {
   const { status, user, pending, error, login, register, logout, expireSession, clearError } =
     useAuth();
   const userId = user?.id ?? null;
+
+  // 把文件拖到输入框以外的地方时，浏览器会导航到那个文件、整个应用被替换掉
+  // （正在生成的回答与草稿全丢）。输入框自己处理框内拖放，这里兜住框外。
+  useForeignFileDropGuard();
 
   /*
     同步引擎跟着登录态起停：它持有游标与定时器，必须和「当前是谁」同生命周期。
