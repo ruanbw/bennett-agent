@@ -35,6 +35,7 @@ import { useSyncStatus } from '../hooks/use-sync-status';
 import { retryNow, retryRejected } from '../lib/sync/engine';
 import {
   describePendingCount,
+  describeSuperseded,
   describeSyncStatus,
   formatAbsoluteTime,
   formatRelativeTime,
@@ -98,6 +99,7 @@ export function SyncStatusButton() {
   }, [open]);
 
   const view = describeSyncStatus(status);
+  const supersededText = describeSuperseded(status.superseded ?? 0);
   const { Icon, trigger, bubble } = TONE_STYLES[view.tone];
   const label = `${view.headline}，查看同步详情`;
 
@@ -213,6 +215,12 @@ export function SyncStatusButton() {
             立即同步
           </Button>
         </div>
+
+        {supersededText && (
+          <p role="status" className="mt-2.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber-700 dark:text-amber-400">
+            {supersededText}
+          </p>
+        )}
 
         <p className="mt-2.5 text-[10.5px] leading-relaxed text-muted-foreground/80">
           {status.rejected > 0 && !isRejectionRetryable(status.rejectedReason)

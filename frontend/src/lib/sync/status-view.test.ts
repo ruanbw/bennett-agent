@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { SyncStatus } from './engine';
 import {
   describePendingCount,
+  describeSuperseded,
   describeRejectionReason,
   describeSyncStatus,
   formatRelativeTime,
@@ -74,6 +75,16 @@ describe('同步状态优先级', () => {
     expect(view.badgeCount).toBe(0);
   });
 
+  it('有本机修改被覆盖时，「已同步」的说明不能再说「都已保存」', () => {
+    const view = describeSyncStatus(
+      status({ lastSyncedAt: NOW - 3 * 60_000, superseded: 2 } as never),
+    );
+
+    expect(view.tone).toBe('ok');
+    expect(view.detail).toContain('被其他设备的更新版本覆盖');
+    expect(view.detail).not.toContain('所有对话都已保存到服务器');
+  });
+
   it('引擎没在跑时明说未启用，而不是假装已同步', () => {
     const view = describeSyncStatus(status({ running: false, lastSyncedAt: null }));
 
@@ -142,5 +153,19 @@ describe('待上传数量文案', () => {
   it('没有排队但正在检查时不说「无」（会与「正在上传变更…」自相矛盾）', () => {
     expect(describePendingCount(0, true)).toBe('正在检查…');
     expect(describePendingCount(0, false)).toBe('无');
+  });
+});
+
+describe('本机修改被覆盖的说明', () => {
+  it('只有真的发生时才有文案', () => {
+    expect(describeSuperseded(0)).toBe('');
+    expect(describeSuperseded(-1)).toBe('');
+  });
+
+  it('说明是「其他设备的更新版本」覆盖了本机修改，不让人以为是同步失败', () => {
+    const text = describeSuperseded(2);
+    expect(text).toContain('2 处');
+    expect(text).toContain('其他设备');
+    expect(text).toContain('以服务器上的为准');
   });
 });

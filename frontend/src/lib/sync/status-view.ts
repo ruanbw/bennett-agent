@@ -60,6 +60,18 @@ export function describePendingCount(pending: number, syncing: boolean): string 
 }
 
 /**
+ * 本机修改被服务器版本覆盖时的说明。
+ *
+ * `stale` 的处理是「标 synced，下一轮 pull 用服务端版本盖掉本地」——本机那次修改就
+ * 丢了。这条提示必须在面板里出现：用户改了标题、看到「已同步」，换设备才发现还是旧标题，
+ * 那是最难排查的一类「同步没坏但我的改动没了」。
+ */
+export function describeSuperseded(count: number): string {
+  if (count <= 0) return '';
+  return `${count} 处本机修改被其他设备的更新版本覆盖（以服务器上的为准）。`;
+}
+
+/**
  * 相对时间。
  *
  * 未来时间（本机时钟比服务器快）按「刚刚」处理：显示「-3 分钟前」只会让人以为坏了。
@@ -146,7 +158,12 @@ export function describeSyncStatus(status: SyncStatus): SyncStatusView {
   return {
     tone: 'ok',
     headline: '已同步',
-    detail: '所有对话都已保存到服务器，换设备登录同一账号即可看到。',
+    // 本机修改被覆盖时不能再只说「所有对话都已保存到服务器」——那句话会让人以为
+    // 自己刚改的内容也上去了，而实际上被服务端版本取代了。
+    detail:
+      (status.superseded ?? 0) > 0
+        ? '服务器上的内容是最新的；本机有修改被其他设备的更新版本覆盖，详见下方说明。'
+        : '所有对话都已保存到服务器，换设备登录同一账号即可看到。',
     canRetry: false,
     badgeCount: 0,
   };

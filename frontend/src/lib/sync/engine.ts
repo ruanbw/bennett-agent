@@ -65,6 +65,13 @@ export interface SyncStatus {
   lastError: string | null;
   /** 最近一次成功同步完成的时间（毫秒）；从未成功过为 null。 */
   lastSyncedAt: number | null;
+  /**
+   * 本次会话里有多少行本机修改被服务器上更新版本覆盖（推送被判 `stale`）。
+   *
+   * `stale` 的处理是「标 synced，等下一轮 pull 用服务端版本盖掉本地」——本机那次修改
+   * 就此丢掉。静默丢弃是最糟的失败方式（用户以为改上去了），所以单独计数给面板显示。
+   */
+  superseded?: number;
 }
 
 const IDLE_STATUS: SyncStatus = {
@@ -75,6 +82,7 @@ const IDLE_STATUS: SyncStatus = {
   syncing: false,
   lastError: null,
   lastSyncedAt: null,
+  superseded: 0,
 };
 
 let status: SyncStatus = { ...IDLE_STATUS };
@@ -458,6 +466,11 @@ async function settleRow(
   if (reason === undefined || reason === 'stale' || reason === 'not_owned' || reason === 'conversation_deleted') {
     // 顺带清掉上一次的拒收原因：这一行已经不再停在 error 了。
     await table.update(id, { syncState: 'synced', syncError: null });
+    if (reason === 'stale') {
+      // 服务端有更新的修订号：这一行本机修改即将被下一轮 pull 覆盖。
+      // 不静默吞掉——否则用户完全无从得知自己改的内容没上去。
+      setStatus({ superseded: (status.superseded ?? 0) + 1 });
+    }
     if (reason !== undefined) {
       console.warn(`同步行被服务端忽略 (${kind}=${id} reason=${reason})`);
     }
