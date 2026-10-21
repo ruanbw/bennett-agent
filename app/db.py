@@ -508,25 +508,62 @@ def diff_schema(actual: dict[str, set[str]]) -> dict[str, set[str]]:
     return missing
 
 
+def diff_column_constraints(actual: dict[str, dict[str, bool]]) -> dict[str, set[str]]:
+    """比对「列是否允许 NULL」，返回**库里比代码更严格**的列。
+
+    `actual` 是 `{表名: {列名: 是否 NOT NULL}}`（来自 `PRAGMA table_info`）。
+
+    只报这一个方向：**模型允许 NULL、库里是 NOT NULL**。此时应用会按模型写 NULL，然后在
+    运行期撞 `IntegrityError: NOT NULL constraint failed`——而这条路径往往只在某个可选字段
+    真的有值时才走到（比如 `null` 的 error 字段），现场极难复现。
+
+    反方向（模型 NOT NULL、库里可空）不报：约束交给应用层，历史库里有旧行本来就是 NULL，
+    报出来只会制造噪音。
+    """
+    stricter: dict[str, set[str]] = {}
+    for table in Base.metadata.sorted_tables:
+        columns = actual.get(table.name)
+        if not columns:
+            continue
+        bad = {column.name for column in table.columns if column.nullable and columns.get(column.name) is True}
+        if bad:
+            stricter[table.name] = bad
+    return stricter
+
+
 async def _warn_on_missing_columns(conn) -> None:  # noqa: ANN001 - AsyncConnection
-    """启动时检查「加了字段却没写迁移」的漂移，并把缺口写进日志。"""
+    """启动时检查「加了字段却没写迁移」的漂移，并把缺口写进日志。
+
+    两类漂移：**库里缺列**（查询会 `no such column`）与**库里比代码更严格**（写 NULL 会
+    `IntegrityError`）。两者都只在运行期某条冷路径上炸，启动日志是唯一能提前发现的地方。
+    """
     actual: dict[str, set[str]] = {}
+    not_null: dict[str, dict[str, bool]] = {}
     for table in Base.metadata.sorted_tables:
         rows = (await conn.execute(text(f"PRAGMA table_info({table.name})"))).fetchall()
-        if rows:
-            # PRAGMA table_info 的第 2 列是列名（cid, name, type, notnull, dflt_value, pk）
-            actual[table.name] = {row[1] for row in rows}
+        if not rows:
+            continue
+        # PRAGMA table_info 列序：cid, name, type, notnull, dflt_value, pk
+        actual[table.name] = {row[1] for row in rows}
+        not_null[table.name] = {str(row[1]): bool(row[3]) for row in rows}
 
     missing = diff_schema(actual)
-    if not missing:
-        return
+    if missing:
+        detail = "；".join(f"{table} 缺 {', '.join(sorted(columns))}" for table, columns in missing.items())
+        logger.warning(
+            "数据库结构与代码不一致（%s）。create_all 不会给已存在的表加列，"
+            "需要在 app/db.py 里补一段幂等的迁移，否则相关查询会报 no such column。",
+            detail,
+        )
 
-    detail = "；".join(f"{table} 缺 {', '.join(sorted(columns))}" for table, columns in missing.items())
-    logger.warning(
-        "数据库结构与代码不一致（%s）。create_all 不会给已存在的表加列，"
-        "需要在 app/db.py 里补一段幂等的迁移，否则相关查询会报 no such column。",
-        detail,
-    )
+    stricter = diff_column_constraints(not_null)
+    if stricter:
+        detail = "；".join(f"{table}.{', '.join(sorted(columns))}" for table, columns in stricter.items())
+        logger.warning(
+            "数据库里有列比代码更严格（%s 在库里是 NOT NULL，而代码允许 NULL）。"
+            "写入 NULL 时会在运行期报 IntegrityError，需要在迁移里重建该表或补默认值。",
+            detail,
+        )
 
 
 async def create_db_and_tables() -> None:

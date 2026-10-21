@@ -16,11 +16,12 @@
 迁移直接建表/改表，共用库会让别的用例莫名其妙地少一列或多一列。
 """
 
+import logging
 import uuid
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db import _migrate_user_role_column, diff_schema
+from app.db import _migrate_user_role_column, diff_column_constraints, diff_schema
 from app.roles import ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_USER
 
 
@@ -178,3 +179,60 @@ def _model_columns_snapshot() -> dict[str, set[str]]:
     from app.db import _model_columns
 
     return _model_columns()
+
+
+# ---------------------------------------------------------------------
+# 结构漂移：库里比代码更严格
+# ---------------------------------------------------------------------
+def test_diff_column_constraints_reports_a_stricter_database_column():
+    """模型允许 NULL、库里却是 NOT NULL：写 NULL 会在运行期炸 IntegrityError。
+
+    这条冷路径很难在现场复现（往往要某个可选字段真的有值时才走到），所以必须在启动时
+    就报出来。
+    """
+    # 干库里默认都按「可空」算（False = 不是 NOT NULL），再把 model 标成 NOT NULL
+    actual = {table: {col: False for col in cols} for table, cols in _model_columns_snapshot().items()}
+    actual["conversation"]["model"] = True
+
+    stricter = diff_column_constraints(actual)
+
+    assert stricter == {"conversation": {"model"}}
+
+
+def test_diff_column_constraints_ignores_the_benign_direction():
+    """模型 NOT NULL、库里可空不报：历史行本来就是 NULL，报出来只是噪音。"""
+    actual = {table: {col: False for col in cols} for table, cols in _model_columns_snapshot().items()}
+
+    assert diff_column_constraints(actual) == {}
+
+
+def test_diff_column_constraints_skips_absent_tables():
+    assert diff_column_constraints({}) == {}
+
+
+async def test_startup_warns_when_a_column_is_stricter_than_the_model(tmp_path, caplog):
+    """端到端：库里 conversation.model 是 NOT NULL，启动检查必须点名它。"""
+    from sqlalchemy.dialects import sqlite
+    from sqlalchemy.schema import CreateTable
+
+    from app.db import Base, _warn_on_missing_columns
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'drift.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            conversation = next(t for t in Base.metadata.sorted_tables if t.name == "conversation")
+            ddl = str(CreateTable(conversation).compile(dialect=sqlite.dialect()))
+            # 把模型里可空的 model 列改成 NOT NULL，模拟「库比代码更严格」
+            stricter = ddl.replace("model VARCHAR(255),", "model VARCHAR(255) NOT NULL,")
+            assert stricter != ddl
+            await conn.exec_driver_sql("DROP TABLE conversation")
+            await conn.exec_driver_sql(stricter)
+
+            with caplog.at_level(logging.WARNING, logger="app.db"):
+                await _warn_on_missing_columns(conn)
+    finally:
+        await engine.dispose()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("更严格" in message and "conversation.model" in message for message in messages)

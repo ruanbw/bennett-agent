@@ -265,6 +265,12 @@ IPv6（带端口的丢掉端口：`no_proxy` 是按主机绕过代理），并�
 迁移」的代价，启动时会做一次结构比对（`app/db.py:diff_schema`）：库里缺列时在日志里
 点名是哪张表的哪一列，而不是等某个查询在运行期报 `no such column`。
 
+**另一个方向也会报：库比代码更严格。** `diff_column_constraints` 找出「模型允许 NULL、
+库里是 `NOT NULL`」的列——应用会按模型写 NULL，然后在运行期撞
+`IntegrityError: NOT NULL constraint failed`，而这条路径往往只在某个可选字段真的有值时
+才走到（例如 `conversation.model` 为空的新会话），现场极难复现。反方向（模型 NOT NULL、
+库里可空）刻意不报：历史行本来就是 NULL，报出来只是噪音。
+
 ## 日志
 
 `LOG_LEVEL`（默认 INFO）与 `LOG_ACCESS`（默认关闭）控制输出，配置在
