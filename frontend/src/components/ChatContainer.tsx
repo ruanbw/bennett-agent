@@ -270,7 +270,13 @@ export function ChatContainer({
                   }
                   setEditingTitle(clamped.title);
                 }}
-                onBlur={handleSaveTitle}
+                onBlur={(event) => {
+                  // 焦点在编辑器内部移动（Tab 到保存/取消）不算「离开」，不能抢跑保存。
+                  // 否则键盘用户一 Tab 就被自动保存，永远到不了取消按钮。
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.form?.contains(next)) return;
+                  void handleSaveTitle();
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
                     handleCancelEdit();
@@ -299,7 +305,7 @@ export function ChatContainer({
               <button
                 type="submit"
                 disabled={saving}
-                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-default"
+                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
                 title="保存"
                 aria-label="保存"
               >
@@ -307,8 +313,8 @@ export function ChatContainer({
               </button>
               <button
                 type="button"
-                onMouseDown={handleCancelEdit}
-                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer"
+                onClick={handleCancelEdit}
+                className="p-1 text-muted-foreground hover:text-foreground rounded-md transition cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
                 title="取消"
                 aria-label="取消"
               >

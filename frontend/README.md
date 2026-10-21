@@ -218,7 +218,10 @@ src/
   `App` **必须**把 `updateTitle` 的 Promise 交回去——用 `void` 吞掉它，await 会立即
   成功，失败只剩控制台一行日志、标题悄悄退回旧值（本项目真踩过）。失败时编辑器保持
   打开、错误就地显示（`role="alert"` + `aria-invalid`），按 Enter 即重试；blur 与
-  submit 可能同批触发，用 ref 挡住第二次保存。输入框用 `[field-sizing:content]` 按
+  submit 可能同批触发，用 ref 挡住第二次保存。**blur 只在焦点离开整个表单时保存**：
+  在输入框与保存/取消按钮之间 Tab 属于表单内部移动，不能抢跑保存，否则键盘用户一 Tab
+  就被存掉、永远到不了取消；取消按钮因此用 `onClick` 而不是 `onMouseDown`。输入框用
+  `[field-sizing:content]` 按
   内容自适应（`size` 属性作旧浏览器退路），固定 12rem 时 90 字标题只能看见一小截。
   **长度按 Unicode 码点算（100 字），不用 `maxLength`**：`maxLength` 会在浏览器层面
   静默截断粘贴内容，还会按 UTF-16 长度劈开 emoji 的代理对。现在在 `onChange` 里截断并
