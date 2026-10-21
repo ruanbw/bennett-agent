@@ -104,6 +104,10 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 在 `app/services/title_text.py`（纯函数，`tests/test_title_text.py` 覆盖）；模型不可用或
 返回空内容时退回「首条消息首行」，并去掉 Markdown 的 `#` 记号。
 
+标题调用还带**自己的 10 秒预算**（`TITLE_TIMEOUT_SECONDS`，逐次 `model_settings` 传入）：
+此前它继承流式对话的 120 秒空闲超时——网关或上游卡住时，`/api/chat/title` 会白占一个请求
+（以及一个限流槽）两分钟，而标题只是装饰、前端本来就是 fire-and-forget + 失败保留占位。
+
 ## 评测
 
 `evals/` 是一套**行为回归**用例：改提示词、换模型、动工具定义之后跑一遍，就知道哪些

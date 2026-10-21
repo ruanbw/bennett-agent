@@ -45,7 +45,11 @@ from app.schemas.events import (
     ToolResult,
     Usage,
 )
-from app.services.agent_factory import build_agent, build_title_agent
+from app.services.agent_factory import (
+    TITLE_TIMEOUT_SECONDS,
+    build_agent,
+    build_title_agent,
+)
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
 from app.services.model_service import ChatModelSnapshot
 from app.services.title_text import fallback_title, normalize_title
@@ -702,7 +706,11 @@ async def generate_title_from_prompt(snapshot: ChatModelSnapshot, prompt: str) -
         if snapshot.target is None and snapshot.registry_managed:
             raise RuntimeError(f"模型不可用: {model_name}")
         agent = build_title_agent(model_name, target=snapshot.target)
-        result = await agent.run(f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}")
+        result = await agent.run(
+            f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}",
+            # 标题是装饰：给它一个远小于流式空闲超时的预算，避免网关卡住时白占两分钟
+            model_settings={"timeout": TITLE_TIMEOUT_SECONDS},
+        )
         title = normalize_title(result.output, MAX_TITLE_CHARS)
         if title:
             return title

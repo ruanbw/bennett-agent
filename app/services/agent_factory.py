@@ -49,6 +49,13 @@ CLARIFICATION_TOOL_NAME = "ask_user_clarification"
 #: 「模板里写死的工具名」正是第 4 条修过的那类漂移。
 CURRENT_TIME_TOOL_NAME = "get_current_time"
 
+#: 标题生成的上游预算（秒）。
+#:
+#: 标题只是装饰：网关/上游卡住时，`/api/chat/title` 没必要跟着等 120 秒的流式空闲超时——
+#: 那会把一个请求（以及一个限流槽）占住两分钟，而用户根本不关心标题什么时候回来。
+#: 前端本来就是 fire-and-forget + 失败保留占位标题，10 秒够了。
+TITLE_TIMEOUT_SECONDS = 10.0
+
 TITLE_SYSTEM_INSTRUCTION = (
     "你是一个会话标题生成助手。根据用户的问题或指令，概括出极简的会话标题。"
     "要求：1. 紧扣核心意向；2. 不超过10个汉字或5个英文单词；"

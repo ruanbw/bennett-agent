@@ -288,7 +288,7 @@ async def test_title_cleans_model_output_before_returning(monkeypatch):
         output = "「标题：向量数据库选型。」"
 
     class _Agent:
-        async def run(self, _prompt):
+        async def run(self, _prompt, **_kwargs):
             return _Result()
 
     monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
@@ -306,7 +306,7 @@ async def test_empty_model_title_falls_back_instead_of_storing_blank(monkeypatch
         output = "   "
 
     class _Agent:
-        async def run(self, _prompt):
+        async def run(self, _prompt, **_kwargs):
             return _Result()
 
     monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
@@ -314,3 +314,43 @@ async def test_empty_model_title_falls_back_instead_of_storing_blank(monkeypatch
     title = await chat_service.generate_title_from_prompt(snapshot, "帮我分析这份财报")
 
     assert title == "帮我分析这份财报"
+
+
+# ---------------------------------------------------------------------
+# 标题生成的预算：装饰性数据不该跟着流式超时等两分钟
+# ---------------------------------------------------------------------
+async def test_title_call_gets_its_own_short_timeout(monkeypatch):
+    """标题调用要带一个远小于流式空闲超时的预算，否则网关卡住时会白占一个请求两分钟。"""
+    snapshot = _title_snapshot(target=object(), registry_managed=False)
+    captured: dict[str, object] = {}
+
+    class _Result:
+        output = "向量数据库选型"
+
+    class _Agent:
+        async def run(self, _prompt, **kwargs):
+            captured.update(kwargs)
+            return _Result()
+
+    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+
+    await chat_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
+
+    assert captured["model_settings"] == {"timeout": chat_service.TITLE_TIMEOUT_SECONDS}
+    # 必须真的比流式空闲超时（默认 120s）小一个量级，否则这条约束没有意义
+    assert chat_service.TITLE_TIMEOUT_SECONDS <= 15
+
+
+async def test_title_timeout_falls_back_to_the_first_line(monkeypatch):
+    """超时与其它失败一样：退回首行截断，不让用户看到报错。"""
+    snapshot = _title_snapshot(target=object(), registry_managed=False)
+
+    class _Agent:
+        async def run(self, _prompt, **_kwargs):
+            raise TimeoutError("标题模型超时")
+
+    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+
+    title = await chat_service.generate_title_from_prompt(snapshot, "帮我把这段 SQL 优化一下")
+
+    assert title == "帮我把这段 SQL 优化一下"
