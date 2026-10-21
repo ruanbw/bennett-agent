@@ -188,7 +188,10 @@ function renderToolCall(toolCall: ToolCallRecord): string[] {
         : toolCall.outcome === 'interrupted'
           ? '已中断'
           : '完成';
-  const status = toolCall.status === 'running' ? '进行中' : outcomeLabel;
+  // 「已完成但没有结果」= 停在半途（用户点停止 / 连接断开 / 上游中途报错）：
+  // 既不能写「完成」（没有结果可以佐证），也不该写「进行中」（它永远不会再返回了）。
+  const interrupted = toolCall.status !== 'running' && toolCall.outcome === undefined && !toolCall.result;
+  const status = toolCall.status === 'running' ? '进行中' : interrupted ? '未完成' : outcomeLabel;
   // 耗时与界面上折叠条右侧的「2.2s」同一口径（`formatToolDuration`）：导出文件里没有
   // 这个数，事后就无法判断一步工具调用是「秒回」还是「卡了一分钟」。
   const duration = toolCallDuration(toolCall);

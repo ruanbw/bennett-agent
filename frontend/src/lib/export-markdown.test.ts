@@ -426,3 +426,16 @@ describe('本轮用量', () => {
     expect(markdown).not.toContain('输出 token 合计');
   });
 });
+
+describe('停在半途的工具调用（不只是「进行中」）', () => {
+  it('停了但没结果：写「未完成」，不冒充完成也不说还在进行', () => {
+    const markdown = build([
+      assistantMessage({
+        toolCalls: [toolCall({ status: 'complete', result: undefined, startedAt: at(10) })],
+      }),
+    ]);
+
+    expect(markdown).toContain('工具调用 · search_docs · 未完成');
+    expect(markdown).not.toContain('· 完成</summary>');
+  });
+});

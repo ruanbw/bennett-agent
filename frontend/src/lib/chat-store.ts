@@ -259,6 +259,8 @@ export function finishRun(sessionId: string, { stopped = false } = {}): RunState
   const run = runs.get(sessionId);
   if (!run) return null;
 
+  settleRunningToolCalls(run);
+
   // 思考计时的收尾：正文出现过就已在 applyEvent 里结算，这里兜住「只有思考没有正文」
   if (run.thinkingStartedAt !== null && run.thinkingMs === 0) {
     run.thinkingMs = Date.now() - run.thinkingStartedAt;
@@ -270,6 +272,23 @@ export function finishRun(sessionId: string, { stopped = false } = {}): RunState
 
   touch(sessionId);
   return run;
+}
+
+/**
+ * 收尾仍在「进行中」的工具调用。
+ *
+ * 用户点停止、连接断开、或上游在工具执行中途报错时，那次调用永远不会有 `tool_result`
+ * 事件。不在这里结算，界面上的转圈会一直转、导出文件里也会写上「进行中」——一份永远
+ * 不会变的存档说某件事还在进行，是纯粹的误导。
+ *
+ * 只把 `status` 改成 complete、**不补 result**：渲染层看到「已完成但没有结果」就显示
+ * 「未完成，工具没有返回结果」（`resolveToolCallViewStatus` 的 interrupted 分支），
+ * 既不假装成功，也不假装失败。
+ */
+function settleRunningToolCalls(run: RunState): void {
+  for (const call of run.toolCalls) {
+    if (call.status === 'running') call.status = 'complete';
+  }
 }
 
 /**

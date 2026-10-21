@@ -756,3 +756,44 @@ describe('失败提示不叠两层「请求失败」', () => {
     expect(getRun('a')!.content).toContain('**请求失败**: 网络连接中断')
   })
 })
+
+describe('停止时收尾仍在进行的工具调用', () => {
+  const toolEvent = (id: string) =>
+    ({ type: 'tool_call', tool_call_id: id, tool_name: 'get_current_time', args: '{}' }) as const
+
+  it('点停止后不会永远停在「进行中」', () => {
+    start('a')
+    applyEvent('a', toolEvent('t1'))
+
+    const run = finishRun('a', { stopped: true })!
+
+    expect(run.toolCalls[0]).toMatchObject({ toolCallId: 't1', status: 'complete' })
+    // 不补结果：没有结果可以佐证「成功」，渲染层据此显示「未完成，工具没有返回结果」
+    expect(run.toolCalls[0].result).toBeUndefined()
+  })
+
+  it('已经拿到结果的调用不受影响', () => {
+    start('a')
+    applyEvent('a', toolEvent('t1'))
+    applyEvent('a', {
+      type: 'tool_result',
+      tool_call_id: 't1',
+      tool_name: 'get_current_time',
+      result: '16:00',
+      outcome: 'success',
+    })
+
+    const run = finishRun('a', {})!
+
+    expect(run.toolCalls[0]).toMatchObject({ status: 'complete', result: '16:00' })
+  })
+
+  it('没有结果时界面按「未完成」而不是「进行中」展示（不是假装成功）', async () => {
+    const { resolveToolCallViewStatus } = await import('./tool-call-view')
+    start('a')
+    applyEvent('a', toolEvent('t1'))
+    finishRun('a', { stopped: true })
+
+    // buildParts 不传 status：没有结果即「停在半途」，与 memory 里的 complete 不矛盾
+    expect(resolveToolCallViewStatus(undefined, undefined)).toBe('interrupted')
+  })})
