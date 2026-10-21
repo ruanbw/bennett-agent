@@ -422,6 +422,30 @@ export function describeProviderSync(result: ProviderSyncResult): string {
   return `同步完成：${parts.join('，')}；上游未返回的模型不会自动删除。`;
 }
 
+/** 模型列表默认平铺多少个；超出部分收进「展开全部」。 */
+export const VISIBLE_MODELS_COLLAPSED = 8;
+
+/**
+ * 按关键词过滤模型（`model_id` 与展示名都匹配，大小写不敏感）。
+ *
+ * 一个 LiteLLM 网关常常暴露几十上百个模型，后台把它们全部平铺时，找某个具体型号只能靠
+ * 滚动与肉眼扫描——而管理动作（启停、设默认、编辑）恰恰都是「针对某一个模型」的。
+ *
+ * 空查询返回原数组（保持调用方的引用，避免无谓重渲染）。
+ */
+export function filterAdminModels<T extends { model_id: string; display_name: string }>(
+  models: readonly T[],
+  query: string,
+): readonly T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return models;
+  return models.filter(
+    (model) =>
+      model.model_id.toLowerCase().includes(needle) ||
+      model.display_name.toLowerCase().includes(needle),
+  );
+}
+
 export function formatContextWindow(tokens: number | null): string {
   if (!tokens || tokens <= 0) return '窗口未知';
   if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M 上下文`;

@@ -6,6 +6,7 @@ import {
   PlugZap,
   Plus,
   RefreshCw,
+  Search,
   Star,
   Trash2,
   X,
@@ -23,6 +24,8 @@ import {
   deleteProvider,
   describeFailure,
   describeProviderSync,
+  filterAdminModels,
+  VISIBLE_MODELS_COLLAPSED,
   formatContextWindow,
   listProviderModels,
   listProviders,
@@ -457,6 +460,14 @@ function ProviderCard({
   onDismissNotice,
 }: ProviderCardProps) {
   const isBusy = busy !== null;
+  const [modelFilter, setModelFilter] = useState('');
+  const [modelsExpanded, setModelsExpanded] = useState(false);
+  const visibleModels = filterAdminModels(models, modelFilter);
+  // 默认折叠：一个 LiteLLM 网关常常暴露几十上百个模型，全部平铺会把页面变成一堵墙，
+  // 而管理动作（启停 / 设默认 / 编辑）都是针对某一个模型的。过滤优先，其次才是展开。
+  const collapsed = modelFilter.trim() === '' && !modelsExpanded && visibleModels.length > VISIBLE_MODELS_COLLAPSED;
+  const shownModels = collapsed ? visibleModels.slice(0, VISIBLE_MODELS_COLLAPSED) : visibleModels;
+
   const isTesting = busy === `test:${provider.id}`;
   const isSyncing = busy === `sync:${provider.id}`;
   // 对话侧的模型列表只包含「提供商启用 + 模型启用」的行。后台展示全部（要能管理停用项），
@@ -573,8 +584,43 @@ function ProviderCard({
             暂无模型：点「同步模型」从上游拉取，或在下方手动添加。
           </p>
         ) : (
-          <ul className="space-y-1.5">
-            {models.map((model) => (
+          <>
+            {/* 模型过滤：模型一多，找某个具体型号只能靠滚动与肉眼扫描 */}
+            <div className="relative flex items-center">
+              <Search
+                className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                value={modelFilter}
+                onChange={(event) => setModelFilter(event.target.value)}
+                placeholder="过滤模型（ID 或名称）"
+                aria-label={`过滤 ${provider.name} 的模型`}
+                className="h-8 pl-8 md:text-xs"
+              />
+              {modelFilter && (
+                <button
+                  type="button"
+                  onClick={() => setModelFilter('')}
+                  aria-label="清除模型过滤"
+                  className="absolute right-2 cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            {modelFilter.trim() !== '' && (
+              <p role="status" className="px-1 text-[11px] text-muted-foreground">
+                匹配 {visibleModels.length} / {models.length} 个模型
+              </p>
+            )}
+            {visibleModels.length === 0 && (
+              <p className="px-1 py-2 text-xs text-muted-foreground">
+                没有匹配「{modelFilter.trim()}」的模型。
+              </p>
+            )}
+            <ul className="space-y-1.5">
+            {shownModels.map((model) => (
               <li
                 key={model.id}
                 className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-2"
@@ -644,7 +690,26 @@ function ProviderCard({
                 </div>
               </li>
             ))}
-          </ul>
+            </ul>
+            {collapsed && (
+              <button
+                type="button"
+                onClick={() => setModelsExpanded(true)}
+                className="w-full cursor-pointer rounded-lg border border-dashed border-border/70 px-2 py-1.5 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+              >
+                展开全部（还有 {visibleModels.length - VISIBLE_MODELS_COLLAPSED} 个）
+              </button>
+            )}
+            {!collapsed && modelsExpanded && modelFilter.trim() === '' && models.length > VISIBLE_MODELS_COLLAPSED && (
+              <button
+                type="button"
+                onClick={() => setModelsExpanded(false)}
+                className="w-full cursor-pointer rounded-lg border border-dashed border-border/70 px-2 py-1.5 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+              >
+                收起，只看前 {VISIBLE_MODELS_COLLAPSED} 个
+              </button>
+            )}
+          </>
         )}
 
         {/* 用 form 而不是裸按钮：输入框里按回车也能添加，符合表单直觉 */}

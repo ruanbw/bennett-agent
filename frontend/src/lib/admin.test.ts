@@ -8,6 +8,7 @@ import {
   describeAdminError,
   describeFailure,
   describeProviderSync,
+  filterAdminModels,
   formatContextWindow,
   validateModelDraft,
   validateProviderDraft,
@@ -251,5 +252,32 @@ describe('formatContextWindow', () => {
   it('百万级窗口按 M 展示', () => {
     expect(formatContextWindow(1_000_000)).toBe('1M 上下文');
     expect(formatContextWindow(2_000_000)).toBe('2M 上下文');
+  });
+});
+
+describe('filterAdminModels', () => {
+  const models = [
+    { model_id: 'auto/deepseek-v4.1-flash', display_name: 'DeepSeek V4.1 Flash' },
+    { model_id: 'workbuddy/gpt-4o', display_name: 'GPT-4o' },
+    { model_id: 'auto/claude-sonnet-4', display_name: 'Claude Sonnet 4' },
+  ];
+
+  it('空查询原样返回（同一引用，不触发无谓重渲染）', () => {
+    expect(filterAdminModels(models, '   ')).toBe(models);
+  });
+
+  it('同时匹配 model_id 与展示名，大小写不敏感', () => {
+    expect(filterAdminModels(models, 'deepseek').map((m) => m.display_name)).toEqual([
+      'DeepSeek V4.1 Flash',
+    ]);
+    expect(filterAdminModels(models, 'GPT-4O').map((m) => m.model_id)).toEqual(['workbuddy/gpt-4o']);
+    expect(filterAdminModels(models, 'auto/').map((m) => m.model_id)).toEqual([
+      'auto/deepseek-v4.1-flash',
+      'auto/claude-sonnet-4',
+    ]);
+  });
+
+  it('没有匹配时返回空数组，而不是原列表', () => {
+    expect(filterAdminModels(models, '不存在')).toEqual([]);
   });
 });

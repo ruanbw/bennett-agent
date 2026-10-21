@@ -535,6 +535,11 @@ localStorage（键 `composer_drafts`，一个 JSON 装所有会话）：
   推理标记：手动添加的模型 `context_window` 不再永远显示「窗口未知」；两个 token 上限
   可留空、填了必须是正整数（`validateModelDraft`，有 vitest），错误聚焦到对应输入框。
   模型显示名可能重复，所以开关 / 编辑 / 删除的 `aria-label` 都带 `model_id`。
+  **模型一多要能过滤，默认也别全平铺。** 一个 LiteLLM 网关常暴露几十上百个模型，全部铺开
+  时找某个具体型号只能靠滚动与肉眼扫描，而管理动作（启停 / 设默认 / 编辑）恰恰都针对某一个
+  模型。卡片里因此有一个过滤框（ID 与展示名都匹配、大小写不敏感，`lib/admin.ts:filterAdminModels`
+  有 vitest），默认只平铺 `VISIBLE_MODELS_COLLAPSED`（8）个，其余收进「展开全部（还有 N 个）」
+  ——过滤时自动展开全部匹配项，并显示「匹配 1 / 18 个模型」。
 - **用户列表刷新时不允许对旧行操作，页码也要自己夹回最后一页。** `loading` 由「本次请求
   key」与「最近一次完成的 key」推导，而不是在 effect 里同步 `setState(true)`（会触发
   级联渲染，React 的 lint 规则也会报）。刷新中禁封禁 / 角色 / 翻页，列表 `aria-busy`
