@@ -3,7 +3,12 @@ import type { PropsWithChildren } from 'react';
 
 import { useMediaQuery } from '../hooks/use-media-query';
 import { ThemeContext } from './theme-context';
-import { readThemePreference, themePreferenceFromStorageEvent, writeThemePreference } from './theme-context';
+import {
+  readThemePreference,
+  themeColorFor,
+  themePreferenceFromStorageEvent,
+  writeThemePreference,
+} from './theme-context';
 import type { ThemePreference } from './theme-context';
 
 export function ThemeProvider({ children }: PropsWithChildren) {
@@ -25,6 +30,9 @@ export function ThemeProvider({ children }: PropsWithChildren) {
     root.classList.toggle('dark', isDark);
     // colorScheme 必须跟着切：滚动条、表单控件等浏览器原生 UI 由它决定，只切 class 不够
     root.style.colorScheme = isDark ? 'dark' : 'light';
+    // 移动端浏览器工具栏不吃 color-scheme，要显式改 theme-color，否则地址栏会一直是白的
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', themeColorFor(resolvedTheme));
   }, [resolvedTheme]);
 
   const setTheme = useCallback((newTheme: ThemePreference) => {

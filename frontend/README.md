@@ -186,6 +186,11 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   账号菜单）各自可测。菜单里的「设置」直接显示当前平台的 `⌘,` / `Ctrl+,` 并带
   `aria-keyshortcuts`；收起态头像触发器补 `focus-visible` ring；外部注入的 `onLogout`
   若 reject，弹一条「登出失败，请重试」而不是只留控制台一行。
+- **移动端工具栏颜色也要跟着切。** `color-scheme` 管的是滚动条与表单控件，管不到 Android
+  地址栏 / iOS 状态栏——不显式改 `<meta name="theme-color">` 就会出现「页面是暗的、顶上
+  那条还是白的」。浅色 `#ffffff`、深色 `#09090b` 与 `index.css` 的 `--background` 同值；
+  首屏内联脚本与 `ThemeProvider` 都会更新它（前者防首帧闪白、后者跟随用户切换）。
+  这两份副本的一致性由 `theme-boot.test.ts` 用假 DOM 执行真实脚本后与 TS 侧比对。
 - **同步状态要能解释，也要能恢复。** 侧边栏云图标是入口而不是装饰：面板给出
   「已同步 / 待上传 / 无法同步 / 失败」的结论、上次同步时间、待上传与被拒数量，并提供
   「立即同步」与「重新上传被拒内容」。被服务端拒收的行（`too_large` / `quota_exceeded` /

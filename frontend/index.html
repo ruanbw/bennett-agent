@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 移动端浏览器工具栏颜色：与 index.css 的 --background、src/context/theme-context.ts
+         的 THEME_COLORS 保持一致，并由下面的首屏脚本与 ThemeProvider 动态更新 -->
+    <meta name="theme-color" content="#ffffff" />
     <title>Bennett Agent</title>
     <!--
       首屏主题引导：在 React 挂载前决定 dark class 与 color-scheme，避免首帧闪白。
@@ -38,6 +41,11 @@
 
         if (isDark) document.documentElement.classList.add('dark');
         document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+
+        // 移动端工具栏颜色（theme-context.ts 的 THEME_COLORS 是同一份取值的另一处副本）
+        var themeColor = isDark ? '#09090b' : '#ffffff';
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', themeColor);
       })();
     </script>
   </head>

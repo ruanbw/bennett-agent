@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import indexHtml from '../../index.html?raw';
 
 import {
+  THEME_COLORS,
   THEME_STORAGE_KEY,
   normalizeThemePreference,
   readThemePreference,
+  themeColorFor,
   themePreferenceFromStorageEvent,
   writeThemePreference,
 } from './theme-context';
@@ -29,6 +31,8 @@ interface BootSandboxOptions {
 interface BootResult {
   classList: Set<string>;
   colorScheme: string | undefined;
+  /** 首屏脚本写进 `<meta name="theme-color">` 的值（移动端工具栏颜色）。 */
+  themeColor: string | null;
 }
 
 /** 取出 index.html 里的首屏脚本，在一个只实现了脚本所需 API 的假 DOM 里执行。 */
@@ -50,18 +54,23 @@ function runBootScript(options: BootSandboxOptions = {}): BootResult {
       return { matches: options.prefersDark ?? false };
     },
   };
+  let themeColor: string | null = null;
   const documentStub = {
     documentElement: {
       classList: { add: (name: string) => classList.add(name) },
       style,
     },
+    querySelector: (selector: string) =>
+      selector === 'meta[name="theme-color"]'
+        ? { setAttribute: (_name: string, value: string) => { themeColor = value; } }
+        : null,
   };
 
   // 在假 window/document 下执行真实脚本（等价于浏览器里的首屏执行）
   const run = new Function('window', 'document', script);
   run(windowStub, documentStub);
 
-  return { classList, colorScheme: style.colorScheme };
+  return { classList, colorScheme: style.colorScheme, themeColor };
 }
 
 beforeEach(() => {
@@ -190,5 +199,32 @@ describe('themePreferenceFromStorageEvent（多标签同步）', () => {
 
   it('其他键的事件 → 忽略', () => {
     expect(themePreferenceFromStorageEvent({ key: 'other_key', newValue: 'dark' })).toBeNull();
+  });
+});
+
+
+describe('移动端工具栏颜色（theme-color）', () => {
+  it('首屏脚本与 TS 侧给出的颜色一致（两份副本必须同源）', () => {
+    for (const [stored, prefersDark] of [
+      ['light', false],
+      ['dark', true],
+      ['system', true],
+      ['system', false],
+      ['Dark', true],
+    ] as const) {
+      const result = runBootScript({ stored, prefersDark });
+      const expected = themeColorFor(result.classList.has('dark') ? 'dark' : 'light');
+
+      expect(result.themeColor).toBe(expected);
+    }
+  });
+
+  it('深色用 #09090b、浅色用 #ffffff（与 index.css 的 --background 一致）', () => {
+    expect(THEME_COLORS.dark).toBe('#09090b');
+    expect(THEME_COLORS.light).toBe('#ffffff');
+  });
+
+  it('index.html 里声明了这个 meta，否则脚本找不到它、移动端工具栏不会跟随', () => {
+    expect(indexHtml).toContain('<meta name="theme-color"');
   });
 });

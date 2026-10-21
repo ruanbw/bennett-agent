@@ -13,6 +13,23 @@ import { createContext, useContext } from 'react';
 export type ThemePreference = 'light' | 'system' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
 
+/**
+ * 移动端浏览器工具栏（Android 地址栏、iOS 状态栏）用的主题色。
+ *
+ * 取值必须与 `index.css` 的 `--background` 一致（浅色 `#ffffff`、深色 `#09090b`），
+ * 否则会出现「页面是暗的、地址栏还是白的」这种半截效果——`color-scheme` 管不到它。
+ * 与首屏内联脚本同样要保持一致（那边是第二份副本，见 index.html 注释）。
+ */
+export const THEME_COLORS: Record<ResolvedTheme, string> = {
+  light: '#ffffff',
+  dark: '#09090b',
+};
+
+/** 解析后的主题 → 浏览器工具栏颜色。 */
+export function themeColorFor(resolved: ResolvedTheme): string {
+  return THEME_COLORS[resolved];
+}
+
 /** 主题偏好的存储键。 */
 export const THEME_STORAGE_KEY = 'theme_preference';
 
