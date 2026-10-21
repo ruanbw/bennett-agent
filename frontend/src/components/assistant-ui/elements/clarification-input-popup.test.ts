@@ -67,3 +67,32 @@ describe('ClarificationInputPopup', () => {
     expect(html).toContain('或手动输入具体要求并回车...');
   });
 });
+
+describe('ClarificationInputPopup 的可访问性', () => {
+  it('选项按钮通过 aria-describedby 关联到问题，焦点落下时能听到上下文', () => {
+    const html = renderToStaticMarkup(
+      createElement(ClarificationInputPopup, {
+        clarification: { question: '你想要哪一种结果？', options: ['方案 A', '方案 B'], allowCustomInput: true },
+        onSubmitAnswer: vi.fn(),
+      }),
+    );
+
+    // 每个选项都要带上描述关联（SSR 输出里与问题的 id 对应）
+    const described = html.match(/aria-describedby="([^"]+)"/g) ?? [];
+    expect(described.length).toBeGreaterThanOrEqual(2);
+    const questionId = /id="([^"]+)"[^>]*>你想要哪一种结果？/.exec(html)?.[1] ?? '';
+    expect(questionId).not.toBe('');
+    expect(html).toContain(`aria-describedby="${questionId}"`);
+  });
+
+  it('选项带 data-clarification-option 标记，方向键导航靠它找同组按钮', () => {
+    const html = renderToStaticMarkup(
+      createElement(ClarificationInputPopup, {
+        clarification: { question: '选一个', options: ['A', 'B', 'C'], allowCustomInput: false },
+        onSubmitAnswer: vi.fn(),
+      }),
+    );
+
+    expect(html.match(/data-clarification-option/g)).toHaveLength(3);
+  });
+});

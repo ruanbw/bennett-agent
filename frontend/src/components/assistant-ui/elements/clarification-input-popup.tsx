@@ -15,7 +15,8 @@ interface ClarificationInputPopupProps {
     /** 后端事件里的 allow_custom_input，经 chat-store 归一化为 camelCase */
     allowCustomInput?: boolean;
   };
-  onSubmitAnswer: (answer: string) => void;
+  /** 返回值可以是 Promise：发送失败（写库/抢槽）时弹层要解锁并提示重试 */
+  onSubmitAnswer: (answer: string) => void | Promise<unknown>;
   onDismiss?: () => void;
 }
 
@@ -38,6 +39,8 @@ export function ClarificationInputPopup({
   // 双击选项 / 连按回车会在弹层卸载前触发两次 answer；第二次会让 onNew 抢 run 槽位
   // 失败并回滚，用户看到互相矛盾的提示。提交一次后锁住整个弹层。
   const [submitted, setSubmitted] = useState(false);
+  /** 提交失败的原因：显示在弹层里，并把按钮重新解锁（否则用户既没发出去也点不了）。 */
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [prevQuestion, setPrevQuestion] = useState(question);
   const firstOptionRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -55,6 +58,7 @@ export function ClarificationInputPopup({
     setCustomText('');
     setShowAllOptions(false);
     setSubmitted(false);
+    setSubmitError(null);
   }
 
   // 提问出现时聚焦首个可操作控件。只在 question 变化时触发：依赖 clarification
@@ -69,7 +73,16 @@ export function ClarificationInputPopup({
     if (submittedRef.current || !answer) return;
     submittedRef.current = true;
     setSubmitted(true);
-    onSubmitAnswer(answer);
+    setSubmitError(null);
+
+    // 失败时解锁：提交的只是「把答案发出去」这一步，它失败了提问就还没被回答，
+    // 弹层必须能重试（此前这里 fire-and-forget，失败后弹层永远变灰）。
+    void Promise.resolve(onSubmitAnswer(answer)).catch((err: unknown) => {
+      console.warn('提交澄清回答失败:', err);
+      submittedRef.current = false;
+      setSubmitted(false);
+      setSubmitError('回答未发送成功，请重试');
+    });
   };
 
   const handleSelectOption = (option: string) => {
@@ -83,9 +96,28 @@ export function ClarificationInputPopup({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key !== 'Escape' || !onDismiss) return;
-    event.stopPropagation();
-    onDismiss();
+    if (event.key === 'Escape' && onDismiss) {
+      event.stopPropagation();
+      onDismiss();
+      return;
+    }
+
+    // 方向键在选项之间移动：这是一组互斥选择，Tab 一个个挪过去很累（选项最多 10 个）。
+    // 只在焦点本身落在某个选项按钮上时接管，避免抢走自定义输入框里的光标移动。
+    const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1
+      : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1
+        : 0;
+    if (step === 0) return;
+
+    const optionButtons = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-clarification-option]'),
+    );
+    const current = optionButtons.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0) return;
+
+    event.preventDefault();
+    const next = (current + step + optionButtons.length) % optionButtons.length;
+    optionButtons[next]?.focus();
   };
 
   return (
@@ -128,6 +160,12 @@ export function ClarificationInputPopup({
         )}
       </div>
 
+      {submitError && (
+        <p role="alert" className="mb-2 text-[11px] text-destructive">
+          {submitError}
+        </p>
+      )}
+
       {/* 候选选项列表：药丸单选按钮，点击后立即提交并消失 */}
       {visible.length > 0 && (
         <div
@@ -138,8 +176,12 @@ export function ClarificationInputPopup({
             <button
               // 清洗后文本已唯一，拼上位置既是稳定 key，也避免同文本再次撞车
               key={`${index}-${opt}`}
+              data-clarification-option=""
               ref={index === 0 ? firstOptionRef : undefined}
               type="button"
+              // 焦点落在选项上时，读屏只念选项本身——听不到「这是在回答什么」。
+              // 关联到问题文本，Tab 进来就能听到完整上下文。
+              aria-describedby={questionId}
               disabled={submitted}
               onClick={() => handleSelectOption(opt)}
               className="inline-flex max-w-full items-center px-3 py-1.5 rounded-full text-xs font-medium border border-border/80 bg-muted/40 hover:bg-primary hover:text-primary-foreground hover:border-primary text-foreground transition-all cursor-pointer shadow-2xs hover:shadow-xs active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"

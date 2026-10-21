@@ -133,6 +133,13 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   提交前拦不住第二次）。「展开更多」展开后保留为「收起选项」（`aria-expanded` /
   `aria-controls`），不能直接卸载按钮——那会把键盘焦点丢回 body，用户要重新 Tab 才能
   到新出现的选项。忽略提问后焦点交回 composer，不留在一个刚卸载的浮层上。
+  键盘上这是一组互斥选择：选项按钮之间用方向键移动（`data-clarification-option` 标记
+  同组按钮，左右/上下循环），Tab 只需进组一次；每个选项还挂 `aria-describedby` 指向问题
+  ——否则读屏只念选项文本，用户听不到「这是在回答什么」。
+  **提交失败必须解锁弹层。** 此前点击后立刻 fire-and-forget 且先把提问清掉：消息写库
+  失败或 run 槽位被抢时，提问再也不会回来（它由最后一条助手消息的 metadata 推导），
+  用户既没发出去也点不了第二次。现在 `answer` 把 Promise 交回弹层，失败时复位提交闸门
+  并显示「回答未发送成功，请重试」；`onNew` 也把「放弃待答提问」挪到**起跑成功之后**。
 - **思考链不回放。** `chat-persistence.ts:loadContextMessages` 只回传 `content`。
   思考链只用于展示，回传会放大请求体积，且长度不可控——一旦超过后端的
   `MAX_THINKING_CHARS`，该会话的每次重试都会拿到 422。

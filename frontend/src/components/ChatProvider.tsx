@@ -219,9 +219,6 @@ export function ChatProvider({
 
       if (!userText.trim()) return;
 
-      // 用户自己输入新内容发送，说明放弃了本轮提问
-      dismissPendingClarification();
-
       const userMsgId = newMessageId();
       const assistantMsgId = newMessageId();
       const userCreatedAt = nextTimestamp();
@@ -293,6 +290,10 @@ export function ChatProvider({
         }
 
         setNotice(null);
+        // 用户在提问未答时直接发了新消息，等于放弃那轮提问。清得**晚一点**：
+        // 写入/起跑失败会回滚消息，而提问一旦清掉就再也回不来（它由最后一条助手消息
+        // 的 metadata 推导），用户会既看不到问题、也不知道自己被问了什么。
+        dismissPendingClarification();
 
         if (priorCount === 0) {
           // 标题只是装饰：与消息显示、生成完全解耦，失败也不该打扰用户
@@ -402,16 +403,24 @@ export function ChatProvider({
     if (currentSessionId) abortChatRun(currentSessionId);
   }, [currentSessionId]);
 
-  // 用户在输入框上方选定/输入后提交：收尾提问，并把答案作为新一轮用户消息发给模型
+  /**
+   * 用户在输入框上方选定/输入后提交：把答案作为新一轮用户消息发给模型。
+   *
+   * **不在这里清提问**：清理放在 `onNew` 起跑成功之后。写入/抢槽失败会回滚消息，而提问
+   * 若已被清掉就再也回不来（它由最后一条助手消息的 metadata 推导），用户会既看不到
+   * 问题、也不知道自己被问了什么。Promise 原样交回弹层，失败时那里能解锁并提示重试。
+   */
   const submitClarificationAnswer = useCallback(
-    (answerText: string) => {
-      dismissPendingClarification();
-      // 这条路径没有 composer 承接 MessageNotSentError 的草稿恢复；失败提示已由 onNew 给出
-      onNew({ content: [{ type: 'text', text: answerText }] }).catch((err: unknown) => {
+    async (answerText: string): Promise<void> => {
+      try {
+        await onNew({ content: [{ type: 'text', text: answerText }] });
+      } catch (err) {
+        // 失败提示已由 onNew 的 rollback 给出（「消息未发送成功…」），这里只留日志
         console.warn('提交澄清回答失败:', err);
-      });
+        throw err;
+      }
     },
-    [dismissPendingClarification, onNew]
+    [onNew]
   );
 
   const runtime = useExternalStoreRuntime({
