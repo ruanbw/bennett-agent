@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 _ENV_NAMES = ("no_proxy", "NO_PROXY")
 
 
+#: 形如 `192.168.0.0/16` 或 `fd00::/8` 的网段条目。
+_CIDR = re.compile(r"^(?P<host>[^/\s]+)/(?P<len>[0-9]{1,3})$")
+
 #: `[IPv6]` 或 `[IPv6]:端口`。
 _BRACKETED_IPV6 = re.compile(r"^\[(?P<host>[^\]]+)\](?::(?P<port>[0-9]+))?$")
 
@@ -65,6 +68,38 @@ def _would_break_httpx(token: str) -> bool:
     """
     has_bracket = "[" in token or "]" in token
     return has_bracket and ":" in token
+
+
+def unsupported_entries(raw: str) -> list[str]:
+    """`no_proxy` 里**看起来像网段**的条目。
+
+    httpx 的白名单是 URL 模式（`all://*<条目>`），没有网段语义：`192.168.0.0/16` 会被拼成
+    `all://*192.168.0.0/16`，永远不会匹配真实主机——不报错，只是**默默不生效**。而把它写进
+    `no_proxy` 的人，本意几乎都是「内网直连」（本项目的 LiteLLM 网关常在内网）。
+
+    这类条目改不出来（httpx 不支持），只能告警：让运维知道「你以为绕过了，其实没绕过」。
+    """
+    entries: list[str] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        matched = _CIDR.match(token)
+        if not matched:
+            continue
+        host, length = matched.group("host"), int(matched.group("len"))
+        # 只认「主机部分是个 IP、前缀长度合法」的写法；`example.com/8` 这种滑稽输入不报
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        if host and 0 <= length <= (128 if ":" in host else 32):
+            entries.append(token)
+    return entries
+
+
+#: 已经告警过的网段写法。`get_http_client()` 每次新建客户端都会调本模块，不去重会刷屏。
+_WARNED_CIDR: set[str] = set()
 
 
 def normalize_no_proxy(raw: str) -> str:
@@ -117,6 +152,22 @@ def sanitize_no_proxy_env(environ: MutableMapping[str, str] | None = None) -> li
 
         env[name] = normalized
         rewrites.append(f"{name}={raw} -> {normalized}")
+
+    # 网段条目：不改变值（改了也不会更好），但必须让人知道它不生效
+    for name in _ENV_NAMES:
+        raw = env.get(name)
+        if not raw:
+            continue
+        for entry in unsupported_entries(raw):
+            if entry in _WARNED_CIDR:
+                continue
+            _WARNED_CIDR.add(entry)
+            logger.warning(
+                "环境变量 %s 里的网段条目 %r 不会被 httpx 识别（白名单是 URL 模式，没有网段语义），"
+                "这些地址仍会走代理。若目的是内网直连，请改成逐条列出具体主机名或 IP。",
+                name,
+                entry,
+            )
 
     if rewrites:
         logger.warning(

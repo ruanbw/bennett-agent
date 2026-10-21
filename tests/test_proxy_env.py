@@ -10,7 +10,7 @@ import os
 import httpx
 import pytest
 
-from app.config.proxy_env import normalize_no_proxy, sanitize_no_proxy_env
+from app.config.proxy_env import normalize_no_proxy, sanitize_no_proxy_env, unsupported_entries
 from app.services.agent_factory import build_provider
 from app.services.http_client import close_http_client, get_http_client
 
@@ -129,3 +129,41 @@ async def test_shared_client_builds_with_ipv6_and_port(monkeypatch):
         assert os.environ["no_proxy"] == "127.0.0.1,::1"
     finally:
         await close_http_client()
+
+
+# ---------------------------------------------------------------------
+# 网段写法：httpx 不认，必须告警（否则「内网直连」只是个错觉）
+# ---------------------------------------------------------------------
+def test_cidr_entries_are_detected():
+    assert unsupported_entries("192.168.0.0/16") == ["192.168.0.0/16"]
+    assert unsupported_entries("10.0.0.1, fd00::/8") == ["fd00::/8"]
+    # 前缀长度越界、主机不是 IP 的写法不算网段条目录别
+    assert unsupported_entries("10.0.0.0/33") == []
+    assert unsupported_entries("example.com/8") == []
+    assert unsupported_entries("localhost,::1") == []
+
+
+def test_cidr_entry_is_warned_once_and_left_untouched(caplog):
+    """值不改（改了也不会更好），但要在日志里说清楚它不生效。"""
+    environ = {"NO_PROXY": "192.168.0.0/16,10.0.0.1"}
+
+    with caplog.at_level("WARNING", logger="app.config.proxy_env"):
+        first = sanitize_no_proxy_env(environ)
+        second = sanitize_no_proxy_env(environ)
+
+    # 方括号/网段都不需要改写，返回值是「没动过」
+    assert first == [] and second == []
+    assert environ["NO_PROXY"] == "192.168.0.0/16,10.0.0.1"
+
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len([message for message in warnings if "192.168.0.0/16" in message]) == 1
+    assert any("网段" in message and "仍会走代理" in message for message in warnings)
+
+
+def test_clean_no_proxy_does_not_warn_about_cidr(caplog):
+    environ = {"no_proxy": "localhost,127.0.0.1,::1"}
+
+    with caplog.at_level("WARNING", logger="app.config.proxy_env"):
+        sanitize_no_proxy_env(environ)
+
+    assert not [record for record in caplog.records if "网段" in record.getMessage()]
