@@ -269,6 +269,12 @@ worker 各有各的缓存，这是省钱手段而不是正确性的一部分。
 `SameSite=None` 必须配 `AUTH_COOKIE_SECURE=true`，否则浏览器直接丢弃 cookie，这个组合在
 启动时就会报错。
 
+**cookie 名的前缀与字符合法性也在启动时校验。** `__Host-` / `__Secure-` 前缀是 RFC 6265bis
+的作用域锁定：带 `__Host-` 的 cookie 必须同时有 `Secure`、`Path=/` 且没有 `Domain`，浏览器
+才肯存——不满足时它**静默丢弃**，运维看到的仍是「登录接口 204、响应里也确实有 Set-Cookie」，
+下一个请求却 401。现在这种组合直接启动失败并写明修法；名字不在 RFC 6265 token 字符集里
+（空格、分号、逗号、中文）同样报错，因为浏览器与代理对这类名字的行为是未定义的。
+
 ## SQLite 连接参数
 
 `app/db.py:apply_sqlite_pragmas` 在**每条连接**上设置：`foreign_keys=ON`（SQLite 默认关，

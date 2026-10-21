@@ -18,6 +18,9 @@ ALLOWED_APP_ENVS = frozenset({"development", "production", "staging", "test"})
 #: 认证密钥的占位默认值。生产环境若仍是这个值，启动时直接报错而不是静默放行。
 DEFAULT_AUTH_SECRET = "dev-insecure-secret-change-me"
 
+#: 合法 cookie 名（RFC 6265 token）。前缀 `__Host-` / `__Secure-` 也落在这个集合里。
+COOKIE_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
 #: 生产密钥的最小长度与占位词。只挡默认值不够：.env.production 里抄一句
 #: "replace-with-a-strong-random-value" 一样没有任何安全强度。
 MIN_PRODUCTION_SECRET_LENGTH = 32
@@ -380,6 +383,38 @@ class Settings(BaseSettings):
         """生产必须走 HTTPS cookie：明文 HTTP 下会话 token 可被链路上任意一跳直接截获。"""
         if self.app_env == "production" and not self.auth_cookie_secure:
             raise ValueError("生产环境必须设置 AUTH_COOKIE_SECURE=true，否则会话 cookie 会在明文 HTTP 上被截获。")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cookie_name_prefix(self) -> "Settings":
+        """`__Host-` / `__Secure-` 前缀有硬性属性要求，不满足时浏览器**静默丢弃** cookie。
+
+        这两类前缀是 RFC 6265bis 的「cookie 作用域锁定」：带 `__Host-` 的 cookie 必须同时
+        有 `Secure`、`Path=/`、且**没有 Domain**，浏览器才肯存。运维看到的是「登录接口
+        204、响应里也确实有 Set-Cookie」，然后下一个请求 401——最难查的那一类。
+
+        所以名称与前缀属性一起校验，启动即时报错并写清修法。
+
+        另：cookie 名必须是 RFC 6265 的 token（不能有空格、分号、逗号等）。带这些字符时
+        浏览器/代理的行为是未定义的，同样属于「配错了但看不出来」。
+        """
+        name = self.auth_cookie_name
+        if not COOKIE_NAME_PATTERN.match(name):
+            raise ValueError(
+                f"AUTH_COOKIE_NAME={name!r} 不是合法的 cookie 名：只允许字母、数字与 "
+                "!#$%&'*+-.^_`|~，不能包含空格、分号、逗号或中文。"
+            )
+        if name.startswith("__Host-") and not self.auth_cookie_secure:
+            raise ValueError(
+                "AUTH_COOKIE_NAME 用了 `__Host-` 前缀，浏览器要求这类 cookie 必须带 Secure，"
+                "否则会被直接丢弃（表现为「登录成功，但下一个请求 401」）。"
+                "请同时设置 AUTH_COOKIE_SECURE=true，或改用不带前缀的名字。"
+            )
+        if name.startswith("__Secure-") and not self.auth_cookie_secure:
+            raise ValueError(
+                "AUTH_COOKIE_NAME 用了 `__Secure-` 前缀，浏览器要求这类 cookie 必须带 Secure，"
+                "否则会被直接丢弃。请同时设置 AUTH_COOKIE_SECURE=true，或改用不带前缀的名字。"
+            )
         return self
 
     def resolved_cookie_samesite(self) -> Literal["lax", "strict", "none"]:

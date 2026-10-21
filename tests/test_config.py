@@ -503,3 +503,49 @@ def test_context_reserve_rejects_negative_values():
         Settings(context_reserve_tokens=-1, _env_file=None)
 
     assert "context_reserve_tokens" in str(exc.value)
+
+
+# ---------------------------------------------------------------------
+# 会话 cookie 名：前缀有硬性属性要求，配错时浏览器静默丢 cookie
+# ---------------------------------------------------------------------
+def _settings(**overrides):
+    base = {"_env_file": None, "auth_secret": "x" * 40}
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_host_prefixed_cookie_requires_secure():
+    """`__Host-` 前缀必须配 Secure：否则浏览器直接丢 cookie，表现为「登录 204 但下一个请求 401」。"""
+    with pytest.raises(ValidationError) as excinfo:
+        _settings(auth_cookie_name="__Host-bennett", auth_cookie_secure=False)
+
+    message = str(excinfo.value)
+    assert "__Host-" in message
+    assert "AUTH_COOKIE_SECURE=true" in message
+
+
+def test_host_prefixed_cookie_is_fine_with_secure():
+    configured = _settings(auth_cookie_name="__Host-bennett", auth_cookie_secure=True)
+    assert configured.auth_cookie_name == "__Host-bennett"
+
+
+def test_secure_prefixed_cookie_requires_secure():
+    with pytest.raises(ValidationError) as excinfo:
+        _settings(auth_cookie_name="__Secure-bennett", auth_cookie_secure=False)
+
+    assert "__Secure-" in str(excinfo.value)
+
+
+def test_plain_cookie_name_still_works_without_secure():
+    """本地 http 调试必须继续可用：不带前缀的名字不需要 Secure。"""
+    configured = _settings(auth_cookie_name="bennett_session", auth_cookie_secure=False)
+    assert configured.auth_cookie_name == "bennett_session"
+
+
+@pytest.mark.parametrize("name", ["bad name", "semi;colon", "中文名", "a,b"])
+def test_illegal_cookie_name_is_rejected(name):
+    """cookie 名必须是 RFC 6265 的 token：带空格/分号时浏览器与代理行为未定义。"""
+    with pytest.raises(ValidationError) as excinfo:
+        _settings(auth_cookie_name=name)
+
+    assert "不是合法的 cookie 名" in str(excinfo.value)
