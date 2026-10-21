@@ -86,3 +86,44 @@ def test_client_is_rebuilt_when_the_event_loop_changes():
 
     assert http_client._client is None
     assert http_client._client_loop is None
+
+
+def test_rebuilt_client_has_bounded_pool():
+    """默认 100 条连接对「三类调用点」没有意义；上游挂掉时它只是把句柄攒得更久。"""
+    from app.services.http_client import DEFAULT_LIMITS
+
+    assert DEFAULT_LIMITS.max_connections == 20
+    assert DEFAULT_LIMITS.max_keepalive_connections <= DEFAULT_LIMITS.max_connections
+
+    async def pool_size():
+        client = get_http_client()
+        try:
+            # httpx 不保留 limits 本身，它被翻译成传输层的连接池配置
+            return client._transport._pool._max_connections
+        finally:
+            await close_http_client()
+
+    assert asyncio.run(pool_size()) == DEFAULT_LIMITS.max_connections
+
+
+def test_switching_loop_warns_instead_of_leaking_silently(caplog):
+    """旧客户端绑在已关闭的 loop 上：没有人能 await 它的 aclose，只能留一条可查的警告。
+
+    在**当前** loop 上给它排关闭任务更糟——httpx 传输层绑定旧 loop，任务里会抛
+    「attached to a different loop」并变成无人回收的异常。
+    """
+
+    async def create_client():
+        return get_http_client()
+
+    first = asyncio.run(create_client())
+
+    with caplog.at_level(logging.WARNING, logger="app.services.http_client"):
+        second = asyncio.run(create_client())
+
+    try:
+        assert second is not first
+        assert any("事件循环已失效" in record.getMessage() for record in caplog.records)
+    finally:
+        asyncio.run(first.aclose())
+        asyncio.run(close_http_client())

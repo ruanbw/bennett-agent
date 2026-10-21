@@ -159,6 +159,15 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 共享 HTTP 客户端
+
+模型列表、提供商同步、Tavily 搜索共用 `app/services/http_client.py` 里的一个
+`httpx.AsyncClient`（有连接池与 keep-alive；此前每个调用点各建一个）。连接池显式限量
+（20 条，`DEFAULT_LIMITS`）：本进程只有三类调用点，httpx 默认的 100 条在上游挂掉时只会
+把句柄攒得更久。客户端绑定创建它的事件循环，换 loop 会重建——重建时旧客户端**会被关掉**
+（旧 loop 已关闭时会留一条 WARNING，此时任何 loop 都无法 await 它的 `aclose`，硬在当前
+loop 上排任务只会抛「attached to a different loop」）。
+
 ## 代理环境变量（no_proxy）
 
 `no_proxy` 里的方括号 IPv6（`[::1]`、`[::1]:8000`）会让 httpx 把代理白名单拼成非法 URL：
