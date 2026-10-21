@@ -24,6 +24,32 @@ const DATA_PREFIX = 'data:';
  */
 export const IDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * 单个 SSE 帧的缓冲上限。
+ *
+ * 我们的事件都很小（增量文本、工具入参、用量），一帧到不了这个量级。没有上限时，
+ * 一个只发字节不发 `\n\n` 的坏上游（或被中间层改写的响应）会让 `buffer` 无界增长，
+ * 直到把标签页的内存吃光——用户看到的是浏览器卡死而不是「请求失败」。超限按
+ * 「丢帧」处理：结束读取、标成 damaged，已有的内容照常显示。
+ */
+export const MAX_FRAME_BYTES = 1_000_000;
+
+/**
+ * 事件流的内容类型校验。
+ *
+ * 拿到 200 不代表拿到的是事件流：反向代理的错误页、网关的登录跳转都是 200 + HTML。
+ * 此时按帧解析只会一个事件都产不出，最后报「回复不完整」——用户在前后端都找不到原因。
+ * 只在响应**带了** content-type 时判断（有些代理不设或设成 application/octet-stream），
+ * 免得把本来能用的流误杀。
+ */
+function assertEventStreamContentType(contentType: string | null): void {
+  if (!contentType) return;
+  if (contentType.toLowerCase().includes('text/event-stream')) return;
+  throw new Error(
+    `接口返回的不是事件流（content-type: ${contentType}），可能被反向代理改写。请检查 /api 是否被转发到后端。`,
+  );
+}
+
 export interface StreamChatParams {
   model: string | null;
   reasoningEffort: string | null;
@@ -104,6 +130,7 @@ async function* parseEventStream(
   let buffer = '';
   let reachedEnd = false;
   let idleTimedOut = false;
+  let frameTooLarge = false;
 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const clearIdleTimer = () => {
@@ -145,13 +172,20 @@ async function* parseEventStream(
       // 最后一段可能是不完整的帧，留到下一轮
       buffer = frames.pop() ?? '';
 
+      if (buffer.length > MAX_FRAME_BYTES) {
+        // 只发字节不发分隔符的坏上游：继续读下去只会把内存吃光，已有的内容照常交出去
+        frameTooLarge = true;
+        onParseError(new Error(`单个 SSE 帧超过 ${MAX_FRAME_BYTES} 字节`), '');
+        break;
+      }
+
       for (const frame of frames) {
         const event = parseFrame(frame, onParseError);
         if (event !== undefined) yield event;
       }
     }
 
-    if (!idleTimedOut) {
+    if (!idleTimedOut && !frameTooLarge) {
       // 流结束：flush 掉 decoder 里可能残留的半个多字节序列，它变成 U+FFFD 交给
       // 解析器诊断，而不是无声消失（缓冲区也可能还剩没以空行收尾的最后一帧）。
       buffer += decoder.decode();
@@ -231,6 +265,7 @@ export async function* streamChat({
   if (!response.body) {
     throw new Error('响应没有可读的流式主体');
   }
+  assertEventStreamContentType(response.headers.get('content-type'));
 
   let sawTerminal = false;
   let damaged = false;

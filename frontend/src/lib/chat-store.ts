@@ -355,13 +355,21 @@ export function setRunError(sessionId: string, error: RunError): void {
     run.content.trim().length > 0 || run.thinking.trim().length > 0 || run.toolCalls.length > 0;
   run.error = error;
   if (!hadOutput) run.sawError = true;
-  run.content += `\n\n> ⚠️ **请求失败**: ${error.message}`;
+  // 消息里可能已经带了「请求失败：」前缀（`describeConnectionFailure` 为菜单等无标签
+  // 场景加的），这里再抄一遍会出现「请求失败: 请求失败：…」。
+  run.content += `\n\n> ⚠️ **请求失败**: ${stripFailurePrefix(error.message)}`;
   touch(sessionId);
 }
 
 // ---------------------------------------------------------------------
 // 事件折叠
 // ---------------------------------------------------------------------
+/** 去掉消息里自带的「请求失败」前缀：引用块本身已经写了标签。 */
+function stripFailurePrefix(message: string): string {
+  const trimmed = message.trim();
+  return trimmed.startsWith('请求失败：') ? trimmed.slice('请求失败：'.length) : trimmed;
+}
+
 function upsertToolCall(
   run: Run,
   event: {

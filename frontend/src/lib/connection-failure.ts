@@ -71,8 +71,12 @@ export function describeConnectionFailure(error: unknown): ConnectionFailure {
 
   // 我们自己写的、已经带中文说明的错误（例如「响应没有可读的流式主体」）优先透传；
   // 透传前加「请求失败」让用户知道这是这一轮没完成，而不是回答内容的一部分。
+  // 已经自带这个前缀的不再叠加——消息区本来就会写「请求失败: 」，两层前缀会变成
+  // 「请求失败: 请求失败：…」。
   if (error instanceof Error && /[\u4e00-\u9fff]/.test(error.message)) {
-    return { message: `请求失败：${error.message}`, retryable: true };
+    const message = error.message.trim();
+    if (message.startsWith('请求失败')) return { message, retryable: true };
+    return { message: `请求失败：${message}`, retryable: true };
   }
 
   return { message: GENERIC_MESSAGE, retryable: true };

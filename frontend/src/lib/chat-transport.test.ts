@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent } from '../types'
 import { API_BASE_URL } from './constants'
-import { IDLE_TIMEOUT_MS, streamChat } from './chat-transport'
+import { IDLE_TIMEOUT_MS, MAX_FRAME_BYTES, streamChat } from './chat-transport'
 
 const encoder = new TextEncoder()
 
@@ -596,5 +596,37 @@ describe('错误响应', () => {
         }
       })(),
     ).rejects.toThrow('HTTP 错误: 504')
+  })
+})
+
+describe('内容类型与帧长度上限', () => {
+  it('200 但不是事件流（反代错误页）时给出可定位的错误，而不是「回复不完整」', async () => {
+    stubFetch({ body: bodyFrom(['<html>502 Bad Gateway</html>']), headers: { 'content-type': 'text/html' } })
+
+    await expect(drain()).rejects.toThrow(/不是事件流/)
+    await expect(drain()).rejects.toThrow(/content-type: text\/html/)
+  })
+
+  it('没有 content-type 头时照常解析（有些代理不设它，误杀比漏判更糟）', async () => {
+    const events = await collect([frame({ type: 'done' })])
+
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('content-type 带 charset 也认', async () => {
+    stubFetch({ body: bodyFrom([frame({ type: 'done' })]), headers: { 'content-type': 'text/event-stream; charset=utf-8' } })
+
+    expect((await collect([frame({ type: 'done' })])).length).toBeGreaterThan(0)
+  })
+
+  it('单个帧超过上限时停止读取并标成 damaged，已产出的内容照常保留', async () => {
+    // 一帧 1MB+ 且没有分隔符：继续读下去只会把标签页的内存吃光
+    const huge = `data: ${'x'.repeat(MAX_FRAME_BYTES + 10)}`
+    const events = await collect([frame({ type: 'content', delta: '前半段' }), huge])
+
+    expect(events[0]).toMatchObject({ type: 'content', delta: '前半段' })
+    const incomplete = events.at(-1)
+    expect(incomplete?.type).toBe(TRANSPORT_INCOMPLETE)
+    expect(incomplete?.damaged).toBe(true)
   })
 })

@@ -75,3 +75,18 @@ describe('describeConnectionFailure', () => {
     }
   });
 });
+
+describe('已经自带「请求失败」前缀的错误', () => {
+  it('不再叠加第二个前缀（消息区本身会写「请求失败: 」）', () => {
+    const failure = describeConnectionFailure(new Error('请求失败：接口返回的不是事件流'));
+
+    expect(failure.message).toBe('请求失败：接口返回的不是事件流');
+    expect(failure.message.match(/请求失败/g)).toHaveLength(1);
+  });
+
+  it('没有前缀的中文错误仍然补上，让用户知道这是本轮没完成', () => {
+    expect(describeConnectionFailure(new Error('响应没有可读的流式主体')).message).toBe(
+      '请求失败：响应没有可读的流式主体',
+    );
+  });
+});

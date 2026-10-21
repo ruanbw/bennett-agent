@@ -736,3 +736,23 @@ describe('落库失败（persistFailed）', () => {
     expect(isRunPersistFailed('nope')).toBe(false)
   })
 })
+
+describe('失败提示不叠两层「请求失败」', () => {
+  it('消息自带前缀时，引用块只保留一个', () => {
+    start('a')
+    setRunError('a', { message: '请求失败：接口返回的不是事件流', retryable: true, code: null })
+
+    const content = getRun('a')!.content
+    expect(content).toContain('**请求失败**: 接口返回的不是事件流')
+    expect(content.match(/请求失败/g)).toHaveLength(1)
+    // 结构化字段保留原文：重试/分类判断不该被展示层的处理影响
+    expect(getRun('a')!.error?.message).toBe('请求失败：接口返回的不是事件流')
+  })
+
+  it('没有前缀的文案原样保留', () => {
+    start('a')
+    setRunError('a', { message: '网络连接中断，请检查网络后重试', retryable: true, code: null })
+
+    expect(getRun('a')!.content).toContain('**请求失败**: 网络连接中断')
+  })
+})
