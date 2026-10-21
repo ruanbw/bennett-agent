@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AdminApiError,
+  buildModelPayload,
   buildProviderPayload,
   clampUsersOffset,
   describeAdminError,
   describeFailure,
   describeProviderSync,
   formatContextWindow,
+  validateModelDraft,
   validateProviderDraft,
+  type ModelDraft,
   type ProviderDraft,
 } from './admin';
 
@@ -103,6 +106,50 @@ describe('describeProviderSync', () => {
 
     expect(text).toContain('上游未返回任何模型');
     expect(text).toContain('不会被删除');
+  });
+});
+
+describe('validateModelDraft / buildModelPayload', () => {
+  const modelDraft = (overrides: Partial<ModelDraft> = {}): ModelDraft => ({
+    displayName: '  DeepSeek V4  ',
+    contextWindow: '128000',
+    maxOutputTokens: '',
+    reasoning: true,
+    ...overrides,
+  });
+
+  it('名称必填，超长按码点拒绝', () => {
+    expect(validateModelDraft(modelDraft({ displayName: '   ' }))).toEqual({
+      field: 'displayName',
+      message: '请填写显示名称',
+    });
+    expect(validateModelDraft(modelDraft({ displayName: '长'.repeat(201) }))?.field).toBe(
+      'displayName',
+    );
+  });
+
+  it('token 上限可留空，填了就必须是正整数', () => {
+    expect(validateModelDraft(modelDraft({ contextWindow: '', maxOutputTokens: '' }))).toBeNull();
+    expect(validateModelDraft(modelDraft({ contextWindow: '0' }))).toMatchObject({
+      field: 'contextWindow',
+    });
+    expect(validateModelDraft(modelDraft({ maxOutputTokens: '1.5' }))).toMatchObject({
+      field: 'maxOutputTokens',
+    });
+    expect(validateModelDraft(modelDraft({ contextWindow: '-1' }))?.field).toBe('contextWindow');
+  });
+
+  it('请求体 trim 名称，空白上限转成 null', () => {
+    const payload = buildModelPayload(
+      modelDraft({ displayName: '  DeepSeek V4  ', contextWindow: ' 128000 ', maxOutputTokens: '' }),
+    );
+
+    expect(payload).toEqual({
+      display_name: 'DeepSeek V4',
+      context_window: 128000,
+      max_output_tokens: null,
+      reasoning: true,
+    });
   });
 });
 

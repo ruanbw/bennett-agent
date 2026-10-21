@@ -235,6 +235,64 @@ export interface ModelPayload {
   is_default?: boolean;
 }
 
+export type ModelDraftField = 'displayName' | 'contextWindow' | 'maxOutputTokens';
+
+export interface ModelDraft {
+  displayName: string;
+  /** 空串 = 清空（null）；否则必须是正整数。 */
+  contextWindow: string;
+  maxOutputTokens: string;
+  reasoning: boolean;
+}
+
+export interface ModelDraftIssue {
+  field: ModelDraftField;
+  message: string;
+}
+
+export const MAX_MODEL_DISPLAY_NAME_CHARS = 200;
+
+function parseOptionalTokenLimit(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * 编辑模型元数据的本地校验。
+ *
+ * 名称是必填；两个 token 上限可留空表示「清空/未知」，但只要填了就必须是正整数。
+ * 后端对非法数字返回的是 Pydantic 的英文 422，对管理员没有帮助，所以先在这里拦。
+ */
+export function validateModelDraft(draft: ModelDraft): ModelDraftIssue | null {
+  const name = draft.displayName.trim();
+  if (!name) return { field: 'displayName', message: '请填写显示名称' };
+  if (Array.from(name).length > MAX_MODEL_DISPLAY_NAME_CHARS) {
+    return { field: 'displayName', message: `名称最多 ${MAX_MODEL_DISPLAY_NAME_CHARS} 字` };
+  }
+
+  for (const [field, value, label] of [
+    ['contextWindow', draft.contextWindow, '上下文窗口'],
+    ['maxOutputTokens', draft.maxOutputTokens, '最大输出 tokens'],
+  ] as const) {
+    if (value.trim() && parseOptionalTokenLimit(value) === null) {
+      return { field, message: `${label}必须是正整数，或留空` };
+    }
+  }
+  return null;
+}
+
+export function buildModelPayload(draft: ModelDraft): ModelPayload {
+  return {
+    display_name: draft.displayName.trim(),
+    context_window: parseOptionalTokenLimit(draft.contextWindow),
+    max_output_tokens: parseOptionalTokenLimit(draft.maxOutputTokens),
+    reasoning: draft.reasoning,
+  };
+}
+
 export function createProviderModel(providerId: string, payload: ModelPayload): Promise<AdminModel> {
   return request<AdminModel>(`/api/admin/providers/${providerId}/models`, {
     method: 'POST',

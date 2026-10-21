@@ -15,6 +15,7 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
 import { ProviderDialog } from './ProviderDialog';
+import { ModelDialog } from './ModelDialog';
 import { ToggleSwitch } from './ToggleSwitch';
 import {
   createProviderModel,
@@ -80,6 +81,7 @@ export function ProvidersPanel() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<AdminProvider | null>(null);
+  const [editingModel, setEditingModel] = useState<AdminModel | null>(null);
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<AdminProvider | null>(null);
   const [pendingDeleteModel, setPendingDeleteModel] = useState<AdminModel | null>(null);
 
@@ -347,6 +349,7 @@ export function ProvidersPanel() {
               onRequestDelete={() => setPendingDeleteProvider(provider)}
               onToggleModel={handleToggleModel}
               onSetDefault={handleSetDefault}
+              onEditModel={setEditingModel}
               onRequestDeleteModel={setPendingDeleteModel}
               onAddModel={() => handleAddModel(provider.id)}
               onDismissNotice={() => setNotice(provider.id, null)}
@@ -359,6 +362,18 @@ export function ProvidersPanel() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         provider={editingProvider}
+        onSaved={reload}
+      />
+
+      <ModelDialog
+        open={editingModel !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditingModel(null);
+        }}
+        model={editingModel}
+        providerName={
+          providers?.find((provider) => provider.id === editingModel?.provider_id)?.name ?? ''
+        }
         onSaved={reload}
       />
 
@@ -415,6 +430,7 @@ interface ProviderCardProps {
   onRequestDelete: () => void;
   onToggleModel: (model: AdminModel) => void;
   onSetDefault: (model: AdminModel) => void;
+  onEditModel: (model: AdminModel) => void;
   onRequestDeleteModel: (model: AdminModel) => void;
   onAddModel: () => void;
   onDismissNotice: () => void;
@@ -435,6 +451,7 @@ function ProviderCard({
   onRequestDelete,
   onToggleModel,
   onSetDefault,
+  onEditModel,
   onRequestDeleteModel,
   onAddModel,
   onDismissNotice,
@@ -589,7 +606,7 @@ function ProviderCard({
                   <ToggleSwitch
                     checked={model.enabled}
                     onCheckedChange={() => onToggleModel(model)}
-                    label={`${model.enabled ? '停用' : '启用'}模型 ${model.display_name}`}
+                    label={`${model.enabled ? '停用' : '启用'}模型 ${model.display_name}（${model.model_id}）`}
                     disabled={isBusy}
                   />
                   {model.enabled && !model.is_default && (
@@ -598,7 +615,7 @@ function ProviderCard({
                       size="xs"
                       onClick={() => onSetDefault(model)}
                       disabled={isBusy}
-                      aria-label={`将 ${model.display_name} 设为默认模型`}
+                      aria-label={`将 ${model.display_name}（${model.model_id}）设为默认模型`}
                       className="cursor-pointer"
                     >
                       设为默认
@@ -607,9 +624,19 @@ function ProviderCard({
                   <Button
                     variant="ghost"
                     size="xs"
+                    onClick={() => onEditModel(model)}
+                    disabled={isBusy}
+                    aria-label={`编辑模型 ${model.display_name}（${model.model_id}）`}
+                    className="cursor-pointer"
+                  >
+                    <Pencil className="size-3" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="xs"
                     onClick={() => onRequestDeleteModel(model)}
                     disabled={isBusy}
-                    aria-label={`删除模型 ${model.display_name}`}
+                    aria-label={`删除模型 ${model.display_name}（${model.model_id}）`}
                     className="cursor-pointer text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >
                     <Trash2 className="size-3" aria-hidden="true" />
