@@ -242,6 +242,15 @@ class Settings(BaseSettings):
             "生产（HTTPS）必须设为 true。"
         ),
     )
+    auth_cookie_samesite: Literal["lax", "strict", "none"] | None = Field(
+        default=None,
+        description=(
+            "会话 cookie 的 SameSite。None=自动：cors_allow_credentials=true 时取 none"
+            "（跨站部署下 lax 的 cookie 根本不会被浏览器回传），否则取 lax。"
+            "取值 none 必须同时满足 auth_cookie_secure=true——浏览器会直接丢弃"
+            "「SameSite=None 但没有 Secure」的 cookie，表现为「登录接口 204 但下一个请求 401」。"
+        ),
+    )
     session_lifetime_seconds: int = Field(
         default=30 * 24 * 60 * 60,
         ge=60,
@@ -371,6 +380,34 @@ class Settings(BaseSettings):
         """生产必须走 HTTPS cookie：明文 HTTP 下会话 token 可被链路上任意一跳直接截获。"""
         if self.app_env == "production" and not self.auth_cookie_secure:
             raise ValueError("生产环境必须设置 AUTH_COOKIE_SECURE=true，否则会话 cookie 会在明文 HTTP 上被截获。")
+        return self
+
+    def resolved_cookie_samesite(self) -> Literal["lax", "strict", "none"]:
+        """实际生效的 SameSite 取值。
+
+        跨域部署（`cors_allow_credentials=true`）必须用 `none`：`lax` 只在同站导航时
+        回传，跨站 `fetch` 一律不带 cookie，表现为「登录成功、下一个请求 401」。
+        显式配置优先，方便同站部署想收紧到 `strict` 的场景。
+        """
+        if self.auth_cookie_samesite is not None:
+            return self.auth_cookie_samesite
+        return "none" if self.cors_allow_credentials else "lax"
+
+    @model_validator(mode="after")
+    def _reject_samesite_none_without_secure(self) -> "Settings":
+        """`SameSite=None` 必须配 `Secure`：否则浏览器直接丢弃 cookie。
+
+        这个组合的失败方式特别难查——登录接口返回 204、响应里也确实带了 Set-Cookie，
+        但下一个请求就是 401，看起来像「会话没存住」。启动即报错比线上猜半天好。
+        """
+        if self.resolved_cookie_samesite() == "none" and not self.auth_cookie_secure:
+            raise ValueError(
+                "会话 cookie 的 SameSite=None 必须同时设置 AUTH_COOKIE_SECURE=true："
+                "浏览器会丢弃「SameSite=None 但没有 Secure」的 cookie，"
+                "表现为登录成功但后续请求全部 401。"
+                "跨站部署请开 HTTPS 并设 AUTH_COOKIE_SECURE=true；"
+                "若前后端同站，请把 CORS_ALLOW_CREDENTIALS 设为 false 或显式设 AUTH_COOKIE_SAMESITE=lax。"
+            )
         return self
 
     def get_cors_origins(self) -> list[str]:

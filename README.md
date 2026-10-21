@@ -142,6 +142,15 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 会话 cookie 与跨站部署
+
+会话是 HttpOnly cookie（`AUTH_COOKIE_NAME`，默认 `bennett_session`），`SameSite` 由
+`Settings.resolved_cookie_samesite()` 决定：`CORS_ALLOW_CREDENTIALS=true`（前后端不同站）
+时取 `none`，否则取 `lax`；也可以用 `AUTH_COOKIE_SAMESITE` 显式覆盖。写死 `lax` 会让跨站
+`fetch` 一律不回传 cookie——登录接口 204、下一个请求 401，看着像「会话没存住」。
+`SameSite=None` 必须配 `AUTH_COOKIE_SECURE=true`，否则浏览器直接丢弃 cookie，这个组合在
+启动时就会报错。
+
 ## 数据库结构漂移
 
 项目**没有 Alembic**：`create_all` 只建缺失的表，对已存在的表一个字节都不改。所以给

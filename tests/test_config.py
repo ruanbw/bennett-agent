@@ -395,6 +395,67 @@ def test_new_fields_have_expected_defaults():
 
     assert config.cors_allow_credentials is False
     assert config.enable_api_docs is None  # None=自动：production 关闭，其余环境开启
+    assert config.auth_cookie_samesite is None  # None=自动，见 resolved_cookie_samesite
+
+
+# ---------------------------------------------------------------------
+# SameSite 与跨站部署
+# ---------------------------------------------------------------------
+def test_samesite_defaults_to_lax_for_same_site_deployments():
+    """同源部署（Vite 代理 / 同站反代）用 lax：跨站请求本来就不该带这个 cookie。"""
+    assert Settings(app_env="development", _env_file=None).resolved_cookie_samesite() == "lax"
+
+
+def test_credentials_mode_switches_samesite_to_none():
+    """跨站 fetch 只在 SameSite=None 时回传 cookie；写死 lax 会变成「登录成功但 401」。"""
+    config = Settings(
+        app_env="development",
+        cors_allow_credentials=True,
+        auth_cookie_secure=True,
+        _env_file=None,
+    )
+
+    assert config.resolved_cookie_samesite() == "none"
+
+
+def test_explicit_samesite_wins_over_the_derived_default():
+    """显式配置优先：同站部署想收紧到 strict 时不必改 cors_allow_credentials。"""
+    config = Settings(
+        app_env="development",
+        cors_allow_credentials=True,
+        auth_cookie_secure=True,
+        auth_cookie_samesite="strict",
+        _env_file=None,
+    )
+
+    assert config.resolved_cookie_samesite() == "strict"
+
+
+def test_samesite_none_without_secure_is_rejected():
+    """浏览器会丢弃「SameSite=None 但没有 Secure」的 cookie，启动即报错。"""
+    with pytest.raises(ValidationError) as exc:
+        Settings(
+            app_env="development",
+            cors_allow_credentials=True,
+            auth_cookie_secure=False,
+            _env_file=None,
+        )
+
+    message = str(exc.value)
+    assert "SameSite=None" in message
+    assert "AUTH_COOKIE_SECURE" in message
+
+
+def test_samesite_none_with_secure_is_allowed():
+    config = Settings(
+        app_env="development",
+        cors_allow_credentials=False,
+        auth_cookie_secure=True,
+        auth_cookie_samesite="none",
+        _env_file=None,
+    )
+
+    assert config.resolved_cookie_samesite() == "none"
 
 
 # ---------------------------------------------------------------------

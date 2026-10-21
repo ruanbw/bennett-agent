@@ -98,7 +98,10 @@ cookie_transport = CookieTransport(
     cookie_max_age=settings.session_lifetime_seconds,
     cookie_secure=settings.auth_cookie_secure,
     cookie_httponly=True,
-    cookie_samesite="lax",
+    # SameSite 由 `settings.resolved_cookie_samesite()` 决定：跨站部署（CORS 带凭据）
+    # 必须是 `none`，写死 `lax` 会让跨站 fetch 一律不回传 cookie——登录接口 204、
+    # 下一个请求 401。`none` 与 `secure=false` 的组合由 settings 在启动时拒绝。
+    cookie_samesite=settings.resolved_cookie_samesite(),
 )
 
 
