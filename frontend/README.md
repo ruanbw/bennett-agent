@@ -382,6 +382,9 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   `lib/composer-send.ts`（上下文已满 → 附件 → 空输入），有 vitest 覆盖。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，
   因此 LLM 输出里的原始 HTML 会被转义。这是当前 XSS 防护的全部依据。
+- **代码块头也是中文界面的一部分。** 复制按钮的 tooltip / `aria-label` 是「复制代码 /
+  已复制 / 复制失败，请重试」，不再是模板里的 `Copy`；无语言标签时显示「代码」。复制
+  成功用 `role="status"` 播报，触屏上按钮放大到 32px。
 
 ## 已知未实现
 

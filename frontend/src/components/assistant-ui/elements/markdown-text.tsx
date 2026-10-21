@@ -31,6 +31,7 @@ export const MarkdownText = memo(MarkdownTextImpl);
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, error, copyToClipboard } = useCopyToClipboard();
+  const copyLabel = isCopied ? '已复制' : error ? '复制失败，请重试' : '复制代码';
   const onCopy = () => {
     if (!code || isCopied) return;
     copyToClipboard(code);
@@ -39,7 +40,7 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   return (
     <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
-        {language}
+        {language || '代码'}
       </span>
       <span className="flex items-center gap-1.5">
         {/* 剪贴板不可用时不再静默失败：明示失败，按钮保留用于重试 */}
@@ -48,9 +49,15 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
             复制失败
           </span>
         )}
+        {/* 状态变化要能被读屏听到：图标从复制变成对勾本身是不可读的视觉反馈 */}
+        <span role="status" className="sr-only">
+          {isCopied ? '已复制代码' : ''}
+        </span>
         <TooltipIconButton
-          tooltip={error ? "复制失败，请重试" : "Copy"}
+          tooltip={copyLabel}
+          aria-label={copyLabel}
           onClick={onCopy}
+          className="pointer-coarse:size-8"
         >
           {!isCopied && (
             <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
