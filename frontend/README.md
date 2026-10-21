@@ -146,7 +146,9 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   `<button>`（内容层 `pointer-events-none` 让点击穿透），不是 `div onClick`；多选模式
   复用 `<button role="checkbox">` + `aria-checked`，原生 Enter/Space 即生效。批量栏是
   带 `aria-label="批量操作"` 的 group；搜索过滤到 0 条时「全选」禁用而不是点了没反应，
-  所有按钮都有 `focus-visible` ring。
+  所有按钮都有 `focus-visible` ring。触屏上「…」按钮放大到 32px，并支持**长按整行**
+  打开同一个操作菜单（判定在 `lib/long-press.ts`：500ms、移动超过 10px 取消、只认
+  `touch`；长按后吞掉随后的 click，避免开菜单的同时切走会话）。
 - **收起侧边栏不等于失去入口。** 搜索框与同步面板都长在侧边栏里，收起后它们会一起消失：
   用户既搜不了历史，也看不到同步是不是失败了。所以顶栏的胶囊工具栏（`ChatContainer`）
   必须补上这两个入口：搜索按钮把侧边栏重新展开（移动端即打开抽屉）并把光标放进输入框，

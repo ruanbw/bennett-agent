@@ -1,8 +1,13 @@
-import { memo, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2, Download } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { highlightRanges, type ContentMatch, type TextRange } from '../lib/session-search';
+import {
+  LONG_PRESS_MS,
+  isLongPressPointer,
+  movedBeyondLongPressTolerance,
+} from '../lib/long-press';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -118,6 +123,58 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
     else onSelect(session.id);
   };
 
+  /**
+   * 触屏长按整行 = 打开操作菜单。
+   *
+   * 手机上没有 hover，右侧「…」按钮又小，手指点不准；长按是移动端列表的通用习惯。
+   * 长按触发后必须吞掉随后的 click，否则开菜单的同时还会切走会话。
+   */
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressStartRef.current = null;
+  }, []);
+
+  // 卸载（切走会话列表、删掉会话）时计时器必须清掉，否则会在已卸载的组件上点按钮
+  useEffect(() => clearLongPress, [clearLongPress]);
+
+  const handleRowPointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (isSelectMode || isEditing) return;
+    if (!isLongPressPointer(event.pointerType)) return;
+    clearLongPress();
+    longPressStartRef.current = { x: event.clientX, y: event.clientY };
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      longPressStartRef.current = null;
+      suppressClickRef.current = true;
+      triggerRef.current?.click();
+    }, LONG_PRESS_MS);
+  };
+
+  const handleRowPointerMove = (event: React.PointerEvent<HTMLElement>) => {
+    const start = longPressStartRef.current;
+    if (!start) return;
+    if (movedBeyondLongPressTolerance(start, { x: event.clientX, y: event.clientY })) {
+      clearLongPress();
+    }
+  };
+
+  const handleRowClick = () => {
+    if (suppressClickRef.current) {
+      // 这次 click 属于长按手势本身，不能再当成「切换会话」
+      suppressClickRef.current = false;
+      return;
+    }
+    handleActivate();
+  };
+
   // 读屏听到的名字要带上「正在生成 / 已置顶」这类只能靠视觉看到的状态
   const stateSuffix = [isPinned ? '已置顶' : '', isRunning ? '正在生成' : '']
     .filter(Boolean)
@@ -149,7 +206,16 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
       {!isEditing && (
         <button
           type="button"
-          onClick={handleActivate}
+          onClick={handleRowClick}
+          onPointerDown={handleRowPointerDown}
+          onPointerMove={handleRowPointerMove}
+          onPointerUp={clearLongPress}
+          onPointerCancel={clearLongPress}
+          onPointerLeave={clearLongPress}
+          onContextMenu={(event) => {
+            // 触屏长按时浏览器可能弹自己的「复制/全选」菜单，盖住我们的操作菜单
+            if (longPressStartRef.current || suppressClickRef.current) event.preventDefault();
+          }}
           aria-label={rowLabel}
           aria-current={!isSelectMode && isActive ? 'true' : undefined}
           role={isSelectMode ? 'checkbox' : undefined}
@@ -235,7 +301,8 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
         >
           <DropdownMenu>
             <DropdownMenuTrigger
-              className="size-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              ref={triggerRef}
+              className="size-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:size-8"
               aria-label={`会话操作：${title}`}
             >
               <MoreHorizontal size={14} />
