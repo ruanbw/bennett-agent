@@ -580,6 +580,7 @@ export function Sidebar({
         <SidebarBatchBar
           selectedCount={visibleSelectedIds.size}
           isAllSelected={isAllSelected}
+          canSelectAll={filteredSessions.length > 0}
           onToggleSelectAll={() =>
             setSelectedIds(isAllSelected ? new Set() : new Set(filteredSessions.map((s) => s.id)))
           }

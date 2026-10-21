@@ -142,7 +142,9 @@ src/
   重新生成都同时挂了 `pointer-coarse:`（触屏）与 `focus-within:` / `group-focus-within:`
   （键盘），否则手机用户点不到、键盘用户看不见。会话条目整行是一个铺满的
   `<button>`（内容层 `pointer-events-none` 让点击穿透），不是 `div onClick`；多选模式
-  复用 `<button role="checkbox">` + `aria-checked`，原生 Enter/Space 即生效。
+  复用 `<button role="checkbox">` + `aria-checked`，原生 Enter/Space 即生效。批量栏是
+  带 `aria-label="批量操作"` 的 group；搜索过滤到 0 条时「全选」禁用而不是点了没反应，
+  所有按钮都有 `focus-visible` ring。
 - **收起侧边栏不等于失去入口。** 搜索框与同步面板都长在侧边栏里，收起后它们会一起消失：
   用户既搜不了历史，也看不到同步是不是失败了。所以顶栏的胶囊工具栏（`ChatContainer`）
   必须补上这两个入口：搜索按钮把侧边栏重新展开（移动端即打开抽屉）并把光标放进输入框，

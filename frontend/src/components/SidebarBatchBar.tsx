@@ -3,6 +3,8 @@ import { Download, Pin, PinOff, Trash2 } from 'lucide-react';
 export interface SidebarBatchBarProps {
   selectedCount: number;
   isAllSelected: boolean;
+  /** 当前可见会话是否非空：空结果时「全选」没有可操作对象，应禁用而不是点了没反应。 */
+  canSelectAll: boolean;
   onToggleSelectAll: () => void;
   onExitSelectMode: () => void;
   // 批量操作允许 async 实现；面向用户的失败提示由调用方（Sidebar）负责
@@ -29,6 +31,7 @@ function trigger(action: () => void | Promise<unknown>, label: string): void {
 export function SidebarBatchBar({
   selectedCount,
   isAllSelected,
+  canSelectAll,
   onToggleSelectAll,
   onExitSelectMode,
   onPinSelected,
@@ -41,7 +44,11 @@ export function SidebarBatchBar({
   const isEmpty = selectedCount === 0;
 
   return (
-    <div className="mx-2 my-1 rounded-xl bg-foreground/[0.04] p-2.5 text-xs flex flex-col gap-2">
+    <div
+      role="group"
+      aria-label="批量操作"
+      className="mx-2 my-1 rounded-xl bg-foreground/[0.04] p-2.5 text-xs flex flex-col gap-2"
+    >
       <div className="flex items-center justify-between text-muted-foreground px-0.5">
         <span className="font-medium text-foreground" aria-live="polite">
           已选 {selectedCount} 项
@@ -50,14 +57,15 @@ export function SidebarBatchBar({
           <button
             type="button"
             onClick={onToggleSelectAll}
-            className="hover:text-foreground cursor-pointer text-[11px]"
+            disabled={!canSelectAll}
+            className="hover:text-foreground cursor-pointer rounded text-[11px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 disabled:cursor-default disabled:opacity-50 disabled:hover:text-muted-foreground"
           >
             {isAllSelected ? '取消全选' : '全选'}
           </button>
           <button
             type="button"
             onClick={onExitSelectMode}
-            className="hover:text-foreground cursor-pointer text-[11px]"
+            className="hover:text-foreground cursor-pointer rounded text-[11px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           >
             完成
           </button>
@@ -69,7 +77,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onPinSelected, '置顶选中会话失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           title="置顶选中会话"
         >
           <Pin size={11} aria-hidden="true" />
@@ -79,7 +87,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onUnpinSelected, '取消置顶失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-background border border-border/60 hover:bg-accent text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           title="取消选中会话的置顶"
         >
           <PinOff size={11} aria-hidden="true" />
@@ -89,7 +97,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onRequestBatchDelete, '批量删除失败')}
           disabled={isEmpty}
-          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap"
+          className="flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50 cursor-pointer transition whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           title="删除选中"
         >
           <Trash2 size={11} aria-hidden="true" />
@@ -102,7 +110,7 @@ export function SidebarBatchBar({
           type="button"
           onClick={() => trigger(onExportSelected, '导出选中会话失败')}
           disabled={isEmpty}
-          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition cursor-pointer disabled:opacity-50 disabled:hover:bg-transparent"
+          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition cursor-pointer disabled:opacity-50 disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           title="把选中的会话导出为一个 Markdown 文件"
         >
           <Download size={12} aria-hidden="true" />
@@ -114,7 +122,7 @@ export function SidebarBatchBar({
         <button
           type="button"
           onClick={() => trigger(onRequestClearAll, '清空会话失败')}
-          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-destructive/80 hover:text-destructive hover:bg-destructive/10 rounded-lg transition cursor-pointer"
+          className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] text-destructive/80 hover:text-destructive hover:bg-destructive/10 rounded-lg transition cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           title="清空所有会话记录"
         >
           <Trash2 size={12} aria-hidden="true" />
