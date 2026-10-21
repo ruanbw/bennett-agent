@@ -12,10 +12,10 @@ import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useLocalDataStats } from '../hooks/use-local-stats';
+import { LocalDataStatsSection } from './LocalDataStatsSection';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
-import { formatStorageUsage } from '../lib/local-stats';
 import { describeToolCount, describeWebSearchCapability } from '../lib/capabilities';
 import type { Capabilities } from '../types';
 
@@ -81,7 +81,7 @@ export function SettingsPanel({
   capabilities = null,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
-  const stats = useLocalDataStats(open);
+  const localStats = useLocalDataStats(open);
 
   // 从邮箱派生昵称与头像首字母
   const nickname = userEmail ? userEmail.split('@')[0] : '未登录用户';
@@ -181,32 +181,11 @@ export function SettingsPanel({
           <HardDrive className="size-3.5" />
           <span>本机数据</span>
         </h3>
-        <div className="rounded-lg border border-border/70 bg-muted/40 p-3 space-y-1.5 text-xs">
-          <div className="flex justify-between items-center">
-            <span className="text-muted-foreground">会话</span>
-            <span className="tabular-nums text-foreground">
-              {stats ? `${stats.sessions} 个` : '—'}
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-muted-foreground">消息</span>
-            <span className="tabular-nums text-foreground">
-              {stats ? `${stats.messages} 条` : '—'}
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-muted-foreground">存储占用</span>
-            <span
-              className="tabular-nums text-foreground"
-              title="浏览器对整个站点的估算值，包含缓存等其他数据；括号内为估算配额占比"
-            >
-              {stats ? formatStorageUsage(stats.usageBytes, stats.quotaBytes) : '—'}
-            </span>
-          </div>
-        </div>
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          会话默认保存在本机浏览器；登录同一账号时后台同步到服务器。存储占用是浏览器对本站点的估算值，括号内为估算配额占比。
-        </p>
+        <LocalDataStatsSection
+          stats={localStats.stats}
+          failed={localStats.failed}
+          onRetry={localStats.retry}
+        />
       </div>
 
       {/* 关于 Bennett Agent 区块 */}

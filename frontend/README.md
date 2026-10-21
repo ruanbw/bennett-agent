@@ -344,6 +344,11 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   （`formatStorageUsage`），用户才知道离上限多远；拿不到 quota 就只显示占用，不编造
   百分比；usage 超过 quota 时夹到 100%。设置面板挂在 `App` 而不是 `AccountBar`：
   侧边栏收起时 AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
+  **读不出统计要说出来。** `useLocalDataStats` 的失败此前只 `console.error`，面板上三个
+  数字停在「—」——对一个「数据默认只存在本机」的应用，这会被读成「我的会话丢了」。
+  现在 hook 返回 `{ stats, failed, retry }`，`LocalDataStatsSection` 在失败时给出原因
+  （浏览器可能禁止了本站点的本地存储）、说明「不代表会话内容已经丢失」，并提供「重新读取」
+  入口；占位符（还在读）与失败（读不出来）是两种状态，不能共用一行 dash。
   面板内容比一屏高，弹层改成「头尾固定、只有中间滚动」：此前整块 `overflow-y-auto`，
   滚动时标题与「完成」一起滚走，小窗口里想关掉它得先滚到底。弹层是 `flex flex-col`
   + `max-h-[85vh]`，中间层 `min-h-0 flex-1 overflow-y-auto`（`min-h-0` 不能省，默认
