@@ -8,6 +8,7 @@ import {
   ToolFallbackRoot,
   ToolFallbackTrigger,
 } from './tool-fallback.aui'
+import { toolResultForDisplay } from '@/lib/tool-call-view'
 
 /**
  * 组件层没有 jsdom，但 args/result 文本块不依赖任何运行时上下文，
@@ -23,13 +24,25 @@ describe('ToolFallbackArgs / ToolFallbackResult 的超长文本处理', () => {
     expect(html).not.toContain(argsText)
   })
 
-  it('result 超过阈值时同样先折叠，并保留 Result 头', () => {
+  it('result 超过阈值时同样先折叠，并保留结果头', () => {
     const result = { payload: 'x'.repeat(2500) }
     const html = renderToStaticMarkup(createElement(ToolFallbackResult, { result }))
 
-    expect(html).toContain('Result:')
+    expect(html).toContain('结果：')
     expect(html).toContain('展开全部')
     expect(html).not.toContain('x'.repeat(2500))
+  })
+
+  it('失败结果用「错误：」而不是「结果：」，不复用成功外观', () => {
+    const html = renderToStaticMarkup(
+      createElement(ToolFallbackResult, {
+        result: toolResultForDisplay('failed', '工具执行失败'),
+      }),
+    )
+
+    expect(html).toContain('错误：')
+    expect(html).toContain('工具执行失败')
+    expect(html).not.toContain('结果：')
   })
 
   it('短文本完整渲染，不出现展开入口', () => {
@@ -37,6 +50,7 @@ describe('ToolFallbackArgs / ToolFallbackResult 的超长文本处理', () => {
       createElement(ToolFallbackArgs, { argsText: '{"q":"短"}' }),
     )
 
+    expect(html).toContain('参数：')
     expect(html).toContain('{&quot;q&quot;:&quot;短&quot;}')
     expect(html).not.toContain('展开全部')
   })

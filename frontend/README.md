@@ -280,13 +280,15 @@ src/
   `fetch_page` 看不出这次查的是什么。`lib/tool-call-view.ts:toolArgsPreview` 优先取主参数
   （`query` / `q` / `question` / `url` …），没有约定字段就取第一个非空字符串，再退回原文；
   空对象/空数组不显示（`{}` 只是噪音）。预览按码点截断 48 字，折叠态的 `aria-label`
-  也带上它——读屏不必展开也能知道参数。
+  也带上它——读屏不必展开也能知道参数。展开后参数块标「参数：」、成功结果标「结果：」，
+  长文本按 Unicode 码点截断与计数（`toolTextLength`），emoji 不会被劈开或算成两个字符。
 - **隔离后的工具失败要标成失败，不能画绿勾。** 服务端把工具异常降级成一条结果（整轮
   继续），但 `tool_result.outcome` 会明确是 `failed` / `denied` / `interrupted`；
   `chat-message.buildToolParts` 用私有包装对象把它带到渲染层，`lib/tool-call-view.ts`
-  据此给出 `failed` / `denied` 状态——触发条红字「失败」、展开后是 `Error:` 而不是
-  `Result:`，导出 Markdown 的 summary 也写失败。不能在前端按「结果以『错误』开头」猜：
-  工具成功返回的业务文案完全可能包含这个词。
+  据此给出 `failed` / `denied` 状态——触发条红字「失败」、展开后是「错误：」而不是
+  「结果：」（拒绝/中断分别用「拒绝原因：」「已中断：」），导出 Markdown 的 summary
+  也写失败。不能在前端按「结果以『错误』开头」猜：工具成功返回的业务文案完全可能包含
+  这个词。
 - **登录页的密码可以显隐，但默认必须隐藏。** 输入框右侧的眼睛按钮只切换 `input` 的
   `type`（值不动，不做「明文塞进另一个字段」那种实现）；按钮带 `aria-label`
   （显示密码 / 隐藏密码）、`aria-pressed` 与 `aria-controls`，点击后把焦点还给输入框。

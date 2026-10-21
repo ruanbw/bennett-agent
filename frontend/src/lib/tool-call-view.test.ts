@@ -9,6 +9,7 @@ import {
   TOOL_TEXT_PREVIEW_LIMIT,
   toolArgsPreview,
   toolResultForDisplay,
+  toolTextLength,
 } from './tool-call-view'
 
 describe('resolveToolCallViewStatus', () => {
@@ -89,6 +90,13 @@ describe('previewToolText', () => {
 
   it('阈值可覆盖，便于按调用场景收紧', () => {
     expect(previewToolText('abcdef', 3)).toEqual({ preview: 'abc…', truncated: true })
+  })
+
+  it('按码点截断，不劈开 emoji；计数器也用码点', () => {
+    const emojis = '😀'.repeat(5)
+
+    expect(previewToolText(emojis, 3)).toEqual({ preview: '😀😀😀…', truncated: true })
+    expect(toolTextLength(emojis)).toBe(5)
   })
 })
 

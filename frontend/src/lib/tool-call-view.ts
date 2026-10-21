@@ -104,13 +104,19 @@ export const formatUnknownValue = (value: unknown, space?: number): string => {
   }
 };
 
+/** 按 Unicode 码点计数：与预览截断同一口径，emoji 不会被算成两个字符。 */
+export function toolTextLength(text: string): number {
+  return Array.from(text).length;
+}
+
 /** 超长文本的预览切片，截断时补一个省略号，让用户看得出这里被截过。 */
 export function previewToolText(
   text: string,
   limit = TOOL_TEXT_PREVIEW_LIMIT,
 ): { preview: string; truncated: boolean } {
-  if (text.length <= limit) return { preview: text, truncated: false };
-  return { preview: `${text.slice(0, limit)}…`, truncated: true };
+  const chars = Array.from(text);
+  if (chars.length <= limit) return { preview: text, truncated: false };
+  return { preview: `${chars.slice(0, limit).join('')}…`, truncated: true };
 }
 
 /**

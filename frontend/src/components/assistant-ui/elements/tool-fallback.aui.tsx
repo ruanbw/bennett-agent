@@ -29,6 +29,7 @@ import {
   previewToolText,
   resolveToolCallViewStatus,
   toolArgsPreview,
+  toolTextLength,
   type ToolCallViewStatus,
 } from "@/lib/tool-call-view";
 
@@ -271,7 +272,6 @@ function ToolFallbackContent({
 function ToolFallbackText({ text, className }: { text: string; className?: string }) {
   const [expanded, setExpanded] = useState(false);
   const { preview, truncated } = previewToolText(text);
-
   return (
     <div className={cn("flex flex-col items-start gap-1", className)}>
       <pre className="bg-muted/50 text-foreground/90 max-h-64 w-full overflow-auto rounded-md p-2.5 text-xs whitespace-pre-wrap">
@@ -284,7 +284,7 @@ function ToolFallbackText({ text, className }: { text: string; className?: strin
           aria-expanded={expanded}
           className="aui-tool-fallback-text-toggle text-muted-foreground hover:text-foreground w-fit cursor-pointer text-xs underline underline-offset-2"
         >
-          {expanded ? "收起" : `展开全部（共 ${text.length} 字符）`}
+          {expanded ? "收起" : `展开全部（共 ${toolTextLength(text)} 字符）`}
         </button>
       )}
     </div>
@@ -306,7 +306,10 @@ function ToolFallbackArgs({
       className={cn("aui-tool-fallback-args", className)}
       {...props}
     >
-      <ToolFallbackText text={argsText} className="aui-tool-fallback-args-value" />
+      <p className="aui-tool-fallback-args-header text-muted-foreground text-xs font-medium">
+        参数：
+      </p>
+      <ToolFallbackText text={argsText} className="aui-tool-fallback-args-value mt-1 w-full" />
     </div>
   );
 }
@@ -337,10 +340,10 @@ function ToolFallbackResult({
       >
         <p className="aui-tool-fallback-result-header text-destructive text-xs font-semibold">
           {failure.__toolOutcome === "denied"
-            ? "Denied reason:"
+            ? "拒绝原因："
             : failure.__toolOutcome === "interrupted"
-              ? "Interrupted:"
-              : "Error:"}
+              ? "已中断："
+              : "错误："}
         </p>
         <ToolFallbackText text={text} className="aui-tool-fallback-result-content mt-1 w-full" />
       </div>
@@ -354,7 +357,7 @@ function ToolFallbackResult({
       {...props}
     >
       <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-        Result:
+        结果：
       </p>
       <ToolFallbackText text={text} className="aui-tool-fallback-result-content mt-1 w-full" />
     </div>
@@ -378,8 +381,8 @@ function ToolFallbackError({
 
   const headerText =
     status?.type === "incomplete" && status.reason === "cancelled"
-      ? "Cancelled reason:"
-      : "Error:";
+      ? "取消原因："
+      : "错误：";
 
   return (
     <div data-slot="tool-fallback-error" className={cn("aui-tool-fallback-error", className)} {...props}>
