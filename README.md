@@ -130,7 +130,7 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 
 | 端点 | 说明 |
 |---|---|
-| `POST /api/auth/register` | 注册（JSON：`email` / `password`，公开，建出的账号为普通用户） |
+| `POST /api/auth/register` | 注册（JSON：`email` / `password`，公开，建出的账号为**普通用户**） |
 | `POST /api/auth/login` | 登录（**表单编码**，字段名 `username` = 邮箱，成功 204） |
 | `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户（含 `role`） |
 | `GET /api/models` | 可用模型列表（含思考链、上下文窗口等元数据） |
@@ -140,6 +140,13 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 | `GET /api/sync/pull` | 按不透明游标增量拉取（`timeout` > 0 时长轮询） |
 | `/api/admin/*` | 提供商与模型管理、用户封禁（`admin` 及以上） |
 | `PATCH /api/admin/users/{id}/role` | 设置用户角色（仅 `superadmin`） |
+
+`/docs` 里的中文说明对**所有**端点都成立，包括 fastapi-users 自动生成的
+login / logout / register：框架给的是 `Auth:Cookie.Login` / `Register:Register` 这类英文
+summary 且没有 description，`app/api/auth.py:_localize_generated_routes` 会按路径改写。
+登录那条还写明「请求体是表单编码而不是 JSON」「同一 IP 有限流」，注册那条写明「没有任何
+请求参数能指定角色」——这两点是打开文档的人最容易踩的坑。`tests/test_server.py` 锁住
+「每个端点都有中文 summary」，新增路由忘记写说明会直接变红。
 
 除注册与登录外所有 `/api/*` 都要求登录：凭据错误 → 400，未登录 → 401。接口文档默认只在非
 production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。`/docs` 按

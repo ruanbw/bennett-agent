@@ -45,6 +45,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+#: 框架自动生成的三条路由的中文说明。fastapi-users 给的是
+#: `Auth:Cookie.Login` / `Register:Register` 这类**英文** summary 且没有 description，
+#: 于是 /docs 里只有这三条是英文——其余端点全是中文，看起来像漏翻或半成品。
+#: 生成的路由没有可以直接加装饰器的函数，只能按路径改写。
+_FRAMEWORK_ROUTE_TEXT: dict[str, tuple[str, str]] = {
+    "/login": (
+        "登录（下发会话 cookie）",
+        "请求体是**表单编码**（`application/x-www-form-urlencoded`，字段 `username` / `password`），"
+        "不是 JSON：这是 OAuth2 密码流的标准形状。成功返回 204 并设置 HttpOnly 会话 cookie；"
+        "失败返回 400（凭据错误）。同一来源 IP 有请求频率上限。",
+    ),
+    "/logout": (
+        "登出（删除会话记录并清除 cookie）",
+        "删除服务端 `access_token` 里的那一行，因此该会话立刻失效（不是「只让客户端忘掉」）。不要求请求体，幂等。",
+    ),
+    "/register": (
+        "注册账号（新账号的角色是普通用户）",
+        "邮箱 + 密码（至少 8 位）。新账号的角色固定为 **普通用户**（`user`）："
+        "**没有任何请求参数能指定角色**，管理员身份只能由 `scripts/seed_admin.py` 播种"
+        "或由超管在后台授予。同一来源 IP 有请求频率上限。",
+    ),
+}
+
+
+def _localize_generated_routes(auth_router: APIRouter) -> None:
+    """把框架生成的英文 summary/description 换成本项目的中文说明。"""
+    for route in auth_router.routes:
+        text = _FRAMEWORK_ROUTE_TEXT.get(getattr(route, "path", ""))
+        if text is not None:
+            route.summary, route.description = text
+
+
 def _limit_login_only(auth_router: APIRouter) -> None:
     """给 login 路由挂上 IP 限流。
 
@@ -62,6 +94,7 @@ def _limit_login_only(auth_router: APIRouter) -> None:
 # POST /api/auth/login、POST /api/auth/logout
 _auth_router = fastapi_users.get_auth_router(auth_backend)
 _limit_login_only(_auth_router)
+_localize_generated_routes(_auth_router)
 router.include_router(_auth_router)
 
 # POST /api/auth/register —— 框架自带的注册路由：建号后 role 取模型默认值（user）
@@ -70,6 +103,7 @@ for _route in _register_router.routes:
     if getattr(_route, "path", None) == "/register":
         # 注册是**未认证**入口，同样要按 IP 挡批量建号
         _route.dependencies.append(Depends(enforce_auth_rate_limit))
+_localize_generated_routes(_register_router)
 router.include_router(_register_router)
 
 
@@ -101,9 +135,7 @@ async def change_password(
     """
     # verify_and_update 是框架自带的校验入口：bcrypt 升级时它还会返回重算后的哈希，
     # 但本路由马上会整行重写密码，不需要在这里落库。
-    valid, _ = user_manager.password_helper.verify_and_update(
-        payload.current_password, user.hashed_password
-    )
+    valid, _ = user_manager.password_helper.verify_and_update(payload.current_password, user.hashed_password)
     if not valid:
         # 400 而不是 401：401 会被前端的全局处理当成「会话过期」直接登出，
         # 而这里只是表单里填错了当前密码，用户应当留在原地重试。
@@ -119,9 +151,7 @@ async def change_password(
         )
 
     try:
-        await user_manager.update(
-            UserUpdate(password=payload.new_password), user, request=request
-        )
+        await user_manager.update(UserUpdate(password=payload.new_password), user, request=request)
     except InvalidPasswordException as exc:
         # 与注册保持同一个错误形状：前端把 reason 直接展示给用户
         raise HTTPException(

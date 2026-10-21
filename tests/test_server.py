@@ -71,3 +71,39 @@ def test_openapi_description_explains_auth_and_docs_exposure():
     description = spec["info"]["description"]
     assert "HttpOnly cookie" in description
     assert "ENABLE_API_DOCS" in description
+
+
+def test_every_operation_has_a_chinese_summary():
+    """框架自动生成的路由曾带着 `Auth:Cookie.Login` 这类英文 summary 混进 /docs。
+
+    其余端点全是中文，只有那三条是英文，看起来像漏翻；而且它们连 description 都没有，
+    打开 /docs 的人看不到「登录要发表单编码而不是 JSON」这种关键差异。
+    """
+    spec = server.create_app().openapi()
+
+    missing = []
+    for path, methods in spec["paths"].items():
+        for method, operation in methods.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            summary = operation.get("summary") or ""
+            if not any("\u4e00" <= char <= "\u9fff" for char in summary):
+                missing.append(f"{method.upper()} {path}: {summary!r}")
+
+    assert not missing, f"这些端点没有中文说明：{missing}"
+
+
+def test_generated_auth_routes_document_their_contract():
+    """登录是表单编码、注册不能指定角色——这两条差异必须写在文档里，而不是靠读代码。"""
+    spec = server.create_app().openapi()
+
+    login = spec["paths"]["/api/auth/login"]["post"]
+    assert "表单编码" in login["description"]
+    assert "username" in login["description"]
+
+    register = spec["paths"]["/api/auth/register"]["post"]
+    assert "普通用户" in register["description"]
+    assert "没有任何请求参数能指定角色" in register["description"]
+
+    logout = spec["paths"]["/api/auth/logout"]["post"]
+    assert "失效" in logout["description"]
