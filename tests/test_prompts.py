@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from jinja2.exceptions import UndefinedError
 
-from app.prompts.manager import PromptManager, prompt_manager
+from app.prompts.manager import PromptManager, PromptTemplateError, prompt_manager
 
 SYSTEM_PROMPT_TEMPLATE = "system_prompt.jinja"
 
@@ -134,3 +134,68 @@ def test_rendered_prompt_stays_free_of_template_artifacts_with_conditionals():
         rendered = render_system_prompt(**kwargs)
         assert "{{" not in rendered
         assert "{%" not in rendered
+
+
+# ---------------------------------------------------------------------
+# 启动自检：模板编译 / 渲染成空
+# ---------------------------------------------------------------------
+def test_shipped_templates_compile_and_render():
+    """仓库里的模板必须能编译、且主提示词能渲染出内容（启动自检跑的就是这一步）。"""
+    from app.server import validate_prompts
+
+    names = prompt_manager.validate_templates()
+
+    assert "system_prompt.jinja" in names
+    validate_prompts()  # 不抛就是通过
+
+
+def test_validate_templates_reports_syntax_errors_with_the_file_name(tmp_path: Path):
+    """少一个 `endif` 这类错误必须在启动时暴露，而不是等第一条用户消息。"""
+    (tmp_path / "broken.jinja").write_text("{% if x %}never closed", encoding="utf-8")
+    manager = PromptManager(template_dir=tmp_path)
+
+    with pytest.raises(PromptTemplateError) as excinfo:
+        manager.validate_templates()
+
+    assert "broken.jinja" in str(excinfo.value)
+
+
+def test_validate_templates_ignores_non_template_files(tmp_path: Path):
+    """提示词目录里放一篇 README 不该被当成模板去编译。"""
+    (tmp_path / "README.md").write_text("# 说明", encoding="utf-8")
+    (tmp_path / "ok.jinja").write_text("你好 {{ name }}", encoding="utf-8")
+    manager = PromptManager(template_dir=tmp_path)
+
+    assert manager.validate_templates() == ["ok.jinja"]
+
+
+def test_render_rejects_a_template_that_renders_empty(tmp_path: Path):
+    """内容全被 Jinja 注释吃掉时，模型会收到一个空系统提示词——行为变了但日志里没痕迹。"""
+    (tmp_path / "empty.jinja").write_text("{# 只有注释 #}", encoding="utf-8")
+    manager = PromptManager(template_dir=tmp_path)
+
+    with pytest.raises(PromptTemplateError, match="渲染结果为空"):
+        manager.render("empty.jinja")
+
+
+def test_render_rejects_a_template_whose_branches_all_close(tmp_path: Path):
+    (tmp_path / "conditional.jinja").write_text("{% if flag %}内容{% endif %}", encoding="utf-8")
+    manager = PromptManager(template_dir=tmp_path)
+
+    with pytest.raises(PromptTemplateError):
+        manager.render("conditional.jinja", flag=False)
+    assert manager.render("conditional.jinja", flag=True) == "内容"
+
+
+def test_digest_changes_with_content_and_is_stable_otherwise(tmp_path: Path):
+    """排查「同样的提示词为什么行为变了」时，日志里的指纹要能指认版本。"""
+    template = tmp_path / "p.jinja"
+    template.write_text("第一版", encoding="utf-8")
+    manager = PromptManager(template_dir=tmp_path)
+
+    first = manager.digest("p.jinja")
+    assert first == manager.digest("p.jinja")
+    assert len(first) == 12
+
+    template.write_text("第二版", encoding="utf-8")
+    assert manager.digest("p.jinja") != first

@@ -19,6 +19,7 @@ from app.api.chat import router as api_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
+from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
 
@@ -65,8 +66,33 @@ def _warn_if_auth_rate_limit_is_global() -> None:
     )
 
 
+def validate_prompts() -> None:
+    """启动自检：编译全部模板，并确认主系统提示词能渲染出内容。
+
+    模板写坏（少一个 `endif`、变量名拼错、内容被条件分支挡光）此前的表现是：服务正常
+    启动，直到某位用户发第一条消息才在预算预检里炸成「请求处理失败」——现场既看不见
+    是提示词的问题，也不会有人想到去查模板文件。启动即失败比那好得多：这是一个纯文件
+    问题，重启就是修复动作。
+
+    抛 `PromptTemplateError` 由调用方决定如何呈现（lifespan 里会记 error 并中止启动）。
+    """
+    from app.services.agent_factory import render_system_prompt
+
+    names = prompt_manager.validate_templates()
+    # 语法通过不代表能渲染：缺变量（StrictUndefined）与「渲染成空串」都只有真渲染才暴露
+    rendered = render_system_prompt()
+    logger.debug("提示词自检通过：%d 个模板，系统提示词 %d 字符", len(names), len(rendered))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # 提示词是纯文件：写坏了就立刻失败，别等第一条用户消息才炸
+    try:
+        validate_prompts()
+    except Exception as exc:  # noqa: BLE001 - 统一转成启动失败，日志里点明原因
+        logger.error("提示词自检失败，服务不会启动: %s", exc)
+        raise
+
     # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
     # 使用 create_all + 手写幂等补列（而非 Alembic）的取舍见 app/db.py。
     await create_db_and_tables()

@@ -166,6 +166,16 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 提示词模板
+
+`prompts/` 下的 Jinja2 模板由 `app/prompts/manager.py` 加载：`StrictUndefined` 让漏传变量
+直接报错（而不是渲染成空串），`PromptTemplateError` 是「模板本身坏了」的统一类型。
+**启动时会自检**（`app/server.py:validate_prompts`）：编译全部模板 + 真渲染一次主系统
+提示词，失败就中止启动并打印是哪个文件、哪一行。此前模板写坏的表现是「服务正常启动，
+某位用户发第一条消息时炸成一句『请求处理失败』」——现场看不出是提示词的问题。
+`PromptManager.digest()` 给出模板源码的 12 位指纹，排查「同样的提示词为什么行为变了」时
+比事后翻 git 历史对时间可靠。
+
 ## 上下文预算
 
 `app/services/token_budget.py` 在每轮请求前估算 prompt 规模，超限直接拒绝（而不是让上游
