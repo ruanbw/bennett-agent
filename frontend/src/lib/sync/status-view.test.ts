@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { SyncStatus } from './engine';
 import {
+  describePendingCount,
   describeRejectionReason,
   describeSyncStatus,
   formatRelativeTime,
+  isRejectionRetryable,
 } from './status-view';
 
 const NOW = Date.UTC(2026, 9, 21, 12, 0, 0);
@@ -116,5 +118,29 @@ describe('拒收原因文案', () => {
 
   it('没有原因时也说得通', () => {
     expect(describeRejectionReason(null)).toBe('服务器拒绝了这些内容');
+  });
+});
+
+describe('被拒内容能否重试', () => {
+  it('单条超过上限不可重试：数据本身放不进去，重试只是让用户反复失望', () => {
+    expect(isRejectionRetryable('too_large')).toBe(false);
+  });
+
+  it('配额满 / 会话不存在 / 未知原因都允许重新上传', () => {
+    expect(isRejectionRetryable('quota_exceeded')).toBe(true);
+    expect(isRejectionRetryable('conversation_missing')).toBe(true);
+    expect(isRejectionRetryable(null)).toBe(true);
+  });
+});
+
+describe('待上传数量文案', () => {
+  it('有排队就说条数', () => {
+    expect(describePendingCount(3, false)).toBe('3 条');
+    expect(describePendingCount(3, true)).toBe('3 条');
+  });
+
+  it('没有排队但正在检查时不说「无」（会与「正在上传变更…」自相矛盾）', () => {
+    expect(describePendingCount(0, true)).toBe('正在检查…');
+    expect(describePendingCount(0, false)).toBe('无');
   });
 });

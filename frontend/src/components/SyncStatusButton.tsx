@@ -34,9 +34,11 @@ import {
 import { useSyncStatus } from '../hooks/use-sync-status';
 import { retryNow, retryRejected } from '../lib/sync/engine';
 import {
+  describePendingCount,
   describeSyncStatus,
   formatAbsoluteTime,
   formatRelativeTime,
+  isRejectionRetryable,
   type SyncTone,
 } from '../lib/sync/status-view';
 import { cn } from '../lib/utils';
@@ -173,7 +175,7 @@ export function SyncStatusButton() {
 
           <dt className="text-muted-foreground">待上传</dt>
           <dd className="text-right tabular-nums text-foreground/90">
-            {status.pending > 0 ? `${status.pending} 条` : '无'}
+            {describePendingCount(status.pending, status.syncing)}
           </dd>
 
           {status.rejected > 0 && (
@@ -187,7 +189,7 @@ export function SyncStatusButton() {
         </dl>
 
         <div className="mt-3 flex items-center gap-2">
-          {status.rejected > 0 && (
+          {status.rejected > 0 && isRejectionRetryable(status.rejectedReason) && (
             <Button
               type="button"
               size="sm"
@@ -213,7 +215,9 @@ export function SyncStatusButton() {
         </div>
 
         <p className="mt-2.5 text-[10.5px] leading-relaxed text-muted-foreground/80">
-          同步在后台自动进行；在其他设备登录同一账号即可看到这些对话。
+          {status.rejected > 0 && !isRejectionRetryable(status.rejectedReason)
+            ? '「单条内容超过服务器上限」重试不会成功：请删掉或导出那条过大的内容后再同步。'
+            : '同步在后台自动进行；在其他设备登录同一账号即可看到这些对话。'}
         </p>
       </PopoverContent>
     </Popover>

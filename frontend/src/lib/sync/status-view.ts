@@ -43,6 +43,23 @@ export function describeRejectionReason(reason: string | null): string {
 }
 
 /**
+ * 被拒内容还能不能自救。
+ *
+ * 「单条内容超过服务器上限」重试多少次都一样——数据本身放不进去，用户需要去删掉或导出
+ * 那条内容；而配额满、会话在服务器上不存在，重新上传有可能成功。面板据此决定给不给
+ * 「重新上传」按钮：给一个注定失败的重试按钮，比不给更让人困惑。
+ */
+export function isRejectionRetryable(reason: string | null): boolean {
+  return reason !== 'too_large';
+}
+
+/** 面板里「待上传」一行的提示：正在上传时不要再说「无」。 */
+export function describePendingCount(pending: number, syncing: boolean): string {
+  if (pending > 0) return `${pending} 条`;
+  return syncing ? '正在检查…' : '无';
+}
+
+/**
  * 相对时间。
  *
  * 未来时间（本机时钟比服务器快）按「刚刚」处理：显示「-3 分钟前」只会让人以为坏了。
