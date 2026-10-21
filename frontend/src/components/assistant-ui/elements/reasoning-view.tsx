@@ -6,7 +6,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ArrowDown, ChevronDown, Loader2 } from "lucide-react";
 import { useDeferredValue, useState, useEffect, useRef } from "react";
-import { thinkingSeconds } from "@/lib/reasoning-time";
+import { thinkingSeconds, thinkingStartTime } from "@/lib/reasoning-time";
 import { isNearScrollBottom } from "@/lib/scroll-follow";
 
 interface ReasoningViewProps {
@@ -14,9 +14,20 @@ interface ReasoningViewProps {
   isStreaming?: boolean;
   /** 持久化的思考耗时（毫秒） */
   elapsedMs?: number;
+  /**
+   * 本轮思考开始的时间戳（仅生成中的内存消息有）。
+   *
+   * 切到别的会话再回来时组件会重挂载；没有它就只能从 0 重新计时。
+   */
+  startedAt?: number | null;
 }
 
-export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: ReasoningViewProps) {
+export function ReasoningView({
+  text,
+  isStreaming = false,
+  elapsedMs = 0,
+  startedAt = null,
+}: ReasoningViewProps) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
@@ -45,12 +56,12 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
   useEffect(() => {
     if (!isStreaming) return;
 
-    const start = Date.now() - elapsedMs;
+    const start = thinkingStartTime(startedAt, elapsedMs);
     const timer = setInterval(() => {
       setLiveElapsed(thinkingSeconds(Date.now() - start));
     }, 500);
     return () => clearInterval(timer);
-  }, [isStreaming, elapsedMs]);
+  }, [isStreaming, elapsedMs, startedAt]);
 
   // 流式输出时自动吸底；用户已经往上翻（follow=false）就不再抢滚动位置
   useEffect(() => {

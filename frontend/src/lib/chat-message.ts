@@ -208,6 +208,9 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
       custom: {
         stopped: run.stopped,
         thinkingMs: run.thinkingMs,
+        // 仅生成中的消息有开始时间；组件重挂载（切会话再回来）靠它续计时，
+        // 不能用 thinkingMs（内容出现前一直是 0）。
+        ...(run.thinkingStartedAt !== null ? { thinkingStartedAt: run.thinkingStartedAt } : {}),
         // 与 toRuntimeMessage 同一条契约：同一轮的覆盖层与落库记录必须给出一致的
         // 「不完整」标记，否则页面刷新前后表现会不一样。
         incomplete: Boolean(run.incomplete),

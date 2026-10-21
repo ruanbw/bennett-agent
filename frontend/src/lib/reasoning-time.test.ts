@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { thinkingSeconds } from './reasoning-time'
+import { thinkingSeconds, thinkingStartTime } from './reasoning-time'
 
 describe('thinkingSeconds', () => {
   it('没有耗时或负值显示 0', () => {
@@ -24,5 +24,27 @@ describe('thinkingSeconds', () => {
   it('长耗时按秒累计', () => {
     expect(thinkingSeconds(59_999)).toBe(59)
     expect(thinkingSeconds(63_000)).toBe(63)
+  })
+})
+
+describe('thinkingStartTime', () => {
+  it('有 run 起点时用它：切走再回来不会把计时清零', () => {
+    expect(thinkingStartTime(1_000, 0, 9_000)).toBe(1_000)
+    expect(thinkingStartTime(1_000, 4_000, 9_000)).toBe(1_000)
+  })
+
+  it('没有起点时退回「现在 - 已持久化耗时」', () => {
+    expect(thinkingStartTime(null, 3_000, 10_000)).toBe(7_000)
+    expect(thinkingStartTime(undefined, 0, 10_000)).toBe(10_000)
+  })
+
+  it('0 / 负数 / 非有限值不是有效起点', () => {
+    expect(thinkingStartTime(0, 2_000, 10_000)).toBe(8_000)
+    expect(thinkingStartTime(-5, 2_000, 10_000)).toBe(8_000)
+    expect(thinkingStartTime(Number.NaN, 2_000, 10_000)).toBe(8_000)
+  })
+
+  it('负的 elapsedMs 不把起点推到未来', () => {
+    expect(thinkingStartTime(null, -5_000, 10_000)).toBe(10_000)
   })
 })

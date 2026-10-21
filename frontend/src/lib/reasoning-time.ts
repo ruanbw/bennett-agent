@@ -8,3 +8,21 @@
 export function thinkingSeconds(ms: number): number {
   return ms > 0 ? Math.max(1, Math.floor(ms / 1000)) : 0;
 }
+
+/**
+ * 直播计时的起点。
+ *
+ * 优先用 run 上记录的 `thinkingStartedAt`：切到别的会话再回来时组件会重挂载，
+ * 单看 `elapsedMs`（内容出现前一直是 0）会把计时清零重来。没有起点时退回
+ * 「现在 - 已持久化的耗时」，与旧行为一致。
+ */
+export function thinkingStartTime(
+  startedAt: number | null | undefined,
+  elapsedMs: number,
+  now: number = Date.now(),
+): number {
+  if (typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0) {
+    return startedAt;
+  }
+  return now - Math.max(0, elapsedMs);
+}

@@ -262,6 +262,16 @@ describe('buildLiveMessage', () => {
     expect(message.status).toBeUndefined()
   })
 
+  it('生成中的消息带思考开始时间，历史消息不带', () => {
+    const live = assertMessage(buildLiveMessage(run({ thinking: '想', thinkingStartedAt: 1_700_000_001_234 })))
+    expect(live.metadata.custom.thinkingStartedAt).toBe(1_700_000_001_234)
+
+    const history = assertMessage(
+      toRuntimeMessage({ id: 'm1', sessionId: 's1', role: 'assistant', content: '答', createdAt: 1 }),
+    )
+    expect(history.metadata.custom.thinkingStartedAt).toBeUndefined()
+  })
+
   it('正文一出现，思考即视为结束（与主流平台一致）', () => {
     const message = assertMessage(buildLiveMessage(run({ thinking: '想', content: '答' })))
 

@@ -559,10 +559,15 @@ const MessageError: FC = () => {
 };
 
 const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (props) => {
-  // 历史消息把思考耗时持久化在 metadata.custom.thinkingMs
+  // 历史消息把思考耗时持久化在 metadata.custom.thinkingMs；生成中的消息另有
+  // thinkingStartedAt，用于组件重挂载后续计时。
   const elapsedMs = useAuiState((s) => {
     const value = s.message.metadata.custom?.thinkingMs;
     return typeof value === "number" ? value : 0;
+  });
+  const startedAt = useAuiState((s) => {
+    const value = s.message.metadata.custom?.thinkingStartedAt;
+    return typeof value === "number" ? value : null;
   });
 
   return (
@@ -570,6 +575,7 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
       text={props.text}
       isStreaming={props.status?.type === "running"}
       elapsedMs={elapsedMs}
+      startedAt={startedAt}
     />
   );
 };

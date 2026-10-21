@@ -407,6 +407,13 @@ export type RuntimeMessage = ThreadMessageLike;
 export interface MessageCustomMetadata {
   stopped: boolean;
   thinkingMs: number;
+  /**
+   * 本轮思考开始的时间戳（仅内存中的生成中消息有）。
+   *
+   * 切到别的会话再回来时 ReasoningView 会重挂载；只靠 thinkingMs（内容出现前为 0）
+   * 会从 0 重新计时。落库记录没有这个字段，历史消息按已结算的 thinkingMs 展示。
+   */
+  thinkingStartedAt?: number | null;
   clarification: ClarificationState | null;
   /** 本轮回答是否由备用模型完成；`thread.aui.tsx` 据此渲染一行提示。 */
   fallback?: FallbackState | null;
