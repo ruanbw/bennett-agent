@@ -20,7 +20,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db import _migrate_user_role_column
+from app.db import _migrate_user_role_column, diff_schema
 from app.roles import ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_USER
 
 
@@ -141,3 +141,40 @@ async def test_missing_table_is_a_noop(tmp_path):
         await _run_migration(engine)  # 不建任何表
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------
+# 结构漂移检测：加了字段却没写迁移
+# ---------------------------------------------------------------------
+def test_diff_schema_reports_columns_the_database_is_missing():
+    """`create_all` 不给已存在的表加列：漏写迁移时必须在启动日志里点名。"""
+    actual = {
+        "user": {"id", "email", "role"},
+        "conversation": {"id", "user_id"},  # 少了 title 等列
+    }
+
+    missing = diff_schema(actual)
+
+    assert "conversation" in missing
+    assert "title" in missing["conversation"]
+    # user 在模型里还有 hashed_password 等列，所以也会被报出来——断言它确实报了
+    assert "hashed_password" in missing["user"]
+
+
+def test_diff_schema_ignores_absent_tables_and_extra_columns():
+    """整张表缺失交给 create_all；库里多出来的旧列不该被报成问题（删它才危险）。"""
+    assert diff_schema({}) == {}
+
+    full = {name: set(cols) for name, cols in _model_columns_snapshot().items()}
+    full["user"].add("legacy_column_from_old_version")
+    assert diff_schema(full) == {}
+
+
+def test_diff_schema_is_empty_when_everything_matches():
+    assert diff_schema(_model_columns_snapshot()) == {}
+
+
+def _model_columns_snapshot() -> dict[str, set[str]]:
+    from app.db import _model_columns
+
+    return _model_columns()

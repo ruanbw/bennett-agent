@@ -142,6 +142,13 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 数据库结构漂移
+
+项目**没有 Alembic**：`create_all` 只建缺失的表，对已存在的表一个字节都不改。所以给
+已有表加列必须手写一段幂等迁移（目前只有 `_migrate_user_role_column`）。为降低「忘了写
+迁移」的代价，启动时会做一次结构比对（`app/db.py:diff_schema`）：库里缺列时在日志里
+点名是哪张表的哪一列，而不是等某个查询在运行期报 `no such column`。
+
 ## 日志
 
 `LOG_LEVEL`（默认 INFO）与 `LOG_ACCESS`（默认关闭）控制输出，配置在

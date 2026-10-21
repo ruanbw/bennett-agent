@@ -445,6 +445,54 @@ async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnec
     )
 
 
+def _model_columns() -> dict[str, set[str]]:
+    """ORM 声明的 `{表名: 列名集合}`（不读库，纯元数据）。"""
+    return {table.name: {column.name for column in table.columns} for table in Base.metadata.sorted_tables}
+
+
+def diff_schema(actual: dict[str, set[str]]) -> dict[str, set[str]]:
+    """比对「代码里的表结构」与「库里的表结构」，返回**库里缺的列**。
+
+    `create_all` 只建缺失的表，对已存在的表一个字节都不改：新增一列而忘了写迁移时，
+    服务能正常启动，直到某个查询撞上 `no such column` 才 500——而那时用户已经在用了。
+    这个比对在启动时就把缺口指出来（表名 + 列名 + 该怎么补），比运行期报错可查得多。
+
+    只报「模型有、库里没有」的列。库里多出来的列不报：那可能是旧版本遗留，删它才危险。
+    表整个缺失也不报（`create_all` 会建出来）。
+    """
+    expected = _model_columns()
+    missing: dict[str, set[str]] = {}
+    for table, columns in expected.items():
+        present = actual.get(table)
+        if present is None:
+            continue
+        gap = columns - present
+        if gap:
+            missing[table] = gap
+    return missing
+
+
+async def _warn_on_missing_columns(conn) -> None:  # noqa: ANN001 - AsyncConnection
+    """启动时检查「加了字段却没写迁移」的漂移，并把缺口写进日志。"""
+    actual: dict[str, set[str]] = {}
+    for table in Base.metadata.sorted_tables:
+        rows = (await conn.execute(text(f"PRAGMA table_info({table.name})"))).fetchall()
+        if rows:
+            # PRAGMA table_info 的第 2 列是列名（cid, name, type, notnull, dflt_value, pk）
+            actual[table.name] = {row[1] for row in rows}
+
+    missing = diff_schema(actual)
+    if not missing:
+        return
+
+    detail = "；".join(f"{table} 缺 {', '.join(sorted(columns))}" for table, columns in missing.items())
+    logger.warning(
+        "数据库结构与代码不一致（%s）。create_all 不会给已存在的表加列，"
+        "需要在 app/db.py 里补一段幂等的迁移，否则相关查询会报 no such column。",
+        detail,
+    )
+
+
 async def create_db_and_tables() -> None:
     """启动时建表 + 补齐列（幂等）。
 
@@ -454,10 +502,14 @@ async def create_db_and_tables() -> None:
     **没有引入 Alembic**：迁移需求目前只有「给 user 表加 role 列」这一处，为它引入
     一整套工具链不划算。代价是新增的列改动必须在 `_migrate_user_role_column` 里手写
     并保持幂等。**再出现第二处加列时应该换成 Alembic**，而不是继续往这里堆。
+
+    为降低「忘了写迁移」的代价，建表之后会做一次结构比对（`diff_schema`）：缺列时在
+    启动日志里点名是哪张表的哪一列，而不是等某个查询在运行期报 `no such column`。
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _migrate_user_role_column(conn)
+        await _warn_on_missing_columns(conn)
 
     logger.info("数据库就绪: %s", DATABASE_URL)
 
