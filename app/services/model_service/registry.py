@@ -47,6 +47,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.db import AppSetting, ModelProvider, ProviderModel, async_session_maker
 from app.schemas.chat import ModelItem, ModelListResponse
+from app.services.fallback_config import configured_fallback_name, warn_fallback_unavailable
 from app.services.http_client import get_http_client
 from app.services.model_service import gateway, outbound_guard
 from app.services.model_service.errors import (
@@ -183,16 +184,12 @@ async def _build_target(model: ProviderModel, provider: ModelProvider) -> ModelT
 
 
 def _configured_fallback_name(primary_name: str) -> str | None:
-    """旧版网关路径的备用模型名；空值、与主模型相同都视为「不启用」。
+    """备用模型名（口径见 `app/services/fallback_config.py`）。
 
-    与 `agent_factory._configured_fallback_name` 同一口径：那边决定是否真的包一层
-    `FallbackModel`，这边只用它给用量事件找窗口，两处不一致会让窗口取自一个根本
-    没被调用的模型。
+    这里只管「配没配」，能不能真的用上由调用方按库里的启用状态判断；配了却用不上时
+    调用方要 `warn_fallback_unavailable`，否则运维以为自己有兜底。
     """
-    fallback_name = (settings.fallback_model_name or "").strip()
-    if not fallback_name or fallback_name == primary_name:
-        return None
-    return fallback_name
+    return configured_fallback_name(primary_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,13 +264,21 @@ async def resolve_chat_model(requested_key: str | None) -> ChatModelSnapshot:
 
     fallback_name = _configured_fallback_name(target.upstream_model)
     if fallback_name is not None:
+        matched = False
         for candidate_model, candidate_provider in rows:
             if candidate_provider.id == provider.id and candidate_model.model_id == fallback_name:
                 fallback = await _build_target(candidate_model, candidate_provider)
                 target = replace(target, fallback=fallback)
                 fallback_key = fallback.key
                 fallback_context_window = fallback.context_window
+                matched = True
                 break
+        if not matched:
+            warn_fallback_unavailable(
+                target.upstream_model,
+                fallback_name,
+                "同一提供商内没有这个已启用的模型（跨提供商的参数兼容性无法保证，因此不做跨提供商兜底）",
+            )
 
     return ChatModelSnapshot(
         key=key,
@@ -955,4 +960,9 @@ async def resolve_model_target(key: str) -> ModelTarget | None:
         if provider.id == match[1].id and model.model_id == fallback_name:
             return replace(target, fallback=await _build_target(model, provider))
 
+    warn_fallback_unavailable(
+        target.upstream_model,
+        fallback_name,
+        "同一提供商内没有这个已启用的模型（跨提供商的参数兼容性无法保证，因此不做跨提供商兜底）",
+    )
     return target

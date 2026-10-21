@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config import settings
 from app.db import Base, ModelProvider, ProviderModel
 from app.schemas.chat import ModelListResponse
-from app.services import model_service
+from app.services import fallback_config, model_service
 from app.services.model_service import registry
 
 # ---------------------------------------------------------------------
@@ -419,3 +419,62 @@ async def test_public_list_and_known_ids_agree_on_disabled_providers(registry_db
 
     assert result.models == []
     assert await model_service.get_known_model_ids() == frozenset()
+
+
+# ---------------------------------------------------------------------
+# 备用模型「配了但用不上」：必须留日志
+# ---------------------------------------------------------------------
+async def test_missing_fallback_model_is_warned(registry_db, monkeypatch, caplog):
+    """`FALLBACK_MODEL_NAME` 指向一个没启用的模型时，此前是静默不兜底。
+
+    主模型 503 时用户直接看到失败，而运维以为自己配了兜底——这种「配置看起来生效、
+    实际没生效」的问题在故障现场几乎不可能被发现。
+    """
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="openai/primary")
+    await _add_model(registry_db, provider_id, model_id="openai/backup", enabled=False)
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/backup")
+    fallback_config.reset_fallback_warnings()
+
+    with caplog.at_level("WARNING", logger="app.services.fallback_config"):
+        snapshot = await model_service.resolve_chat_model("gw/openai/primary")
+
+    assert snapshot.target is not None
+    assert snapshot.target.fallback is None
+    assert snapshot.fallback_key is None
+    assert any("备用模型已配置但本轮无法启用" in record.getMessage() for record in caplog.records)
+
+
+async def test_cross_provider_fallback_is_warned(registry_db, monkeypatch, caplog):
+    """备用模型在另一个提供商下：不做跨提供商兜底（参数兼容性无法保证），但要告警。"""
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="openai/primary")
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    async with maker() as session:
+        other = ModelProvider(name="另一个", slug="other", base_url="http://127.0.0.1:5000/v1", enabled=True)
+        session.add(other)
+        await session.commit()
+        other_id = other.id
+    await _add_model(registry_db, other_id, model_id="openai/backup")
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/backup")
+    fallback_config.reset_fallback_warnings()
+
+    with caplog.at_level("WARNING", logger="app.services.fallback_config"):
+        snapshot = await model_service.resolve_chat_model("gw/openai/primary")
+
+    assert snapshot.fallback_key is None
+    assert any("同一提供商内没有这个已启用的模型" in record.getMessage() for record in caplog.records)
+
+
+async def test_available_fallback_does_not_warn(registry_db, monkeypatch, caplog):
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(registry_db, provider_id, model_id="openai/primary")
+    await _add_model(registry_db, provider_id, model_id="openai/backup")
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/backup")
+    fallback_config.reset_fallback_warnings()
+
+    with caplog.at_level("WARNING", logger="app.services.fallback_config"):
+        snapshot = await model_service.resolve_chat_model("gw/openai/primary")
+
+    assert snapshot.fallback_key == "gw/openai/backup"
+    assert not [r for r in caplog.records if "备用模型" in r.getMessage()]

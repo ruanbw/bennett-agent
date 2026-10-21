@@ -29,6 +29,7 @@ from pydantic_ai.providers.litellm import LiteLLMProvider
 from app.config import is_usable_api_key, settings
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.prompts import prompt_manager
+from app.services.fallback_config import configured_fallback_name
 from app.services.fallback_tracker import record_fallback
 from app.services.model_target import ModelTarget
 from app.services.upstream_errors import is_fallback_eligible
@@ -152,15 +153,8 @@ def build_upstream_timeout() -> httpx.Timeout | None:
 
 
 def _configured_fallback_name(primary_name: str) -> str | None:
-    """取配置里的备用模型名；空值、与主模型相同都视为「不启用」。
-
-    同名时没有必要包 `FallbackModel`：它只会对同一个模型再打一次，还让错误变成
-    异常组（分类文案反而更绕）。大小写不归一：模型 id 由网关定义，后端不做猜测。
-    """
-    fallback_name = (settings.fallback_model_name or "").strip()
-    if not fallback_name or fallback_name == primary_name:
-        return None
-    return fallback_name
+    """取配置里的备用模型名（口径与 `model_service` 共用 `fallback_config`）。"""
+    return configured_fallback_name(primary_name)
 
 
 def _build_fallback_handler(

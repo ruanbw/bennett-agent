@@ -142,6 +142,14 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 备用模型
+
+`FALLBACK_MODEL_NAME` 让主模型在上游 5xx/429/超时/连接失败时切一次备用模型（`FallbackModel`，
+只在流打开阶段切换，不会出现「正文已流出又重来」）。解析口径收敛在
+`app/services/fallback_config.py`：空值、与主模型同名都视为不启用；**配了却用不上**
+（模型没启用、或不在同一提供商下）会记一条 WARNING，否则「主模型 503 直接失败」在现场
+看不出是配置问题——运维会以为自己有兜底。
+
 ## 会话 cookie 与跨站部署
 
 会话是 HttpOnly cookie（`AUTH_COOKIE_NAME`，默认 `bennett_session`），`SameSite` 由
