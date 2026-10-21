@@ -21,18 +21,31 @@ export interface LocalDataStats {
   messages: number;
   /** 浏览器估算的 origin 存储占用（字节）；不被支持或拒绝时为 null。 */
   usageBytes: number | null;
+  /** 浏览器给本站点估算的配额（字节）；不支持时为 null。 */
+  quotaBytes: number | null;
+}
+
+interface StorageEstimateResult {
+  usageBytes: number | null;
+  quotaBytes: number | null;
 }
 
 /** 浏览器可能不提供 storage.estimate，也可能在隐私模式下拒绝：两种情况都退回 null。 */
-async function estimateUsageBytes(): Promise<number | null> {
+async function estimateStorage(): Promise<StorageEstimateResult> {
   try {
     const storage = typeof navigator === 'undefined' ? undefined : navigator.storage;
-    if (!storage || typeof storage.estimate !== 'function') return null;
+    if (!storage || typeof storage.estimate !== 'function') {
+      return { usageBytes: null, quotaBytes: null };
+    }
     const estimate = await storage.estimate();
-    return typeof estimate?.usage === 'number' ? estimate.usage : null;
+    return {
+      usageBytes: typeof estimate?.usage === 'number' ? estimate.usage : null,
+      quotaBytes:
+        typeof estimate?.quota === 'number' && estimate.quota > 0 ? estimate.quota : null,
+    };
   } catch (err) {
     console.warn('读取浏览器存储占用失败:', err);
-    return null;
+    return { usageBytes: null, quotaBytes: null };
   }
 }
 
@@ -40,12 +53,13 @@ async function estimateUsageBytes(): Promise<number | null> {
 export async function readLocalDataStats(): Promise<LocalDataStats> {
   // 没有事务包住：两个 count 之间用户可能删了东西，但这是一份展示用的快照，
   // 数字之间的微小偏差不值得为它开一个长事务。
-  const [sessions, messages] = await Promise.all([
+  const [sessions, messages, storage] = await Promise.all([
     db.sessions.filter((session) => !session.deleted).count(),
     db.messages.count(),
+    estimateStorage(),
   ]);
 
-  return { sessions, messages, usageBytes: await estimateUsageBytes() };
+  return { sessions, messages, ...storage };
 }
 
 /**
@@ -66,4 +80,24 @@ export function formatBytes(bytes: number | null): string {
     unitIndex += 1;
   }
   return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+/**
+ * 存储占用一行文案：有配额时一并给出，用户才知道离上限还有多远。
+ *
+ * 百分比直接由 usage/quota 得到，保留一位小数；浏览器可能报 usage > quota（估算口径
+ * 或配额被动态收紧），显示时夹到 100%，不出现「已用 120%」这种无法解释的数字。
+ */
+export function formatStorageUsage(
+  usageBytes: number | null,
+  quotaBytes: number | null,
+): string {
+  if (usageBytes === null || !Number.isFinite(usageBytes) || usageBytes < 0) return '未知';
+  if (quotaBytes === null || !Number.isFinite(quotaBytes) || quotaBytes <= 0) {
+    return formatBytes(usageBytes);
+  }
+  const percent = Math.min(100, (usageBytes / quotaBytes) * 100);
+  // 3 MB / 10 GB 显示「0.0%」会让人以为没占用：小但非零的占比写成「<0.1%」
+  const percentLabel = percent > 0 && percent < 0.1 ? '<0.1' : percent.toFixed(1);
+  return `${formatBytes(usageBytes)} / ${formatBytes(quotaBytes)}（${percentLabel}%）`;
 }

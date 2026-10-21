@@ -7,11 +7,11 @@
 
 import 'fake-indexeddb/auto';
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { MessageRecord, SessionRecord } from '../types';
 import { db } from '../db';
-import { formatBytes, readLocalDataStats } from './local-stats';
+import { formatBytes, formatStorageUsage, readLocalDataStats } from './local-stats';
 
 const session = (id: string, deleted = false): SessionRecord => ({
   id,
@@ -55,6 +55,36 @@ describe('formatBytes', () => {
   });
 });
 
+describe('formatStorageUsage', () => {
+  it('有配额时给出占用 / 配额与百分比', () => {
+    expect(formatStorageUsage(1536, 4096)).toBe('1.5 KB / 4.0 KB（37.5%）');
+  });
+
+  it('没有配额时只显示占用，不编造百分比', () => {
+    expect(formatStorageUsage(1536, null)).toBe('1.5 KB');
+  });
+
+  it('占用未知时整行未知', () => {
+    expect(formatStorageUsage(null, 4096)).toBe('未知');
+    expect(formatStorageUsage(Number.NaN, 4096)).toBe('未知');
+  });
+
+  it('占用超过配额时夹到 100%，不出现 120%', () => {
+    expect(formatStorageUsage(120, 100)).toContain('100.0%');
+  });
+
+  it('小但非零的占比显示 <0.1%，不是误导性的 0.0%', () => {
+    expect(formatStorageUsage(3 * 1024 * 1024, 10 * 1024 * 1024 * 1024)).toContain('<0.1%');
+    expect(formatStorageUsage(0, 4096)).toContain('0.0%');
+  });
+
+  it('配额为 0 / 负数 / 非有限值按未知配额处理', () => {
+    expect(formatStorageUsage(100, 0)).toBe('100 B');
+    expect(formatStorageUsage(100, -1)).toBe('100 B');
+    expect(formatStorageUsage(100, Number.POSITIVE_INFINITY)).toBe('100 B');
+  });
+});
+
 describe('readLocalDataStats', () => {
   it('会话排除墓碑，消息计数与库一致', async () => {
     await db.sessions.bulkPut([session('s1'), session('s2'), session('s3', true)]);
@@ -73,6 +103,20 @@ describe('readLocalDataStats', () => {
   it('没有 storage.estimate 的环境里占用为 null（不编造数字）', async () => {
     const stats = await readLocalDataStats();
     expect(stats.usageBytes).toBeNull();
+    expect(stats.quotaBytes).toBeNull();
+  });
+
+  it('读取浏览器估算的 usage 与 quota', async () => {
+    vi.stubGlobal('navigator', {
+      storage: { estimate: async () => ({ usage: 1536, quota: 4096 }) },
+    });
+    try {
+      const stats = await readLocalDataStats();
+      expect(stats.usageBytes).toBe(1536);
+      expect(stats.quotaBytes).toBe(4096);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('空库返回 0 而不是抛错', async () => {

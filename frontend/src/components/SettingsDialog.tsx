@@ -15,7 +15,7 @@ import { useLocalDataStats } from '../hooks/use-local-stats';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
-import { formatBytes } from '../lib/local-stats';
+import { formatStorageUsage } from '../lib/local-stats';
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -191,14 +191,14 @@ export function SettingsPanel({
             <span className="text-muted-foreground">存储占用</span>
             <span
               className="tabular-nums text-foreground"
-              title="浏览器对整个站点的估算值，包含缓存等其他数据"
+              title="浏览器对整个站点的估算值，包含缓存等其他数据；括号内为估算配额占比"
             >
-              {stats ? formatBytes(stats.usageBytes) : '—'}
+              {stats ? formatStorageUsage(stats.usageBytes, stats.quotaBytes) : '—'}
             </span>
           </div>
         </div>
         <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          会话默认保存在本机浏览器；登录同一账号时后台同步到服务器。存储占用是浏览器对本站点的估算值。
+          会话默认保存在本机浏览器；登录同一账号时后台同步到服务器。存储占用是浏览器对本站点的估算值，括号内为估算配额占比。
         </p>
       </div>
 

@@ -258,8 +258,10 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   而 package.json 是 `0.0.0`，展示的版本跟构建无关。「本机数据」里的会话数排除墓碑
   （同步用的删除标记），否则会和侧边栏列表对不上；存储占用来自
   `navigator.storage.estimate()`，是**整个 origin** 的估算值，文案必须说清这一点，
-  否则用户会拿它精确对账。设置面板挂在 `App` 而不是 `AccountBar`：侧边栏收起时
-  AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
+  否则用户会拿它精确对账。能拿到 quota 时一并显示「占用 / 配额（百分比）」
+  （`formatStorageUsage`），用户才知道离上限多远；拿不到 quota 就只显示占用，不编造
+  百分比；usage 超过 quota 时夹到 100%。设置面板挂在 `App` 而不是 `AccountBar`：
+  侧边栏收起时 AccountBar 不渲染，顶栏胶囊工具栏的齿轮要能打开它。
 - **改密 = 踢掉所有会话。** 设置面板的「修改密码」调用 `POST /api/auth/change-password`
   （验当前密码 → 新密码走与注册同一条 `validate_password` → `UserManager.update` 触发
   `on_after_update` 删掉该账号全部 access_token）。成功后客户端**不能**再假装已登录：
