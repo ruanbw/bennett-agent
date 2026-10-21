@@ -222,3 +222,50 @@ class OriginGuardMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------
+# 安全响应头 / 缓存策略
+# ---------------------------------------------------------------------
+
+#: 所有响应都带的基线头。API 返回 JSON，但 `X-Content-Type-Options: nosniff`
+#: 能阻止浏览器把错误页/上游内容按 HTML 猜类型；`X-Frame-Options` 防点击劫持
+#: （对 `/docs` 这类页面也有用）。
+_BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """给 `/api/*` 响应加安全头，且默认 `Cache-Control: no-store`。
+
+    `/api/auth/me`、`/api/admin/users` 等响应含账号/邮箱/角色信息；没有显式
+    `Cache-Control` 时，浏览器与中间缓存可能把带 cookie 的 GET 响应留在本地缓存
+    （共享电脑/浏览器历史）。SSE 自己已经设了 `no-store`，这里不覆盖已有值。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        is_api = scope.get("path", "").startswith("/api")
+
+        async def wrapped_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                existing = {name.lower() for name, _value in headers}
+                for name, value in _BASE_SECURITY_HEADERS:
+                    if name not in existing:
+                        headers.append((name, value))
+                if is_api and b"cache-control" not in existing:
+                    headers.append((b"cache-control", b"no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, wrapped_send)

@@ -20,7 +20,7 @@ from app.api.chat import router as api_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
-from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware
+from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
 from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
@@ -290,6 +290,9 @@ def create_app() -> FastAPI:
         # `fetch` 拿到的是 `null`——前端没法告诉用户「还要等几秒」。
         expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
+
+    # 最后注册 = 最外层：连 CORS/限流产生的错误响应也带上安全头。
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(auth_router)
     app.include_router(api_router)
