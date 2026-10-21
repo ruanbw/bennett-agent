@@ -48,6 +48,7 @@ import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
 import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
+import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
@@ -667,10 +668,33 @@ const readFallback = (value: unknown): FallbackState | null => {
 /** 失败信息同理：只在结构完整时返回，否则当作没有（老记录/写坏的数据）。 */
 const readError = (value: unknown): RunError | null => {
   if (!value || typeof value !== "object") return null;
-  const { message, retryable, code } = value as Partial<RunError>;
-  return typeof message === "string"
-    ? { message, retryable: retryable === true, code: readKnownErrorCode(code) }
-    : null;
+  const { message, retryable, code, retryAfterAt } = value as Partial<RunError>;
+  if (typeof message !== "string") return null;
+  return {
+    message,
+    retryable: retryable === true,
+    code: readKnownErrorCode(code),
+    retryAfterAt: typeof retryAfterAt === "number" ? retryAfterAt : null,
+  };
+};
+
+/**
+ * 429 冷却：等到 `retryAfterAt` 才允许重试，期间每秒重渲染一次用于倒计时。
+ *
+ * 用 `setInterval` 而不是 `requestAnimationFrame`：这是个一秒级的倒计时，60fps 重渲染
+ * 纯属浪费；组件卸载时清理，避免「消息滚出视口后还在跑」。
+ */
+const useRetryCooldown = (retryAfterAt: number | null | undefined): string => {
+  const [now, setNow] = useState(() => Date.now());
+  const remaining = remainingCooldownMs(retryAfterAt, now);
+
+  useEffect(() => {
+    if (remaining <= 0) return undefined;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [remaining]);
+
+  return describeCooldown(remainingCooldownMs(retryAfterAt, now));
 };
 
 const AssistantMessage: FC = () => {
@@ -689,6 +713,8 @@ const AssistantMessage: FC = () => {
     error.code !== "model_unavailable";
   // 分类能给出确定动作时补一行「下一步」：只说「出错了」用户不知道该动哪里
   const errorHint = error ? describeErrorHint(error.code) : "";
+  // 429 有冷却期：把「还要等几秒」直接写在按钮上，否则用户只能反复点、反复失败
+  const cooldownLabel = useRetryCooldown(error?.retryAfterAt);
 
   return (
     <MessagePrimitive.Root
@@ -731,10 +757,12 @@ const AssistantMessage: FC = () => {
           <ActionBarPrimitive.Reload asChild>
             <button
               type="button"
+              // 冷却期内 disabled：再点一次只会再吃一个 429，还多烧一次限流桶
+              disabled={cooldownLabel !== ""}
               className="border-border/70 text-foreground hover:bg-muted focus-visible:ring-ring/50 inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors focus-visible:ring-1 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
             >
               <RefreshCwIcon className="size-3.5" />
-              重试
+              {cooldownLabel || '重试'}
             </button>
           </ActionBarPrimitive.Reload>
         </div>

@@ -286,6 +286,13 @@ export interface RunError {
   retryable: boolean;
   /** 失败分类，见 `StreamErrorEvent.code`；未分类时为 null（老记录/老服务端）。 */
   code: ErrorCode | null;
+  /**
+   * 服务端要求等到这个时刻（epoch ms）再重试；没有 `Retry-After` 时为 null/缺失。
+   *
+   * 存**绝对时刻**而不是「还有几秒」：这份错误会随消息落库，刷新后若把相对秒数当剩余
+   * 时间，倒计时会从零再走一遍，而实际上早就该能重试了。
+   */
+  retryAfterAt?: number | null;
 }
 
 /**

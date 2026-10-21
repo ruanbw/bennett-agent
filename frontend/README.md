@@ -279,6 +279,12 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   失败会把结论写进消息正文并挂到 `run.error` 上——消息区因此出现「重试」按钮，刷新后
   仍在；没收到任何输出时按「本轮失败」收尾，不叠加「回复不完整」。`/api/models` 拉取
   失败也用同一套翻译，菜单空态显示可读原因而不是一句 HTTP 500。
+- **429 的重试按钮要倒计时，而不是让用户反复撞墙。** 后端在 `Retry-After` 里给了秒数，
+  以前拿到就丢了：按钮一直可点，点一次再吃一次 429，而提示里的「请 N 秒后重试」早已滚过去。
+  现在 `chat-runs` 把它换算成**绝对时刻** `run.error.retryAfterAt`（落库也用绝对时刻：
+  存相对秒数的话刷新后会从零再走一遍），`lib/rate-limit-cooldown.ts` 给出剩余时间与
+  「N 秒后可重试」文案（向上取整，剩 0.4 秒不说「0 秒后」；上限 1 小时，数据写坏也不会把
+  按钮永久禁用），消息区的「重试」在冷却期内 `disabled` 并显示倒计时，到点恢复成「重试」。
 - **崩溃页要给人话，技术原文折叠收起。** 边界此前直接把 `error.message` 贴在页面上：
   `Cannot read properties of undefined (reading 'content')`、`Failed to fetch dynamically
   imported module` 用户读不懂，也不知道该做什么。`lib/error-boundary-text.ts` 的

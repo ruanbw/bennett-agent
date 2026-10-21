@@ -348,3 +348,36 @@ describe('跨标签失效后的消息重读', () => {
     expect(getRun('a')!.finished).toBe(false)
   })
 })
+
+describe('429 的 Retry-After 落到错误上', () => {
+  it('把「等到什么时候」记成绝对时刻，供按钮倒计时', async () => {
+    const { ChatRequestError } = await import('./chat-request-error')
+    // 先吐一个空增量（不产生任何可见内容），再抛错：既能走「请求失败」这条路，
+    // 也让这个 async generator 真的产出过东西
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { type: 'content', delta: '' } as const
+      throw new ChatRequestError(429, '请求过于频繁，请 17 秒后重试', 17)
+    })
+
+    const before = Date.now()
+    start()
+    await vi.waitFor(() => expect(getRun('a')?.finished).toBe(true))
+
+    const error = getRun('a')?.error
+    expect(error?.retryable).toBe(true)
+    expect(error?.retryAfterAt).toBeGreaterThanOrEqual(before + 17_000)
+    expect(error?.retryAfterAt).toBeLessThanOrEqual(Date.now() + 17_000)
+  })
+
+  it('没有 Retry-After 的失败不带冷却', async () => {
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { type: 'content', delta: '' } as const
+      throw new Error('Failed to fetch')
+    })
+
+    start()
+    await vi.waitFor(() => expect(getRun('a')?.finished).toBe(true))
+
+    expect(getRun('a')?.error?.retryAfterAt).toBeNull()
+  })
+})
