@@ -478,3 +478,55 @@ async def test_available_fallback_does_not_warn(registry_db, monkeypatch, caplog
 
     assert snapshot.fallback_key == "gw/openai/backup"
     assert not [r for r in caplog.records if "备用模型" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------
+# 用户搜索：LIKE 元字符按字面匹配
+# ---------------------------------------------------------------------
+async def test_escape_like_pattern_escapes_metacharacters():
+    from app.api.admin import escape_like_pattern
+
+    assert escape_like_pattern("%") == "\\%"
+    assert escape_like_pattern("a_b") == "a\\_b"
+    assert escape_like_pattern("a\\b") == "a\\\\b"
+    assert escape_like_pattern("alice") == "alice"
+
+
+async def _seed_users(registry_db, emails):
+    from app.db import User
+
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    async with maker() as session:
+        for email in emails:
+            session.add(User(email=email, hashed_password="x", is_active=True, is_verified=True))
+        await session.commit()
+
+
+async def _search(registry_db, query):
+    from app.api.admin import list_users
+
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    async with maker() as session:
+        page = await list_users(query=query, limit=50, offset=0, session=session)
+    return [item.email for item in page.items]
+
+
+async def test_user_search_treats_percent_as_a_literal(registry_db):
+    """不转义时搜一个 `%` 会列出**全部**账号，看起来像搜索功能坏了。"""
+    await _seed_users(registry_db, ["alice@example.com", "bob@example.com"])
+
+    assert await _search(registry_db, "%") == []
+
+
+async def test_user_search_treats_underscore_as_a_literal(registry_db):
+    """邮箱里出现下划线并不罕见：`a_b` 不该命中 `axb`。"""
+    await _seed_users(registry_db, ["a_b@example.com", "axb@example.com"])
+
+    assert await _search(registry_db, "a_b") == ["a_b@example.com"]
+
+
+async def test_user_search_still_does_substring_and_case_insensitive_match(registry_db):
+    await _seed_users(registry_db, ["Alice@Example.com", "bob@example.com"])
+
+    assert await _search(registry_db, "alice") == ["Alice@Example.com"]
+    assert await _search(registry_db, "example.com") == ["Alice@Example.com", "bob@example.com"]

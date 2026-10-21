@@ -65,6 +65,10 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 之后由超管在管理后台把别的账号设为管理员。三个角色的权限见 `app/roles.py`：
 `user` 只能对话，`admin` 能进后台维护提供商与封禁用户，`superadmin` 额外能调整角色。
 
+后台的用户检索按**字面**匹配：`%` 与 `_` 是 SQL `LIKE` 的元字符，转义前搜一个 `%` 会
+列出全部账号（看起来像搜索坏了），搜 `a_b` 还会命中 `axb`。`app/api/admin.py` 的
+`escape_like_pattern` 负责转义，测试覆盖 `%`、`_`、反斜杠与大小写/子串匹配。
+
 ## 系统提示词与工具装配
 
 `prompts/system_prompt.jinja` 里的「可用工具」一节与联网搜索规则都由**实际装配结果**

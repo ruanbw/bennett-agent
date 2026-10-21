@@ -286,6 +286,16 @@ def _user_read(user: User) -> UserAdminRead:
     )
 
 
+def escape_like_pattern(term: str) -> str:
+    """转义 SQL `LIKE` 的元字符，让用户输入按字面匹配。
+
+    不转义时管理员搜一个 `%` 会列出**全部**账号（看起来像搜索坏了），搜 `a_b` 还会
+    命中 `axb`——邮箱里出现下划线并不罕见。反斜杠作转义符，调用处必须同时传
+    `escape="\\"`，否则 SQLite 不认这个转义（反斜杠会变成普通字符）。
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/users", response_model=UserPage, summary="搜索/分页列出用户")
 async def list_users(
     query: str | None = Query(None, max_length=200, description="按邮箱模糊搜索"),
@@ -296,7 +306,9 @@ async def list_users(
     stmt = select(User)
     cleaned = (query or "").strip()
     if cleaned:
-        stmt = stmt.where(func.lower(User.email).like(f"%{cleaned.lower()}%"))
+        # 用户输入按字面匹配：`%` / `_` 是 LIKE 的元字符，不转义时搜「%」会列出全部账号
+        pattern = f"%{escape_like_pattern(cleaned.lower())}%"
+        stmt = stmt.where(func.lower(User.email).like(pattern, escape="\\"))
 
     total = await session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     users = (await session.scalars(stmt.order_by(User.email).limit(limit).offset(offset))).all()
