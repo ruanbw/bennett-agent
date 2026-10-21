@@ -10,13 +10,22 @@ httpx 在 `trust_env=True` 时会把 `no_proxy` 的每一项拼成代理白名�
 坏的是客户端的代理白名单而不是某一条请求，所以表现为“全挂”：`model_service`
 拉不到网关模型列表，静默兜底成配置里的一个模型，最容易被误判成网关或端口问题。
 
-这里只做最小修正：把 `[IPv6]` 归一化成裸 `IPv6`（httpx 能正确识别），其它条目
-原样保留。刻意不 `trust_env=False` 一刀切：外网请求（Tavily 等）仍需要继承系统代理。
+这里做两件事（都只针对「会让 httpx 拼出非法白名单」的条目）：
+
+1. `[IPv6]` / `[IPv6]:端口` 归一化成**裸** `IPv6`（httpx 能正确识别）。带端口的写法
+   同样会炸：`[::1]:8000` 被拼成 `all://*[::1]:8000`，报的同样是 `Invalid port: ':1]:8000'`。
+   归一化时**丢掉端口**——`no_proxy` 的语义就是按主机名绕过代理，curl/browser 也忽略端口。
+2. 其余「含 `[`/`]` 且带冒号」的条目直接丢弃并告警：它们进 httpx 就会让**整个**客户端
+   构造失败（`[a:b]` 也被拼成非法 URL），而删掉一个无法解析的条目的代价只是那个主机
+   仍走代理——比所有上游请求全挂小得多。
+
+刻意不 `trust_env=False` 一刀切：外网请求（Tavily 等）仍需要继承系统代理。
 """
 
 import ipaddress
 import logging
 import os
+import re
 from collections.abc import MutableMapping
 
 logger = logging.getLogger(__name__)
@@ -25,12 +34,21 @@ logger = logging.getLogger(__name__)
 _ENV_NAMES = ("no_proxy", "NO_PROXY")
 
 
+#: `[IPv6]` 或 `[IPv6]:端口`。
+_BRACKETED_IPV6 = re.compile(r"^\[(?P<host>[^\]]+)\](?::(?P<port>[0-9]+))?$")
+
+
 def _bare_ipv6(token: str) -> str | None:
-    """`[::1]` 转成 `::1`；不是方括号 IPv6 时返回 None。"""
-    if len(token) < 2 or not (token.startswith("[") and token.endswith("]")):
+    """`[::1]` / `[::1]:8000` 转成 `::1`；不是方括号 IPv6 时返回 None。
+
+    带端口的写法丢掉端口：`no_proxy` 是按主机绕过代理，端口不参与匹配
+    （裸 `::1:8000` 会被解析成另一个 IPv6 地址，不能简单去掉方括号）。
+    """
+    matched = _BRACKETED_IPV6.match(token)
+    if not matched:
         return None
 
-    inner = token[1:-1]
+    inner = matched.group("host")
     try:
         ipaddress.IPv6Address(inner)
     except ValueError:
@@ -38,8 +56,19 @@ def _bare_ipv6(token: str) -> str | None:
     return inner
 
 
+def _would_break_httpx(token: str) -> bool:
+    """这个条目会不会让 httpx 拼出非法白名单。
+
+    httpx 把每个 no_proxy 项拼成 `all://*{条目}`，然后当 URL 解析：条目里只要同时有
+    `[`/`]` 与冒号（`[a:b]`、`[::1]`、`[::1]:8000`），端口解析就会失败并让**整个客户端
+    构造**抛 `InvalidURL`。不含冒号的 `[not-an-ip]` 能正常解析，保持原样。
+    """
+    has_bracket = "[" in token or "]" in token
+    return has_bracket and ":" in token
+
+
 def normalize_no_proxy(raw: str) -> str:
-    """规范化一个 no_proxy 值；没有方括号 IPv6 时原样返回。"""
+    """规范化一个 no_proxy 值；没有会炸 httpx 的条目时原样返回。"""
     tokens: list[str] = []
     changed = False
 
@@ -50,8 +79,15 @@ def normalize_no_proxy(raw: str) -> str:
 
         bare = _bare_ipv6(token)
         if bare is not None:
-            token = bare
+            tokens.append(bare)
             changed = True
+            continue
+
+        if _would_break_httpx(token):
+            # 解析不了又会让整个客户端构造失败：丢掉它，代价只是这个主机仍走代理
+            changed = True
+            continue
+
         tokens.append(token)
 
     if not changed:
@@ -84,8 +120,8 @@ def sanitize_no_proxy_env(environ: MutableMapping[str, str] | None = None) -> li
 
     if rewrites:
         logger.warning(
-            "环境变量 no_proxy 含方括号 IPv6（如 [::1]），httpx 会拼出非法代理白名单、"
-            "让所有上游请求在发出前失败；已归一化为裸 IPv6: %s",
+            "环境变量 no_proxy 里有 httpx 无法解析的条目（方括号 IPv6 会拼出非法代理白名单，"
+            "让所有上游请求在发出前失败）；已归一化为裸 IPv6、无法解析的条目已丢弃: %s",
             "; ".join(rewrites),
         )
 

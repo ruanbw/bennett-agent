@@ -79,3 +79,53 @@ def test_build_provider_builds_with_bracketed_ipv6(monkeypatch):
     provider = build_provider()  # 修复前抛 httpx.InvalidURL
 
     assert provider is not None
+
+
+# ---------------------------------------------------------------------
+# 带端口的方括号 IPv6，以及无法解析的条目
+# ---------------------------------------------------------------------
+def test_normalize_unwraps_bracketed_ipv6_with_port():
+    """`[::1]:8000` 同样会炸（拼成 `all://*[::1]:8000`）：归一化时丢掉端口。
+
+    `no_proxy` 是按主机绕过代理，端口不参与匹配；裸 `::1:8000` 会被解析成**另一个**
+    IPv6 地址，所以不能只去掉方括号。
+    """
+    assert normalize_no_proxy("127.0.0.1,[::1]:8000") == "127.0.0.1,::1"
+    assert normalize_no_proxy("[::1]:8000") == "::1"
+
+
+def test_unparseable_bracket_entries_are_dropped():
+    """`[a:b]` 进 httpx 会让**整个**客户端构造失败；丢掉它的代价只是该主机仍走代理。"""
+    assert normalize_no_proxy("[a:b]") == ""
+    assert normalize_no_proxy("127.0.0.1,[a:b],localhost") == "127.0.0.1,localhost"
+
+
+def test_bracket_entries_without_colon_are_kept():
+    """不含冒号的方括号条目 httpx 能正常解析，不属于本问题。"""
+    assert normalize_no_proxy("[not-an-ip]") == "[not-an-ip]"
+
+
+def test_sanitize_reports_the_rewrite(caplog):
+    env = {"no_proxy": "127.0.0.1,[::1]:8000"}
+
+    with caplog.at_level(logging.WARNING, logger="app.config.proxy_env"):
+        rewrites = sanitize_no_proxy_env(env)
+
+    assert env["no_proxy"] == "127.0.0.1,::1"
+    assert rewrites == ["no_proxy=127.0.0.1,[::1]:8000 -> 127.0.0.1,::1"]
+    assert "丢弃" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_shared_client_builds_with_ipv6_and_port(monkeypatch):
+    """回归：`no_proxy` 里带端口的方括号 IPv6 曾让客户端构造直接抛 InvalidURL。"""
+    monkeypatch.setenv("no_proxy", "127.0.0.1,[::1]:8000")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,[::1]:8000")
+
+    await close_http_client()
+    client = get_http_client()
+    try:
+        assert not client.is_closed
+        assert os.environ["no_proxy"] == "127.0.0.1,::1"
+    finally:
+        await close_http_client()

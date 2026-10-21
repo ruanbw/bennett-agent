@@ -148,6 +148,15 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 代理环境变量（no_proxy）
+
+`no_proxy` 里的方括号 IPv6（`[::1]`、`[::1]:8000`）会让 httpx 把代理白名单拼成非法 URL：
+`all://*[::1]`，于是**本进程里任何** httpx 客户端在构造阶段就抛
+`InvalidURL: Invalid port: ':1]'`，模型列表、聊天上游、Tavily 全部在发请求之前失败——
+看起来像网关或端口问题。`app/config/proxy_env.py` 在客户端构造前把这类条目归一化成裸
+IPv6（带端口的丢掉端口：`no_proxy` 是按主机绕过代理），并把「含方括号又带冒号」的无法
+解析条目丢弃 + 告警（丢掉一个条目的代价只是该主机仍走代理，比全挂小得多）。
+
 ## 工具异常隔离
 
 工具是外部边界（网络、第三方 SDK、上游返回的形状）：`app/tools/guard.py` 用 pydantic-ai
