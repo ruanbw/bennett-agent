@@ -521,8 +521,13 @@ def baseline_config_mismatch(
 class BaselineDiff:
     """两次运行的差异。
 
-    真正要盯的只有 `newly_failed`：同一个用例从 PASS 变 FAIL，说明这次改动弄坏了
+    真正要盯的只有 `newly_failed`：同一个用例从**非 FAIL** 变 FAIL，说明这次改动弄坏了
     某个已经能工作的行为。其余字段用于解释「为什么总数变了」。
+
+    「非 FAIL」而不仅是「PASS」：用例此前因缺少依赖（例如没配 TAVILY_API_KEY）被 SKIP，
+    这次依赖配上了、一跑就 FAIL——那同样是新出现的失败。此前只把 PASS→FAIL 算作回归，
+    SKIP→FAIL 会掉进所有分类之外，命令行还会打印「行为与基线一致」，正好把最需要
+    注意的一类变化藏起来。
     """
 
     newly_failed: tuple[str, ...] = ()
@@ -530,6 +535,9 @@ class BaselineDiff:
     still_failed: tuple[str, ...] = ()
     still_passed: tuple[str, ...] = ()
     newly_skipped: tuple[str, ...] = ()
+    #: 仍然失败、但**失败原因变了**的用例（例如从「答错」变成「没用工具」）。
+    #: 只报名字不够：修 A 弄坏 B 时，两次都红会让人以为「还是老问题」。
+    changed_failures: tuple[str, ...] = ()
     added: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     context_tokens_delta: int = 0
@@ -539,6 +547,30 @@ class BaselineDiff:
     @property
     def has_regression(self) -> bool:
         return bool(self.newly_failed)
+
+    @property
+    def is_unchanged(self) -> bool:
+        """完全没有变化：状态没变，且仍失败的用例连失败原因也没变。"""
+        return not (
+            self.newly_failed
+            or self.newly_passed
+            or self.newly_skipped
+            or self.changed_failures
+            or self.added
+            or self.missing
+        )
+
+
+def _failure_checks(report: dict[str, Any]) -> dict[str, frozenset[str]]:
+    """`{用例 id: 失败断言的集合}`。断言只认 check 名，不比对 detail 文案里的数值。"""
+    checks: dict[str, frozenset[str]] = {}
+    for entry in report.get("cases", []):
+        if not isinstance(entry, dict):
+            continue
+        failures = entry.get("failures")
+        names = {str(item.get("check")) for item in failures or [] if isinstance(item, dict)}
+        checks[str(entry.get("id"))] = frozenset(names)
+    return checks
 
 
 def _status_map(report: dict[str, Any]) -> dict[str, str]:
@@ -556,13 +588,27 @@ def diff_reports(baseline: dict[str, Any], current: dict[str, Any]) -> BaselineD
     cur = _status_map(current)
 
     common = [case_id for case_id in cur if case_id in base]
-    newly_failed = tuple(sorted(i for i in common if base[i] == "pass" and cur[i] == "fail"))
-    newly_passed = tuple(sorted(i for i in common if base[i] == "fail" and cur[i] == "pass"))
+    # 按「本次状态是否变坏」分类，而不是只认 PASS↔FAIL：SKIP→PASS（依赖装上、行为其实
+    # 早就对了）与 SKIP→FAIL（依赖装上、立刻暴露问题）都必须被归进去。
+    newly_failed = tuple(sorted(i for i in common if cur[i] == "fail" and base[i] != "fail"))
+    newly_passed = tuple(sorted(i for i in common if cur[i] == "pass" and base[i] != "pass"))
     still_failed = tuple(sorted(i for i in common if base[i] == "fail" and cur[i] == "fail"))
     still_passed = tuple(sorted(i for i in common if base[i] == "pass" and cur[i] == "pass"))
-    newly_skipped = tuple(sorted(i for i in common if base[i] != "skip" and cur[i] == "skip"))
+    newly_skipped = tuple(sorted(i for i in common if cur[i] == "skip" and base[i] != "skip"))
     added = tuple(sorted(i for i in cur if i not in base))
     missing = tuple(sorted(i for i in base if i not in cur))
+
+    # 仍然失败但原因变了：只报名字会让人以为「还是老问题」，而修 A 弄坏 B 正是
+    # 回归对比最想拦住的形态之一。缺 failures 字段的老报告不参与这条判定。
+    base_checks = _failure_checks(baseline)
+    cur_checks = _failure_checks(current)
+    changed_failures = tuple(
+        sorted(
+            case_id
+            for case_id in still_failed
+            if case_id in base_checks and case_id in cur_checks and base_checks[case_id] != cur_checks[case_id]
+        )
+    )
 
     return BaselineDiff(
         newly_failed=newly_failed,
@@ -570,6 +616,7 @@ def diff_reports(baseline: dict[str, Any], current: dict[str, Any]) -> BaselineD
         still_failed=still_failed,
         still_passed=still_passed,
         newly_skipped=newly_skipped,
+        changed_failures=changed_failures,
         added=added,
         missing=missing,
         context_tokens_delta=_total(current, "context_tokens") - _total(baseline, "context_tokens"),

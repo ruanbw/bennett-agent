@@ -435,3 +435,83 @@ def test_safe_endpoint_strips_credentials():
     assert safe_endpoint("http://localhost:4000") == "http://localhost:4000"
     assert safe_endpoint("http://user:pass@gateway.example.com:4000/v1") == "http://gateway.example.com:4000/v1"
     assert "pass" not in safe_endpoint("http://user:pass@gateway.example.com/v1")
+
+
+def test_skip_to_fail_is_a_regression():
+    """此前只把 PASS→FAIL 算回归：依赖装上后立刻失败的用例会掉进所有分类之外，
+    命令行还会打印「行为与基线一致」。"""
+    baseline = {"totals": {}, "cases": [{"id": "a", "status": "skip"}, {"id": "b", "status": "skip"}]}
+    current = {"totals": {}, "cases": [{"id": "a", "status": "fail"}, {"id": "b", "status": "pass"}]}
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.newly_failed == ("a",)
+    assert diff.newly_passed == ("b",)
+    assert diff.has_regression
+
+
+def test_is_unchanged_requires_no_added_or_missing_cases():
+    """「行为一致」只在状态完全没变时说；新增/缺失用例也是差异。"""
+    same = {"totals": {}, "cases": [{"id": "a", "status": "pass"}, {"id": "b", "status": "fail"}]}
+
+    assert diff_reports(same, same).is_unchanged
+
+    added = {"totals": {}, "cases": [{"id": "a", "status": "pass"}, {"id": "c", "status": "pass"}]}
+    assert not diff_reports(same, added).is_unchanged
+
+    missing = {"totals": {}, "cases": [{"id": "a", "status": "pass"}]}
+    assert not diff_reports(same, missing).is_unchanged
+
+
+def test_still_failing_cases_alone_are_not_reported_as_unchanged_silently():
+    """全部仍然失败：is_unchanged 为真（状态没变），但命令行要单独列出「仍然失败」，
+    不能只说「与基线一致」——那读起来像「没有问题了」。"""
+    baseline = {"totals": {}, "cases": [{"id": "a", "status": "fail"}]}
+    current = {"totals": {}, "cases": [{"id": "a", "status": "fail"}]}
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.is_unchanged
+    assert diff.still_failed == ("a",)
+    assert not diff.has_regression
+
+
+def _report_with_failures(cases):
+    return {"totals": {}, "cases": cases}
+
+
+def test_changed_failure_reason_is_flagged():
+    """修 A 弄坏 B 时两次都红：只报名字会让人以为「还是老问题」。"""
+    baseline = _report_with_failures(
+        [{"id": "a", "status": "fail", "failures": [{"check": "answer_contains", "detail": "缺少 X"}]}]
+    )
+    current = _report_with_failures(
+        [{"id": "a", "status": "fail", "failures": [{"check": "tools", "detail": "期望 [...]"}]}]
+    )
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.still_failed == ("a",)
+    assert diff.changed_failures == ("a",)
+    assert not diff.is_unchanged
+    assert not diff.has_regression  # 状态没变坏，不冒充回归
+
+
+def test_same_failure_reason_stays_unchanged():
+    case = {"id": "a", "status": "fail", "failures": [{"check": "tools", "detail": "期望 [x]，实际 []"}]}
+
+    diff = diff_reports(_report_with_failures([case]), _report_with_failures([case]))
+
+    assert diff.changed_failures == ()
+    assert diff.is_unchanged
+
+
+def test_reports_without_failure_entries_do_not_fake_changes():
+    """老报告没有 failures 字段：不参与原因比对，不能凭空报「原因变了」。"""
+    baseline = _report_with_failures([{"id": "a", "status": "fail"}])
+    current = _report_with_failures([{"id": "a", "status": "fail"}])
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.changed_failures == ()
+    assert diff.is_unchanged

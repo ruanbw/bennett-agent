@@ -97,8 +97,14 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
   真实 token 用量。`--baseline auto` 取**同模型 + 同思考等级 + 同上下文守卫**的最近一份
   报告做 diff；换过 `--effort` 或 `--context-guard` 后不会拿旧配置的报告硬比，
   否则「配置不同」会被误报成「新失败」。显式传 `--baseline <路径>` 时若配置不一致会
-  先打印警告。其中 **新失败（newly_failed）** 是唯一需要立刻处理的信号：它表示某个用
-  例从 PASS 变成了 FAIL。
+  先打印警告。其中 **新失败（newly_failed）** 是需要立刻处理的信号：某个用例从
+  **非 FAIL** 变成了 FAIL——既包括 PASS→FAIL，也包括 SKIP→FAIL（依赖刚配上、一跑就
+  红）。此前只认 PASS→FAIL，SKIP→FAIL 会掉在所有分类之外，命令行还会打印「行为与基线
+  一致」，正好把最该注意的一类变化藏起来。
+- 仍然失败但**失败原因变了**的用例单独一行（`! 仍然失败但原因变了`）：修 A 弄坏 B 时
+  两次都红，只报名字会让人以为「还是老问题」。原因比对只看断言名，不比对 detail 里的
+  数值；没有 `failures` 字段的老报告不参与这条判定。
+- 「行为与基线一致」只在状态**与失败原因都**没变时说，且新增/缺失用例也算差异。
 - 报告内自带 `schema_version`；读入时会校验版本与每条用例的 `id`/`status`，旧版或损坏
   的基线会给出「哪份文件、哪个字段」的错误并跳过对比，而不是抛一个 KeyError。
 - `requires: [tavily]` 的用例在没配 `TAVILY_API_KEY` 时记为 SKIP 而不是失败——没有 key

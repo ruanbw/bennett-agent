@@ -128,13 +128,17 @@ def print_diff(baseline_path: Path, baseline: dict, diff) -> None:
         print(f"  ✓ 新通过：{', '.join(diff.newly_passed)}")
     if diff.still_failed:
         print(f"  · 仍然失败：{', '.join(diff.still_failed)}")
+    if diff.changed_failures:
+        print(f"  ! 仍然失败但原因变了：{', '.join(diff.changed_failures)}")
     if diff.newly_skipped:
         print(f"  · 本次跳过：{', '.join(diff.newly_skipped)}")
     if diff.added:
         print(f"  + 新增用例：{', '.join(diff.added)}")
     if diff.missing:
         print(f"  - 基线里有、本次没有：{', '.join(diff.missing)}")
-    if not (diff.newly_failed or diff.newly_passed or diff.still_failed or diff.newly_skipped):
+    # 「行为一致」只在**状态完全没变**时说。此前判断漏了新增/缺失用例与仍然失败的用例：
+    # 全部仍失败时会打印「行为与基线一致」，读起来像「没有问题了」。
+    if diff.is_unchanged:
         print("  行为与基线一致")
     print(
         f"  token：上下文 {diff.context_tokens_delta:+d}，输出 {diff.output_tokens_delta:+d}"
