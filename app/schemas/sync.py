@@ -26,6 +26,14 @@ CURSOR_PREFIX = "v1"
 #: 别的形状，前缀只用于可读性，不承担校验职责。真正的约束是「别把我当 SQL」。
 ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
+#: 客户端修订号上限。只用来拒绝「旧内容覆盖新内容」，不需要真正到 64 位；
+#: 但没有上限时 `10**20` 会让 SQLite 的 INTEGER 绑定溢出，最终变成 500。
+MAX_CLIENT_REV = 2**31 - 1
+
+#: 客户端毫秒时间戳上限（9999-12-31T23:59:59.999Z）。同样是为了把
+#: 「超出 SQLite 64 位范围 → 运行期 OverflowError → 500」变成入口处的 422。
+MAX_CLIENT_TIMESTAMP_MS = 253_402_300_799_999
+
 
 class ConversationIn(BaseModel):
     """一次 push 里的一个会话行。字段与前端 `SessionRecord` 对齐。"""
@@ -40,10 +48,10 @@ class ConversationIn(BaseModel):
     #: 墓碑：删除只推这一位，服务端据此级联删消息并让其他设备也删掉。
     deleted: bool = False
     #: 客户端修订号（本地每次修改 +1）；服务端拒绝更旧的重放。
-    client_rev: int = Field(default=0, ge=0)
+    client_rev: int = Field(default=0, ge=0, le=MAX_CLIENT_REV)
     #: 客户端毫秒时间戳，只用于展示排序，**不可**作为同步判据。
-    created_at: int = Field(ge=0)
-    updated_at: int = Field(ge=0)
+    created_at: int = Field(ge=0, le=MAX_CLIENT_TIMESTAMP_MS)
+    updated_at: int = Field(ge=0, le=MAX_CLIENT_TIMESTAMP_MS)
 
 
 class MessageIn(BaseModel):
@@ -59,8 +67,8 @@ class MessageIn(BaseModel):
     conversation_id: str = Field(pattern=ID_PATTERN)
     role: Literal["user", "assistant"]
     payload: dict[str, Any] = Field(default_factory=dict)
-    client_rev: int = Field(default=0, ge=0)
-    created_at: int = Field(ge=0)
+    client_rev: int = Field(default=0, ge=0, le=MAX_CLIENT_REV)
+    created_at: int = Field(ge=0, le=MAX_CLIENT_TIMESTAMP_MS)
 
 
 class PushRequest(BaseModel):

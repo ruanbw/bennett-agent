@@ -71,8 +71,29 @@ logger = logging.getLogger(__name__)
 MIN_PASSWORD_LENGTH = 8
 
 
+def role_assignment(role: Role) -> dict[str, object]:
+    """角色对应的列值（`role` 与两个派生布尔位）。
+
+    抽出来是为了让两条写路径共用同一份口径：
+
+    - `apply_role()` 在 ORM 对象上 setattr（种子脚本、普通路径）；
+    - `app/api/admin.py` 的降级走一条**带子查询的 UPDATE**，需要同样的 values
+      映射，但不能先把对象读出来再写（那会重新引入「先查后写」的竞态）。
+
+    管理员账号一并记为已验证：本项目没有邮箱验证流程，让 is_verified 长期为 False
+    只会在前端多显示一行无用提示。
+    """
+    values: dict[str, object] = {
+        "role": role.value_str,
+        "is_superuser": role >= ADMIN_LEVEL,
+    }
+    if role >= ADMIN_LEVEL:
+        values["is_verified"] = True
+    return values
+
+
 def apply_role(user: User, role: Role) -> None:
-    """**唯一**改动用户角色的入口：同时写 `role` 与派生的 `is_superuser`。
+    """**唯一**改动用户角色的 ORM 入口：同时写 `role` 与派生的 `is_superuser`。
 
     两列必须一起改。fastapi-users 的基表强制带 `is_superuser`，而它是内置
     `current_user(superuser=True)` 依赖的判据；若只改 `role`，两套依赖会给出相反结论。
@@ -80,12 +101,8 @@ def apply_role(user: User, role: Role) -> None:
 
     不提交事务：调用方（路由 / 种子脚本）在自己的 session 上决定何时 commit。
     """
-    user.role = role.value_str
-    user.is_superuser = role >= ADMIN_LEVEL
-    # 管理员账号一并记为已验证：本项目没有邮箱验证流程，让 is_verified 长期为 False
-    # 只会在前端多显示一行无用提示。
-    if role >= ADMIN_LEVEL:
-        user.is_verified = True
+    for field, value in role_assignment(role).items():
+        setattr(user, field, value)
 
 
 async def count_superadmins() -> int:

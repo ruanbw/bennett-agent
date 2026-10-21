@@ -784,3 +784,81 @@ def test_validate_reasoning_effort_is_skipped_when_model_does_not_declare_levels
     )
 
     validate_reasoning_effort(snapshot, "whatever")
+
+
+# ---------------------------------------------------------------------
+# 超管降级的并发守卫（L-12）
+# ---------------------------------------------------------------------
+async def _role_users(registry_db, **specs):
+    """按 `email=role` 造用户，返回 {email: id}。"""
+    from app.db import User
+
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    ids: dict[str, object] = {}
+    async with maker() as session:
+        for email, role in specs.items():
+            user = User(
+                email=email,
+                hashed_password="x",
+                is_active=True,
+                is_verified=True,
+                role=role,
+                is_superuser=role in ("admin", "superadmin"),
+            )
+            session.add(user)
+            await session.flush()
+            ids[email] = user.id
+        await session.commit()
+    return ids
+
+
+async def test_demoting_the_last_superadmin_is_rejected_atomically(registry_db, monkeypatch):
+    """「先 count 再写」在并发下会双双通过；单条带子查询的 UPDATE 必须兜住最后一个。"""
+    from fastapi import HTTPException
+    from sqlalchemy import func, select
+
+    from app.api.admin import set_user_role
+    from app.db import User
+    from app.schemas.admin import RoleUpdate
+
+    async def _noop(_user_id):  # noqa: ANN001, ANN202
+        return 0
+
+    monkeypatch.setattr("app.api.admin.delete_user_access_tokens", _noop)
+    ids = await _role_users(registry_db, **{"caller@example.com": "admin", "target@example.com": "superadmin"})
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+
+    async with maker() as session:
+        caller = await session.get(User, ids["caller@example.com"])
+        with pytest.raises(HTTPException) as excinfo:
+            await set_user_role(ids["target@example.com"], RoleUpdate(role="user"), caller, session)
+        assert excinfo.value.status_code == 400
+
+    async with maker() as session:
+        remaining = await session.scalar(select(func.count()).select_from(User).where(User.role == "superadmin"))
+    assert remaining == 1
+
+
+async def test_superadmin_can_be_demoted_when_another_one_remains(registry_db, monkeypatch):
+    from sqlalchemy import select
+
+    from app.api.admin import set_user_role
+    from app.db import User
+    from app.schemas.admin import RoleUpdate
+
+    async def _noop(_user_id):  # noqa: ANN001, ANN202
+        return 0
+
+    monkeypatch.setattr("app.api.admin.delete_user_access_tokens", _noop)
+    ids = await _role_users(registry_db, **{"caller@example.com": "superadmin", "target@example.com": "superadmin"})
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+
+    async with maker() as session:
+        caller = await session.get(User, ids["caller@example.com"])
+        result = await set_user_role(ids["target@example.com"], RoleUpdate(role="user"), caller, session)
+        assert result.role == "user"
+
+    async with maker() as session:
+        target = await session.get(User, ids["target@example.com"])
+        assert target.role == "user" and target.is_superuser is False
+        assert await session.scalar(select(User.role).where(User.id == ids["caller@example.com"])) == "superadmin"

@@ -29,7 +29,7 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import User, delete_user_access_tokens, get_async_session
@@ -49,7 +49,7 @@ from app.schemas.admin import (
     mask_api_key,
 )
 from app.services import model_service
-from app.services.auth import apply_role, count_superadmins, current_admin, current_superadmin
+from app.services.auth import apply_role, current_admin, current_superadmin, role_assignment
 from app.services.model_service import (
     ApiKeyRequiredError,
     DuplicateModelError,
@@ -424,11 +424,12 @@ async def set_user_role(
 
     第 3 条在单请求顺序执行时是**不可达的**：操作者自己就是超管，而第 1 条已经禁了
     改自己，所以目标也是超管就意味着库里至少有两人。保留它是因为并发场景：A 降 B 的
-    同时 B 降 A，两个请求各自读到的 `count_superadmins()` 都是 2，于是两个都通过，
-    结果库里零个超管、后台永久锁死。SQLite 单进程下这需要两个 async 请求交错，窗口
-    很窄但存在；换成多 worker 部署就会变成真实概率。
+    同时 B 降 A，若先 `count_superadmins()` 再写，两个请求各自读到的计数都是 2，于是
+    两个都通过，结果库里零个超管、后台永久锁死。
 
-    删掉它的唯一条件是给角色变更加行锁或改成单条带子查询的 UPDATE。
+    这里用**一条带子查询的 UPDATE** 消除窗口：`WHERE role = 'superadmin' AND
+    (SELECT COUNT(*) FROM user WHERE role = 'superadmin') > 1` 与写入在同一条语句里，
+    SQLite 串行化写，后执行的那条会看到先提交的结果、rowcount=0，于是返回 400。
 
     成功后会**删掉该用户的全部会话**：角色变了但旧 token 还能用，等于权限变更要等到
     对方重新登录才生效，而那时谁也不会记得去验一下。删完对方下一次请求就是 401，
@@ -450,10 +451,27 @@ async def set_user_role(
         # 幂等：重复提交同一个角色不算错误，但也不必写库与踢会话
         return _user_read(target)
 
-    if old_role >= Role.SUPERADMIN > new_role and await count_superadmins() <= 1:
-        raise HTTPException(status_code=400, detail="不能降级最后一个超级管理员，后台将无人可管")
-
-    apply_role(target, new_role)
+    if old_role >= Role.SUPERADMIN > new_role:
+        # 原子守卫：计数与写入必须在同一条 UPDATE 里，不能先读后写（见 docstring 第 3 条）。
+        remaining_superadmins = (
+            select(func.count()).select_from(User).where(User.role == Role.SUPERADMIN.value_str).scalar_subquery()
+        )
+        statement = (
+            update(User)
+            .where(
+                User.id == user_id,
+                User.role == Role.SUPERADMIN.value_str,
+                remaining_superadmins > 1,
+            )
+            .values(**role_assignment(new_role))
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(statement)
+        if result.rowcount == 0:
+            await session.rollback()
+            raise HTTPException(status_code=400, detail="不能降级最后一个超级管理员，后台将无人可管")
+    else:
+        apply_role(target, new_role)
     await session.commit()
     # commit 后对象已过期，刷一次再序列化；不重新查库是因为同一 session 里就是刚写的行
     await session.refresh(target)

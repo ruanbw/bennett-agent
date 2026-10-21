@@ -358,3 +358,29 @@ def test_joined_content_still_respects_the_length_limit():
             role="user",
             content=[{"type": "text", "text": half}, {"type": "text", "text": half}],
         )
+
+
+# ---------------------------------------------------------------------
+# 同步行的整数边界（L-04）
+#
+# `ge=0` 只挡住负数；`10**20` 在 SQLite INTEGER（64 位）绑定时会溢出，
+# 最终变成未捕获的 500。入口处 422 才是可解释的错误。
+# ---------------------------------------------------------------------
+def test_sync_timestamps_are_bounded():
+    from app.schemas.sync import MAX_CLIENT_TIMESTAMP_MS, ConversationIn
+
+    ConversationIn(id="sess_ok", created_at=MAX_CLIENT_TIMESTAMP_MS, updated_at=1)  # 边界值可用
+
+    with pytest.raises(ValidationError, match="less than or equal"):
+        ConversationIn(id="sess_big", created_at=10**20, updated_at=1)
+    with pytest.raises(ValidationError, match="less than or equal"):
+        ConversationIn(id="sess_big", created_at=1, updated_at=10**20)
+
+
+def test_sync_client_rev_is_bounded():
+    from app.schemas.sync import MAX_CLIENT_REV, MessageIn
+
+    MessageIn(id="msg_ok", conversation_id="sess_ok", role="user", client_rev=MAX_CLIENT_REV, created_at=1)
+
+    with pytest.raises(ValidationError, match="less than or equal"):
+        MessageIn(id="msg_big", conversation_id="sess_ok", role="user", client_rev=2**40, created_at=1)
