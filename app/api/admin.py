@@ -26,6 +26,7 @@
 
 import logging
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
@@ -296,19 +297,34 @@ def escape_like_pattern(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-@router.get("/users", response_model=UserPage, summary="搜索/分页列出用户")
+@router.get("/users", response_model=UserPage, summary="搜索/筛选/分页列出用户")
 async def list_users(
     query: str | None = Query(None, max_length=200, description="按邮箱模糊搜索"),
+    status_filter: Literal["all", "active", "banned"] = Query(
+        "all",
+        alias="status",
+        description="按账号状态筛选：all=全部，active=正常，banned=已封禁",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_session),  # noqa: B008
 ):
+    """列出用户。
+
+    `status` 是为「查一下有哪些账号被封了」准备的：此前只能翻页找人，账号一多就等于没有
+    这个能力。筛选必须发生在**计数之前**（`total` 要是筛选后的总数），否则分页器会指向
+    一个不存在的页数。
+    """
     stmt = select(User)
     cleaned = (query or "").strip()
     if cleaned:
         # 用户输入按字面匹配：`%` / `_` 是 LIKE 的元字符，不转义时搜「%」会列出全部账号
         pattern = f"%{escape_like_pattern(cleaned.lower())}%"
         stmt = stmt.where(func.lower(User.email).like(pattern, escape="\\"))
+    if status_filter == "active":
+        stmt = stmt.where(User.is_active.is_(True))
+    elif status_filter == "banned":
+        stmt = stmt.where(User.is_active.is_(False))
 
     total = await session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     users = (await session.scalars(stmt.order_by(User.email).limit(limit).offset(offset))).all()

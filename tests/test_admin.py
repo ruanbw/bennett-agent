@@ -593,3 +593,80 @@ async def test_valid_bootstrap_url_still_seeds_a_provider(registry_db, monkeypat
 
     providers = await reg.list_providers()
     assert providers[0].base_url == "http://127.0.0.1:4000"
+
+
+# ---------------------------------------------------------------------
+# 用户列表按状态筛选：账号一多，「有哪些被封了」不能靠翻页找人
+# ---------------------------------------------------------------------
+async def _seed_mixed_users(registry_db):
+    from app.db import User
+
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    async with maker() as session:
+        session.add_all(
+            [
+                User(email="alice@example.com", hashed_password="x", is_active=True, is_verified=True),
+                User(email="bob@example.com", hashed_password="x", is_active=False, is_verified=True),
+                User(email="carol@example.com", hashed_password="x", is_active=False, is_verified=False),
+            ]
+        )
+        await session.commit()
+
+
+async def _list_users_page(registry_db, *, query=None, status="all"):
+    from app.api.admin import list_users
+
+    maker = async_sessionmaker(registry_db, expire_on_commit=False)
+    async with maker() as session:
+        return await list_users(
+            query=query,
+            status_filter=status,
+            limit=50,
+            offset=0,
+            session=session,
+        )
+
+
+async def test_user_list_can_filter_banned_accounts(registry_db):
+    await _seed_mixed_users(registry_db)
+
+    banned = await _list_users_page(registry_db, status="banned")
+    active = await _list_users_page(registry_db, status="active")
+
+    assert [item.email for item in banned.items] == ["bob@example.com", "carol@example.com"]
+    assert [item.email for item in active.items] == ["alice@example.com"]
+
+
+async def test_status_filter_applies_to_the_total_not_just_the_page(registry_db):
+    """`total` 要是筛选后的总数：否则分页器会指向一个不存在的页数。"""
+    await _seed_mixed_users(registry_db)
+
+    page = await _list_users_page(registry_db, status="banned")
+
+    assert page.total == 2
+    assert page.limit == 50
+    assert page.offset == 0
+
+
+async def test_status_filter_combines_with_search(registry_db):
+    await _seed_mixed_users(registry_db)
+
+    page = await _list_users_page(registry_db, query="carol", status="banned")
+    mismatch = await _list_users_page(registry_db, query="alice", status="banned")
+
+    assert [item.email for item in page.items] == ["carol@example.com"]
+    assert mismatch.items == []
+    assert mismatch.total == 0
+
+
+async def test_status_all_keeps_every_account(registry_db):
+    await _seed_mixed_users(registry_db)
+
+    page = await _list_users_page(registry_db)
+
+    assert page.total == 3
+    assert [item.email for item in page.items] == [
+        "alice@example.com",
+        "bob@example.com",
+        "carol@example.com",
+    ]

@@ -15,10 +15,18 @@ import {
   type AdminUser,
   type AdminUserPage,
   type SettableRole,
+  type UserStatusFilter,
 } from '../../lib/admin';
 
 /** 每页条数：与后端的 limit 上限无关，纯展示选择。 */
 const PAGE_SIZE = 20;
+
+/** 状态筛选的三个档位。`all` 是默认，不传 `status` 参数。 */
+const STATUS_OPTIONS: Array<{ value: UserStatusFilter; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'active', label: '正常' },
+  { value: 'banned', label: '已封禁' },
+];
 
 export interface UsersPanelProps {
   /** 当前登录邮箱：自己不能被自己封禁，也不能改自己的角色。 */
@@ -46,6 +54,7 @@ const ROLE_TONE: Record<string, 'primary' | 'muted'> = {
 export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps) {
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('all');
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<AdminUserPage | null>(null);
   // 请求身份：列表「是否在刷新」由它和最近一次完成的请求推导，而不是在 effect 里
@@ -61,7 +70,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
-  const requestKey = `${appliedQuery}\u0000${offset}\u0000${reloadToken}`;
+  const requestKey = `${appliedQuery}\u0000${statusFilter}\u0000${offset}\u0000${reloadToken}`;
   const loading = completedKey !== requestKey;
 
   useEffect(() => {
@@ -69,7 +78,12 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
 
     void (async () => {
       try {
-        const result = await listUsers({ query: appliedQuery, limit: PAGE_SIZE, offset });
+        const result = await listUsers({
+          query: appliedQuery,
+          status: statusFilter,
+          limit: PAGE_SIZE,
+          offset,
+        });
         if (!active) return;
 
         // 封掉最后一页的唯一用户后，offset 会越过新的最后一页：夹回去重新拉取，
@@ -94,7 +108,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
     return () => {
       active = false;
     };
-  }, [appliedQuery, offset, reloadToken, requestKey]);
+  }, [appliedQuery, statusFilter, offset, reloadToken, requestKey]);
 
   const run = useCallback(
     async (key: string, action: () => Promise<void>): Promise<boolean> => {
@@ -123,6 +137,13 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
     setQuery('');
     setOffset(0);
     setAppliedQuery('');
+    setStatusFilter('all');
+  }, []);
+
+  /** 切换状态筛选：与搜索一样要回到第一页，否则会停在越界的 offset 上。 */
+  const handleStatusChange = useCallback((next: UserStatusFilter) => {
+    setOffset(0);
+    setStatusFilter(next);
   }, []);
 
   const handleBan = useCallback(
@@ -221,6 +242,31 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         </Button>
       </form>
 
+      {/* 状态筛选：账号一多，「有哪些被封了」不能靠翻页找人。用 role=group + aria-pressed
+          而不是 select：三档选项一眼看全，也省一次展开。 */}
+      <div role="group" aria-label="按账号状态筛选" className="flex flex-wrap items-center gap-1.5">
+        {STATUS_OPTIONS.map(({ value, label }) => {
+          const active = statusFilter === value;
+          return (
+            <Button
+              key={value}
+              type="button"
+              size="xs"
+              variant={active ? 'default' : 'outline'}
+              aria-pressed={active}
+              disabled={isBusy}
+              onClick={() => handleStatusChange(value)}
+              className="cursor-pointer"
+            >
+              {label}
+            </Button>
+          );
+        })}
+        {statusFilter !== 'all' && page !== null && (
+          <span className="text-[11px] text-muted-foreground">共 {page.total} 个</span>
+        )}
+      </div>
+
       {actionError && (
         <div
           role="alert"
@@ -262,7 +308,15 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         )
       ) : page.items.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-border/70 bg-card/50 px-4 py-10 text-center text-xs text-muted-foreground">
-          <span>{appliedQuery ? `没有匹配「${appliedQuery}」的用户` : '暂无用户'}</span>
+          <span>
+            {appliedQuery
+              ? `没有匹配「${appliedQuery}」的用户`
+              : statusFilter === 'banned'
+                ? '没有被封禁的账号'
+                : statusFilter === 'active'
+                  ? '没有正常状态的账号'
+                  : '暂无用户'}
+          </span>
           {appliedQuery && (
             <Button
               variant="outline"

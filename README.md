@@ -76,6 +76,11 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 列出全部账号（看起来像搜索坏了），搜 `a_b` 还会命中 `axb`。`app/api/admin.py` 的
 `escape_like_pattern` 负责转义，测试覆盖 `%`、`_`、反斜杠与大小写/子串匹配。
 
+用户列表另支持 `?status=all|active|banned` 筛选（后台是「全部 / 正常 / 已封禁」三个
+分段按钮）：账号一多，「有哪些被封了」不能靠翻页找人。筛选必须发生在**计数之前**——
+`total` 要是筛选后的总数，否则分页器会指向一个不存在的页数；切换档位要回到第一页，
+否则会停在越界的 offset 上。
+
 ## 系统提示词与工具装配
 
 `prompts/system_prompt.jinja` 里的「可用工具」一节与联网搜索规则都由**实际装配结果**

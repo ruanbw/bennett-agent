@@ -311,13 +311,18 @@ export function deleteModel(modelId: string): Promise<void> {
   return request<void>(`/api/admin/models/${modelId}`, { method: 'DELETE' });
 }
 
+/** 用户列表的状态筛选：`all` 不传参数（后端默认也是 all）。 */
+export type UserStatusFilter = 'all' | 'active' | 'banned';
+
 export function listUsers(params: {
   query?: string;
+  status?: UserStatusFilter;
   limit?: number;
   offset?: number;
 }): Promise<AdminUserPage> {
   const search = new URLSearchParams();
   if (params.query?.trim()) search.set('query', params.query.trim());
+  if (params.status && params.status !== 'all') search.set('status', params.status);
   if (params.limit !== undefined) search.set('limit', String(params.limit));
   if (params.offset !== undefined) search.set('offset', String(params.offset));
 
