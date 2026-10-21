@@ -44,6 +44,8 @@ import {
 } from "lucide-react";
 import { type FC, type RefObject, useCallback, useRef, useState } from "react";
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { messageTextForCopy } from "@/lib/message-copy";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
@@ -684,6 +686,42 @@ const AssistantMessage: FC = () => {
   );
 };
 
+/**
+ * 「复制回答」。
+ *
+ * 不用 `ActionBarPrimitive.Copy`：它只走 `navigator.clipboard`，在非安全上下文
+ * （局域网 http 访问）里该 API 不存在，点了复制既没反应也没提示。这里复用项目里带
+ * `execCommand` 回退的 `useCopyToClipboard`，文本由 `messageTextForCopy` 从文本分片拼出
+ * （不含折叠的思考链与工具调用）。失败时按钮文案变成「复制失败，请重试」，不再是静默失败。
+ */
+const AssistantCopyButton: FC = () => {
+  const text = useAuiState((s) => messageTextForCopy(s.message.content as { type?: string; text?: string }[]));
+  const { isCopied, error, copyToClipboard } = useCopyToClipboard();
+  const label = error ? "复制失败，请重试" : isCopied ? "已复制" : "复制回答";
+
+  return (
+    <>
+      {/* 状态变化要能被读屏听到：图标从复制变对勾是不可读的视觉反馈 */}
+      <span role="status" className="sr-only">
+        {isCopied ? "已复制回答" : error ? "复制回答失败" : ""}
+      </span>
+      <TooltipIconButton
+        tooltip={label}
+        aria-label={label}
+        onClick={() => copyToClipboard(text)}
+        disabled={!text}
+        className="size-7 p-0"
+      >
+        {isCopied ? (
+          <CheckIcon className="size-3.5 text-foreground" />
+        ) : (
+          <CopyIcon className="size-3.5" />
+        )}
+      </TooltipIconButton>
+    </>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const isLast = useAuiState((s) => s.message.isLast);
   // 重新生成只对最后一条助手消息开放：历史回答上的 Reload 会重跑别的那条
@@ -709,16 +747,7 @@ const AssistantActionBar: FC = () => {
           : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto pointer-coarse:opacity-100 pointer-coarse:pointer-events-auto"
       )}
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="复制回答" className="size-7 p-0">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="size-3.5 text-foreground" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="size-3.5" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
+      <AssistantCopyButton />
       {canReload && !contextLocked && (
         <ActionBarPrimitive.Reload asChild>
           <TooltipIconButton tooltip="重新生成" className="size-7 p-0">
