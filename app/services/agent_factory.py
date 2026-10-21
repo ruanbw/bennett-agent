@@ -15,7 +15,7 @@ O-2：装配结果按参数缓存。pydantic-ai 的 `Agent` 设计上就是可�
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 
 import httpx
@@ -38,6 +38,9 @@ from app.tools.guard import ToolErrorIsolation
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_TEMPLATE = "system_prompt.jinja"
+
+#: 联网搜索工具名。提示词里「可以联网」这句话与它的装配状态绑定，单点定义避免拼错。
+WEB_SEARCH_TOOL_NAME = "tavily_search"
 
 TITLE_SYSTEM_INSTRUCTION = (
     "你是一个会话标题生成助手。根据用户的问题或指令，概括出极简的会话标题。"
@@ -260,17 +263,25 @@ def _build_chat_model(
     )
 
 
-def render_system_prompt() -> str:
+def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
     """渲染主对话的系统提示词。
 
     独立成函数是因为它有两个消费方：装配（`_build_agent_cached`）与上下文预算
     （`token_budget` 要把它算进每轮的固定开销）。两处各写一遍 render 参数，
     改了其中一处就会出现「预算按 A 算、实际发出去的是 B」。
+
+    `tool_names` 默认取**当前实际装配**的工具列表：提示词里「可以联网搜索」这句话
+    必须与 `build_tools()` 的结果一致。此前模板无条件写着「请调用 tavily_search」，
+    没配 Key 时模型会去调一个根本不存在的工具——白烧一轮 token，还让用户看到
+    「工具不存在」的错误。把装配结果渲染进提示词，两者就不会再漂移。
     """
+    names = list(tool_names) if tool_names is not None else [tool.name for tool in build_tools()]
     return prompt_manager.render(
         SYSTEM_PROMPT_TEMPLATE,
         app_env=settings.app_env,
         assistant_name=settings.assistant_name,
+        tools=names,
+        web_search=WEB_SEARCH_TOOL_NAME in names,
     )
 
 
@@ -288,7 +299,10 @@ def _build_agent_cached(
     输入命中同一个槽位」与「配置变了就换槽位」。`ModelTarget` 是 frozen dataclass，
     本身可哈希；管理员改了地址/密钥/模型后会产生新的 target，旧缓存自然不再命中。
     """
-    system_prompt = render_system_prompt()
+    # 只装配一次工具：提示词里的工具清单必须与真正挂上去的那份是同一份，
+    # 分两次 `build_tools()` 调用在配置热更新时可能拿到不同结果。
+    tools = build_tools()
+    system_prompt = render_system_prompt([tool.name for tool in tools])
 
     model_settings: dict[str, object] = {}
     if effort:
@@ -303,7 +317,7 @@ def _build_agent_cached(
     return Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=build_tools(),
+        tools=tools,
         # 工具是外部边界：一个工具抛异常不应该让整轮回答作废。
         # 兜底只作用于「漏网抛出来」的异常，工具自己返回文案的路径不受影响。
         capabilities=[_TOOL_ERROR_ISOLATION],

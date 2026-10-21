@@ -65,6 +65,15 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 之后由超管在管理后台把别的账号设为管理员。三个角色的权限见 `app/roles.py`：
 `user` 只能对话，`admin` 能进后台维护提供商与封禁用户，`superadmin` 额外能调整角色。
 
+## 系统提示词与工具装配
+
+`prompts/system_prompt.jinja` 里的「可用工具」一节与联网搜索规则都由**实际装配结果**
+渲染（`app/services/agent_factory.render_system_prompt`）：没配 `TAVILY_API_KEY` 时
+`tavily_search` 根本不挂，提示词里也就不再教模型「请调用 tavily_search」，而是明确写
+「本轮没有联网搜索工具，不要声称查过网络」。此前模板无条件写着搜索指令，模型会去调用
+一个不存在的工具——白烧一轮 token，用户看到的是「工具不存在」。
+`tests/test_agent_factory.py` 锁住「挂上的工具都出现在提示词里」这条一致性。
+
 ## 评测
 
 `evals/` 是一套**行为回归**用例：改提示词、换模型、动工具定义之后跑一遍，就知道哪些

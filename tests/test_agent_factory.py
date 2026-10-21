@@ -161,6 +161,21 @@ def test_build_agent_renders_system_prompt():
     assert settings.app_env in instructions
 
 
+def test_agent_prompt_lists_exactly_the_tools_it_is_built_with():
+    """提示词里的工具清单必须与真正挂给 agent 的那份一致，否则模型会调用不存在的工具。"""
+    agent = build_agent("openai/gpt-4o")
+    instructions = "\n".join(agent._system_prompts)
+    mounted = {tool.name for tool in agent._function_toolset.tools.values()}
+
+    for name in mounted:
+        assert name in instructions, f"工具 {name} 挂上了却没写进提示词"
+
+    # 没挂 tavily 时提示词不能教模型去调用它
+    if "tavily_search" not in mounted:
+        assert "请调用 `tavily_search`" not in instructions
+        assert "本轮**没有**联网搜索工具" in instructions
+
+
 # ---------------------------------------------------------------------
 # 装配缓存（O-2）
 # ---------------------------------------------------------------------
