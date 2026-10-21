@@ -16,6 +16,7 @@ from pydantic_ai.exceptions import (
 from app.services.upstream_errors import (
     GENERIC_STREAM_ERROR_MESSAGE,
     SERVICE_UNAVAILABLE_MESSAGE,
+    describe_fallback_reason,
     is_fallback_eligible,
     is_retryable_for_user,
     is_retryable_upstream_error,
@@ -131,3 +132,25 @@ def test_group_members_decide_user_retry():
     group = FallbackExceptionGroup("all models failed", [http_error(503), http_error(401)])
 
     assert is_retryable_for_user(group) is True
+
+
+# ---------------------------------------------------------------------
+# 「为什么切备用模型」的类别短语
+# ---------------------------------------------------------------------
+def test_fallback_reason_names_rate_limiting_first():
+    """429 也是 4xx：先认它，否则会掉进「上游错误」的兜底分支。"""
+    assert describe_fallback_reason(http_error(429)) == "上游限流"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_fallback_reason_includes_the_upstream_status(status):
+    assert describe_fallback_reason(http_error(status)) == f"上游 {status}"
+
+
+def test_fallback_reason_recognises_timeouts_and_transport_failures():
+    assert describe_fallback_reason(httpx.ReadTimeout("slow")) == "请求超时"
+    assert describe_fallback_reason(httpx.ConnectError("refused")) == "连接失败"
+
+
+def test_fallback_reason_has_a_fallback_of_its_own():
+    assert describe_fallback_reason(ValueError("boom")) == "上游错误"

@@ -124,6 +124,8 @@ export interface FallbackEvent {
   from_model: string;
   /** 实际完成本轮回答的备用模型 id。 */
   to_model: string;
+  /** 切换原因类别（「上游限流」「上游 503」…）；老服务端不带时为空串。 */
+  reason?: string;
 }
 
 export interface DoneEvent {
@@ -255,6 +257,12 @@ export interface ClarificationState {
 export interface FallbackState {
   fromModel: string;
   toModel: string;
+  /**
+   * 切换原因的类别短语（「上游限流」「上游 503」「请求超时」…）。
+   *
+   * 老服务端 / 老记录没有这个字段：此时只显示「已切换」，不编造原因。
+   */
+  reason?: string | null;
 }
 
 /**

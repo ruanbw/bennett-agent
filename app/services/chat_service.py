@@ -467,7 +467,11 @@ def _take_fallback_events(occurrences: list[FallbackOccurrence]) -> Iterator[Fal
     """把本轮收集到的切换记录按发生顺序转成事件，并清空收集器。"""
     while occurrences:
         occurrence = occurrences.pop(0)
-        yield FallbackUsed(from_model=occurrence.primary_model, to_model=occurrence.fallback_model)
+        yield FallbackUsed(
+            from_model=occurrence.primary_model,
+            to_model=occurrence.fallback_model,
+            reason=occurrence.reason,
+        )
 
 
 async def stream_chat_events(

@@ -140,7 +140,11 @@ function renderNotices(message: MessageRecord): string[] {
   if (message.stopped) notices.push('> ⏹ 生成被用户停止，此回答不完整。');
   else if (message.incomplete) notices.push('> ⚠ 回复不完整（连接中断或生成异常）。');
   if (message.fallback) {
-    notices.push(`> ⇄ 本轮由备用模型完成：${message.fallback.fromModel} → ${message.fallback.toModel}`);
+    // 带上切换原因：导出是事后复盘用的，只说「切过」等于把最重要的信息留给猜测
+    const reason = message.fallback.reason ? `（${message.fallback.reason}）` : '';
+    notices.push(
+      `> ⇄ 本轮由备用模型完成：${message.fallback.fromModel} → ${message.fallback.toModel}${reason}`,
+    );
   }
   if (message.error) notices.push(`> ✕ 本轮失败：${message.error.message}`);
   return notices;

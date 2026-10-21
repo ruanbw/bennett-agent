@@ -248,7 +248,11 @@ describe('事件折叠', () => {
     applyEvent('a', { type: 'content', delta: '答' })
 
     const run = getRun('a')!
-    expect(run.fallback).toEqual({ fromModel: 'openai/gpt-4o', toModel: 'openai/gpt-4o-mini' })
+    expect(run.fallback).toEqual({
+      fromModel: 'openai/gpt-4o',
+      toModel: 'openai/gpt-4o-mini',
+      reason: null,
+    })
     // 写进正文会被当成助手历史再次发给模型，也会被复制/导出当成回答的一部分
     expect(run.content).toBe('答')
   })
@@ -797,3 +801,31 @@ describe('停止时收尾仍在进行的工具调用', () => {
     // buildParts 不传 status：没有结果即「停在半途」，与 memory 里的 complete 不矛盾
     expect(resolveToolCallViewStatus(undefined, undefined)).toBe('interrupted')
   })})
+
+describe('备用模型切换事件', () => {
+  const fallbackEvent = (reason?: string) =>
+    ({
+      type: 'fallback',
+      from_model: 'gw/primary',
+      to_model: 'gw/backup',
+      ...(reason === undefined ? {} : { reason }),
+    }) as const;
+
+  it('记下切换原因，供提示行与导出使用', () => {
+    start('a')
+    applyEvent('a', fallbackEvent('上游限流'))
+
+    expect(getRun('a')!.fallback).toEqual({
+      fromModel: 'gw/primary',
+      toModel: 'gw/backup',
+      reason: '上游限流',
+    })
+  })
+
+  it('老服务端不带 reason 时记成 null，而不是空串或「未知」', () => {
+    start('a')
+    applyEvent('a', fallbackEvent())
+
+    expect(getRun('a')!.fallback?.reason).toBeNull()
+  })
+})

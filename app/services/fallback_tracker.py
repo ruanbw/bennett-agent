@@ -17,10 +17,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FallbackOccurrence:
-    """一次实际发生的模型切换。"""
+    """一次实际发生的模型切换。
+
+    `reason` 是给人和用户看的类别短语（「上游限流」「上游 503」「请求超时」…），
+    由 `upstream_errors.describe_fallback_reason` 生成：只说「已切换」不说为什么，
+    用户与运维都只能猜。
+    """
 
     primary_model: str
     fallback_model: str
+    reason: str = ""
 
 
 #: 当前任务的本轮收集器；`None` 表示当前上下文不关心切换（没有对话流在跑）。
@@ -42,8 +48,8 @@ def collect_fallbacks() -> Iterator[list[FallbackOccurrence]]:
         _collector.reset(token)
 
 
-def record_fallback(primary_model: str, fallback_model: str) -> None:
+def record_fallback(primary_model: str, fallback_model: str, reason: str = "") -> None:
     """记录一次实际发生的切换；没有收集器时静默忽略。"""
     occurrences = _collector.get()
     if occurrences is not None:
-        occurrences.append(FallbackOccurrence(primary_model, fallback_model))
+        occurrences.append(FallbackOccurrence(primary_model, fallback_model, reason))

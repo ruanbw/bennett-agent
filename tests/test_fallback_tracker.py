@@ -4,7 +4,7 @@
 不可见；它若在 ContextVar 里留下脏状态，下一次请求会误报切换。
 """
 
-from app.services.fallback_tracker import collect_fallbacks, record_fallback
+from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks, record_fallback
 
 
 def test_records_switches_in_order():
@@ -35,3 +35,21 @@ def test_collector_is_reset_after_the_context_exits():
     record_fallback("primary", "fallback-after-exit")
 
     assert len(occurrences) == 1
+
+
+# ---------------------------------------------------------------------
+# 切换原因：只说「已切换」不说为什么，用户与运维都只能猜
+# ---------------------------------------------------------------------
+def test_reason_is_recorded_with_the_occurrence():
+    with collect_fallbacks() as occurrences:
+        record_fallback("gw/primary", "gw/backup", "上游限流")
+
+    assert occurrences == [FallbackOccurrence("gw/primary", "gw/backup", "上游限流")]
+
+
+def test_reason_defaults_to_empty_for_old_call_sites():
+    """老调用点不带原因时不该炸：`reason` 有默认值。"""
+    with collect_fallbacks() as occurrences:
+        record_fallback("a", "b")
+
+    assert occurrences[0].reason == ""

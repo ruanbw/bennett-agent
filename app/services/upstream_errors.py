@@ -120,6 +120,29 @@ def is_fallback_eligible(exc: BaseException) -> bool:
     return is_retryable_upstream_error(exc)
 
 
+def describe_fallback_reason(exc: BaseException) -> str:
+    """把「为什么切到备用模型」压成一句短语，给事件、前端提示与导出用。
+
+    用户看到「已切换备用模型」时最自然的疑问是「为什么」；运维拿到一张截图也想知道
+    是限流还是上游挂了。这里只给类别、不给原始异常文本——后者可能含上游 URL 与凭据上下文。
+
+    判定顺序与 `is_fallback_eligible` 保持一致：429 先认（它同样是 4xx，容易被后面的
+    分支漏掉），再 5xx、超时、连接错误。
+    """
+    chain = tuple(iter_exception_chain(exc))
+    if any(_status_code(item) == 429 for item in chain):
+        return "上游限流"
+    for item in chain:
+        status = _status_code(item)
+        if status is not None and 500 <= status < 600:
+            return f"上游 {status}"
+    if any(isinstance(item, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)) for item in chain):
+        return "请求超时"
+    if any(isinstance(item, httpx.TransportError) for item in chain):
+        return "连接失败"
+    return "上游错误"
+
+
 #: 用户手动重试也不会成功的状态码：凭据/权限问题（401/403）与请求本身的问题
 #: （400/404）。这些错误已经在文案里提示「换模型」或「联系管理员」，给重试按钮
 #: 只会让用户重复一次必然失败的操作。

@@ -677,10 +677,10 @@ const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (pro
  */
 const readFallback = (value: unknown): FallbackState | null => {
   if (!value || typeof value !== "object") return null;
-  const { fromModel, toModel } = value as Partial<FallbackState>;
-  return typeof fromModel === "string" && typeof toModel === "string"
-    ? { fromModel, toModel }
-    : null;
+  const { fromModel, toModel, reason } = value as Partial<FallbackState>;
+  if (typeof fromModel !== "string" || typeof toModel !== "string") return null;
+  // 原因只在确实是字符串时带上：老记录/老服务端没有这个字段
+  return { fromModel, toModel, reason: typeof reason === "string" ? reason : null };
 };
 
 /** 失败信息同理：只在结构完整时返回，否则当作没有（老记录/写坏的数据）。 */
@@ -763,6 +763,8 @@ const AssistantMessage: FC = () => {
         <div className="text-muted-foreground/70 mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
           <ArrowLeftRightIcon className="size-3" />
           已切换备用模型：{fallback.fromModel} → {fallback.toModel}
+          {/* 只说「已切换」不说为什么，用户与运维都只能猜 */}
+          {fallback.reason ? `（${fallback.reason}）` : ''}
         </div>
       )}
 

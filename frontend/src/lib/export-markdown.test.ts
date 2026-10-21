@@ -439,3 +439,24 @@ describe('停在半途的工具调用（不只是「进行中」）', () => {
     expect(markdown).not.toContain('· 完成</summary>');
   });
 });
+
+describe('备用模型切换原因', () => {
+  it('导出带上原因类别（事后复盘时最重要的一格）', () => {
+    const markdown = build([
+      assistantMessage({
+        fallback: { fromModel: 'gw/primary', toModel: 'gw/backup', reason: '上游限流' },
+      }),
+    ]);
+
+    expect(markdown).toContain('本轮由备用模型完成：gw/primary → gw/backup（上游限流）');
+  });
+
+  it('老记录没有原因时不编造括号', () => {
+    const markdown = build([
+      assistantMessage({ fallback: { fromModel: 'gw/primary', toModel: 'gw/backup' } }),
+    ]);
+
+    expect(markdown).toContain('gw/primary → gw/backup');
+    expect(markdown).not.toContain('gw/backup（');
+  });
+});
