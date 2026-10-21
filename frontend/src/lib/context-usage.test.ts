@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   describeContextUsage,
+  estimateRemainingChars,
   formatPercent,
   formatTokens,
   readUsage,
@@ -217,5 +218,19 @@ describe('describeContextUsage', () => {
     const view = describeContextUsage(usage({ contextWindow: 0 }), { currentModel: 'm', usageModel: 'm' })!;
     expect(view.contextWindow).toBeNull();
     expect(view.usedPercent).toBeNull();
+  });
+});
+
+describe('estimateRemainingChars', () => {
+  it('有余量时给一个量级参照（按中文 ≈1 字/token 粗估）', () => {
+    expect(estimateRemainingChars(18_000)).toBe('约 18k 字');
+    expect(estimateRemainingChars(850)).toBe('约 850 字');
+  });
+
+  it('未知或已无余量时不写「约 0 字」', () => {
+    expect(estimateRemainingChars(null)).toBe('');
+    expect(estimateRemainingChars(0)).toBe('');
+    expect(estimateRemainingChars(-5)).toBe('');
+    expect(estimateRemainingChars(Number.NaN)).toBe('');
   });
 });

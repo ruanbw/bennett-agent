@@ -120,3 +120,25 @@ describe('ContextUsageIndicator 的档位提示', () => {
     expect(html).not.toContain('已接近可用上限');
   });
 });
+
+describe('剩余空间的「人话」参照', () => {
+  it('展开后说明还能写多少字（token 对用户没有直觉）', () => {
+    const html = render({ usage: usage({ contextTokens: 12_000, contextLimitTokens: 18_000 }), initialOpen: true });
+
+    expect(html).toContain('还能写约 6,000 字');
+    // 必须写明是粗估与英文口径，别把它当成精确换算
+    expect(html).toContain('粗估');
+    expect(html).toContain('英文约 4 字符/token');
+  });
+
+  it('没有余量（或上限未知）时不渲染那一行', () => {
+    const exhausted = render({
+      usage: usage({ contextTokens: 20_000, contextLimitTokens: 18_000 }),
+      initialOpen: true,
+    });
+    expect(exhausted).not.toContain('还能写约');
+
+    const unknown = render({ usage: usage({ contextLimitTokens: null, contextWindow: null }), initialOpen: true });
+    expect(unknown).not.toContain('还能写约');
+  });
+});

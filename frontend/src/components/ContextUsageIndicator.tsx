@@ -5,6 +5,7 @@ import {
   CONTEXT_CRITICAL_PERCENT,
   CONTEXT_WARN_PERCENT,
   describeContextUsage,
+  estimateRemainingChars,
   formatPercent,
   formatTokens,
   type ContextUsageView,
@@ -210,6 +211,11 @@ export function ContextUsageIndicator({
                   />
                 </dl>
 
+                {estimateRemainingChars(view.remainingTokens) && (
+                  <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+                    {`还能写${estimateRemainingChars(view.remainingTokens)}（按中文 ≈1 字/token 粗估；英文约 4 字符/token，同样的余量能写的英文单词少得多）。`}
+                  </p>
+                )}
                 {nearFull && (
                   <p className="mt-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-[10px] leading-relaxed text-destructive">
                     已接近可用上限，下一条长消息可能被拒绝。建议新建会话，或换用窗口更大的模型。

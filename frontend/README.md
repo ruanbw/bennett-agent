@@ -522,6 +522,10 @@ localStorage（键 `composer_drafts`，一个 JSON 装所有会话）：
   （「已用过七成：还能继续聊，但长对话建议尽快新建会话」）——只把条变黄而不说含义，用户
   只会觉得「颜色怪怪的」。`components/ContextUsageIndicator.test.ts` 用 SSR 锁住三件事：
   锁定时不显示旧数字、没用量的会话不渲染图标、九成以上才有红色提示。
+  **「还剩 18k tokens」对用户没有直觉**，所以弹层里再给一句量级参照：
+  `estimateRemainingChars` 按中文 ≈1 字/token 粗估成「还能写约 18k 字」，并明写这是粗估、
+  英文约 4 字符/token（同样的余量能写的英文少得多）。没有余量或上限未知时不渲染这一行，
+  而不是写「约 0 字」。
 - **管理后台的表单先本地拦错，再谈服务端 422。** 新增 / 编辑提供商时名称必填、接口地址
   必须是 `http://` 或 `https://` 开头（与后端一样区分大小写）；校验失败把焦点移到对应
   输入框并挂 `aria-invalid` / `aria-describedby`，而不是把 Pydantic 的

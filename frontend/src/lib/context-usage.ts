@@ -44,6 +44,23 @@ export function formatPercent(percent: number): string {
 }
 
 /**
+ * 剩余空间换算成「大约还能写多少字」。
+ *
+ * token 是模型账本上的单位，用户对它的直觉很差：看到「还剩 18k tokens」既不知道这是
+ * 多还是少，也不知道够写几段话。这里按**中文常见分词口径**粗估（≈1 token/字），
+ * 只当作量级参照——弹层里同时写明「粗估」，不假装它是精确换算：
+ * 英文约 4 字符/token，同一串剩余量能写的英文单词数会少得多。
+ *
+ * 未知（`null`）或已经没有余量时返回空串：调用方据此不渲染那一行，而不是写「约 0 字」。
+ */
+export function estimateRemainingChars(remainingTokens: number | null): string {
+  if (remainingTokens === null || !Number.isFinite(remainingTokens) || remainingTokens <= 0) {
+    return '';
+  }
+  return `约 ${formatTokens(remainingTokens)} 字`;
+}
+
+/**
  * 收起态的 token 格式：k 级保留一位小数。
  *
  * `formatTokens` 对 10k 以上直接取整，17,500 与 18,000 都会变成「18k」——进度条已经
