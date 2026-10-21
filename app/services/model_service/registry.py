@@ -35,10 +35,12 @@
 内部那次查询按约定保留（它不归本模块管），于是每请求只剩两次。
 """
 
+import ipaddress
 import logging
 import re
 import uuid
 from dataclasses import dataclass, replace
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
@@ -341,6 +343,48 @@ def _default_key_of(rows: list[tuple[ProviderModel, ModelProvider]]) -> str | No
     return None
 
 
+#: 引导用的网关地址必须是 http(s)：写错成 `localhost:4000`（少了 scheme）或整段黏在
+#: 别的变量里时，httpx 会在第一次请求前抛 `UnsupportedProtocol`，而**用户看到的**
+#: 是「模型不可用」——配置错误的现场证据只剩一行启动日志。
+_BOOTSTRAP_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+def validate_bootstrap_base_url(raw: str | None) -> tuple[str | None, str]:
+    """校验 `LITELLM_API_BASE` 能否用来引导提供商；返回 `(地址, 不可用原因)`。
+
+    只做**不需要联网**的检查（scheme / 主机名 / 元数据族字面量 IP）：出站地址守卫
+    （`outbound_guard._reject_private_target`）会在真正发请求时按当时解析结果再拦一次，
+    启动路径上不该为了校验去跑一次 DNS。
+
+    为什么要在**写库之前**拦：引导一旦写进库，`_provider_config_exists` 就为真、后台
+    成为权威，环境变量路径彻底停用。一条写错的 `LITELLM_API_BASE` 于是把刚部署好的
+    实例变成「零个可用模型」，只能进管理后台修——而这本来是一行配置笔误。拦住时保持
+    「后台未接管」，服务继续按环境变量工作。
+    """
+    # 先按原值校验再归一化：`http://` 去掉尾斜杠会变成 `http:`，报错信息里就成了
+    # 一个没人写过的值，反而看不出问题。
+    original = (raw or "").strip()
+    if not original:
+        return None, "LITELLM_API_BASE 为空"
+
+    parsed = urlsplit(original)
+    if parsed.scheme.lower() not in _BOOTSTRAP_ALLOWED_SCHEMES:
+        return None, f"LITELLM_API_BASE 必须以 http:// 或 https:// 开头（收到 {original!r}）"
+    if not parsed.hostname:
+        return None, f"LITELLM_API_BASE 缺少主机名（收到 {original!r}）"
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        return None, f"LITELLM_API_BASE 端口不合法（收到 {original!r}）"
+
+    base_url = original.rstrip("/")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return base_url, ""
+    if outbound_guard._is_metadata_range(address):
+        return None, f"LITELLM_API_BASE 指向链路本地/未指定地址（{address}），不能作为模型网关"
+    return base_url, ""
+
+
 async def seed_default_provider() -> bool:
     """首次启动时把环境变量里的网关引导成一条提供商记录。
 
@@ -352,6 +396,15 @@ async def seed_default_provider() -> bool:
     if not settings.bootstrap_provider_from_env:
         return False
 
+    base_url, reason = validate_bootstrap_base_url(settings.litellm_api_base)
+    if base_url is None:
+        logger.warning(
+            "跳过从环境变量引导模型提供商：%s。目前仍按环境变量网关工作，"
+            "修正 LITELLM_API_BASE 后重启，或直接到管理后台添加提供商。",
+            reason,
+        )
+        return False
+
     async with async_session_maker() as session:
         if await _provider_config_exists(session):
             return False
@@ -359,7 +412,7 @@ async def seed_default_provider() -> bool:
         provider = ModelProvider(
             name=DEFAULT_PROVIDER_NAME,
             slug=await _unique_provider_slug(session, DEFAULT_PROVIDER_NAME),
-            base_url=settings.litellm_api_base.strip().rstrip("/"),
+            base_url=base_url,
             api_key=settings.litellm_api_key,
             enabled=True,
         )
@@ -380,7 +433,7 @@ async def seed_default_provider() -> bool:
         await _mark_registry_initialized(session)
         await session.commit()
 
-    logger.info("已从环境变量引导默认模型提供商: base_url=%s model=%s", settings.litellm_api_base, model_id)
+    logger.info("已从环境变量引导默认模型提供商: base_url=%s model=%s", base_url, model_id)
     return True
 
 

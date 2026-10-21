@@ -530,3 +530,66 @@ async def test_user_search_still_does_substring_and_case_insensitive_match(regis
 
     assert await _search(registry_db, "alice") == ["Alice@Example.com"]
     assert await _search(registry_db, "example.com") == ["Alice@Example.com", "bob@example.com"]
+
+
+# ---------------------------------------------------------------------
+# 环境变量引导：一条写错的 LITELLM_API_BASE 不该把实例变成「零个可用模型」
+# ---------------------------------------------------------------------
+def test_validate_bootstrap_base_url_accepts_http_and_strips_trailing_slash():
+    from app.services.model_service.registry import validate_bootstrap_base_url
+
+    assert validate_bootstrap_base_url("http://localhost:4000/") == ("http://localhost:4000", "")
+    assert validate_bootstrap_base_url("  https://api.example.com/v1  ") == ("https://api.example.com/v1", "")
+
+
+@pytest.mark.parametrize(
+    "raw,fragment",
+    [
+        ("", "为空"),
+        ("   ", "为空"),
+        ("localhost:4000", "http://"),
+        ("ftp://gateway/v1", "http://"),
+        ("http://", "缺少主机名"),
+        ("http://169.254.169.254/latest", "链路本地"),
+    ],
+)
+def test_validate_bootstrap_base_url_rejects_bad_values(raw, fragment):
+    from app.services.model_service.registry import validate_bootstrap_base_url
+
+    url, reason = validate_bootstrap_base_url(raw)
+
+    assert url is None
+    assert fragment in reason
+
+
+async def test_bad_bootstrap_url_keeps_the_env_path_working(registry_db, monkeypatch, caplog):
+    """写错的地址不能写进库：一旦写进库，后台就成了权威，实例变成零个可用模型。"""
+    from app.config import settings
+    from app.services.model_service import registry as reg
+
+    monkeypatch.setattr(settings, "bootstrap_provider_from_env", True)
+    monkeypatch.setattr(settings, "litellm_api_base", "localhost:4000")
+
+    with caplog.at_level("WARNING", logger="app.services.model_service.registry"):
+        created = await reg.seed_default_provider()
+
+    assert created is False
+    # 关键断言：库里没有任何提供商，`_provider_config_exists` 仍为 False，
+    # 于是解析继续走环境变量路径（服务不会变成「零个可用模型」）
+    assert await reg.provider_config_exists() is False
+    assert any("跳过从环境变量引导" in record.getMessage() for record in caplog.records)
+
+
+async def test_valid_bootstrap_url_still_seeds_a_provider(registry_db, monkeypatch):
+    from app.config import settings
+    from app.services.model_service import registry as reg
+
+    monkeypatch.setattr(settings, "bootstrap_provider_from_env", True)
+    monkeypatch.setattr(settings, "litellm_api_base", "http://127.0.0.1:4000/")
+    monkeypatch.setattr(settings, "model_name", "openai/gpt-4o")
+
+    assert await reg.seed_default_provider() is True
+    assert await reg.provider_config_exists() is True
+
+    providers = await reg.list_providers()
+    assert providers[0].base_url == "http://127.0.0.1:4000"
