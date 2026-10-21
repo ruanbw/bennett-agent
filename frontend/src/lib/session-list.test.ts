@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest'
 import type { SessionRecord } from '../types'
 import {
   TITLE_MAX_LENGTH,
+  batchDeleteDescription,
   clampTitle,
+  deleteSessionDescription,
   pinChange,
   sortSessions,
   titleChange,
@@ -129,5 +131,25 @@ describe('标题长度', () => {
     expect(titleLength(title)).toBe(TITLE_MAX_LENGTH)
     // 直接比较内容：劈开代理对会得到长度对不上的乱码
     expect(title).toBe('😀'.repeat(TITLE_MAX_LENGTH))
+  })
+})
+
+describe('删除确认文案', () => {
+  it('单个删除写出消息条数；空标题回退「新对话」', () => {
+    expect(deleteSessionDescription('架构讨论', 12, false)).toBe(
+      '「架构讨论」及其 12 条消息将被删除，且无法恢复。',
+    )
+    expect(deleteSessionDescription('   ', 0, false)).toBe('「新对话」将被删除，且无法恢复。')
+  })
+
+  it('正在生成的会话明确说明删除会中止回答', () => {
+    expect(deleteSessionDescription('长回答', 3, true)).toContain('删除会立即停止回答')
+  })
+
+  it('批量删除写出会话数、总消息数与正在生成的个数', () => {
+    expect(batchDeleteDescription(2, 30, 1)).toBe(
+      '选中的 2 个会话（共 30 条消息）将被删除，且无法恢复。其中 1 个正在生成回答，删除会立即停止。',
+    )
+    expect(batchDeleteDescription(1, 0, 0)).toBe('选中的 1 个会话将被删除，且无法恢复。')
   })
 })

@@ -5,8 +5,15 @@ import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
 import { SEARCH_SHORTCUT_KEYS, searchShortcutLabel } from '../lib/keyboard-shortcuts';
 import { matchText } from '../lib/session-search';
-import { clampTitle, TITLE_MAX_LENGTH, visibleSelection } from '../lib/session-list';
+import {
+  batchDeleteDescription,
+  clampTitle,
+  deleteSessionDescription,
+  TITLE_MAX_LENGTH,
+  visibleSelection,
+} from '../lib/session-list';
 import { groupSessionsByDate } from '../lib/session-grouping';
+import { countSessionMessages } from '../lib/chat-persistence';
 import { notify } from '../lib/toast';
 import { useMidnightRefresh } from '../hooks/use-midnight-refresh';
 import { useSessionContentSearch } from '../hooks/use-session-search';
@@ -314,36 +321,59 @@ export function Sidebar({
   // -------------------------------------------------------------------
   const requestDeleteSession = useCallback(
     (session: SessionRecord) => {
-      setConfirmRequest({
-        title: '删除对话',
-        description: `「${session.title}」及其全部消息将被删除，且无法恢复。`,
-        confirmLabel: '删除',
-        destructive: true,
-        onConfirm: () => {
-          void runAction(() => onDeleteSession(session.id), '删除失败，请重试');
-        },
-      });
+      void (async () => {
+        let messageCount = 0;
+        try {
+          messageCount = await countSessionMessages(session.id);
+        } catch (err) {
+          // 统计失败不该挡住删除：退回不带条数的文案
+          console.warn('统计会话消息数失败:', err);
+        }
+        setConfirmRequest({
+          title: '删除对话',
+          description: deleteSessionDescription(
+            session.title,
+            messageCount,
+            runningIds.has(session.id),
+          ),
+          confirmLabel: '删除',
+          destructive: true,
+          onConfirm: () => {
+            void runAction(() => onDeleteSession(session.id), '删除失败，请重试');
+          },
+        });
+      })();
     },
-    [onDeleteSession, runAction],
+    [onDeleteSession, runAction, runningIds],
   );
 
   const requestBatchDelete = useCallback(() => {
     const ids = [...visibleSelectedIds];
     if (ids.length === 0) return;
-    setConfirmRequest({
-      title: `删除 ${ids.length} 个对话`,
-      description: '选中会话及其全部消息将被删除，且无法恢复。',
-      confirmLabel: '删除',
-      destructive: true,
-      onConfirm: () => {
-        void (async () => {
-          const ok = await runAction(() => onBatchDelete(ids), '删除失败，请重试');
-          // 失败时保留多选态，用户可以直接重试
-          if (ok) exitSelectMode();
-        })();
-      },
-    });
-  }, [visibleSelectedIds, onBatchDelete, runAction, exitSelectMode]);
+    void (async () => {
+      let messageCount = 0;
+      try {
+        const counts = await Promise.all(ids.map((id) => countSessionMessages(id)));
+        messageCount = counts.reduce((sum, count) => sum + count, 0);
+      } catch (err) {
+        console.warn('统计选中会话的消息数失败:', err);
+      }
+      const runningCount = ids.filter((id) => runningIds.has(id)).length;
+      setConfirmRequest({
+        title: `删除 ${ids.length} 个对话`,
+        description: batchDeleteDescription(ids.length, messageCount, runningCount),
+        confirmLabel: '删除',
+        destructive: true,
+        onConfirm: () => {
+          void (async () => {
+            const ok = await runAction(() => onBatchDelete(ids), '删除失败，请重试');
+            // 失败时保留多选态，用户可以直接重试
+            if (ok) exitSelectMode();
+          })();
+        },
+      });
+    })();
+  }, [visibleSelectedIds, onBatchDelete, runningIds, runAction, exitSelectMode]);
 
   const requestClearAll = useCallback(() => {
     setConfirmRequest({

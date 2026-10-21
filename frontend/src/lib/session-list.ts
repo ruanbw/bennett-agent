@@ -87,3 +87,31 @@ export function visibleSelection(
   }
   return visible;
 }
+
+/**
+ * 单个会话的删除确认文案。
+ *
+ * 确认框的任务不是重复「无法恢复」，而是让用户知道**具体会失去什么**：消息条数、
+ * 是否正在生成。正在生成时删除会直接中止回答，这一条必须写出来。
+ */
+export function deleteSessionDescription(
+  title: string,
+  messageCount: number,
+  running: boolean,
+): string {
+  const name = title.trim() || '新对话';
+  const messages = messageCount > 0 ? `及其 ${messageCount} 条消息` : '';
+  const stop = running ? '该会话正在生成回答，删除会立即停止回答。' : '';
+  return `「${name}」${messages}将被删除，且无法恢复。${stop}`;
+}
+
+/** 批量删除的确认文案：会话数 + 总消息数 + 其中正在生成的会话数。 */
+export function batchDeleteDescription(
+  sessionCount: number,
+  messageCount: number,
+  runningCount: number,
+): string {
+  const messages = messageCount > 0 ? `（共 ${messageCount} 条消息）` : '';
+  const stop = runningCount > 0 ? `其中 ${runningCount} 个正在生成回答，删除会立即停止。` : '';
+  return `选中的 ${sessionCount} 个会话${messages}将被删除，且无法恢复。${stop}`;
+}
