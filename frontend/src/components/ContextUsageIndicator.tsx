@@ -2,6 +2,8 @@ import { type FC, useCallback, useEffect, useRef, useState } from 'react';
 import { Gauge } from 'lucide-react';
 
 import {
+  CONTEXT_CRITICAL_PERCENT,
+  CONTEXT_WARN_PERCENT,
   describeContextUsage,
   formatPercent,
   formatTokens,
@@ -25,6 +27,11 @@ export interface ContextUsageIndicatorProps {
    * 是「历史 + 回答预留」这个更大的量。显示旧数字（可能才 60%）会与「已满」自相矛盾。
    */
   locked?: boolean;
+  /**
+   * 弹层初始是否展开。默认 false：桌面端靠 hover/焦点打开，触屏靠点按。
+   * 主要用于渲染测试（SSR 没有交互，收起的弹层根本不会出现在输出里）。
+   */
+  initialOpen?: boolean;
 }
 
 /**
@@ -46,9 +53,10 @@ export function ContextUsageIndicator({
   currentModel = null,
   modelContextWindow = null,
   locked = false,
+  initialOpen = false,
 }: ContextUsageIndicatorProps) {
   const view = describeContextUsage(usage, { usageModel, currentModel, modelContextWindow });
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const containerRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<number | null>(null);
 
@@ -92,7 +100,9 @@ export function ContextUsageIndicator({
   if (!view && !locked) return null;
 
   const usedPercent = view?.usedPercent ?? null;
-  const nearFull = usedPercent !== null && usedPercent >= 90;
+  const nearFull = usedPercent !== null && usedPercent >= CONTEXT_CRITICAL_PERCENT;
+  // 进度条在 70% 就变琥珀色：不给一句话解释，用户只会看到「变黄了」而不知道这意味着什么
+  const warning = !nearFull && usedPercent !== null && usedPercent >= CONTEXT_WARN_PERCENT;
   const alerting = locked || nearFull;
 
   return (
@@ -205,6 +215,11 @@ export function ContextUsageIndicator({
                     已接近可用上限，下一条长消息可能被拒绝。建议新建会话，或换用窗口更大的模型。
                   </p>
                 )}
+                {warning && (
+                  <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-700 dark:text-amber-400">
+                    已用过七成：还能继续聊，但长对话建议尽快新建会话，或换个窗口更大的模型——历史只会越来越长。
+                  </p>
+                )}
 
                 <p className="mt-2.5 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
                   已用是上一轮请求的真实 prompt token（含系统提示词与整份历史），不含还没发送的草稿。
@@ -227,8 +242,13 @@ export function ContextUsageIndicator({
 
 const UsageBar: FC<{ view: ContextUsageView }> = ({ view }) => {
   const percent = view.usedPercent ?? 0;
+  // 阈值与「已接近可用上限」文案共用同一份常量：红条与警告必须同时出现
   const tone =
-    percent >= 90 ? 'bg-destructive' : percent >= 70 ? 'bg-amber-500' : 'bg-primary';
+    percent >= CONTEXT_CRITICAL_PERCENT
+      ? 'bg-destructive'
+      : percent >= CONTEXT_WARN_PERCENT
+        ? 'bg-amber-500'
+        : 'bg-primary';
 
   return (
     <div

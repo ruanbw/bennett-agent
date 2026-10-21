@@ -14,6 +14,16 @@ import type { UsageState } from '@/types';
 /** 占比小于这个值时不说「0.0%」：那看起来像「没用量」，其实是「用量很小」。 */
 const TINY_PERCENT = 0.1;
 
+/**
+ * 上下文占用到这些比例时的提醒档位。
+ *
+ * 放在这里而不是组件里：进度条变红与「已接近上限」文案必须同时发生。此前组件里
+ * 90 写了两遍（`nearFull` 与 `UsageBar` 的 tone）、70 只写了一遍——改一个忘一个就会
+ * 出现「进度条已经红了但没有提示」，或者反过来。
+ */
+export const CONTEXT_WARN_PERCENT = 70;
+export const CONTEXT_CRITICAL_PERCENT = 90;
+
 const positive = (value: number | null | undefined): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 
