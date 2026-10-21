@@ -21,6 +21,7 @@ import {
   deleteModel,
   deleteProvider,
   describeFailure,
+  describeProviderSync,
   formatContextWindow,
   listProviderModels,
   listProviders,
@@ -174,11 +175,14 @@ export function ProvidersPanel() {
       setNotice(provider.id, null);
       void (async () => {
         const ok = await run(`sync:${provider.id}`, async () => {
-          const result = await syncProvider(provider.id);
-          setNotice(provider.id, {
-            tone: 'success',
-            text: `同步完成：新增 ${result.created} / 更新 ${result.updated}`,
-          });
+          try {
+            const result = await syncProvider(provider.id);
+            setNotice(provider.id, { tone: 'success', text: describeProviderSync(result) });
+          } catch (err) {
+            // 与「测试连接」一致：失败原因贴近该提供商卡片显示；面板顶部只留给
+            // 不属于任何一行的问题（例如列表加载失败）。
+            setNotice(provider.id, { tone: 'error', text: describeFailure(err) });
+          }
         });
         if (ok) reload();
       })();

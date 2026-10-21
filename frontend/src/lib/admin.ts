@@ -339,6 +339,26 @@ export function describeFailure(error: unknown): string {
   return describeAdminError(error);
 }
 
+/**
+ * 同步结果的用户文案。
+ *
+ * 「新增 0 / 更新 0」对管理员没有信息量：他刚点完同步，需要知道上游到底给了多少、
+ * 自己手动加的模型会不会被删。后端的策略是**只增不删**，这句必须写出来，否则
+ * 「上游没返回它」会被理解成「它被删了」。
+ */
+export function describeProviderSync(result: ProviderSyncResult): string {
+  if (result.fetched === 0) {
+    return '同步完成：上游未返回任何模型；已保存的模型不会被删除。';
+  }
+
+  const parts = [`上游 ${result.fetched} 个`];
+  if (result.created > 0) parts.push(`新增 ${result.created}`);
+  if (result.updated > 0) parts.push(`更新 ${result.updated}`);
+  if (result.created === 0 && result.updated === 0) parts.push('没有变化');
+
+  return `同步完成：${parts.join('，')}；上游未返回的模型不会自动删除。`;
+}
+
 export function formatContextWindow(tokens: number | null): string {
   if (!tokens || tokens <= 0) return '窗口未知';
   if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M 上下文`;

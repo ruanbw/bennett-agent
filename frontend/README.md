@@ -311,7 +311,10 @@ src/
   `body.base_url: Value error…` 原样丢给管理员。API Key 输入框可显隐（默认密文，
   `aria-controls` 指向输入框）；编辑时留空 = 不修改、勾选「清除」才发空串，这条语义仍只在
   `buildProviderPayload` 一处实现。本地校验规则在 `lib/admin.ts:validateProviderDraft`，
-  有 vitest 覆盖。
+  有 vitest 覆盖。同步结果也不写「新增 0 / 更新 0」这种无信息量文案：
+  `lib/admin.ts:describeProviderSync` 会报上游数量、明说「没有变化」，并固定提醒
+  **上游未返回的模型不会自动删除**（后端的只增不删策略）；同步失败的原因留在对应
+  提供商卡片里，而不是飘到面板顶部。
 - **用户列表刷新时不允许对旧行操作，页码也要自己夹回最后一页。** `loading` 由「本次请求
   key」与「最近一次完成的 key」推导，而不是在 effect 里同步 `setState(true)`（会触发
   级联渲染，React 的 lint 规则也会报）。刷新中禁封禁 / 角色 / 翻页，列表 `aria-busy`

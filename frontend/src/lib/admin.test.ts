@@ -6,6 +6,7 @@ import {
   clampUsersOffset,
   describeAdminError,
   describeFailure,
+  describeProviderSync,
   formatContextWindow,
   validateProviderDraft,
   type ProviderDraft,
@@ -76,6 +77,32 @@ describe('clampUsersOffset', () => {
     expect(clampUsersOffset(40, 20, 0)).toBe(0);
     expect(clampUsersOffset(40, 0, 100)).toBe(0);
     expect(clampUsersOffset(-20, 20, 100)).toBe(0);
+  });
+});
+
+describe('describeProviderSync', () => {
+  it('报出上游数量与新增/更新，并说明只增不删', () => {
+    const text = describeProviderSync({ fetched: 7, created: 2, updated: 1 });
+
+    expect(text).toContain('上游 7 个');
+    expect(text).toContain('新增 2');
+    expect(text).toContain('更新 1');
+    expect(text).toContain('不会自动删除');
+  });
+
+  it('没有变化时明说「没有变化」，而不是只剩新增 0 / 更新 0', () => {
+    const text = describeProviderSync({ fetched: 5, created: 0, updated: 0 });
+
+    expect(text).toContain('上游 5 个');
+    expect(text).toContain('没有变化');
+    expect(text).not.toContain('新增 0');
+  });
+
+  it('上游返回空列表时提醒已保存模型不会被删', () => {
+    const text = describeProviderSync({ fetched: 0, created: 0, updated: 0 });
+
+    expect(text).toContain('上游未返回任何模型');
+    expect(text).toContain('不会被删除');
   });
 });
 
