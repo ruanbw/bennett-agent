@@ -118,7 +118,7 @@ export function SettingsPanel({
           <Sun className="size-3.5" />
           <span>外观与主题</span>
         </h4>
-        <div className="grid grid-cols-3 gap-2">
+        <div role="group" aria-label="外观主题" className="grid grid-cols-3 gap-2">
           {THEME_OPTIONS.map(({ value, label, description, Icon }) => {
             const isActive = theme === value;
             return (
@@ -126,7 +126,8 @@ export function SettingsPanel({
                 key={value}
                 type="button"
                 onClick={() => setTheme(value)}
-                className={`relative flex flex-col items-center justify-center p-3 rounded-xl border text-center transition cursor-pointer select-none ${
+                aria-pressed={isActive}
+                className={`relative flex flex-col items-center justify-center p-3 rounded-xl border text-center transition cursor-pointer select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 ${
                   isActive
                     ? 'border-primary bg-primary/5 text-foreground shadow-xs ring-1 ring-primary/40'
                     : 'border-border/70 hover:border-border hover:bg-muted/50 text-muted-foreground'
@@ -134,7 +135,7 @@ export function SettingsPanel({
               >
                 {isActive && (
                   <span className="absolute top-2 right-2 text-primary">
-                    <Check className="size-3.5" />
+                    <Check className="size-3.5" aria-hidden="true" />
                   </span>
                 )}
                 <Icon

@@ -25,7 +25,11 @@ export function ThemeSwitcher() {
   const { theme, setTheme } = useTheme();
 
   return (
-    <div className="flex items-center justify-between bg-muted/60 p-1 rounded-lg border border-border/40">
+    <div
+      role="group"
+      aria-label="外观主题"
+      className="flex items-center justify-between bg-muted/60 p-1 rounded-lg border border-border/40"
+    >
       {OPTIONS.map(({ value, label, Icon, activeClass }) => {
         const isActive = theme === value;
         return (
@@ -36,7 +40,7 @@ export function ThemeSwitcher() {
             title={`${label}模式`}
             aria-label={`${label}模式`}
             aria-pressed={isActive}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-medium transition cursor-pointer ${
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-medium transition cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 ${
               isActive ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'
             }`}
           >

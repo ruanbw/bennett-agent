@@ -149,6 +149,15 @@ describe('SettingsPanel 设置面板内容', () => {
     expect(html).toContain('浅色');
     expect(html).toContain('深色');
     expect(html).toContain('跟随系统');
+    // 主题卡片是 toggle 按钮：读屏要能知道当前选中哪一个
+    expect(html).toContain('role="group" aria-label="外观主题"');
+    // 只看主题分组这一段：改密表单也有一组 aria-pressed 的显隐按钮，不能全局数
+    const themeGroup = html.slice(
+      html.indexOf('aria-label="外观主题"'),
+      html.indexOf('修改密码')
+    );
+    expect(themeGroup.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(themeGroup.match(/aria-pressed="false"/g)).toHaveLength(2);
 
     // 版本来自 package.json（构建时注入），不是手写字面量；服务端渲染时统计还没回来
     expect(html).toContain(`v${APP_VERSION}`);
