@@ -109,12 +109,46 @@ def _api_docs_enabled() -> bool:
     return settings.enable_api_docs
 
 
+#: OpenAPI 分组说明。
+#:
+#: 端点本身已有中文 summary，但 /docs 左侧的分组默认只有英文 tag 名（auth/chat…），
+#: 第一次打开的人分不清哪个是登录、哪个是管理。这里给每组一句用途与权限说明；
+#: `tests/test_server.py` 还会锁住「没有端点落在未声明的 tag 下」，避免新增路由时忘了分组。
+_API_TAGS = [
+    {
+        "name": "auth",
+        "description": "注册、登录、登出、当前用户。会话是 HttpOnly cookie，登录接口用表单编码。",
+    },
+    {
+        "name": "chat",
+        "description": "模型列表、SSE 对话与标题生成。`POST /api/chat` 返回 `text/event-stream`。",
+    },
+    {
+        "name": "capabilities",
+        "description": "运行时能力探针：报告实际装配的工具（如是否可联网搜索）。",
+    },
+    {
+        "name": "sync",
+        "description": "本机数据增量同步：push 逐行接受或拒绝，pull 用不透明游标做长轮询。",
+    },
+    {
+        "name": "admin",
+        "description": "提供商 / 模型 / 用户管理。需要 admin 及以上；角色调整仅 superadmin。",
+    },
+]
+
+
 def create_app() -> FastAPI:
     docs_enabled = _api_docs_enabled()
     app = FastAPI(
         title=f"{settings.assistant_name} Agent API",
-        description="基于 FastAPI + PydanticAI + LiteLLM 的对话助手服务",
+        description=(
+            "基于 FastAPI + PydanticAI + LiteLLM 的对话助手服务。\n\n"
+            "除注册与登录外，所有 `/api/*` 都要求 HttpOnly cookie 会话；"
+            "接口文档默认只在非 production 环境暴露，可用 `ENABLE_API_DOCS=true` 显式打开。"
+        ),
         version="1.0.0",
+        openapi_tags=_API_TAGS,
         lifespan=lifespan,
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,

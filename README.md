@@ -107,7 +107,9 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 | `PATCH /api/admin/users/{id}/role` | 设置用户角色（仅 `superadmin`） |
 
 除注册与登录外所有 `/api/*` 都要求登录：凭据错误 → 400，未登录 → 401。接口文档默认只在非
-production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。
+production 环境暴露，需要时用 `ENABLE_API_DOCS=true` 显式打开。`/docs` 按
+auth / chat / capabilities / sync / admin 分组，每组都有用途与权限说明；`tests/test_server.py`
+锁住「没有端点落在未声明的 tag 下」，避免新增路由时漏分组。
 
 ## 项目结构
 

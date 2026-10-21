@@ -14,7 +14,7 @@ from app.schemas.capabilities import CapabilitiesResponse
 from app.services.auth import current_active_user
 from app.tools import build_tools
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", tags=["capabilities"])
 
 
 def collect_capabilities() -> CapabilitiesResponse:

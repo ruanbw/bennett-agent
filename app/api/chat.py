@@ -26,7 +26,7 @@ from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
 from app.services.model_service import ChatModelSnapshot, fetch_available_models, resolve_chat_model
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", tags=["chat"])
 
 #: 关闭中间层缓冲，否则流式输出会被反向代理攒成一整块。
 #: `Cache-Control` 用 `no-store`（与库默认一致）：SSE 是即时的、不可复用的一次性
