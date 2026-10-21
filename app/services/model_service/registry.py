@@ -202,9 +202,13 @@ class ChatModelSnapshot:
     `context_window` / `max_output_tokens` 与 `fallback_*` 分开存而不是查库：备用模型
     接手时用量事件必须报**真正回答的那个模型**的窗口，否则两个模型的窗口会混在一起。
 
-    `known_ids is None` 表示无法校验（旧版网关上游故障/兜底），此时白名单**放行**；
+    `known_ids is None` 表示**数据库路径**下无法校验；旧版网关兜底路径不再返回
+    None（那等于「上游故障时任意模型名都放行」），而是收敛为配置里的模型名。
     `key` 为空串表示「数据库已接管但一个模型都没启用」，调用方必须明确拒绝而不是
     退回环境变量。
+
+    `reasoning_levels` 是该模型声明的思考等级；空集合表示「无法校验」（数据库/网关
+    没给），不应用于拒绝请求。
     """
 
     key: str
@@ -215,6 +219,7 @@ class ChatModelSnapshot:
     fallback_context_window: int | None
     known_ids: frozenset[str] | None
     registry_managed: bool
+    reasoning_levels: frozenset[str] = frozenset()
 
     def context_window_for(self, answered_by: str) -> int | None:
         """本轮实际回答的模型对应的上下文窗口。"""
@@ -291,6 +296,7 @@ async def resolve_chat_model(requested_key: str | None) -> ChatModelSnapshot:
         fallback_context_window=fallback_context_window,
         known_ids=frozenset(by_key),
         registry_managed=True,
+        reasoning_levels=frozenset(str(level).strip().lower() for level in (model.supported_reasoning_levels or [])),
     )
 
 
@@ -300,12 +306,22 @@ async def _resolve_from_gateway(requested_key: str | None) -> ChatModelSnapshot:
     这里没有 per-provider 的 `ModelTarget`（凭据与地址来自环境变量，由
     `agent_factory.build_provider` 兜底），上限从网关列表里按 id 取。
 
-    白名单保持原语义：网关列表不可用时 `known_ids=None`（放行），而不是空集合
-    （那会把「上游故障」判成「所有模型都不可用」）。
+    **兜底时白名单收敛，而不是放行**：此前 `known_ids=None`（「拿不到列表就不校验」），
+    于是网关 `/v1/models` 只要抖一下，任意登录用户就能用服务端的 key 调一个未启用的
+    高价模型（M-04/旧网关路径）。兜底列表里的模型就是 `settings.model_name` 与
+    `FALLBACK_MODEL_NAME`，白名单也只允许这两个。
     """
     result, is_fallback = await gateway._load_models(use_cache=True)
     key = requested_key or settings.model_name
-    known_ids = None if is_fallback else frozenset(model.id for model in result.models)
+    fallback_key = _configured_fallback_name(key)
+
+    if is_fallback:
+        allowed = {settings.model_name}
+        if fallback_key is not None:
+            allowed.add(fallback_key)
+        known_ids: frozenset[str] | None = frozenset(allowed)
+    else:
+        known_ids = frozenset(model.id for model in result.models)
 
     def limits_of(model_id: str) -> tuple[int | None, int | None]:
         if is_fallback:
@@ -317,8 +333,15 @@ async def _resolve_from_gateway(requested_key: str | None) -> ChatModelSnapshot:
         return None, None
 
     context_window, max_output_tokens = limits_of(key)
-    fallback_key = _configured_fallback_name(key)
     fallback_context_window = limits_of(fallback_key)[0] if fallback_key is not None else None
+
+    # 兜底时列表不可信，思考等级不做校验（空集合 = 无法判定）。
+    reasoning_levels: frozenset[str] = frozenset()
+    if not is_fallback:
+        for model in result.models:
+            if model.id == key:
+                reasoning_levels = frozenset(str(level).strip().lower() for level in model.supported_reasoning_levels)
+                break
 
     return ChatModelSnapshot(
         key=key,
@@ -329,6 +352,7 @@ async def _resolve_from_gateway(requested_key: str | None) -> ChatModelSnapshot:
         fallback_context_window=fallback_context_window,
         known_ids=known_ids,
         registry_managed=False,
+        reasoning_levels=reasoning_levels,
     )
 
 
@@ -934,12 +958,15 @@ async def get_default_model_key() -> str | None:
     return _default_key_of(rows)
 
 
-async def get_known_model_ids() -> set[str] | None:
-    """可用模型的路由键集合；无法校验时返回 None。
+async def get_known_model_ids() -> set[str]:
+    """可用模型的路由键集合。**任何路径都不返回 None**。
 
-    数据库路径不会返回 None：即便一个模型都没启用，也是一个确定的空集合，调用方
-    必须拒绝所有显式模型（而不是把「后台全停了」当成「校验服务不可用」放行）。
-    旧版网关路径保留原语义：上游故障/兜底时返回 None。
+    数据库路径：即便一个模型都没启用，也是一个确定的空集合，调用方必须拒绝所有
+    显式模型（而不是把「后台全停了」当成「校验服务不可用」放行）。
+
+    旧版网关路径：上游故障/兜底时**收敛为配置里的模型名**（`MODEL_NAME` 与
+    `FALLBACK_MODEL_NAME`），而不是返回 None 放行任意模型名。此前上游 `/v1/models`
+    一抖动，任意登录用户就能让服务端用环境变量里的 key 调未启用的模型。
     """
     if await provider_config_exists():
         async with async_session_maker() as session:
@@ -948,7 +975,11 @@ async def get_known_model_ids() -> set[str] | None:
 
     result, is_fallback = await gateway._load_models(use_cache=True)
     if is_fallback:
-        return None
+        allowed = {settings.model_name}
+        fallback_name = _configured_fallback_name(settings.model_name)
+        if fallback_name is not None:
+            allowed.add(fallback_name)
+        return allowed
     return {model.id for model in result.models}
 
 

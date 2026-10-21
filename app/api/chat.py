@@ -22,6 +22,7 @@ from app.schemas.chat import (
     TitleGenerateResponse,
 )
 from app.schemas.events import ChatEvent
+from app.services.agent_factory import normalize_reasoning_effort
 from app.services.auth import current_active_user
 from app.services.chat_service import generate_title_from_prompt, stream_chat_events
 from app.services.model_service import ChatModelSnapshot, fetch_available_models, resolve_chat_model
@@ -116,8 +117,8 @@ async def resolve_request_model(model: str | None) -> ChatModelSnapshot:
 
     白名单（`known_ids`）：显式传入的 model 必须是网关真实暴露的 id。没有这一道，
     登录用户能拿服务端的 key 去调网关没暴露（或更贵）的模型——`model` 只是转发给上游
-    的字符串。`known_ids is None` 表示拿不到网关列表（旧版路径的上游故障/兜底），
-    此时**放行**：校验服务不可用不该让对话功能跟着不可用。
+    的字符串。旧版网关兜底时不再返回 `None`（放行任意模型名），而是收敛为配置里的
+    模型名；`None` 只保留给数据库路径的「无法校验」语义。
 
     数据库路径下「这个 key 不在启用模型里」不会在这里 400：`target=None` 留给对话流
     以 SSE 的 `model_unavailable` 收尾（流已经开了，客户端拿得到可展示的失败原因）。
@@ -133,6 +134,26 @@ async def resolve_request_model(model: str | None) -> ChatModelSnapshot:
     if not snapshot.key:
         raise HTTPException(status_code=503, detail="管理员尚未启用任何模型，请联系管理员。")
     return snapshot
+
+
+def validate_reasoning_effort(snapshot: ChatModelSnapshot, reasoning_effort: str | None) -> None:
+    """请求的思考等级必须在该模型声明的等级内（模型没声明时无法校验，放行）。
+
+    `"none"` 是「关闭思考」的归一化结果（前端用 off/false 表达），始终允许：
+    很多网关把它当作独立的开关，而不是 `supported_reasoning_levels` 里的一项。
+    """
+    if not reasoning_effort or not snapshot.reasoning_levels:
+        return
+
+    normalized = normalize_reasoning_effort(reasoning_effort)
+    if normalized is None or normalized == "none":
+        return
+    if normalized not in snapshot.reasoning_levels:
+        levels = "、".join(sorted(snapshot.reasoning_levels))
+        raise HTTPException(
+            status_code=400,
+            detail=f"模型 {snapshot.key} 不支持思考等级 {reasoning_effort}，可选等级：{levels}。",
+        )
 
 
 @router.get(
@@ -171,6 +192,7 @@ async def chat_stream(request: ChatRequest):
     事件以 `done` 或 `error` 收尾。
     """
     snapshot = await resolve_request_model(request.model)
+    validate_reasoning_effort(snapshot, request.reasoning_effort)
 
     async def event_generator():
         async for event in stream_chat_events(

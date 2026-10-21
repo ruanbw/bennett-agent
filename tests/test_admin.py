@@ -342,10 +342,12 @@ async def test_resolve_chat_model_carries_fallback_window(registry_db, monkeypat
     assert snapshot.context_window_for("gw/openai/primary") == 128000
 
 
-async def test_resolve_chat_model_gateway_path_is_fail_open(registry_db, monkeypatch):
-    """旧版网关列表不可用时白名单**放行**（`known_ids=None`），不是空集合。
+async def test_resolve_chat_model_gateway_path_fails_closed(registry_db, monkeypatch):
+    """旧版网关列表不可用时白名单**收敛为配置模型**，而不是放行任意模型名。
 
     `registry_db` 是空库（无提供商、无 marker），因此走的正是旧版网关路径。
+    此前 `known_ids=None` 意味着上游 `/v1/models` 一抖动，任意登录用户都能让服务端
+    用环境变量里的 key 调未启用的模型。
     """
     empty = ModelListResponse(models=[], default_model="openai/gpt-4o")
 
@@ -353,13 +355,31 @@ async def test_resolve_chat_model_gateway_path_is_fail_open(registry_db, monkeyp
         return empty, True
 
     monkeypatch.setattr(model_service.gateway, "_load_models", _unavailable)
+    monkeypatch.setattr(settings, "model_name", "openai/gpt-4o")
+    monkeypatch.setattr(settings, "fallback_model_name", None)
 
     snapshot = await model_service.resolve_chat_model(None)
 
     assert snapshot.registry_managed is False
     assert snapshot.target is None
-    assert snapshot.known_ids is None
+    assert snapshot.known_ids == frozenset({"openai/gpt-4o"})
     assert (snapshot.context_window, snapshot.max_output_tokens) == (None, None)
+
+
+async def test_resolve_chat_model_gateway_fallback_also_allows_config_fallback(registry_db, monkeypatch):
+    """兜底时备用模型名同样要留在白名单里，否则主模型失败后切过去会被 400 挡住。"""
+    empty = ModelListResponse(models=[], default_model="openai/gpt-4o")
+
+    async def _unavailable(*, use_cache):  # noqa: ANN001, ARG001
+        return empty, True
+
+    monkeypatch.setattr(model_service.gateway, "_load_models", _unavailable)
+    monkeypatch.setattr(settings, "model_name", "openai/gpt-4o")
+    monkeypatch.setattr(settings, "fallback_model_name", "openai/backup")
+
+    snapshot = await model_service.resolve_chat_model(None)
+
+    assert snapshot.known_ids == frozenset({"openai/gpt-4o", "openai/backup"})
 
 
 # ---------------------------------------------------------------------
@@ -701,3 +721,66 @@ async def test_nat64_public_embedded_address_is_allowed(monkeypatch):
     """NAT64 包装的公网地址不应被误杀（严格模式下也放行）。"""
     monkeypatch.setattr(settings, "provider_block_private_targets", True)
     await model_service._reject_private_target("http://[64:ff9b::808:808]/v1")
+
+
+async def test_resolve_chat_model_carries_declared_reasoning_levels(registry_db):
+    """思考等级校验需要模型声明的词表；快照必须把它带出来（并归一化成小写）。"""
+    provider_id = await _seed_provider(registry_db)
+    await _add_model(
+        registry_db,
+        provider_id,
+        model_id="openai/thinker",
+        supported_reasoning_levels=["low", "HIGH", " max "],
+    )
+
+    snapshot = await model_service.resolve_chat_model("gw/openai/thinker")
+
+    assert snapshot.reasoning_levels == frozenset({"low", "high", "max"})
+
+
+def test_validate_reasoning_effort_rejects_undeclared_levels():
+    """前端不应发未声明等级；手工构造的请求也不能把任意值塞进 extra_body。"""
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from app.api.chat import validate_reasoning_effort
+    from app.services.model_service import ChatModelSnapshot
+
+    snapshot = ChatModelSnapshot(
+        key="gw/thinker",
+        target=None,
+        context_window=None,
+        max_output_tokens=None,
+        fallback_key=None,
+        fallback_context_window=None,
+        known_ids=frozenset({"gw/thinker"}),
+        registry_managed=True,
+        reasoning_levels=frozenset({"low", "high"}),
+    )
+
+    validate_reasoning_effort(snapshot, None)
+    validate_reasoning_effort(snapshot, "HIGH")
+    validate_reasoning_effort(snapshot, "off")  # 关闭思考始终允许
+
+    with _pytest.raises(HTTPException) as excinfo:
+        validate_reasoning_effort(snapshot, "ultra")
+    assert excinfo.value.status_code == 400
+
+
+def test_validate_reasoning_effort_is_skipped_when_model_does_not_declare_levels():
+    """网关没枚举等级（很多 OpenAI 兼容网关）时不能凭空拒绝。"""
+    from app.api.chat import validate_reasoning_effort
+    from app.services.model_service import ChatModelSnapshot
+
+    snapshot = ChatModelSnapshot(
+        key="gw/unknown",
+        target=None,
+        context_window=None,
+        max_output_tokens=None,
+        fallback_key=None,
+        fallback_context_window=None,
+        known_ids=frozenset({"gw/unknown"}),
+        registry_managed=True,
+    )
+
+    validate_reasoning_effort(snapshot, "whatever")
