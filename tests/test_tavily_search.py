@@ -19,9 +19,11 @@ import pytest
 from app.config import settings
 from app.tools.tavily_search import (
     MAX_ITEM_CHARS,
+    MAX_QUERY_CHARS,
     MAX_TOTAL_CHARS,
     UNTRUSTED_PREFIX,
     _format_results,
+    normalize_query,
     tavily_search,
 )
 
@@ -511,3 +513,49 @@ def test_registered_tool_timeout_uses_the_derived_value():
     from app.tools import tavily_tool
 
     assert tavily_tool.timeout == module.TAVILY_TOOL_TIMEOUT_SECONDS
+
+
+# ---------------------------------------------------------------------
+# 关键词归一化（空白/控制字符/超长）
+# ---------------------------------------------------------------------
+def test_normalize_query_collapses_whitespace_and_control_chars():
+    """换行会打散查询语义、日志里也变成多行；控制字符会让上游直接 400。"""
+    assert normalize_query("  Python\n3.13\t新特性  ") == "Python 3.13 新特性"
+    assert normalize_query("a\x00b") == "a b"
+
+
+def test_normalize_query_truncates_long_input():
+    """模型偶尔把整段上下文当关键词发过来：截断后通常仍是一次有意义的搜索。"""
+    assert len(normalize_query("词" * (MAX_QUERY_CHARS + 200))) == MAX_QUERY_CHARS
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n\t", None])
+def test_normalize_query_returns_empty_for_blank(raw):
+    assert normalize_query(raw) == ""
+
+
+async def test_blank_query_is_rejected_before_requesting(fake_http):
+    """空白关键词必然换回 400 或无关结果：发请求之前就拒绝，省一次配额。"""
+    client = fake_http(FakeResponse(payload={"results": []}))
+
+    result = await tavily_search(None, "   \n\t ")
+
+    assert "搜索关键词为空" in result
+    assert client.calls == []
+
+
+async def test_query_is_normalised_before_sending(fake_http):
+    client = fake_http(FakeResponse(payload={"results": []}))
+
+    await tavily_search(None, "  向量\n数据库  ")
+
+    assert client.calls[0][1]["json"]["query"] == "向量 数据库"
+
+
+async def test_error_messages_echo_the_normalised_query(fake_http):
+    """失败文案里的关键词也要是归一化后的：否则多行关键词会撑爆那一行。"""
+    fake_http(exc=httpx.TimeoutException("slow"))
+
+    result = await tavily_search(None, "多行\n关键词")
+
+    assert "多行 关键词" in result
