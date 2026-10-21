@@ -555,6 +555,13 @@ localStorage（键 `composer_drafts`，一个 JSON 装所有会话）：
   `lib/composer-send.ts`（上下文已满 → 附件 → 空输入），有 vitest 覆盖。
 - **不要给 markdown 加 `rehype-raw`。** `markdown-text.tsx` 只挂 `remarkGfm`，
   因此 LLM 输出里的原始 HTML 会被转义。这是当前 XSS 防护的全部依据。
+- **GFM 的两块「裸 HTML」要单独补样式。** remark-gfm 产出的任务列表
+  （`ul.contains-task-list` / `li.task-list-item`）与脚注（`section[data-footnotes]`、
+  `a[data-footnote-backref]`）**没有可挂的类名**，组件映射够不着内部结构。不补样式时：
+  任务列表同时画「项目符号 + 浏览器原生灰方块复选框」，脚注是一个紧贴正文的普通有序列表、
+  回链还带着 emoji 变体的 `↩`。`index.css` 里针对 `.aui-md` 作用域补了这几条：去掉圆点、
+  复选框用 `accent-color: var(--primary)`（深色主题下自动变成亮色）、脚注加分隔线与小字、
+  回链写成中文「返回」。
 - **「复制回答」要能在非安全上下文里工作，失败也不能静默。** assistant-ui 的
   `ActionBarPrimitive.Copy` 只走 `navigator.clipboard`：局域网用 `http://192.168.x.x`
   访问时该 API 不存在，点了复制既没反应也没提示。这里改用带 `execCommand` 回退的

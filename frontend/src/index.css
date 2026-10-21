@@ -136,3 +136,55 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(161, 161, 170, 0.4);
 }
+
+/*
+ * GFM 的两块「裸 HTML」样式：任务列表与脚注。
+ *
+ * remark-gfm 产出的是**没有类名的语义标签**（`<ul class="contains-task-list">`、
+ * `<section data-footnotes>`、`<a data-footnote-backref>`），组件映射里够不着它们的
+ * 内部结构，只能在这里补：
+ *
+ * - 任务列表：默认样式会同时画「项目符号 + 浏览器原生复选框」，且复选框是最原始的灰方块。
+ *   去掉圆点、改成 flex 对齐、用主题色画勾选框，勾选状态才和界面同一套语言。
+ * - 脚注：默认是一个普通有序列表，紧贴正文像是正文的一部分；回链还带着 emoji 变体的
+ *   `↩`。这里把它变成正文下方一条带分隔线的注释区，并把回链写成中文「返回」。
+ */
+.aui-md .contains-task-list {
+  list-style: none;
+  margin-inline-start: 0;
+  padding-inline-start: 0;
+}
+
+.aui-md .task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.aui-md .task-list-item > input[type='checkbox'] {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin-top: 0.3rem;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+
+.aui-md [data-footnotes] {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.aui-md [data-footnote-backref] {
+  font-size: 0;
+  text-decoration: none;
+}
+
+.aui-md [data-footnote-backref]::after {
+  content: '返回';
+  font-size: 10px;
+  margin-inline-start: 0.25rem;
+  color: var(--primary);
+}
