@@ -29,6 +29,10 @@ export interface SettingsDialogProps {
   onPasswordChanged?: () => void;
   /** 运行时能力快照；null = 还没拿到 / 拿不到（面板据此显示「未知」）。 */
   capabilities?: Capabilities | null;
+  /** 上一次能力探测是否失败：失败且没有快照时给出「重新探测」入口。 */
+  capabilitiesFailed?: boolean;
+  /** 重新探测运行时能力（管理员配好搜索 Key 后不必刷新页面）。 */
+  onRefreshCapabilities?: () => void;
 }
 
 export interface SettingsPanelProps {
@@ -37,6 +41,10 @@ export interface SettingsPanelProps {
   onPasswordChanged?: () => void;
   /** 运行时能力快照；null = 还没拿到 / 拿不到（面板据此显示「未知」）。 */
   capabilities?: Capabilities | null;
+  /** 上一次能力探测是否失败。 */
+  capabilitiesFailed?: boolean;
+  /** 重新探测运行时能力。 */
+  onRefreshCapabilities?: () => void;
   /**
    * 面板是否可见。默认 true（直接渲染 `SettingsPanel` 的场景）。
    * 本机数据只在打开时读一次，不是实时监控。
@@ -79,6 +87,8 @@ export function SettingsPanel({
   open = true,
   onPasswordChanged,
   capabilities = null,
+  capabilitiesFailed = false,
+  onRefreshCapabilities,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
   const localStats = useLocalDataStats(open);
@@ -215,6 +225,24 @@ export function SettingsPanel({
             <span className="text-foreground">{describeToolCount(capabilities)}</span>
           </div>
         </div>
+        {/* 能力清单只拉一次：启动瞬间失败（cookie 刚生效、反代在建连）会让这里永远是
+            「未知」，而用户唯一能做的就是刷新整个页面。给一个就地重探的入口。 */}
+        {capabilities === null && onRefreshCapabilities && (
+          <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-muted-foreground/80">
+            <span>
+              {capabilitiesFailed
+                ? '能力探测失败，下面的「未知」不代表服务端没配。'
+                : '还没有拿到能力清单。'}
+            </span>
+            <button
+              type="button"
+              onClick={onRefreshCapabilities}
+              className="cursor-pointer rounded-md border border-border/70 px-1.5 py-0.5 font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+            >
+              重新探测
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -226,6 +254,8 @@ export function SettingsDialog({
   userEmail,
   userRole = null,
   capabilities = null,
+  capabilitiesFailed = false,
+  onRefreshCapabilities,
   onPasswordChanged,
 }: SettingsDialogProps) {
   return (
@@ -247,6 +277,8 @@ export function SettingsDialog({
             userRole={userRole}
             open={open}
             capabilities={capabilities}
+            capabilitiesFailed={capabilitiesFailed}
+            onRefreshCapabilities={onRefreshCapabilities}
             onPasswordChanged={onPasswordChanged}
           />
         </div>

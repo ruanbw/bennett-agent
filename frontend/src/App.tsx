@@ -257,7 +257,7 @@ function AuthenticatedShell({
 }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
   // 运行时能力只用于裁剪空对话页的起步建议；失败时降级为「无联网搜索」，不阻塞界面
-  const capabilities = useCapabilities();
+  const { capabilities, failed: capabilitiesFailed, retry: refreshCapabilities } = useCapabilities();
   const {
     sessions,
     currentSessionId,
@@ -451,7 +451,13 @@ function AuthenticatedShell({
                 currentReasoningEffort={currentReasoningEffort}
                 onSelectModel={selectModel}
                 onSelectReasoningEffort={selectReasoningEffort}
-                onRefreshModels={refreshModels}
+                // 模型菜单的「重试」顺带重探运行时能力：管理员刚配好搜索 Key 时，
+                // 最常做的就是回聊天页点这个按钮——只刷模型列表会留下「已启用搜索但
+                // 起步建议里没有搜索示例」的错位。
+                onRefreshModels={async () => {
+                  refreshCapabilities();
+                  await refreshModels();
+                }}
                 onToggleSidebar={handleToggleSidebar}
                 onOpenSearch={handleOpenSearch}
                 onOpenSettings={handleOpenSettings}
@@ -476,6 +482,8 @@ function AuthenticatedShell({
         userEmail={userEmail}
         userRole={userRole}
         capabilities={capabilities}
+        capabilitiesFailed={capabilitiesFailed}
+        onRefreshCapabilities={refreshCapabilities}
         onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
       />
 

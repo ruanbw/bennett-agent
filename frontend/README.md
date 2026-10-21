@@ -429,6 +429,11 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   `describeToolCount`）。`useCapabilities` 返回 `null` 表示「还没拿到 / 拿不到」，而不是
   用保守值顶替——否则面板会把「探测失败」说成「未启用」。探测本身带 8s 超时
   （`CAPABILITIES_TIMEOUT_MS`）：被反代攒住时不至于永远挂着。
+  **一次失败不等于永久未知。** 启动瞬间正是最容易失败的时机（cookie 刚生效、反代在建连），
+  而能力只拉一次的话，用户唯一的补救是刷新整个页面。`useCapabilities` 现在失败后
+  `CAPABILITIES_AUTO_RETRY_MS`（3s）自动补一次，并暴露 `retry`：设置里「未知」下方出现
+  「能力探测失败，下面的「未知」不代表服务端没配。」+「重新探测」；模型菜单的「重试」
+  也会顺带重探（管理员刚配好搜索 Key 时最常点的就是那里）。
 - **工具调用的折叠条要能自证「在干什么」。** 只显示工具名时，`search_docs` 和
   `fetch_page` 看不出这次查的是什么。`lib/tool-call-view.ts:toolArgsPreview` 优先取主参数
   （`query` / `q` / `question` / `url` …），没有约定字段就取第一个非空字符串，再退回原文；

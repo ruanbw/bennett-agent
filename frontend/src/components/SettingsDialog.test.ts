@@ -1,6 +1,6 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SettingsPanel } from './SettingsDialog';
 
@@ -57,5 +57,46 @@ describe('SettingsPanel', () => {
     const html = render({ userEmail: null });
 
     expect(html).toContain('未登录');
+  });
+});
+
+describe('运行时能力：未知时的「重新探测」入口', () => {
+  it('能力探测失败时说明「未知不代表没配」，并给一个就地重探的按钮', () => {
+    const onRefresh = vi.fn();
+    const html = renderToStaticMarkup(
+      createElement(SettingsPanel, {
+        userEmail: 'user@example.com',
+        capabilities: null,
+        capabilitiesFailed: true,
+        onRefreshCapabilities: onRefresh,
+      }),
+    );
+
+    expect(html).toContain('能力探测失败');
+    expect(html).toContain('不代表服务端没配');
+    expect(html).toContain('重新探测');
+  });
+
+  it('拿到能力清单后不再显示这句提示', () => {
+    const html = renderToStaticMarkup(
+      createElement(SettingsPanel, {
+        userEmail: 'user@example.com',
+        capabilities: { web_search: true, tools: ['tavily_search'] },
+        onRefreshCapabilities: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain('已启用');
+    expect(html).not.toContain('重新探测');
+  });
+
+  it('调用方没提供重探回调时不渲染点不动的按钮', () => {
+    const html = renderToStaticMarkup(
+      createElement(SettingsPanel, { userEmail: 'user@example.com', capabilities: null, capabilitiesFailed: true }),
+    );
+
+    // 没有可点的动作就不留一句干瞪眼的提示
+    expect(html).not.toContain('重新探测');
+    expect(html).not.toContain('还没有拿到能力清单');
   });
 });
