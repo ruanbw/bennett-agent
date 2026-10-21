@@ -4,9 +4,10 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ArrowDown, ChevronDown, Loader2 } from "lucide-react";
 import { useDeferredValue, useState, useEffect, useRef } from "react";
 import { thinkingSeconds } from "@/lib/reasoning-time";
+import { isNearScrollBottom } from "@/lib/scroll-follow";
 
 interface ReasoningViewProps {
   text?: string;
@@ -19,16 +20,19 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
+  // 是否跟随最新思考。用户往上翻后关掉，避免每个增量都把他拽回底部。
+  const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 思考文本每个增量都会整串重渲染：推后一帧渲染，让输入与滚动先跟上
   const deferredText = useDeferredValue(text);
 
-  // 新一轮思考开始时：重置计时，流式中默认展开
+  // 新一轮思考开始时：重置计时，流式中默认展开并恢复跟随
   if (prevStreaming !== isStreaming) {
     setPrevStreaming(isStreaming);
     if (isStreaming) {
       setUserToggled(null);
       setLiveElapsed(0);
+      setFollow(true);
     }
   }
 
@@ -48,12 +52,25 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
     return () => clearInterval(timer);
   }, [isStreaming, elapsedMs]);
 
-  // 流式输出时思考内容自动平滑吸底
+  // 流式输出时自动吸底；用户已经往上翻（follow=false）就不再抢滚动位置
   useEffect(() => {
-    if (isStreaming && isOpen && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [deferredText, isStreaming, isOpen]);
+    if (!isStreaming || !isOpen || !follow) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [deferredText, isStreaming, isOpen, follow]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = isNearScrollBottom(el);
+    setFollow((prev) => (prev === near ? prev : near));
+  };
+
+  const resumeFollow = () => {
+    setFollow(true);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
 
   if (!text && !isStreaming) return null;
 
@@ -67,7 +84,7 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
         render={
           <button
             type="button"
-            className="group inline-flex items-center gap-1.5 py-1 text-xs text-muted-foreground/80 hover:text-foreground transition-colors cursor-pointer"
+            className="group inline-flex items-center gap-1.5 py-1.5 text-xs text-muted-foreground/80 hover:text-foreground transition-colors cursor-pointer"
           />
         }
       >
@@ -110,10 +127,23 @@ export function ReasoningView({ text, isStreaming = false, elapsedMs = 0 }: Reas
             role="group"
             aria-label="思考过程"
             tabIndex={0}
+            onScroll={handleScroll}
             className="max-h-64 overflow-y-auto pr-2 text-xs leading-relaxed text-muted-foreground/85 whitespace-pre-wrap select-text font-sans"
           >
             {deferredText || "思考中..."}
           </div>
+          {isStreaming && !follow && (
+            <div className="mt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={resumeFollow}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 cursor-pointer"
+              >
+                <ArrowDown className="size-3" aria-hidden="true" />
+                回到最新思考
+              </button>
+            </div>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>
