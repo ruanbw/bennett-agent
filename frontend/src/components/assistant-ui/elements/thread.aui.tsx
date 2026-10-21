@@ -48,6 +48,7 @@ import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
 import { contextExhausted } from "@/lib/chat-message";
+import { resolveSendGate } from "@/lib/composer-send";
 import { readUsage } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
@@ -390,14 +391,18 @@ const Composer: FC<{
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
   const blockedByAttachments = attachmentCount > 0;
+  const composerEmpty = useAuiState((s) => s.composer.isEmpty);
   // 两个禁用理由共存时以上下文为准：附件可以移除，换模型/新会话不能省
   const blocked = contextLocked || blockedByAttachments;
   const inputPlaceholder = contextLocked ? "本会话上下文已满，请新建会话继续" : "问点什么吧...";
-  const sendTooltip = contextLocked
-    ? "本会话上下文已满，请新建会话"
-    : blockedByAttachments
-      ? "附件暂不支持，请先移除"
-      : "发送消息";
+  // 空输入也要禁用：ComposerPrimitive.Send 内部会拒绝发送，但 asChild 会把按钮
+  // 自身的 disabled 保留下来，不显式传就渲染成「看起来能点、点了没反应」。
+  const sendGate = resolveSendGate({
+    contextLocked,
+    hasAttachments: blockedByAttachments,
+    isEmpty: composerEmpty,
+  });
+  const { disabled: sendDisabled, tooltip: sendTooltip } = sendGate;
 
   return (
     <ComposerPrimitive.Root
@@ -509,7 +514,7 @@ const Composer: FC<{
                   type="button"
                   variant="default"
                   size="icon"
-                  disabled={blocked}
+                  disabled={sendDisabled}
                   className="size-8 pointer-coarse:size-10 rounded-xl cursor-pointer"
                   aria-label={sendTooltip}
                 >

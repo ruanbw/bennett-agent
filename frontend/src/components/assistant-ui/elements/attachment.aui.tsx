@@ -291,21 +291,25 @@ export const ComposerAttachments: FC = () => {
   );
 };
 
+/**
+ * 附件入口：后端只接受文本，因此**明确禁用**而不是打开文件选择器再拦发送。
+ *
+ * 此前按钮可点、选完文件后才在上方显示「不会发送」的提示：用户已经完成了一次
+ * 无效操作。保留按钮（而不是隐藏）是为了让入口位置稳定，并用 aria-label 说明原因；
+ * 粘贴/拖拽仍然会经过 `ComposerAttachments` 的提示与发送阻断，作为最后一道保险。
+ */
 export const ComposerAddAttachment: FC = () => {
   return (
-    <ComposerPrimitive.AddAttachment
-      render={
-        <TooltipIconButton
-          tooltip="添加附件（暂不支持，见提示）"
-          side="bottom"
-          variant="ghost"
-          size="icon"
-          className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 pointer-coarse:size-8 rounded-full active:scale-[0.96] motion-reduce:transition-none"
-          aria-label="添加附件（暂不支持）"
-        />
-      }
+    <TooltipIconButton
+      tooltip="附件暂不支持（后端只接受文本）"
+      side="bottom"
+      variant="ghost"
+      size="icon"
+      disabled
+      className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 pointer-coarse:size-8 rounded-full active:scale-[0.96] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-40"
+      aria-label="附件暂不支持"
     >
       <PlusIcon className="aui-attachment-add-icon size-4" />
-    </ComposerPrimitive.AddAttachment>
+    </TooltipIconButton>
   );
 };
