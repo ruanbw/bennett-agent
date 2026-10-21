@@ -25,13 +25,88 @@ from app.services.model_service.errors import ProviderFetchError
 logger = logging.getLogger(__name__)
 
 
-def _is_metadata_range(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """链路本地 / 未指定 / 组播：**任何配置下**都不接受的出站目标。
+#: 云厂商实例元数据服务的已知地址。它们**不都是**链路本地地址：
+#:
+#: - AWS/GCP/Azure：169.254.169.254（link-local，已被下面的通用判定覆盖）
+#: - AWS IPv6 IMDS：fd00:ec2::254（ULA，只被这条显式列表覆盖）
+#: - 阿里云：100.100.100.200（100.64/10 CGNAT，不是 link-local）
+#:
+#: 只靠 `is_link_local` 会把后两者漏掉；默认模式下私网又是放行的，于是它们在
+#: 「元数据永远拒绝」的承诺下依然可达（M-03）。
+CLOUD_METADATA_ADDRESSES: frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address] = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("fd00:ec2::254"),
+    }
+)
 
-    这一族没有任何「合法的模型网关」用途，却正好覆盖云厂商的实例元数据服务
-    （169.254.169.254、fe80:: 链路本地），是最该堵死的那一类。
+#: NAT64 前缀（RFC 6052 / RFC 8215）：最后 32 位是内嵌的 IPv4。
+_NAT64_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
+
+def _embedded_ipv4(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
+    """取出 IPv6 地址里内嵌的 IPv4（若存在）。
+
+    这些写法在操作系统/网络设备上会**真的连到内嵌的 IPv4 目标**，但
+    `ipaddress` 的属性（`is_link_local` / `is_global`）看的是外层 IPv6：
+    `64:ff9b::a9fe:a9fe` 的 `is_global` 是 True，直接放行等于允许访问
+    169.254.169.254（NAT64 网络下）。
+
+    覆盖：IPv4-mapped（::ffff:0:0/96）、6to4（2002::/16）、Teredo、
+    NAT64（64:ff9b::/96、64:ff9b:1::/48）、已废弃的 IPv4-compatible（::/96）。
     """
-    return address.is_link_local or address.is_unspecified or address.is_multicast
+    if not isinstance(address, ipaddress.IPv6Address):
+        return None
+
+    if address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    if address.sixtofour is not None:
+        return address.sixtofour
+    if address.teredo is not None:
+        # teredo 返回 (server, client)，服务端地址是实际可达的那一跳
+        return address.teredo[0]
+
+    packed = int(address)
+    for network in _NAT64_NETWORKS:
+        if address in network:
+            return ipaddress.IPv4Address(packed & 0xFFFFFFFF)
+    # IPv4-compatible ::a.b.c.d（:: 与 ::1 除外）同样按内嵌 IPv4 处理。
+    if (packed >> 32) == 0 and packed not in (0, 1):
+        return ipaddress.IPv4Address(packed & 0xFFFFFFFF)
+    return None
+
+
+def _classify_addresses(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """外层地址 + 内嵌 IPv4（若有）一起参与判定。"""
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [address]
+    embedded = _embedded_ipv4(address)
+    if embedded is not None:
+        addresses.append(embedded)
+    return addresses
+
+
+def _is_metadata_range(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """元数据族：**任何配置下**都不接受的出站目标。
+
+    元数据族 = 链路本地 / 未指定 / 组播，**或**已知云厂商元数据地址（见
+    `CLOUD_METADATA_ADDRESSES`）；IPv6 的内嵌 IPv4 也要拆开判。这一族没有任何
+    「合法的模型网关」用途，却是盲 SSRF 里唯一「不需要先拿到凭据」就能换到新凭据
+    的攻击。
+    """
+    for candidate in _classify_addresses(address):
+        if candidate in CLOUD_METADATA_ADDRESSES:
+            return True
+        if candidate.is_link_local or candidate.is_unspecified or candidate.is_multicast:
+            return True
+    return False
 
 
 def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -41,7 +116,13 @@ def _is_internal_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     `is_private` / `is_loopback` 更难漏掉一种。**但默认不启用**：本机 LiteLLM 网关
     （`LITELLM_API_BASE` 的默认值就是 `http://localhost:4000`）与自建 vLLM 常在同一台
     机器或内网，一刀切会把项目文档里最主要的用法拦掉。
+
+    IPv6 的内嵌 IPv4 按被嵌入的地址判定：`64:ff9b::7f00:1` 外层是 global，实际却
+    连到 127.0.0.1，不能因为它「看起来是公网 IPv6」就放行。
     """
+    embedded = _embedded_ipv4(address)
+    if embedded is not None:
+        return not embedded.is_global
     return not address.is_global
 
 

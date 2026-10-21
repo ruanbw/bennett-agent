@@ -419,3 +419,14 @@ def test_prompt_rules_stay_one_per_line():
 
     numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)}]
     assert len(numbered) == 8, numbered
+
+
+def test_upstream_http_client_does_not_follow_redirects():
+    """openai SDK 默认跟随 30x；守卫只看首跳，必须显式关掉（M-02）。"""
+    client = agent_factory._build_upstream_http_client()
+    assert client.follow_redirects is False
+
+
+def test_provider_injects_the_no_redirect_client():
+    provider = agent_factory.build_provider()
+    assert provider.client._client.follow_redirects is False

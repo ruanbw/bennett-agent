@@ -670,3 +670,34 @@ async def test_status_all_keeps_every_account(registry_db):
         "bob@example.com",
         "carol@example.com",
     ]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # IPv6 内嵌 IPv4：外层 is_global=True，实际会连到内嵌的元数据/环回地址
+        "http://[64:ff9b::a9fe:a9fe]/latest/meta-data",
+        "http://[::a9fe:a9fe]/latest/meta-data",
+        # 云厂商元数据不全是 link-local
+        "http://100.100.100.200/latest/meta-data",
+        "http://[fd00:ec2::254]/latest/meta-data",
+    ],
+)
+async def test_embedded_and_cloud_metadata_targets_are_rejected(base_url):
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service._reject_private_target(base_url)
+    assert "链路本地" in str(excinfo.value)
+
+
+async def test_nat64_loopback_is_internal_in_strict_mode(monkeypatch):
+    """64:ff9b::7f00:1 外层是 global，严格模式也必须按内嵌 127.0.0.1 拦下。"""
+    monkeypatch.setattr(settings, "provider_block_private_targets", True)
+    with pytest.raises(model_service.ProviderFetchError) as excinfo:
+        await model_service._reject_private_target("http://[64:ff9b::7f00:1]/v1")
+    assert "内网" in str(excinfo.value)
+
+
+async def test_nat64_public_embedded_address_is_allowed(monkeypatch):
+    """NAT64 包装的公网地址不应被误杀（严格模式下也放行）。"""
+    monkeypatch.setattr(settings, "provider_block_private_targets", True)
+    await model_service._reject_private_target("http://[64:ff9b::808:808]/v1")

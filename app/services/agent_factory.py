@@ -118,6 +118,24 @@ def _settings_cache_key() -> tuple[object, ...]:
     )
 
 
+def _build_upstream_http_client() -> httpx.AsyncClient:
+    """对话链路的 httpx 客户端：**不跟随重定向**。
+
+    `openai` SDK 默认 `follow_redirects=True`（`_base_client.py` 里
+    `kwargs.setdefault("follow_redirects", True)`），而 `outbound_guard` 只校验
+    管理员填写的 base_url 首跳。如果该主机返回 307/303，SDK 会自行把请求发到
+    `Location` 指向的内网/云元数据地址，守卫完全看不到（M-02）。
+
+    这里显式关闭跟随。需要重定向的合法网关极少；要支持时应逐跳重新执行 scheme +
+    地址校验，而不是交给 SDK 静默跟随。
+    """
+    timeout = build_upstream_timeout()
+    return httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=timeout if timeout is not None else None,
+    )
+
+
 def build_provider(target: ModelTarget | None = None) -> LiteLLMProvider:
     """构造 LiteLLM provider。
 
@@ -128,6 +146,8 @@ def build_provider(target: ModelTarget | None = None) -> LiteLLMProvider:
     自己就会重试上游，两层重试叠加空闲超时会把单轮对话的最坏耗时乘上去。pydantic-ai
     2.31.1 的 `LiteLLMProvider` 没有 `max_retries` 参数，只能自己构造 `AsyncOpenAI`
     再通过官方支持的 `openai_client=` 传入（见其 `__init__` 重载）。
+
+    同时注入一个**不跟随重定向**的 httpx 客户端（见 `_build_upstream_http_client`）。
     """
     base_url = target.base_url if target is not None else settings.litellm_api_base
     api_key = target.api_key if target is not None else settings.litellm_api_key
@@ -139,6 +159,7 @@ def build_provider(target: ModelTarget | None = None) -> LiteLLMProvider:
         base_url=base_url,
         api_key=api_key or "sk-no-key",
         max_retries=0,
+        http_client=_build_upstream_http_client(),
     )
     return LiteLLMProvider(openai_client=client)
 
