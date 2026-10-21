@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useRef, useState, type FormEvent } from 'react';
-import { Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 
 import { MIN_PASSWORD_LENGTH, modeAfterRegister, type RegisterOutcome } from '../lib/auth';
 import { readAuthFieldState } from '../lib/auth-form';
@@ -28,9 +28,26 @@ export interface LoginPageProps {
   pending: boolean;
   error: string | null;
   onClearError: () => void;
+  /**
+   * 当前停在登录页的原因是「探测登录态失败」（网络/本地库），而不是服务端明确说未登录。
+   *
+   * 这两种情况要分开：真正未登录就让用户输密码；只是没探到时，会话 cookie 很可能还
+   * 完全有效，让用户重输密码是在拿一次网络抖动换一次重新登录。
+   */
+  probeFailed?: boolean;
+  /** 重新探测登录态；缺省时不显示「重试」（页面在没有 useAuth 的场景下也能渲染）。 */
+  onRetryProbe?: () => void;
 }
 
-export function LoginPage({ onLogin, onRegister, pending, error, onClearError }: LoginPageProps) {
+export function LoginPage({
+  onLogin,
+  onRegister,
+  pending,
+  error,
+  onClearError,
+  probeFailed = false,
+  onRetryProbe,
+}: LoginPageProps) {
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -172,9 +189,25 @@ export function LoginPage({ onLogin, onRegister, pending, error, onClearError }:
 
           {/* role=alert：错误是异步出现的，屏幕阅读器需要被主动告知 */}
           {error ? (
-            <p id="auth-error" role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
+            <div id="auth-error" role="alert" className="space-y-1.5">
+              <p className="text-sm text-destructive">{error}</p>
+              {/* 只是没探到会话时，重输密码是多余的：会话 cookie 可能完全有效 */}
+              {probeFailed && onRetryProbe ? (
+                // 用带边框的按钮而不是一行下划线小字：在这种状态下它是**主行动**
+                // （用户不该为了一个网络抖动重新输密码），埋在提示文字里会被忽略。
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={onRetryProbe}
+                  disabled={pending}
+                  className="cursor-pointer gap-1.5"
+                >
+                  <RefreshCw className="size-3.5" aria-hidden="true" />
+                  重试检查登录状态
+                </Button>
+              ) : null}
+            </div>
           ) : null}
 
           <Button type="submit" size="lg" className="w-full" disabled={!canSubmit}>

@@ -502,8 +502,19 @@ function AuthenticatedShell({
  * 自身渲染期抛出的错误。这里只保留「对话区域」那层按会话重建的边界。
  */
 export function App() {
-  const { status, user, pending, error, login, register, logout, expireSession, clearError } =
-    useAuth();
+  const {
+    status,
+    user,
+    pending,
+    error,
+    probeFailed,
+    retryProbe,
+    login,
+    register,
+    logout,
+    expireSession,
+    clearError,
+  } = useAuth();
   const userId = user?.id ?? null;
 
   // 把文件拖到输入框以外的地方时，浏览器会导航到那个文件、整个应用被替换掉
@@ -534,6 +545,8 @@ export function App() {
           pending={pending}
           error={error}
           onClearError={clearError}
+          probeFailed={probeFailed}
+          onRetryProbe={() => void retryProbe()}
         />
       ) : (
         /*

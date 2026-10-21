@@ -62,3 +62,31 @@ describe('LoginPage', () => {
     expect(html).toContain('id="auth-error"');
   });
 });
+
+describe('启动时探测失败', () => {
+  it('只是没探到会话时提供「重试检查登录状态」，而不是让用户重输密码', () => {
+    const html = render({ error: '网络连接中断，请检查网络后重试', probeFailed: true, onRetryProbe: vi.fn() });
+
+    expect(html).toContain('重试检查登录状态');
+  });
+
+  it('真正未登录（凭据错误）时不出现探测重试按钮', () => {
+    const html = render({ error: '邮箱或密码错误', probeFailed: false, onRetryProbe: vi.fn() });
+
+    expect(html).not.toContain('重试检查登录状态');
+    expect(html).toContain('邮箱或密码错误');
+  });
+
+  it('没有 onRetryProbe 时不渲染按钮（页面可以被单独渲染）', () => {
+    const html = render({ error: '探测失败', probeFailed: true });
+
+    expect(html).not.toContain('重试检查登录状态');
+  });
+
+  it('错误与重试入口同属 role=alert，读屏会一起播报', () => {
+    const html = render({ error: '探测失败', probeFailed: true, onRetryProbe: vi.fn() });
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('id="auth-error"');
+  });
+});

@@ -39,6 +39,15 @@ export interface UseAuthResult {
   /** 请求进行中：用于禁用提交按钮，避免重复提交。 */
   pending: boolean;
   error: string | null;
+  /**
+   * 「退回登录页」是因为**探测失败**（网络/本地库）而不是服务端明确说未登录。
+   *
+   * 两者在界面上必须能区分：真正未登录时让用户输密码；只是没探到时，会话 cookie 可能
+   * 还完全有效，让用户重输密码是在拿一个网络抖动换一次重新登录。
+   */
+  probeFailed: boolean;
+  /** 重新探测登录态（`probeFailed` 时登录页上「重试」按钮的入口）。 */
+  retryProbe: () => Promise<void>;
   login: (email: string, password: string) => Promise<boolean>;
   /**
    * 注册并自动登录。返回值可区分「注册失败」与「账号已创建但自动登录失败」，
@@ -61,6 +70,7 @@ export function useAuth(): UseAuthResult {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [probeFailed, setProbeFailed] = useState(false);
 
   /**
    * 认领本地缓存，返回「失败原因」或 `null`。
@@ -79,44 +89,58 @@ export function useAuth(): UseAuthResult {
     }
   }, []);
 
-  // 启动时探测登录态
-  useEffect(() => {
-    let active = true;
-
-    void (async () => {
-      try {
-        const current = await fetchCurrentUser();
-        if (!active) return;
-
-        if (!current) {
-          setStatus('anonymous');
-          return;
-        }
-
-        const claimError = await claimSession(current.id);
-        if (!active) return;
-        if (claimError) {
-          setError(claimError);
-          setStatus('anonymous');
-          return;
-        }
-
-        setUser(current);
-        setStatus('authenticated');
-      } catch (err) {
-        if (!active) return;
-        console.error('探测登录态失败:', err);
-        // 网络故障也当作未登录：让用户看到登录页并有机会重试，比停在转不出去的加载态好。
-        // 但必须说明原因——静默当作「未登录」会让用户以为自己的会话丢了。
-        setError(describeConnectionError(err));
+  /**
+   * 探测一次登录态（启动、账号切换、用户点「重试」共用同一段逻辑）。
+   *
+   * 语义：`/api/auth/me` 明确回 401 才算「真的未登录」；网络/本地库问题一律记成
+   * `probeFailed`——会话 cookie 很可能还完全有效，让用户重输密码是在拿一次网络抖动
+   * 换一次重新登录。返回是否已确定状态（调用方据此决定是否还要继续）。
+   */
+  const probeSession = useCallback(async (): Promise<void> => {
+    try {
+      const current = await fetchCurrentUser();
+      if (!current) {
+        setProbeFailed(false);
         setStatus('anonymous');
+        return;
       }
-    })();
 
-    return () => {
-      active = false;
-    };
+      const claimError = await claimSession(current.id);
+      if (claimError) {
+        setError(claimError);
+        setProbeFailed(true);
+        setStatus('anonymous');
+        return;
+      }
+
+      setUser(current);
+      setProbeFailed(false);
+      setStatus('authenticated');
+    } catch (err) {
+      console.error('探测登录态失败:', err);
+      // 网络故障也当作未登录：让用户看到登录页并有机会重试，比停在转不出去的加载态好。
+      // 但必须说明原因，而且把「可以重试探测」这条路留出来。
+      setError(describeConnectionError(err));
+      setProbeFailed(true);
+      setStatus('anonymous');
+    }
   }, [claimSession]);
+
+  // 启动时探测登录态。`useAuth` 与整个应用同生命周期（只在 shell 卸载时消失），
+  // 不额外做「忽略迟到结果」的世代守卫：迟到的 Promise 解析时组件早已随应用销毁。
+  useEffect(() => {
+    void (async () => {
+      await probeSession();
+    })();
+  }, [probeSession]);
+
+  /** 用户点「重试」时重新探测：先回到加载态，避免登录页闪一下又跳走。 */
+  const retryProbe = useCallback(async () => {
+    setError(null);
+    setProbeFailed(false);
+    setStatus('loading');
+    await probeSession();
+  }, [probeSession]);
 
   // 任何请求拿到 401 都退回登录页
   useEffect(() => {
@@ -150,29 +174,9 @@ export function useAuth(): UseAuthResult {
       stopSync();
       setUser(null);
       setStatus('loading');
-      void (async () => {
-        try {
-          const current = await fetchCurrentUser();
-          if (!current) {
-            setUser(null);
-            setStatus('anonymous');
-            return;
-          }
-          const claimError = await claimSession(current.id);
-          if (claimError) {
-            setUser(null);
-            setError(claimError);
-            setStatus('anonymous');
-            return;
-          }
-          setUser(current);
-          setStatus('authenticated');
-        } catch (err) {
-          console.error('账号切换后重新探测登录态失败:', err);
-        }
-      })();
+      void probeSession();
     });
-  }, [claimSession]);
+  }, [probeSession]);
 
   /**
    * 登录。pending 必须覆盖整个流程（POST + `/me` 探测）：只包 POST 的话，探测期间提
@@ -191,6 +195,7 @@ export function useAuth(): UseAuthResult {
             return false;
           }
           setUser(attempt.user);
+          setProbeFailed(false);
           setStatus('authenticated');
           return true;
         }
@@ -220,6 +225,7 @@ export function useAuth(): UseAuthResult {
             return 'login-failed';
           }
           setUser(attempt.user);
+          setProbeFailed(false);
           setStatus('authenticated');
           return 'ok';
         }
@@ -243,6 +249,8 @@ export function useAuth(): UseAuthResult {
     }
 
     setUser(null);
+    // 主动登出是明确结果，不是「探测失败」：登录页不该再提示重试探测
+    setProbeFailed(false);
     setStatus('anonymous');
     // 服务端没确认登出时必须让用户看见（cookie 还在，刷新就会恢复登录）
     setError(result.error);
@@ -252,11 +260,24 @@ export function useAuth(): UseAuthResult {
     // 服务端已经删掉了会话行，同步循环继续跑只会不断 401
     stopSync();
     setUser(null);
+    setProbeFailed(false);
     setStatus('anonymous');
     setError(message);
   }, []);
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { status, user, pending, error, login, register, logout, expireSession, clearError };
+  return {
+    status,
+    user,
+    pending,
+    error,
+    probeFailed,
+    retryProbe,
+    login,
+    register,
+    logout,
+    expireSession,
+    clearError,
+  };
 }
