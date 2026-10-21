@@ -47,11 +47,13 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
+import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
 import { readUsage } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
+import { notify } from "@/lib/toast";
 import {
   availableStartSuggestions,
   pickStartSuggestions,
@@ -412,6 +414,16 @@ const Composer: FC<{
           e.preventDefault();
         }
       }}
+      // 附件入口已禁用，但拖拽/粘贴仍可能绕过按钮；不要静默丢弃，也不让浏览器直接
+      // 打开被拖进来的文件。真正支持附件时，这里要改成交给 AttachmentDropzone。
+      onDragOver={(e) => {
+        if (Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        if (e.dataTransfer.files.length === 0) return;
+        e.preventDefault();
+        notify("info", attachmentUnsupportedMessage(e.dataTransfer.files.length));
+      }}
     >
       {/*
         上下文已满：输入框还在，但不是可以继续提问的输入框。把它做成一条常驻横条而不是
@@ -449,6 +461,13 @@ const Composer: FC<{
           className="max-h-48 min-h-12 w-full resize-none bg-transparent px-4 pt-3 pb-2 text-base leading-relaxed outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm"
           rows={1}
           aria-label="输入消息"
+          onPaste={(e) => {
+            // assistant-ui 默认只在运行时声明支持附件时才接管粘贴；这里在输入框这一层
+            // 直接拦文件，避免「贴了图什么都没发生」。
+            if (e.clipboardData.files.length === 0) return;
+            e.preventDefault();
+            notify("info", attachmentUnsupportedMessage(e.clipboardData.files.length));
+          }}
           onKeyDown={(e) => {
             if (blocked && e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

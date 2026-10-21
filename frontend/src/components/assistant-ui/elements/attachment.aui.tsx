@@ -33,6 +33,12 @@ import {
 } from "@/components/ui/dialog";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
+import {
+  attachmentPreviewTitle,
+  attachmentRemoveLabel,
+  attachmentTileLabel,
+  attachmentUploadError,
+} from "@/lib/attachment-labels";
 import { useAttachmentSrc } from "@/hooks/use-attachment-src";
 import { cn } from "@/lib/utils";
 
@@ -46,7 +52,7 @@ const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src, name }) => {
   return (
     <img
       src={src}
-      alt={`Preview of ${name}`}
+      alt={attachmentPreviewTitle(name)}
       className={cn(
         "block h-auto max-h-[80vh] w-auto max-w-full rounded-sm object-contain transition-opacity duration-300 motion-reduce:transition-none",
         isLoaded
@@ -85,7 +91,7 @@ const AttachmentPreviewDialog: FC<AttachmentPreviewDialogProps> = ({
       />
       <DialogContent className="aui-attachment-preview-dialog-content [&>button]:bg-foreground/60 [&>button]:hover:bg-foreground/80 [&_svg]:text-background p-2 sm:max-w-3xl [&>button]:rounded-full [&>button]:p-1 [&>button]:opacity-100 [&>button]:ring-0!">
         <DialogTitle className="aui-sr-only sr-only">
-          Preview {name}
+          {attachmentPreviewTitle(name)}
         </DialogTitle>
         <div className="aui-attachment-preview bg-background relative mx-auto flex max-h-[80dvh] w-full items-center justify-center overflow-hidden rounded-sm">
           <AttachmentPreview src={src} name={name} />
@@ -116,20 +122,8 @@ const AttachmentUI: FC = () => {
   const src = useAttachmentSrc();
 
   const isImage = useAuiState((s) => s.attachment.type === "image");
+  const type = useAuiState((s) => s.attachment.type);
   const name = useAuiState((s) => s.attachment.name);
-  const typeLabel = useAuiState((s) => {
-    const type = s.attachment.type;
-    switch (type) {
-      case "image":
-        return "Image";
-      case "document":
-        return "Document";
-      case "file":
-        return "File";
-      default:
-        return type;
-    }
-  });
 
   // An attachment on a submission is still being prepared, whether or not the
   // adapter reports progress while it uploads.
@@ -149,7 +143,7 @@ const AttachmentUI: FC = () => {
   const errorMessage = useAuiState((s) =>
     s.attachment.status.type === "incomplete" &&
     s.attachment.status.reason === "error"
-      ? (s.attachment.status.message ?? "Upload failed")
+      ? attachmentUploadError(s.attachment.status.message)
       : undefined,
   );
 
@@ -186,13 +180,13 @@ const AttachmentUI: FC = () => {
                       e.currentTarget.click();
                     }
                   }}
-                  aria-label={`${src ? `预览 ${name}` : `${typeLabel} 附件 ${name}`}${
-                    isError
-                      ? ", 上传失败"
-                      : isUploading
-                        ? ", 上传中"
-                        : ""
-                  }`}
+                  aria-label={attachmentTileLabel({
+                    name,
+                    type,
+                    hasPreview: Boolean(src),
+                    uploading: isUploading,
+                    error: isError,
+                  })}
                 />
               }
             >
@@ -233,7 +227,7 @@ const AttachmentRemove: FC<{ name: string }> = ({ name }) => {
     <AttachmentPrimitive.Remove
       render={
         <TooltipIconButton
-          tooltip={`Remove ${name}`}
+          tooltip={attachmentRemoveLabel(name)}
           className="aui-attachment-tile-remove absolute end-1 top-1 size-5 rounded-full bg-black/50! text-white after:absolute after:-inset-1.5 hover:bg-black/70! hover:text-white! active:scale-[0.96] motion-reduce:transition-none"
           side="top"
         />
