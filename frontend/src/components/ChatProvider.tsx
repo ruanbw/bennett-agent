@@ -1,5 +1,4 @@
 import {
-  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -36,6 +35,7 @@ import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
 import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
 import { ClarificationProvider } from '../context/clarification-context';
+import { ChatSessionContext, type ChatSessionContextValue } from '../context/chat-session';
 import type { RuntimeMessage } from '../types';
 
 export interface ChatProviderProps {
@@ -54,14 +54,8 @@ interface AppendMessageInput {
   content: ReadonlyArray<{ type: string; text?: string }>;
 }
 
-interface ChatSessionContextValue {
-  sessionId: string;
-  /** 一次性的用户可见提示（发送未成功等）；null 表示没有。 */
-  notice: string | null;
-  dismissNotice: () => void;
-}
-
-const ChatSessionContext = createContext<ChatSessionContextValue | null>(null);
+// 会话上下文（sessionId / 一次性提示）定义在独立模块里：它同时被输入框草稿消费，
+// 放在组件文件里会触发 react-refresh 的「只导出组件」规则。
 
 /**
  * assistant-ui runtime 适配层：把「IndexedDB 里的已完成轮次」与「内存里的生成中轮次」

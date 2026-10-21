@@ -53,6 +53,8 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useClarification } from "@/context/clarification-context";
+import { useChatSessionId } from "@/context/chat-session";
+import { getDraftStorage, readDraft, writeDraft } from "@/lib/composer-draft";
 import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
@@ -436,6 +438,18 @@ const Composer: FC<{
   onCreateSession,
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
+  // 草稿按会话存：切走再回来、或刷新页面，正在组织的那句话都还在。
+  // 草稿是增强手段——取不到 storage 时（隐私模式）读为空、写静默失败，不打扰用户。
+  const sessionId = useChatSessionId();
+  const aui = useAui();
+  const restoredFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!sessionId || restoredFor.current === sessionId) return;
+    restoredFor.current = sessionId;
+    const draft = readDraft(getDraftStorage(), sessionId);
+    // 只在该会话的输入框仍为空时回填：用户已经在打字的场景（切回来立刻输入）不能被覆盖
+    if (draft && aui.composer.getState().text.trim() === "") aui.composer.setText(draft);
+  }, [aui, sessionId]);
 
   // 整个会话里最近一次回报的用量：上下文会不会被锁、占比多少，只跟最新那次请求有关。
   // 用量此前挂在每条回答下面，越往上越旧却长得像「当前上下文」，现在统一收进输入框。
@@ -532,6 +546,10 @@ const Composer: FC<{
             if (e.clipboardData.files.length === 0) return;
             e.preventDefault();
             notify("info", attachmentUnsupportedMessage(e.clipboardData.files.length));
+          }}
+          onChange={(e) => {
+            // 每次改动都落一次草稿；清空即删除条目（发送成功后输入框会清空）
+            writeDraft(getDraftStorage(), sessionId, e.target.value);
           }}
           onKeyDown={(e) => {
             if (blocked && e.key === "Enter" && !e.shiftKey) {
