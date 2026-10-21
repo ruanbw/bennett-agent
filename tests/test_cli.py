@@ -76,3 +76,26 @@ def test_small_history_fits():
 
     assert budget is not None
     assert budget.over_limit is False
+
+
+def test_parse_cli_command_recognises_builtin_commands():
+    assert main.parse_cli_command("exit") == "exit"
+    assert main.parse_cli_command("  QUIT ") == "exit"
+    assert main.parse_cli_command("q") == "exit"
+    assert main.parse_cli_command("clear") == "clear"
+    assert main.parse_cli_command("Help") == "help"
+    assert main.parse_cli_command("?") == "help"
+
+
+def test_parse_cli_command_keeps_normal_prompts_as_prompts():
+    """不能把「帮我把这个 clear 掉」之类的内容误当命令。"""
+    assert main.parse_cli_command("帮我把这个 clear 掉") is None
+    assert main.parse_cli_command("exit 之后怎么办") is None
+    assert main.parse_cli_command("") is None
+
+
+def test_cli_model_label_shows_resolved_route_when_env_is_ignored():
+    assert main.format_cli_model_label("auto/model", "auto/model") == "auto/model"
+    assert main.format_cli_model_label("", "group/model") == "group/model"
+    assert main.format_cli_model_label("auto/model", "group/default") == ("auto/model（实际路由：group/default）")
+    assert main.format_cli_model_label("", "") == "未配置"

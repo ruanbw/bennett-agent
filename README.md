@@ -43,6 +43,10 @@ uv run python main.py              # CLI 交互
 uv run python main.py --web        # 后端 API（http://127.0.0.1:8000）
 ```
 
+CLI 交互模式内置命令：`exit` / `quit` / `q` 退出、`clear` 重置上下文、`help` / `?`
+查看帮助。启动横幅会同时显示 `MODEL_NAME` 与**实际解析到的路由**——环境变量不是后台
+合法路由键时 CLI 会退回数据库默认模型，只打印环境变量会让人按错误的名字排查。
+
 ```bash
 cd frontend
 npm install

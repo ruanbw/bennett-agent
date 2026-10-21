@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from typing import Literal
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
@@ -39,6 +40,40 @@ from app.services.token_budget import (
 )
 
 logger = logging.getLogger(__name__)
+
+CliCommand = Literal["exit", "clear", "help"]
+
+
+def parse_cli_command(raw: str) -> CliCommand | None:
+    """把一行输入识别成内置命令（大小写不敏感，前后空白忽略）。
+
+    抽成纯函数是为了能单测：命令词与普通提问共用一行输入，误把 "clear" 当消息发给
+    模型会浪费一次调用；反过来把普通提问误判成命令则会丢消息。
+    """
+    match raw.strip().lower():
+        case "exit" | "quit" | "q":
+            return "exit"
+        case "clear":
+            return "clear"
+        case "help" | "?":
+            return "help"
+        case _:
+            return None
+
+
+def format_cli_model_label(env_model: str, resolved_key: str) -> str:
+    """启动横幅里的模型文案。
+
+    只打印 `MODEL_NAME` 会骗人：当环境变量不是后台合法路由键时，CLI 实际用的是数据库
+    默认模型。两者不同时必须同时写出来，否则用户会按错误的名字排查。
+    """
+    requested = env_model.strip()
+    resolved = resolved_key.strip()
+    if not requested:
+        return resolved or "未配置"
+    if not resolved or resolved == requested:
+        return resolved or requested
+    return f"{requested}（实际路由：{resolved}）"
 
 
 def _budget_for_cli(model_key: str, history: list[ModelMessage], context_window: int | None, max_output):
@@ -75,10 +110,10 @@ async def run_interactive_loop(
     print("=" * 60)
     print(" Bennett Agent 启动成功 (流式响应模式)")
     print(f" [环境] APP_ENV:          {settings.app_env}")
-    print(f" [模型] MODEL_NAME:       {settings.model_name}")
+    print(f" [模型] MODEL_NAME:       {format_cli_model_label(settings.model_name, model_key)}")
     print(f" [接口] LITELLM_API_BASE: {settings.litellm_api_base}")
     print("=" * 60)
-    print("提示: 输入你的问题（输入 'exit' 或 'quit' 退出，输入 'clear' 重置上下文）\n")
+    print("提示: 输入你的问题；exit / quit / q 退出，clear 重置上下文，help 查看命令\n")
 
     message_history: list[ModelMessage] = []
     context_window, max_output = limits
@@ -94,11 +129,16 @@ async def run_interactive_loop(
         if not user_input:
             continue
 
-        if user_input.lower() in ("exit", "quit", "q"):
+        command = parse_cli_command(user_input)
+        if command == "exit":
             print("再见！")
             break
 
-        if user_input.lower() == "clear":
+        if command == "help":
+            print("可用命令：exit / quit / q 退出；clear 重置上下文；help / ? 查看本帮助\n")
+            continue
+
+        if command == "clear":
             message_history.clear()
             print("[上下文已重置]\n")
             continue
