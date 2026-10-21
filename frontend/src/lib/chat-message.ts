@@ -32,6 +32,15 @@ export type { PartKind };
  */
 const LEGACY_INTERNAL_TOOLS = new Set(['ask_user_clarification']);
 
+/** 把落库的起止时间映射成运行时要求的 `timing`；缺起点时返回 undefined（不显示耗时）。 */
+function toolCallTiming(call: ToolCallRecord): { startedAt: number; completedAt?: number } | undefined {
+  if (typeof call.startedAt !== 'number') return undefined;
+  return {
+    startedAt: call.startedAt,
+    completedAt: typeof call.finishedAt === 'number' ? call.finishedAt : undefined,
+  };
+}
+
 function buildToolParts(toolCalls: ToolCallRecord[] | undefined): RuntimePart[] {
   if (!Array.isArray(toolCalls)) return [];
 
@@ -49,6 +58,12 @@ function buildToolParts(toolCalls: ToolCallRecord[] | undefined): RuntimePart[] 
         // 刻意不传 status：它不在 `ThreadMessageLike` 的 tool-call 形状里，运行时也
         // 不读（见 @assistant-ui/core 的 auto-status.js），而是从 result 是否存在
         // 自行推导 running / complete。传入只会被静默忽略。
+        //
+        // timing 则**必须**显式传：`useToolCallElapsed`（耗时 chip）读的就是部件上的
+        // `timing.completedAt - timing.startedAt`，而运行时不会替我们补。此前没有它，
+        // ToolFallbackDuration 任何时候都拿到 undefined，那个 chip 其实是死代码。
+        // 老记录没有这两个时间戳 → 不传 timing，行为与之前一致（不显示耗时）。
+        timing: toolCallTiming(call),
       }),
     );
 }

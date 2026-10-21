@@ -221,6 +221,15 @@ export interface ToolCallRecord {
   status: 'running' | 'complete';
   /** 服务端给的执行结果；老记录没有该字段 → success。 */
   outcome?: ToolOutcome;
+  /**
+   * 本机收到 `tool_call` / `tool_result` 事件的时间戳（毫秒）。
+   *
+   * 只有落库的这两个时间戳能让耗时在**刷新之后**仍然显示：assistant-ui 的
+   * `useToolCallElapsed` 读的是消息部件的 `timing`，而部件的 timing 由这里的记录
+   * 映射而来（见 `chat-message.buildToolParts`）。老记录没有它们 → 不显示耗时。
+   */
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 /**

@@ -28,6 +28,8 @@ type AssertedPart = {
   status: { type: string }
   toolCallId: string
   toolName: string
+  /** 工具耗时：运行时读 `timing.completedAt - timing.startedAt`（见 useToolCallElapsed） */
+  timing?: { startedAt: number; completedAt?: number }
 }
 
 const assertParts = (parts: RuntimePart[]): AssertedPart[] => parts as unknown as AssertedPart[]
@@ -454,3 +456,53 @@ describe('contextExhausted（上下文已满 → 锁住输入框）', () => {
     expect(contextExhausted(undefined, 'm')).toBe(false)
   })
 })
+
+describe('工具耗时（timing）', () => {
+  const record = (extra: Partial<ToolCallRecord> = {}): ToolCallRecord => ({
+    toolCallId: 'c1',
+    toolName: 'tavily_search',
+    argsText: '{}',
+    status: 'complete',
+    result: 'ok',
+    ...extra,
+  });
+
+  it('落库的起止时间会进到部件的 timing —— 耗时 chip 靠它', () => {
+    const parts = assertParts(
+      buildParts({
+        toolCalls: [record({ startedAt: 1_000, finishedAt: 3_500 })],
+        reasoningStatus: 'complete',
+        textStatus: 'complete',
+      }),
+    );
+
+    const tool = parts.find((part) => part.type === 'tool-call');
+    expect(tool?.timing).toEqual({ startedAt: 1_000, completedAt: 3_500 });
+  });
+
+  it('还在跑（只有起点）时不传 completedAt，chip 会按运行中计时', () => {
+    const parts = assertParts(
+      buildParts({
+        toolCalls: [record({ status: 'running', result: undefined, startedAt: 1_000 })],
+        reasoningStatus: 'complete',
+        textStatus: 'complete',
+      }),
+    );
+
+    const tool = parts.find((part) => part.type === 'tool-call');
+    expect(tool?.timing).toEqual({ startedAt: 1_000, completedAt: undefined });
+  });
+
+  it('老记录没有时间戳就不传 timing（与改动前一致：不显示耗时，也不编一个 0）', () => {
+    const parts = assertParts(
+      buildParts({
+        toolCalls: [record()],
+        reasoningStatus: 'complete',
+        textStatus: 'complete',
+      }),
+    );
+
+    const tool = parts.find((part) => part.type === 'tool-call');
+    expect(tool?.timing).toBeUndefined();
+  });
+});

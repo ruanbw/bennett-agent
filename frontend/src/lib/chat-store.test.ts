@@ -158,22 +158,47 @@ describe('事件折叠', () => {
     start('a')
     applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 'tavily_search', args: '{"q":1}' })
 
-    expect(getRun('a')!.toolCalls).toEqual([
-      { toolCallId: 'c1', toolName: 'tavily_search', argsText: '{"q":1}', result: undefined, status: 'running' },
-    ])
+    expect(getRun('a')!.toolCalls[0]).toMatchObject({
+      toolCallId: 'c1',
+      toolName: 'tavily_search',
+      argsText: '{"q":1}',
+      result: undefined,
+      status: 'running',
+    })
+    // 起点在收到 tool_call 的那一刻打上，完成时间此刻还没有
+    expect(typeof getRun('a')!.toolCalls[0].startedAt).toBe('number')
+    expect(getRun('a')!.toolCalls[0].finishedAt).toBeUndefined()
 
     applyEvent('a', { type: 'tool_result', tool_call_id: 'c1', tool_name: 'tavily_search', result: 'ok' })
 
     expect(getRun('a')!.toolCalls[0]).toMatchObject({ result: 'ok', status: 'complete' })
+    expect(typeof getRun('a')!.toolCalls[0].finishedAt).toBe('number')
+  })
+
+  it('耗时的完成时间只记第一次：同一结果重复到达不会把耗时越拉越长', () => {
+    start('a')
+    applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 'tavily_search', args: '{}' })
+    applyEvent('a', { type: 'tool_result', tool_call_id: 'c1', tool_name: 'tavily_search', result: 'ok' })
+    const firstFinish = getRun('a')!.toolCalls[0].finishedAt
+
+    applyEvent('a', { type: 'tool_result', tool_call_id: 'c1', tool_name: 'tavily_search', result: 'ok' })
+
+    expect(getRun('a')!.toolCalls[0].finishedAt).toBe(firstFinish)
   })
 
   it('结果先于调用到达时也能补上条目', () => {
     start('a')
     applyEvent('a', { type: 'tool_result', tool_call_id: 'c9', tool_name: 't', result: 'r' })
 
-    expect(getRun('a')!.toolCalls).toEqual([
-      { toolCallId: 'c9', toolName: 't', argsText: '', result: 'r', status: 'complete' },
-    ])
+    // 没有起点就没有可算的耗时：只记完成时间不参与展示（chat-message 会跳过它）
+    expect(getRun('a')!.toolCalls[0]).toMatchObject({
+      toolCallId: 'c9',
+      toolName: 't',
+      argsText: '',
+      result: 'r',
+      status: 'complete',
+    })
+    expect(getRun('a')!.toolCalls[0].finishedAt).toBeUndefined()
   })
 
   it('失败 outcome 落到工具记录上，成功则不写该字段', () => {

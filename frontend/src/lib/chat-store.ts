@@ -374,15 +374,24 @@ function upsertToolCall(
   status: ToolCallRecord['status'],
 ): void {
   const existing = run.toolCalls.find((call) => call.toolCallId === event.tool_call_id);
+  // 耗时用「收到事件的本机时间」而不是服务端时间：两者只差网络往返，而本机时间戳
+  // 不需要额外字段、也不会与时区/时钟偏移纠缠。只在这里打点，渲染层只读。
+  const now = Date.now();
 
   if (existing) {
     existing.status = status;
     if (event.args !== undefined) existing.argsText = event.args;
+    if (existing.startedAt === undefined && status === 'running') existing.startedAt = now;
     if (status === 'complete') {
       existing.result = event.result;
       // success 不落字段：老记录/旧服务端没有 outcome，默认就是成功
       existing.outcome =
         event.outcome && event.outcome !== 'success' ? event.outcome : undefined;
+      // 只记第一次完成时间：同一结果重复到达时不能把耗时越拉越长。
+      // 没有起点就无法计算耗时，此时不记完成时间（渲染层据此不显示 chip）。
+      if (existing.startedAt !== undefined && existing.finishedAt === undefined) {
+        existing.finishedAt = now;
+      }
     }
     return;
   }
@@ -397,6 +406,10 @@ function upsertToolCall(
       status === 'complete' && event.outcome && event.outcome !== 'success'
         ? event.outcome
         : undefined,
+    // 结果先于调用到达（丢帧/乱序）时并不知道这次调用何时开始：不编一个起点，
+    // 也算不出耗时，两个字段都不写（渲染层据此不显示耗时，而不是显示 0s）
+    startedAt: status === 'running' ? now : undefined,
+    finishedAt: undefined,
   });
 }
 

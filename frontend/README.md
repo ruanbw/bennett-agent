@@ -369,6 +369,13 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
   空对象/空数组不显示（`{}` 只是噪音）。预览按码点截断 48 字，折叠态的 `aria-label`
   也带上它——读屏不必展开也能知道参数。展开后参数块标「参数：」、成功结果标「结果：」，
   长文本按 Unicode 码点截断与计数（`toolTextLength`），emoji 不会被劈开或算成两个字符。
+- **耗时 chip 依赖落库的 `timing`，不是运行时凭空给的。** 折叠条右侧的「2.2s」来自
+  `useToolCallElapsed`，它只读消息部件上的 `timing.completedAt - timing.startedAt`；运行时
+  不会替我们补这两个时间戳。`chat-store` 在收到 `tool_call` / `tool_result` 事件时打点
+  （`ToolCallRecord.startedAt` / `finishedAt`，本机时钟），`chat-message.buildToolParts`
+  再映射成部件的 `timing`。此前没有任何一处写 timing，那个 chip 永远是 `null`——即死代码。
+  两个刻意的取舍：结果先于调用到达（丢帧/乱序）时不编起点，宁可不显示耗时；完成时间只记
+  第一次，重复结果不会把耗时越拉越长。刷新后仍显示，因为时间戳跟着消息一起落库。
 - **隔离后的工具失败要标成失败，不能画绿勾。** 服务端把工具异常降级成一条结果（整轮
   继续），但 `tool_result.outcome` 会明确是 `failed` / `denied` / `interrupted`；
   `chat-message.buildToolParts` 用私有包装对象把它带到渲染层，`lib/tool-call-view.ts`
