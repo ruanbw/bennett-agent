@@ -101,6 +101,13 @@ Composer 根节点的 `onDrop` 直接拦截，弹同一条 toast——此前这�
 选区、链接拖放有各自的语义（在输入框里拖动选中的文字），拦掉会破坏它们。框内不重复
 提示：Composer 自己会给更具体的那一条（用 `data-slot="aui_composer-root"` 区分）。
 后端只接受文本：`ChatMessage` 没有附件字段，`/api/chat` 也只读 `type === 'text'` 的分片。
+**这份「只接受文本」的契约在服务端也是显式的**：`ChatMessage.content` 的 before-validator
+会把分片数组收成字符串（纯文本分片按行拼合，兼容 assistant-ui 那种
+`[{type:"text",text}]` 形状），遇到 `image` / `file` 之类的分片则抛
+`unsupported_content_part` 拒绝，文案是「本条消息包含 image 类型的内容；后端目前只接受
+纯文本，附件与多模态暂不支持」。此前客户端按分片形状发过来只会拿到一条 pydantic 的
+「Input should be a valid string」——既不说原因也不说字段；而静默丢掉那个分片最糟：
+用户以为图片传上去了，模型只看到一句文字。
 
 ## 输入框草稿
 

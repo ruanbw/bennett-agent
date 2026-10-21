@@ -309,3 +309,52 @@ def test_malformed_context_anchor_is_rejected(anchor, expected):
     由 `token_budget.usable_anchor` 退回估算处理，不报错。
     """
     assert reject(ChatRequest, messages=[user()], context_anchor=anchor) == expected
+
+
+# ---------------------------------------------------------------------
+# 内容分片：纯文本拼合，非文本明确拒绝（附件暂不支持）
+# ---------------------------------------------------------------------
+def test_text_parts_are_joined():
+    """assistant-ui 用分片数组表达内容，接口契约是字符串：宽容地拼起来，不逼调用方重写。"""
+    message = ChatMessage(
+        role="user",
+        content=[{"type": "text", "text": "第一段"}, {"type": "text", "text": "第二段"}],
+    )
+
+    assert message.content == "第一段\n第二段"
+
+
+def test_plain_string_content_is_untouched():
+    assert ChatMessage(role="user", content="原样").content == "原样"
+
+
+def test_non_text_parts_are_rejected_with_a_readable_reason():
+    """附件目前不支持：静默丢掉那个分片最糟——用户以为图片传上去了，模型只看到文字。"""
+    with pytest.raises(ValidationError) as excinfo:
+        ChatMessage(role="user", content=[{"type": "image", "image": "data:image/png;base64,..."}])
+
+    error = excinfo.value.errors()[0]
+    assert "image" in error["msg"]
+    assert "只接受纯文本" in error["msg"]
+    # 不能是 pydantic 的通用文案（"Input should be a valid string"），那既不说原因也不说字段
+    assert "valid string" not in error["msg"]
+
+
+def test_parts_without_a_type_but_with_text_are_accepted():
+    """容忍省略 type 的写法（`{text: "..."}`）：语义无歧义，没有理由拒绝。"""
+    assert ChatMessage(role="user", content=[{"text": "hi"}]).content == "hi"
+
+
+def test_unknown_shapes_inside_a_part_list_are_ignored_not_crashing():
+    assert ChatMessage(role="user", content=[{"type": "text", "text": "ok"}, 42, None]).content == "ok"
+
+
+def test_joined_content_still_respects_the_length_limit():
+    """拼合之后的总长才是真正的边界：分片不能成为绕过上限的通道。"""
+    half = "x" * (MAX_MESSAGE_CHARS // 2 + 1)
+
+    with pytest.raises(ValidationError):
+        ChatMessage(
+            role="user",
+            content=[{"type": "text", "text": half}, {"type": "text", "text": half}],
+        )

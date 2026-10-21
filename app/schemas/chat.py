@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 # =====================================================================
 # 输入边界
@@ -44,6 +45,45 @@ def _strip_optional_model(value: object) -> object:
     return value
 
 
+def _coerce_message_content(value: object) -> object:
+    """把「内容分片数组」收成纯文本，非文本分片直接拒绝。
+
+    前端库（assistant-ui）用 `content: [{type: "text", text: "..."}]` 这种形状，而本接口
+    的契约一直是 `content: str`。此前客户端按分片形状发过来只会拿到一条 Pydantic 的
+    「Input should be a valid string」——既没说明**是哪个字段**、也没说明**为什么**。
+
+    这里做两件事：
+
+    1. 纯文本分片数组 → 拼成一个字符串（对调用方宽容，不必为一个格式细节重写客户端）；
+    2. 含非文本分片（`image` / `file` …）→ 明确拒绝并点名类型。附件目前**不支持**，
+       静默丢掉那个分片最糟：用户以为图片传上去了，模型却只看到一句文字。
+
+    长度校验仍交给字段上的 `max_length`（拼接后的总长才是真正的边界）。
+    """
+    if not isinstance(value, (list, tuple)):
+        return value
+
+    texts: list[str] = []
+    for part in value:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        if kind in (None, "text"):
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+            continue
+        raise PydanticCustomError(
+            "unsupported_content_part",
+            "本条消息包含 {kind} 类型的内容；后端目前只接受纯文本，附件与多模态暂不支持",
+            {"kind": str(kind)},
+        )
+    return "\n".join(texts)
+
+
 class ChatMessage(BaseModel):
     # 只允许 user/assistant。此前还接受 "system"，而 convert_chat_history 会把它
     # 转成 SystemPromptPart 插进历史——那等于让调用方注入系统提示词，而系统提示词
@@ -51,6 +91,8 @@ class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(..., max_length=MAX_MESSAGE_CHARS)
     thinking: str | None = Field(None, max_length=MAX_THINKING_CHARS)
+
+    _coerce_content = field_validator("content", mode="before")(_coerce_message_content)
 
     @model_validator(mode="after")
     def _require_user_content(self) -> "ChatMessage":
