@@ -7,11 +7,17 @@
 
 import { useEffect, useState } from 'react';
 
-import { UNKNOWN_CAPABILITIES, fetchCapabilities } from '../lib/capabilities';
+import { fetchCapabilities } from '../lib/capabilities';
 import type { Capabilities } from '../types';
 
-export function useCapabilities(): Capabilities {
-  const [capabilities, setCapabilities] = useState<Capabilities>(UNKNOWN_CAPABILITIES);
+/**
+ * 返回 `null` 表示「还没拿到 / 拿不到」。
+ *
+ * 不用「无联网搜索」的假数据顶替：设置面板要区分「未启用」与「未知」，拿保守值当
+ * 结论会把「探测失败」说成「服务端没配」。调用方按 `?? false` 降级到保守行为即可。
+ */
+export function useCapabilities(): Capabilities | null {
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
 
   useEffect(() => {
     let active = true;

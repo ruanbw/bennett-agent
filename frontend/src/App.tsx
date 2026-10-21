@@ -434,7 +434,7 @@ function AuthenticatedShell({
                 }
                 models={models}
                 modelsError={modelsError}
-                webSearchAvailable={capabilities.web_search}
+                webSearchAvailable={capabilities?.web_search ?? false}
                 currentModel={currentModel}
                 currentReasoningEffort={currentReasoningEffort}
                 onSelectModel={selectModel}
@@ -463,6 +463,7 @@ function AuthenticatedShell({
         onOpenChange={setSettingsOpen}
         userEmail={userEmail}
         userRole={userRole}
+        capabilities={capabilities}
         onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
       />
 

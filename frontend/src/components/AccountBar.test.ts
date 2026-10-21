@@ -163,6 +163,25 @@ describe('SettingsPanel 设置面板内容', () => {
     expect(html).toContain(`v${APP_VERSION}`);
     expect(html).toContain('PydanticAI');
     expect(html).toContain('存储占用');
+    // 能力快照缺席时显示「未知」，不能把「还没拿到」说成「未启用」
+    expect(html).toContain('联网搜索');
+    expect(html).toContain('未知');
+  });
+
+  it('服务端能力快照到达后显示联网搜索与工具数量', () => {
+    const html = renderToStaticMarkup(
+      withTheme(
+        createElement(SettingsPanel, {
+          userEmail: 'alice@example.com',
+          capabilities: { web_search: true, tools: ['ask_user_clarification', 'tavily_search'] },
+        }),
+        'dark'
+      )
+    );
+
+    expect(html).toContain('联网搜索');
+    expect(html).toContain('已启用');
+    expect(html).toContain('2 个');
   });
 
   it('角色徽标来自后端 role，未知角色不猜', () => {

@@ -16,6 +16,8 @@ import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
 import { formatStorageUsage } from '../lib/local-stats';
+import { describeToolCount, describeWebSearchCapability } from '../lib/capabilities';
+import type { Capabilities } from '../types';
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -25,12 +27,16 @@ export interface SettingsDialogProps {
   userRole?: string | null;
   /** 密码修改成功后调用：服务端已失效所有会话，App 负责退回登录页。 */
   onPasswordChanged?: () => void;
+  /** 运行时能力快照；null = 还没拿到 / 拿不到（面板据此显示「未知」）。 */
+  capabilities?: Capabilities | null;
 }
 
 export interface SettingsPanelProps {
   userEmail: string | null;
   userRole?: string | null;
   onPasswordChanged?: () => void;
+  /** 运行时能力快照；null = 还没拿到 / 拿不到（面板据此显示「未知」）。 */
+  capabilities?: Capabilities | null;
   /**
    * 面板是否可见。默认 true（直接渲染 `SettingsPanel` 的场景）。
    * 本机数据只在打开时读一次，不是实时监控。
@@ -72,6 +78,7 @@ export function SettingsPanel({
   userRole = null,
   open = true,
   onPasswordChanged,
+  capabilities = null,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
   const stats = useLocalDataStats(open);
@@ -218,6 +225,16 @@ export function SettingsPanel({
             <span className="text-muted-foreground">推理内核</span>
             <span className="text-foreground">PydanticAI + assistant-ui</span>
           </div>
+          {/* 服务端能力：空对话页的示例是裁剪过的，这里说明裁剪依据，
+              否则「没有搜索示例」会被当成功能缺失，而不是服务端没配 */}
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">联网搜索</span>
+            <span className="text-foreground">{describeWebSearchCapability(capabilities)}</span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">已装配工具</span>
+            <span className="text-foreground">{describeToolCount(capabilities)}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -229,6 +246,7 @@ export function SettingsDialog({
   onOpenChange,
   userEmail,
   userRole = null,
+  capabilities = null,
   onPasswordChanged,
 }: SettingsDialogProps) {
   return (
@@ -243,6 +261,7 @@ export function SettingsDialog({
           userEmail={userEmail}
           userRole={userRole}
           open={open}
+          capabilities={capabilities}
           onPasswordChanged={onPasswordChanged}
         />
 

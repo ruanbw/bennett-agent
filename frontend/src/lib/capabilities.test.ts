@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchCapabilities } from './capabilities';
+import {
+  UNKNOWN_CAPABILITIES,
+  describeToolCount,
+  describeWebSearchCapability,
+  fetchCapabilities,
+} from './capabilities';
 
 interface StubResponse {
   ok?: boolean;
@@ -63,5 +68,23 @@ describe('fetchCapabilities', () => {
     stubFetch({ json: async () => null });
 
     await expect(fetchCapabilities()).resolves.toEqual({ web_search: false, tools: [] });
+  });
+});
+
+describe('能力状态文案', () => {
+  it('能力清单缺席时显示未知，而不是「未启用」', () => {
+    expect(describeWebSearchCapability(null)).toBe('未知');
+    expect(describeWebSearchCapability(undefined)).toBe('未知');
+  });
+
+  it('按 web_search 布尔值给出结论', () => {
+    expect(describeWebSearchCapability({ web_search: true, tools: ['tavily_search'] })).toBe('已启用');
+    expect(describeWebSearchCapability(UNKNOWN_CAPABILITIES)).toBe('未启用');
+  });
+
+  it('工具数量：有则报数，清单缺席或为空说未知（不说「0 个工具」）', () => {
+    expect(describeToolCount({ web_search: false, tools: ['a', 'b'] })).toBe('2 个');
+    expect(describeToolCount(null)).toBe('未知');
+    expect(describeToolCount(UNKNOWN_CAPABILITIES)).toBe('未知');
   });
 });
