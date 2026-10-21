@@ -18,6 +18,7 @@
  */
 
 import type { MessageRecord, SessionRecord, ToolCallRecord } from '../types';
+import { formatToolDuration } from './tool-call-view';
 
 /** 工具参数/结果各自的截断上限（字符）。 */
 export const MAX_TOOL_TEXT_CHARS = 1000;
@@ -79,7 +80,9 @@ export function exportFileName(title: string, now: number = Date.now()): string 
     // 首尾的点与空格（Windows 会静默丢弃结尾的点）
     .replace(/^[. ]+|[. ]+$/g, '');
 
-  const base = cleaned.slice(0, MAX_FILENAME_CHARS).trim();
+  // 按**码点**截断：`slice` 走 UTF-16，会在代理对中间切断 emoji，得到一个非法字符
+  // （文件名里出现 U+FFFD 或半个字符），而界面上同一套口径已经统一用码点。
+  const base = Array.from(cleaned).slice(0, MAX_FILENAME_CHARS).join('').trim();
   return `${base || `对话-${timestampSlug(now)}`}.md`;
 }
 
@@ -96,8 +99,10 @@ export function fencedBlock(text: string, language = ''): string {
 }
 
 function truncate(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  return `${text.slice(0, limit)}\n…（已截断，原文 ${text.length} 字符）`;
+  const chars = Array.from(text);
+  // 同样按码点计数与切片：工具参数/结果里出现 emoji 很常见，切断代理对会写出半个字符
+  if (chars.length <= limit) return text;
+  return `${chars.slice(0, limit).join('')}\n…（已截断，原文 ${chars.length} 字符）`;
 }
 
 /**
@@ -140,6 +145,20 @@ function renderNotices(message: MessageRecord): string[] {
   return notices;
 }
 
+/**
+ * 一次工具调用的耗时文案；任一端缺失时返回空串。
+ *
+ * 只认落库的两个时间戳（`startedAt` / `finishedAt`）：还在跑的调用没有完成时间，
+ * 算出来的「到现在为止」每次导出都不一样，那种数不该写进文件。
+ */
+function toolCallDuration(toolCall: ToolCallRecord): string {
+  const { startedAt, finishedAt } = toolCall;
+  if (typeof startedAt !== 'number' || typeof finishedAt !== 'number') return '';
+  const elapsed = finishedAt - startedAt;
+  if (!Number.isFinite(elapsed) || elapsed < 0) return '';
+  return formatToolDuration(elapsed);
+}
+
 function renderToolCall(toolCall: ToolCallRecord): string[] {
   const outcomeLabel =
     toolCall.outcome === 'failed'
@@ -150,7 +169,11 @@ function renderToolCall(toolCall: ToolCallRecord): string[] {
           ? '已中断'
           : '完成';
   const status = toolCall.status === 'running' ? '进行中' : outcomeLabel;
-  const lines = ['<details>', `<summary>工具调用 · ${toolCall.toolName} · ${status}</summary>`, ''];
+  // 耗时与界面上折叠条右侧的「2.2s」同一口径（`formatToolDuration`）：导出文件里没有
+  // 这个数，事后就无法判断一步工具调用是「秒回」还是「卡了一分钟」。
+  const duration = toolCallDuration(toolCall);
+  const summary = `工具调用 · ${toolCall.toolName} · ${status}${duration ? ` · ${duration}` : ''}`;
+  const lines = ['<details>', `<summary>${summary}</summary>`, ''];
 
   const args = toolCall.argsText?.trim();
   if (args) {

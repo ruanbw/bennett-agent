@@ -316,3 +316,60 @@ describe('archiveFileName', () => {
     expect(archiveFileName(at(12))).toBe('Bennett-对话导出-20261021-1200.md');
   });
 });
+
+describe('工具调用耗时', () => {
+  it('起止时间都在时写进折叠块标题（与界面上的「2.2s」同口径）', () => {
+    const markdown = build([
+      assistantMessage({
+        toolCalls: [toolCall({ startedAt: at(10), finishedAt: at(10) + 2_200 })],
+      }),
+    ]);
+
+    expect(markdown).toContain('search_docs · 完成 · 2.2s');
+  });
+
+  it('还在跑 / 老记录没有时间戳时不给耗时（算不出确定值就不写）', () => {
+    const running = build([
+      assistantMessage({
+        toolCalls: [toolCall({ status: 'running', result: undefined, startedAt: at(10) })],
+      }),
+    ]);
+    expect(running).toContain('search_docs · 进行中');
+    expect(running).not.toMatch(/进行中 · /);
+
+    const legacy = build([assistantMessage({ toolCalls: [toolCall()] })]);
+    expect(legacy).toContain('search_docs · 完成</summary>');
+  });
+
+  it('时间戳被写坏（完成早于开始）时不写负数耗时', () => {
+    const markdown = build([
+      assistantMessage({
+        toolCalls: [toolCall({ startedAt: at(11), finishedAt: at(10) })],
+      }),
+    ]);
+
+    expect(markdown).toContain('search_docs · 完成</summary>');
+  });
+});
+
+describe('按码点截断（emoji 不会被劈成半个字符）', () => {
+  it('文件名截断不产生孤立代理项', () => {
+    // 59 个 ASCII + emoji：按 UTF-16 切会在上限处把 emoji 劈开
+    const name = exportFileName(`${'a'.repeat(MAX_FILENAME_CHARS - 1)}😀😀`, at(12));
+
+    expect(name.endsWith('.md')).toBe(true);
+    const base = name.slice(0, -3);
+    expect(Array.from(base).length).toBeLessThanOrEqual(MAX_FILENAME_CHARS);
+    // 没有落单的代理项（配对的 emoji 是可接受的，孤立的一半不是）
+    expect(base).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(base).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
+
+  it('工具结果超长时按码点截断，原文长度也按码点报', () => {
+    const content = '😀'.repeat(MAX_TOOL_TEXT_CHARS + 3);
+    const markdown = build([assistantMessage({ toolCalls: [toolCall({ result: content })] })]);
+
+    expect(markdown).toContain(`原文 ${Array.from(content).length} 字符`);
+    expect(markdown).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+});
