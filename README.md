@@ -166,6 +166,21 @@ main.py       CLI 与 --web 入口
 
 其余配置项见 `.env.example`，前端细节见 `frontend/README.md`。
 
+## 上下文预算
+
+`app/services/token_budget.py` 在每轮请求前估算 prompt 规模，超限直接拒绝（而不是让上游
+以 400 拒绝再被错译成「模型不可用」）。两条细节：
+
+- **窗口取自同一份快照。** 对话路径在 `resolve_chat_model` 里已经解析过
+  `context_window` / `max_output_tokens`，预算不再按名字查一遍库（那是一次多余的全表
+  扫描，且两次读之间管理员改配置会出现「预算按旧窗口算、实际调用走新窗口」）。
+  `resolve_context_budget(..., model_limits=...)` 传快照；CLI 等直接调用传 None 时仍按
+  名字查。
+- **「只告警一次」的两处去重。** 网关没报窗口（`_WARNED_UNKNOWN_WINDOWS`，有界 LRU）与
+  锚点被拒（`_WARNED_ANCHOR_REASONS`，按原因去重）都只在首次出现时记 WARNING：前者每轮
+  都会触发刷新日志，后者在客户端版本错位时会随每条消息重复出现。需要再看一次时调
+  `reset_token_budget_warnings()`。
+
 ## 共享 HTTP 客户端
 
 模型列表、提供商同步、Tavily 搜索共用 `app/services/http_client.py` 里的一个

@@ -525,7 +525,14 @@ async def stream_chat_events(
             return
 
         # 预检排在历史转换与装配之前：判定已经不可能通过的请求没有必要再走后面两步。
-        budget = await resolve_context_budget(model_name, messages, context_anchor)
+        # 窗口与输出上限直接取自已解析的快照：再按名字查一次库既多一次全表扫描，
+        # 也让「预算按旧配置、实际调用按新配置」成为可能。
+        budget = await resolve_context_budget(
+            model_name,
+            messages,
+            context_anchor,
+            model_limits=(snapshot.context_window, snapshot.max_output_tokens),
+        )
     except Exception:
         # 注意与上面的 `model_unavailable` 区分：那是「模型真的不存在」的**确定结论**，
         # 这里是「查不出来」的内部故障。混在一起会把一次数据库抖动报成「模型已下架」。

@@ -50,6 +50,14 @@ def msg(role="user", content="", thinking=None):
     return ChatMessage(role=role, content=content, thinking=thinking)
 
 
+@pytest.fixture(autouse=True)
+def _reset_once_warnings():
+    """「只告警一次」的去重集合是模块级状态，用例之间必须隔离。"""
+    token_budget.reset_token_budget_warnings()
+    yield
+    token_budget.reset_token_budget_warnings()
+
+
 def patch_limits(monkeypatch, context_window, max_output_tokens=None):
     """把 `get_model_limits` 换成固定返回值。
 
@@ -720,3 +728,83 @@ async def test_agent_messages_async_wrapper_matches_the_sync_estimate(monkeypatc
     assert await estimate_agent_messages_tokens_async(long) == estimate_agent_messages_tokens(long)
     assert len(calls) == 1
     assert calls[0][0] is estimate_agent_messages_tokens
+
+
+# ---------------------------------------------------------------------
+# 已解析的快照优先：对话路径不该为预算再查一遍库
+# ---------------------------------------------------------------------
+async def test_pre_resolved_limits_skip_the_lookup(monkeypatch):
+    """传了 `model_limits` 就不该再按名字查库：对话路径已经有一份快照。
+
+    多查一次不只是慢：两次读之间管理员改了配置，会出现「预算按旧窗口算、实际调用走
+    新窗口」。
+    """
+
+    async def boom(_model_id):
+        raise AssertionError("不该再按名字查一次模型窗口")
+
+    monkeypatch.setattr(token_budget, "get_model_limits", boom)
+
+    budget = await resolve_context_budget(
+        "m",
+        [msg("user", "abcd")],
+        model_limits=(100_000, 8_192),
+    )
+
+    assert budget is not None
+    assert budget.context_window == 100_000
+    assert budget.max_output_tokens == 8_192
+
+
+async def test_pre_resolved_unknown_window_still_allows_through(monkeypatch):
+    """快照里没有窗口时与「网关没报」同一条放行路径，不能因为传了参数就改判。"""
+    patch_limits(monkeypatch, context_window=100_000)
+
+    assert await resolve_context_budget("m", [msg("user", "你好")], model_limits=(None, None)) is None
+
+
+async def test_gateway_path_without_snapshot_still_looks_limits_up(monkeypatch):
+    """不传 `model_limits` 的调用方（CLI / 直接调用）保持原行为。"""
+    patch_limits(monkeypatch, context_window=64_000, max_output_tokens=4_096)
+
+    budget = await resolve_context_budget("m", [msg("user", "abcd")])
+
+    assert budget is not None
+    assert budget.context_window == 64_000
+
+
+# ---------------------------------------------------------------------
+# 坏锚点只告警一次：客户端版本错位时会随每一条消息重复出现
+# ---------------------------------------------------------------------
+def test_bad_anchor_reason_is_warned_only_once(caplog):
+    messages = [msg("user", "问"), msg("assistant", "答")]
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        for _ in range(3):
+            assert usable_anchor(messages, anchor(99, 5_000)) is None
+
+    assert len([record for record in caplog.records if "越界" in record.getMessage()]) == 1
+
+
+def test_different_anchor_problems_are_each_warned(caplog):
+    messages = [msg("user", "问"), msg("assistant", "答")]
+
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        usable_anchor(messages, anchor(99, 5_000))  # 越界
+        usable_anchor([msg("user", "问")], anchor(0, 5_000))  # 指向 user 消息
+        usable_anchor(messages, anchor(1, 8))  # 恰好等于结构性开销下限
+
+    messages_text = [record.getMessage() for record in caplog.records]
+    assert any("越界" in text for text in messages_text)
+    assert any("不是 assistant" in text for text in messages_text)
+    assert any("结构性开销" in text for text in messages_text)
+
+
+def test_reset_allows_the_warning_again(caplog):
+    messages = [msg("user", "问"), msg("assistant", "答")]
+    with caplog.at_level("WARNING", logger="app.services.token_budget"):
+        usable_anchor(messages, anchor(99, 5_000))
+        token_budget.reset_token_budget_warnings()
+        usable_anchor(messages, anchor(99, 5_000))
+
+    assert len([record for record in caplog.records if "越界" in record.getMessage()]) == 2

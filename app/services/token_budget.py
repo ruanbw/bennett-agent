@@ -244,6 +244,25 @@ def build_budget(
     )
 
 
+#: 锚点被拒的原因 → 是否已告警。客户端版本错位时**每轮**都会带着同一个坏锚点，
+#: 逐轮告警会把日志刷满（与 `_WARNED_UNKNOWN_WINDOWS` 同一个套路）。
+#: 只有三种原因，容量固定，不存在被输入灌大的风险。
+_WARNED_ANCHOR_REASONS: dict[str, None] = {}
+
+
+def reset_token_budget_warnings() -> None:
+    """清空两处「只告警一次」的去重集合（测试用；也可用于「改了配置想再看一次告警」）。"""
+    _WARNED_ANCHOR_REASONS.clear()
+    _WARNED_UNKNOWN_WINDOWS.clear()
+
+
+def _warn_anchor_dropped_once(reason: str, template: str, *args: object) -> None:
+    if reason in _WARNED_ANCHOR_REASONS:
+        return
+    _WARNED_ANCHOR_REASONS[reason] = None
+    logger.warning(template, *args)
+
+
 def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> ContextAnchor | None:
     """判断这个锚点能不能用；不能用返回 None（退回到从零估算）。
 
@@ -269,14 +288,25 @@ def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> 
     if anchor is None:
         return None
     if not 0 <= anchor.message_index < len(messages):
-        logger.warning("上下文锚点下标越界，退回估算 (index=%d, messages=%d)", anchor.message_index, len(messages))
+        # 同一原因只记一次：坏锚点通常来自客户端版本错位，会随每一条消息重复出现
+        _warn_anchor_dropped_once(
+            "index",
+            "上下文锚点下标越界，退回估算 (index=%d, messages=%d)",
+            anchor.message_index,
+            len(messages),
+        )
         return None
     if messages[anchor.message_index].role != "assistant":
-        logger.warning("上下文锚点指向的不是 assistant 消息，退回估算 (index=%d)", anchor.message_index)
+        _warn_anchor_dropped_once(
+            "role",
+            "上下文锚点指向的不是 assistant 消息，退回估算 (index=%d)",
+            anchor.message_index,
+        )
         return None
     floor_tokens = MESSAGE_OVERHEAD_TOKENS * (anchor.message_index + 1)
     if anchor.context_tokens <= floor_tokens:
-        logger.warning(
+        _warn_anchor_dropped_once(
+            "floor",
             "上下文锚点低于其覆盖消息的结构性开销，退回估算 (index=%d, context_tokens=%d, 下限=%d)",
             anchor.message_index,
             anchor.context_tokens,
@@ -311,8 +341,15 @@ async def resolve_context_budget(
     model_name: str,
     messages: list[ChatMessage],
     anchor: ContextAnchor | None = None,
+    *,
+    model_limits: tuple[int | None, int | None] | None = None,
 ) -> ContextBudget | None:
     """解析本轮的上下文预算；无法判定时返回 `None`。
+
+    `model_limits` 允许调用方传入**已经解析好的** `(context_window, max_output_tokens)`：
+    对话路径在 `resolve_chat_model` 里已经查过一次（`ChatModelSnapshot`），再按名字查
+    一遍等于同一个请求把库扫两遍，而且两次读之间管理员改配置还会让「预算按 A 算、
+    实际用 B 跑」。传 None 表示「我这里没有，请自己查」——CLI 与直接调用走这条路。
 
     返回 `None` 的三种情形都意味着**放行**：
 
@@ -337,7 +374,10 @@ async def resolve_context_budget(
     if settings.context_guard_mode == "off":
         return None
 
-    context_window, max_output_tokens = await get_model_limits(model_name)
+    if model_limits is None:
+        context_window, max_output_tokens = await get_model_limits(model_name)
+    else:
+        context_window, max_output_tokens = model_limits
     if context_window is None or context_window <= 0:
         _warn_unknown_window_once(model_name)
         return None
