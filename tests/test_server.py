@@ -23,15 +23,29 @@ def test_warns_when_auth_rate_limit_is_global(monkeypatch, caplog):
     assert "10" in warning
 
 
-def test_no_warning_when_trusted_proxy_headers_configured(monkeypatch, caplog):
-    """配了受信头就说明知道自己在反代后面，不必再提醒。"""
+def test_no_warning_when_trusted_proxy_headers_and_ips_configured(monkeypatch, caplog):
+    """标头与代理网段都配好，限流能识别真实来源，不必再提醒。"""
     monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10)
     monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
+    monkeypatch.setattr(settings, "trusted_proxy_ips", "10.0.0.0/8")
 
     with caplog.at_level(logging.WARNING, logger="app.server"):
         server._warn_if_auth_rate_limit_is_global()
 
-    assert not [record for record in caplog.records if "TRUSTED_PROXY_HEADERS" in record.getMessage()]
+    assert not caplog.records
+
+
+def test_warns_when_headers_configured_without_proxy_ips(monkeypatch, caplog):
+    """只配标头不配代理网段 = 谁来都信：必须显式告警（L-10）。"""
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10)
+    monkeypatch.setattr(settings, "trusted_proxy_headers", "X-Forwarded-For")
+    monkeypatch.setattr(settings, "trusted_proxy_ips", "")
+
+    with caplog.at_level(logging.WARNING, logger="app.server"):
+        server._warn_if_auth_rate_limit_is_global()
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "TRUSTED_PROXY_IPS 为空" in messages
 
 
 def test_no_warning_when_auth_rate_limit_disabled(monkeypatch, caplog):

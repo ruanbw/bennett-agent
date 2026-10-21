@@ -19,6 +19,7 @@
 `current_active_user`（按账号计数），而本模块刻意不依赖任何业务服务。
 """
 
+import ipaddress
 import logging
 import time
 from collections import OrderedDict, deque
@@ -115,33 +116,109 @@ class SlidingWindowLimiter:
         self._hits.clear()
 
 
+def _parse_ip(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """把 XFF / client.host 里的单个地址解析成 IP；解析失败返回 None。
+
+    兼容 `[::1]`、`[::1]:443`、`1.2.3.4:5678` 这几种代理常见的写法。
+    """
+    if not value:
+        return None
+    candidate = value.strip()
+    if candidate.startswith("["):
+        closing = candidate.find("]")
+        if closing == -1:
+            return None
+        candidate = candidate[1:closing]
+    elif candidate.count(":") == 1 and "." in candidate:
+        candidate = candidate.rsplit(":", 1)[0]
+    try:
+        return ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+
+
+def parse_trusted_proxy_networks(raw: str | None) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """解析 `TRUSTED_PROXY_IPS`（逗号分隔的 IP/CIDR）。
+
+    空值返回空列表——**空列表意味着不采信任何代理标头**（fail closed）。
+    非法条目跳过并告警，不静默把整份配置作废。
+    """
+    networks = []
+    for item in (raw or "").split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cleaned, strict=False))
+        except ValueError:
+            logger.warning("TRUSTED_PROXY_IPS 里的条目不是合法 IP/CIDR，已忽略: %r", cleaned)
+    return networks
+
+
+_warned_missing_proxy_ips = False
+
+
 def resolve_client_ip(
     direct_host: str | None,
     headers: dict[str, str] | None = None,
     trusted_headers: list[str] | None = None,
+    trusted_proxies: str | None = None,
 ) -> str:
     """从受信任的标头或直连客户端解析真实客户端 IP。
 
-    当配置了 trusted_headers 时，依序从传入的 headers 中取值；对 X-Forwarded-For 这类以逗号
-    分隔的列表取**最右侧**非空值。
+    ## 为什么需要两层信任
 
-    取最右而不是最左，是因为最左侧的值来自客户端，取它等于让客户端自选限流键（换一个
-    假的 XFF 就换一个桶）。最右侧是最后一跳代理追加的地址——前提是代理**覆盖或追加**
-    该头（如 Nginx 的 `$proxy_add_x_forwarded_for`），而不是原样透传。若未配置
-    trusted_headers 或未取到值，回退到 direct_host。
+    只配「标头名」而不管「谁发来的」是不安全的：后端一旦能被直连，任意客户端都能
+    自己写一个 `X-Forwarded-For`，每换一个值就换一个限流桶（L-10）。因此必须同时
+    配置 `TRUSTED_PROXY_IPS`；且直连对端本身必须落在这些网段里，否则**完全不采信**
+    标头、退回 `direct_host`。
+
+    ## 从右往左找第一个非代理地址
+
+    解析 `X-Forwarded-For` 时从**最右**开始，跳过属于受信代理网段的地址，返回第一个
+    非代理地址。这比「取最右」更准确：两跳代理（CDN → Nginx）时，最右是 Nginx 的
+    上游 CDN 地址；继续往左跳过所有受信代理后才是真实客户端。也避免了「取最左」被
+    客户端自填值欺骗。
+
+    任何无法解析成 IP 的条目都会被忽略，不会变成可自选的限流键。
     """
-    if trusted_headers and headers:
-        # headers 可能是 mapping 或 dict，进行大小写不敏感匹配
-        lower_headers = {k.lower(): v for k, v in headers.items()}
-        for header_name in trusted_headers:
-            raw_val = lower_headers.get(header_name.lower().strip())
-            if raw_val and raw_val.strip():
-                # 逗号分隔时取最后一个非空值（代理追加的那个）
-                for candidate in reversed(raw_val.split(",")):
-                    rightmost_ip = candidate.strip()
-                    if rightmost_ip:
-                        return rightmost_ip
-    return direct_host or "unknown"
+    global _warned_missing_proxy_ips
+
+    if not trusted_headers or not headers:
+        return direct_host or "unknown"
+
+    networks = parse_trusted_proxy_networks(trusted_proxies)
+    if not networks:
+        if not _warned_missing_proxy_ips:
+            _warned_missing_proxy_ips = True
+            logger.warning(
+                "TRUSTED_PROXY_HEADERS 已配置但 TRUSTED_PROXY_IPS 为空：为避免直连伪造标头，"
+                "代理标头不会被采信，限流按 client.host 计数。请在 TRUSTED_PROXY_IPS 里配置代理网段。"
+            )
+        return direct_host or "unknown"
+
+    direct_ip = _parse_ip(direct_host)
+    if direct_ip is None or not any(direct_ip in network for network in networks):
+        # 直连对端不是受信代理：它带来的任何标头都不可信
+        return direct_host or "unknown"
+
+    lower_headers = {key.lower(): value for key, value in headers.items()}
+    chain: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for header_name in trusted_headers:
+        raw_val = lower_headers.get(header_name.lower().strip())
+        if not raw_val or not raw_val.strip():
+            continue
+        chain = [parsed for item in raw_val.split(",") if (parsed := _parse_ip(item)) is not None]
+        break
+
+    if not chain:
+        return direct_host or "unknown"
+
+    for candidate in reversed(chain):
+        if not any(candidate in network for network in networks):
+            return str(candidate)
+    # 整条链都是受信代理（异常配置）：退回最左项，至少不会退化成空串
+    return str(chain[0])
 
 
 def client_key(host: str | None, scope: str = "") -> str:
@@ -223,7 +300,12 @@ async def enforce_auth_rate_limit(request: Request) -> None:
 
     direct_host = request.client.host if request.client else None
     trusted_headers = get_trusted_proxy_headers()
-    ip = resolve_client_ip(direct_host, headers=dict(request.headers), trusted_headers=trusted_headers)
+    ip = resolve_client_ip(
+        direct_host,
+        headers=dict(request.headers),
+        trusted_headers=trusted_headers,
+        trusted_proxies=settings.trusted_proxy_ips,
+    )
 
     scope = request.url.path.rstrip("/").rsplit("/", 1)[-1] or "auth"
     limiter = get_auth_limiter()

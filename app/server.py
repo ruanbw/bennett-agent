@@ -59,12 +59,25 @@ def _warn_if_auth_rate_limit_is_global() -> None:
     """
     if settings.auth_rate_limit_per_minute <= 0:
         return
-    if settings.trusted_proxy_headers.strip():
+
+    headers_configured = bool(settings.trusted_proxy_headers.strip())
+    ips_configured = bool(settings.trusted_proxy_ips.strip())
+
+    if headers_configured and not ips_configured:
+        # 只配标头不配代理网段等于「谁来都信」：直连客户端可以轮换 XFF 绕过限流（L-10）。
+        # 限流器会 fail closed（不采信标头），但部署者必须知道这个配置不会生效。
+        logger.warning(
+            "TRUSTED_PROXY_HEADERS 已配置但 TRUSTED_PROXY_IPS 为空：代理标头不会被采信，"
+            "认证限流将按直连地址计数；如确实在反向代理之后，请补上 TRUSTED_PROXY_IPS。"
+        )
+
+    if headers_configured and ips_configured:
         return
+
     logger.warning(
-        "认证限流按 client.host 计数，而 TRUSTED_PROXY_HEADERS 为空：若本服务部署在反向代理之后，"
-        "所有请求会被算作同一个来源（全站共享 %d 次/分钟）。请在代理上设置 X-Forwarded-For 并配置"
-        " TRUSTED_PROXY_HEADERS=X-Forwarded-For，或直连后端。",
+        "认证限流按 client.host 计数：若本服务部署在反向代理之后，所有请求会被算作同一个来源"
+        "（全站共享 %d 次/分钟）。请在代理上设置 X-Forwarded-For 并同时配置"
+        " TRUSTED_PROXY_HEADERS 与 TRUSTED_PROXY_IPS，或直连后端。",
         settings.auth_rate_limit_per_minute,
     )
 

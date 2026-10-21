@@ -189,8 +189,16 @@ class Settings(BaseSettings):
         default="",
         description=(
             "逗号分隔的受信任反向代理 IP 标头列表（如 'X-Forwarded-For,X-Real-IP'）。"
-            "仅当部署在受信反向代理之后时配置，取最右非空值（要求代理覆盖或追加）；"
-            "为空时直接使用直连 client.host，防止客户端伪造标头绕过限流。"
+            "仅当部署在受信反向代理之后时配置；**必须同时配置 TRUSTED_PROXY_IPS**，"
+            "否则标头不会被采信（避免直连客户端伪造 XFF 绕过限流）。"
+        ),
+    )
+    trusted_proxy_ips: str = Field(
+        default="",
+        description=(
+            "受信反向代理的 IP/CIDR 列表（逗号分隔，如 '10.0.0.0/8,127.0.0.1/32'）。"
+            "只有直连对端落在这些网段内时才读 TRUSTED_PROXY_HEADERS，并从右往左跳过"
+            "受信代理地址、取第一个非代理地址作为客户端 IP。为空时一律使用 direct host。"
         ),
     )
     model_upstream_timeout: float = Field(

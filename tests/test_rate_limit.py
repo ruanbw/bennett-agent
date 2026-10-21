@@ -181,35 +181,81 @@ def test_concurrent_checks_are_safe():
 
 
 def test_resolve_client_ip():
-    """验证反向代理 IP 识别逻辑。"""
+    """验证反向代理 IP 识别逻辑：直连对端必须是受信代理，且从左往右跳过受信地址。"""
+    proxies = "10.0.0.0/8,127.0.0.1/32"
+    trusted = ["X-Forwarded-For", "X-Real-IP"]
+
     # 无受信任标头时返回直连 IP
     assert resolve_client_ip("127.0.0.1", headers={"x-forwarded-for": "10.0.0.1"}) == "127.0.0.1"
 
-    # 有受信任标头时取**最右**值：那是最后一跳代理追加的真实来源
-    trusted = ["X-Forwarded-For", "X-Real-IP"]
+    # 有标头但没配代理网段：不采信，退回直连（fail closed）
+    assert resolve_client_ip("198.51.100.7", headers={"X-Forwarded-For": "203.0.113.9"}, trusted_headers=trusted) == (
+        "198.51.100.7"
+    )
+
+    # 直连对端是受信代理：从右往左取第一个**非代理**地址
     headers = {"X-Forwarded-For": "203.0.113.195, 70.41.3.18, 150.172.238.178"}
-    assert resolve_client_ip("127.0.0.1", headers=headers, trusted_headers=trusted) == "150.172.238.178"
+    assert (
+        resolve_client_ip("10.0.0.5", headers=headers, trusted_headers=trusted, trusted_proxies=proxies)
+        == "150.172.238.178"
+    )
+
+    # 两跳代理：最右是受信 CDN，继续往左才是真实客户端
+    two_hop = {"X-Forwarded-For": "203.0.113.9, 10.1.2.3"}
+    assert (
+        resolve_client_ip("10.0.0.5", headers=two_hop, trusted_headers=["X-Forwarded-For"], trusted_proxies=proxies)
+        == "203.0.113.9"
+    )
 
     headers_real_ip = {"X-Real-IP": "198.51.100.1"}
-    assert resolve_client_ip("127.0.0.1", headers=headers_real_ip, trusted_headers=trusted) == "198.51.100.1"
+    assert (
+        resolve_client_ip("10.0.0.5", headers=headers_real_ip, trusted_headers=trusted, trusted_proxies=proxies)
+        == "198.51.100.1"
+    )
 
     # headers 为空或标头值全为空时回退直连 IP
-    assert resolve_client_ip("127.0.0.1", headers={}, trusted_headers=trusted) == "127.0.0.1"
-    assert resolve_client_ip("127.0.0.1", headers={"X-Forwarded-For": "  "}, trusted_headers=trusted) == "127.0.0.1"
-    assert resolve_client_ip(None, headers={}, trusted_headers=trusted) == "unknown"
+    assert resolve_client_ip("10.0.0.5", headers={}, trusted_headers=trusted, trusted_proxies=proxies) == "10.0.0.5"
+    assert (
+        resolve_client_ip(
+            "10.0.0.5", headers={"X-Forwarded-For": "  "}, trusted_headers=trusted, trusted_proxies=proxies
+        )
+        == "10.0.0.5"
+    )
+    assert resolve_client_ip(None, headers={}, trusted_headers=trusted, trusted_proxies=proxies) == "unknown"
 
 
-def test_client_forged_xff_leftmost_is_ignored():
-    """客户端可以把最左值写成任意内容；只有代理追加的最右值能决定限流键。"""
-    trusted = ["X-Forwarded-For"]
-    forged = {"X-Forwarded-For": "6.6.6.6, 7.7.7.7, 203.0.113.9"}
+def test_resolve_client_ip_ignores_unparseable_entries():
+    """无法解析成 IP 的条目不能变成可自选的限流键。"""
+    result = resolve_client_ip(
+        "10.0.0.5",
+        headers={"X-Forwarded-For": "6.6.6.6, not-an-ip, 203.0.113.9"},
+        trusted_headers=["X-Forwarded-For"],
+        trusted_proxies="10.0.0.0/8",
+    )
+    assert result == "203.0.113.9"
 
-    assert resolve_client_ip("127.0.0.1", headers=forged, trusted_headers=trusted) == "203.0.113.9"
 
-    # 代理异常或手工拼接会在末尾留下空段：取最右**非空**值
-    trailing = {"X-Forwarded-For": "203.0.113.9, , "}
-    assert resolve_client_ip("127.0.0.1", headers=trailing, trusted_headers=trusted) == "203.0.113.9"
-    assert resolve_client_ip("127.0.0.1", headers={"X-Forwarded-For": " , "}, trusted_headers=trusted) == "127.0.0.1"
+def test_resolve_client_ip_handles_bracketed_ipv6():
+    result = resolve_client_ip(
+        "10.0.0.5",
+        headers={"X-Forwarded-For": "[2001:db8::1]:443"},
+        trusted_headers=["X-Forwarded-For"],
+        trusted_proxies="10.0.0.0/8",
+    )
+    assert result == "2001:db8::1"
+
+
+def test_direct_client_cannot_spoof_proxy_headers():
+    """L-10：直连对端不在受信网段时，X-Forwarded-For 完全不被采信。"""
+    assert (
+        resolve_client_ip(
+            "198.51.100.7",
+            headers={"X-Forwarded-For": "6.6.6.6"},
+            trusted_headers=["X-Forwarded-For"],
+            trusted_proxies="10.0.0.0/8",
+        )
+        == "198.51.100.7"
+    )
 
 
 def test_reset_clears_state():
