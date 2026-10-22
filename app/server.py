@@ -123,6 +123,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await _cleanup_expired_sessions_on_startup()
     _warn_if_auth_rate_limit_is_global()
+    await _discover_mcp_tools()
 
     try:
         yield
@@ -138,6 +139,41 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await engine.dispose()
         except Exception:  # noqa: BLE001 - 同上，两个清理动作互不遮蔽
             logger.warning("释放数据库连接失败", exc_info=True)
+
+
+async def _discover_mcp_tools() -> None:
+    """启动时发现 MCP 工具，让提示词与能力探针拿到真实清单。
+
+    为什么要在启动时做而不是等第一次对话：
+
+    1. `render_system_prompt` 是同步的（预算预检每轮都会调它），它只能读缓存好的
+       工具快照——不预先发现，提示词里就永远少一段 MCP 能力；
+    2. 发现要建连（stdio 还要起子进程），放在第一轮对话里等于让第一个用户替所有人
+       付这次开销，而且会撞上 SSE 的总时长预算。
+
+    失败**不阻止启动**：MCP 是增强能力。但要在日志里说清楚是哪个 server 连不上
+    （`discovery_error` 同时会出现在 `/api/capabilities` 里）。
+    """
+    from app.tools.mcp_client import get_mcp_registry
+
+    registry = get_mcp_registry()
+    if not registry.configs:
+        return
+
+    try:
+        tools = await registry.discover()
+    except Exception:  # noqa: BLE001 - 发现失败不该让服务起不来
+        logger.warning("MCP 工具发现失败（不影响启动，内置工具照常可用）", exc_info=True)
+        return
+
+    error = registry.discovery_error
+    if error:
+        logger.warning("部分 MCP server 不可用：%s（对应工具不会出现在本轮装配里）", error)
+    if tools:
+        logger.info(
+            "MCP 工具已就绪：%s",
+            "、".join(f"{info.server}__{info.name}" for info in tools),
+        )
 
 
 def _api_docs_enabled() -> bool:

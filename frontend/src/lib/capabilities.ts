@@ -7,11 +7,16 @@
  * 响应形状见 `types.ts:Capabilities` 与 `app/schemas/capabilities.py`。
  */
 
-import type { Capabilities } from '../types';
+import type { Capabilities, McpServerStatus } from '../types';
 import { apiFetch } from './api';
 
 /** 还没拿到（或拿不到）能力清单时的保守取值：不推荐任何依赖外部服务的能力。 */
-export const UNKNOWN_CAPABILITIES: Capabilities = { web_search: false, tools: [] };
+export const UNKNOWN_CAPABILITIES: Capabilities = {
+  web_search: false,
+  tools: [],
+  mcp_servers: [],
+  mcp_error: null,
+};
 
 /**
  * 能力探测的超时。
@@ -38,7 +43,32 @@ export async function fetchCapabilities(): Promise<Capabilities> {
     tools: Array.isArray(record.tools)
       ? record.tools.filter((name): name is string => typeof name === 'string')
       : [],
+    mcp_servers: sanitizeMcpServers(record.mcp_servers),
+    mcp_error: typeof record.mcp_error === 'string' && record.mcp_error ? record.mcp_error : null,
   };
+}
+
+/**
+ * 收窄 MCP server 列表。
+ *
+ * 丢掉名字不是字符串的条目：`name` 是渲染键，也是工具名前缀。留一个 `undefined`
+ * 进来会让 React 的 key 出问题，而且渲染出一个「无名 server」对排查毫无帮助。
+ */
+function sanitizeMcpServers(value: unknown): McpServerStatus[] {
+  if (!Array.isArray(value)) return [];
+  const servers: McpServerStatus[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { name, tools } = entry as Partial<McpServerStatus>;
+    if (typeof name !== 'string' || !name) continue;
+    servers.push({
+      name,
+      tools: Array.isArray(tools)
+        ? tools.filter((tool): tool is string => typeof tool === 'string')
+        : [],
+    });
+  }
+  return servers;
 }
 
 /**
@@ -57,4 +87,27 @@ export function describeWebSearchCapability(capabilities: Capabilities | null | 
 export function describeToolCount(capabilities: Capabilities | null | undefined): string {
   const count = capabilities?.tools.length ?? 0;
   return count > 0 ? `${count} 个` : '未知';
+}
+
+/**
+ * MCP 的展示文案。
+ *
+ * 「配了但不通」必须能看出来：只让工具从列表里消失，用户会以为这个助手本来就没有
+ * 那些能力，而运维会以为配置从来没生效。两句话分别对应「通了几个」与「为什么没通」。
+ */
+export function describeMcpCapability(capabilities: Capabilities | null | undefined): string {
+  if (!capabilities) return '未知';
+  const servers = capabilities.mcp_servers ?? [];
+  if (servers.length === 0) {
+    // 有错误但零个可用 = 配了全都不通；没错误 = 根本没配
+    return capabilities.mcp_error ? '配置了但未能连接' : '未配置';
+  }
+  const toolCount = servers.reduce((sum, server) => sum + server.tools.length, 0);
+  return `${servers.length} 个 server · ${toolCount} 个工具`;
+}
+
+/** MCP server 名字清单（设置面板里展开显示；空串表示没有可列的东西）。 */
+export function describeMcpServers(capabilities: Capabilities | null | undefined): string {
+  const servers = capabilities?.mcp_servers ?? [];
+  return servers.map((server) => server.name).join('、');
 }

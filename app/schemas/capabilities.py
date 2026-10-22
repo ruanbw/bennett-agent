@@ -12,6 +12,13 @@
 from pydantic import BaseModel, Field
 
 
+class McpServerStatus(BaseModel):
+    """一个 MCP server 的运行时状态。"""
+
+    name: str = Field(description="server 名（也是工具名前缀）")
+    tools: list[str] = Field(default_factory=list, description="该 server 提供、且已装配的工具名（不含前缀）")
+
+
 class CapabilitiesResponse(BaseModel):
     """当前进程实际具备的能力。"""
 
@@ -19,4 +26,16 @@ class CapabilitiesResponse(BaseModel):
     tools: list[str] = Field(
         default_factory=list,
         description="本轮装配给 Agent 的工具名（按注册顺序）；供前端与排障共用",
+    )
+    mcp_servers: list[McpServerStatus] = Field(
+        default_factory=list,
+        description="已配置且连通的 MCP server 及其工具；连不上的不在这个列表里",
+    )
+    mcp_error: str | None = Field(
+        default=None,
+        description=(
+            "MCP 配置了但没能连上的原因；全部连通或未配置时为 null。"
+            "单独给出这个字段是为了让「配了但不通」可被界面解释——"
+            "只让工具从列表里消失，用户会以为配置从来没生效。"
+        ),
     )

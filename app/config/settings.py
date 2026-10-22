@@ -152,6 +152,24 @@ class Settings(BaseSettings):
     )
     assistant_name: str = Field(default="Bennett", description="助手名称")
     tavily_api_key: str | None = Field(default=None, description="Tavily 网页搜索 API Key")
+    mcp_servers: str = Field(
+        default="",
+        description=(
+            "MCP server 声明，分号分隔。每条形如 '名称=url:https://host/mcp' 或 "
+            "'名称=stdio:/path/to/server arg1 arg2'。名称只能用字母/数字/下划线/短横线"
+            "（它会变成工具名前缀，如 `filesystem__read_file`）。留空 = 不接任何 MCP server。"
+            "写错的声明会让**启动失败**而不是静默跳过：声明出来的能力不能悄悄消失。"
+        ),
+    )
+    mcp_tool_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=600.0,
+        description=(
+            "单个 MCP 工具调用的默认超时（秒）。MCP server 可能做很重的事（跑查询、读大文件），"
+            "所以比搜索宽；但必须有上限——没有上限时一个卡死的 server 会一直占着一个 SSE。"
+        ),
+    )
     cors_allowed_origins: str = Field(
         default="",
         description=(

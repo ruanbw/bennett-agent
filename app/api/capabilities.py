@@ -10,17 +10,34 @@
 
 from fastapi import APIRouter, Depends
 
-from app.schemas.capabilities import CapabilitiesResponse
+from app.schemas.capabilities import CapabilitiesResponse, McpServerStatus
 from app.services.auth import current_active_user
 from app.tools import build_tools
+from app.tools.mcp_client import get_mcp_registry
 
 router = APIRouter(prefix="/api", tags=["capabilities"])
 
 
 def collect_capabilities() -> CapabilitiesResponse:
-    """按实际装配结果生成能力清单（纯函数，便于单测）。"""
+    """按实际装配结果生成能力清单（纯函数，便于单测）。
+
+    MCP 部分读的是**已缓存**的发现结果：端点本身是同步的，而发现要建连。
+    启动时已经 await 过一次（`app/server.py:_discover_mcp_tools`），所以正常路径下
+    这里拿到的是真实清单；还没发现过时列表为空——那比让端点去联网更可预期。
+    """
     tools = [tool.name for tool in build_tools()]
-    return CapabilitiesResponse(web_search="tavily_search" in tools, tools=tools)
+
+    registry = get_mcp_registry()
+    grouped: dict[str, list[str]] = {}
+    for info in registry.cached_tools():
+        grouped.setdefault(info.server, []).append(info.name)
+
+    return CapabilitiesResponse(
+        web_search="tavily_search" in tools,
+        tools=tools,
+        mcp_servers=[McpServerStatus(name=name, tools=names) for name, names in sorted(grouped.items())],
+        mcp_error=registry.discovery_error,
+    )
 
 
 @router.get(

@@ -115,6 +115,9 @@ def _settings_cache_key() -> tuple[object, ...]:
         # 与 `build_tools()` 的启用判定同源：占位 Key 视为未配置，避免缓存键在
         # 「配置不可用」与「已配置」之间反复切换而装配结果其实完全相同。
         is_usable_api_key(settings.tavily_api_key),
+        # MCP server 声明会改变 toolsets 与提示词里的外部工具段：不加进键，
+        # 管理员加了 server 之后旧 agent 会一直从缓存里出来（表现为「配置改了没生效」）。
+        settings.mcp_servers.strip(),
     )
 
 
@@ -313,7 +316,45 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         web_search=WEB_SEARCH_TOOL_NAME in names,
         clarification=CLARIFICATION_TOOL_NAME in names,
         current_time=CURRENT_TIME_TOOL_NAME in names,
+        # MCP 工具：名字带 `server__` 前缀，与内置工具混在同一个 tools 列表里。
+        # 模板单独列一段——不列的话模型只知道「有这些名字」，不知道它们是
+        # **外部**工具（可能慢、可能失败、结果需要按不可信数据处理）。
+        mcp_servers=mcp_server_summary(names),
     )
+
+
+def mcp_server_summary(tool_names: Sequence[str]) -> list[dict[str, object]]:
+    """从工具名里还原出「哪些 MCP server 提供了哪些工具」。
+
+    入参是**装配后的工具名列表**（`build_tools()` 的结果加上 MCP 的带前缀名字），
+    所以提示词里列出的 MCP 能力与真正挂上去的必然是同一份——与 `web_search` 等
+    三个条件渲染同一条原则：模板里写死工具名，一旦某个来源没装配，模型就会去调用
+    一个不存在的工具。
+
+    解析用 `MCP` 名字分隔符的最后一个（`split(NAME_SEPARATOR, 1)`）：prefix 里不
+    允许出现 `__`（server 名只允许字母数字下划线短横线，但连续两个下划线在这里是
+    分隔符），所以第一个就是 server 名。
+    """
+    from app.tools.mcp_client import NAME_SEPARATOR, get_mcp_registry
+
+    registry = get_mcp_registry()
+    if not registry.configs:
+        return []
+
+    known = {info.qualified_name: info for info in registry.cached_tools()}
+    grouped: dict[str, list[str]] = {}
+    for name in tool_names:
+        info = known.get(name)
+        if info is not None:
+            grouped.setdefault(info.server, []).append(info.name)
+        elif NAME_SEPARATOR in name:
+            # 兜底：toolset 已装配但发现结果还没回来（理论上启动后不会发生）。
+            # 按前缀归组，至少让提示词里出现这个名字，而不是让模型看着一个名字
+            # 却不知道它从哪来。
+            server, _, bare = name.partition(NAME_SEPARATOR)
+            grouped.setdefault(server, []).append(bare)
+
+    return [{"name": server, "tools": tools} for server, tools in sorted(grouped.items())]
 
 
 @lru_cache(maxsize=AGENT_CACHE_SIZE)
@@ -349,10 +390,32 @@ def _build_agent_cached(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
+        # MCP 工具走 toolsets 而不是 tools：toolset 自己管连接生命周期与并发引用计数
+        # （见 app/tools/mcp_client.py 的「生命周期」一节）。没配 server 时是空列表。
+        toolsets=_mcp_toolsets(),
         # 工具是外部边界：一个工具抛异常不应该让整轮回答作废。
         # 兜底只作用于「漏网抛出来」的异常，工具自己返回文案的路径不受影响。
         capabilities=[_TOOL_ERROR_ISOLATION],
     )
+
+
+def _mcp_toolsets() -> list[object]:
+    """取当前配置下的 MCP toolset 列表；未配置时为空。
+
+    装配失败**不让 agent 构建失败**：MCP 是增强能力，缺了它本轮仍可用内置工具回答。
+    这也是这里只取已缓存的实例而不做发现的原因——发现是 async 的，而装配是同步的
+    缓存路径；发现由启动时与能力探针负责（见 `app/server.py` 的 lifespan）。
+    """
+    from app.tools.mcp_client import get_mcp_registry
+
+    registry = get_mcp_registry()
+    if not registry.configs:
+        return []
+    try:
+        return list(registry.toolsets())
+    except Exception:
+        logger.warning("MCP toolset 装配失败，本轮只用内置工具", exc_info=True)
+        return []
 
 
 def build_agent(

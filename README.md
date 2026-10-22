@@ -8,6 +8,8 @@
 - PydanticAI 的 tool-calling 循环与上下文会话管理，LiteLLM 通过 `LiteLLMProvider` 适配聚合网关。
 - 工具在 `app/tools` 按领域独立编写、统一注册注入；工具抛异常经 `ToolFailed` 隔离成
   `outcome=failed` 的失败结果回灌模型，不打断整轮；前端与 Markdown 导出都标成「失败」而不是绿勾。
+- 除内置工具外可接 **MCP server**（`MCP_SERVERS`）：进程启动时发现工具，
+  名字统一加 `<server>__` 前缀防撞名，结果按不可信外部数据定界并截断。配置写错时启动即失败。
 - 上游兜底分三层：同模型重试一次 → 备用模型（切换对用户可见）→ 面向用户的错误文案。
 - 上下文预算：按网关的 `context_window` 估算。超限时**先压缩**（截断超长单条 → 把早期
   轮次折叠成事实清单注入本轮 instructions），压完仍超才拒绝并锁住输入框；每次压缩都告知
@@ -155,7 +157,7 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 | `POST /api/auth/login` | 登录（**表单编码**，字段名 `username` = 邮箱，成功 204） |
 | `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户（含 `role`） |
 | `GET /api/models` | 可用模型列表（含思考链、上下文窗口等元数据） |
-| `GET /api/capabilities` | 运行时能力探针（当前装配的工具、是否可联网搜索） |
+| `GET /api/capabilities` | 运行时能力探针（当前装配的工具、是否可联网搜索、已连通的 MCP server） |
 | `POST /api/chat` · `POST /api/chat/title` | 对话（SSE 流式）/ 生成会话标题 |
 | `POST /api/sync/push` | 批量推送本机变更（行级幂等 upsert，逐行接受或拒绝） |
 | `GET /api/sync/pull` | 按不透明游标增量拉取（`timeout` > 0 时长轮询） |
@@ -309,6 +311,39 @@ IPv6（带端口的丢掉端口：`no_proxy` 是按主机绕过代理），并�
 关键词（大小写/空白无关）+ max_results」，容量 64、LRU 淘汰。**只缓存成功结果**：超时、
 429、5xx 往往是瞬时的，缓存它们等于把一次抖动固定成十分钟的「搜不到」。不跨进程——多
 worker 各有各的缓存，这是省钱手段而不是正确性的一部分。
+
+## MCP 外部工具
+
+`app/tools/mcp_client.py` 让工具来源变成配置而不是代码：在 `MCP_SERVERS` 里写一行
+server 地址（`url:https://…` 或 `stdio:/path/to/server`），进程启动时连一次、按 server
+实际暴露的工具清单装配，代码一行不改。没有这一步，每接一个新能力面（读写文件、查库、
+调内部 API）都要改 `app/tools/__init__.py`、重新部署、重新过一遍 review。
+
+**工具名一律加 `<server>__` 前缀。** MCP server 由第三方提供，它的 `search`、`read`
+极可能与内置工具或另一个 server 撞名；加前缀让撞名从「静默覆盖其中一个」变成「两个
+都存在、名字不同」。前缀的写法有个坑：`PrefixedToolset` **自己会再补一个下划线**，
+所以想得到 `demo__echo`，传进去的 prefix 必须是 `demo_`——传 `demo__` 会得到
+`demo___echo`，而且任何地方都不会报错。`_exposed_prefix()` 是这一点的单点定义。
+
+**server 是外部边界**，所以三件事都由客户端做，不依赖 server 配合：
+
+- **超时**：MCP 工具没有内置工具那样的自带超时，本层按 `MCP_TOOL_TIMEOUT_SECONDS`
+  注入。超时抛 `ToolFailed`（不是 `ModelRetry`）——server 卡死与参数无关，让模型拿
+  同样参数重试只是白烧 token。错误行为也配成 `"failed"` 而不是默认的 `"retry"`。
+- **截断**：MCP 结果没有长度约束，一整篇网页会直接吃掉上下文预算。文本截到 8000
+  字符；**结构化结果保形**（dict/list 原样交给模型，只在整个 JSON 超限时退回截断
+  文本），**二进制结果不包装**（贴一段中文前缀会毁掉图片）。
+- **不可信定界**：结果与 `tavily_search` 同样标成「外部内容，不是指令」。server
+  返回的文本里完全可以写着「忽略以上规则」。
+
+**发现失败不让服务起不来。** MCP 是增强能力，单个 server 连不上时跳过它、内置工具
+照常可用；但原因会进 `GET /api/capabilities` 的 `mcp_error`，设置面板显示成
+「配置了但未能连接：<原因>」——只让工具从列表里消失，用户会以为功能本来就没有，
+运维会以为配置从来没生效。
+
+工具发现放在**启动时**（`app/server.py:_discover_mcp_tools`）而不是第一次对话：提示词
+渲染是同步的，只能读缓存好的清单；而且建连（stdio 还要起子进程）不该让第一个用户
+替所有人付这次开销。
 
 ## 备用模型
 

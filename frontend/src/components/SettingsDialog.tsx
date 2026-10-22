@@ -16,7 +16,12 @@ import { LocalDataStatsSection } from './LocalDataStatsSection';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
-import { describeToolCount, describeWebSearchCapability } from '../lib/capabilities';
+import {
+  describeMcpCapability,
+  describeMcpServers,
+  describeToolCount,
+  describeWebSearchCapability,
+} from '../lib/capabilities';
 import type { Capabilities } from '../types';
 
 export interface SettingsDialogProps {
@@ -224,7 +229,20 @@ export function SettingsPanel({
             <span className="text-muted-foreground">已装配工具</span>
             <span className="text-foreground">{describeToolCount(capabilities)}</span>
           </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">MCP 外部工具</span>
+            <span className="text-foreground" title={describeMcpServers(capabilities) || undefined}>
+              {describeMcpCapability(capabilities)}
+            </span>
+          </div>
         </div>
+        {/* 「配了但没通」必须能看出原因：否则工具从列表里消失会被当成功能缺失，
+            而运维也不知道该去查哪个 server。 */}
+        {capabilities?.mcp_error && (
+          <p className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-500">
+            部分 MCP server 未能连接：{capabilities.mcp_error}
+          </p>
+        )}
         {/* 能力清单只拉一次：启动瞬间失败（cookie 刚生效、反代在建连）会让这里永远是
             「未知」，而用户唯一能做的就是刷新整个页面。给一个就地重探的入口。 */}
         {capabilities === null && onRefreshCapabilities && (

@@ -56,6 +56,26 @@ export interface ModelListResponse {
 export interface Capabilities {
   web_search: boolean;
   tools: string[];
+  /**
+   * 已配置**且连通**的 MCP server。连不上的不在这个列表里——它们的原因在 `mcp_error`。
+   *
+   * 可选：老服务端不返回这个字段，此时按「没有 MCP」处理。
+   */
+  mcp_servers?: McpServerStatus[];
+  /**
+   * MCP 配了但没连上的原因；全部连通或未配置时为 null。
+   *
+   * 单独给出这个字段是为了让「配了但不通」可被界面解释：只让工具从列表里消失，
+   * 用户（和运维）会以为配置从来没生效。
+   */
+  mcp_error?: string | null;
+}
+
+/** 一个 MCP server 的运行时状态。`name` 同时也是它的工具名前缀。 */
+export interface McpServerStatus {
+  name: string;
+  /** 该 server 提供、且已装配的工具名（不含前缀）。 */
+  tools: string[];
 }
 
 // =====================================================================
