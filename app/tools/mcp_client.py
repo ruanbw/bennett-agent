@@ -53,12 +53,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.toolsets import ToolsetTool, WrapperToolset
 
 from app.config import settings
+from app.tools.approval import RISK_METADATA_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +278,52 @@ class McpToolsetBinding:
     exposed: MCPToolset
 
 
+#: 打在 MCP 工具定义上的风险等级。
+#:
+#: MCP 工具是**第三方实现**，我们无法确认它有没有副作用，所以默认按 `SAFE_WRITE`
+#: 处理（`RiskLevel` 的 docstring 对这一点有承诺）。这个默认值偏向「多问一次」，
+#: 而不是替用户假设安全。
+MCP_TOOL_RISK_LEVEL = "safe_write"
+
+
+class RiskAnnotatingToolset(WrapperToolset[None]):
+    """给包装着的工具定义补上 `risk_level` 元数据。
+
+    ## 为什么需要这一层
+
+    `ApprovalGate`（`app/tools/approval.py`）读的是 `tool_def.metadata["risk_level"]`，
+    而**本地工具**在 `ManagedTool.__init__` 里就把这个键写进了 metadata。MCP 工具是
+    远端生成的 `ToolDefinition`，里面只有 name/description/parameters——没有 metadata。
+
+    于是闸门对这个工具取到的风险等级是 `None`，`requires_approval(None)` 返回
+    `False`，**工具直接执行**。这个漏洞是真实存在的：MCP 工具绕过了 HITL，而
+    `RiskLevel` 的 docstring 还写着「MCP 外部工具默认按 SAFE_WRITE 处理」。修复方式
+    就是在这里把那个承诺兑现成数据。
+
+    ## 为什么用 toolset 包装而不是在闸门里判断「名字带 `__` 就是 MCP」
+
+    名字前缀只是**约定**（`NAME_SEPARATOR`），不是证据：本地工具完全可能叫
+    `foo__bar`，而闸门不应该靠字符串猜来源。包装层是从数据源头补齐，判断依据变成
+    「这个工具确实来自 MCP toolset」，不依赖命名。
+
+    也考虑过 `process_tool_call`：那个钩子只在**调用**时经过，拿不到 `ToolDefinition`，
+    改不了工具清单。
+    """
+
+    async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+        tools = await super().get_tools(ctx)
+        return {
+            name: replace(
+                tool,
+                tool_def=replace(
+                    tool.tool_def,
+                    metadata={**(tool.tool_def.metadata or {}), RISK_METADATA_KEY: MCP_TOOL_RISK_LEVEL},
+                ),
+            )
+            for name, tool in tools.items()
+        }
+
+
 @dataclass(frozen=True)
 class McpToolInfo:
     """一次工具发现的快照（供能力探针与提示词渲染使用）。"""
@@ -393,7 +442,9 @@ def build_toolset(config: McpServerConfig) -> McpToolsetBinding:
     return McpToolsetBinding(
         config=config,
         raw=raw,
-        exposed=raw.prefixed(_exposed_prefix(config.name)),
+        # 顺序：先加前缀（模型看到 `server__tool`），再补风险等级。反过来也行，但
+        # 补元数据这一层在最外面更直观——它描述的是「交给 Agent 的那份清单」。
+        exposed=RiskAnnotatingToolset(raw.prefixed(_exposed_prefix(config.name))),
     )
 
 

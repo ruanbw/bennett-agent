@@ -525,3 +525,113 @@ def test_mcp_section_is_absent_from_rendered_prompt_without_servers():
     # 第 7 条把「MCP 外部工具结果」列为不可信数据来源之一，那句是常驻的。
     assert "### 外部工具（MCP）" not in rendered
     assert "server `" not in rendered
+
+
+# ---------------------------------------------------------------------
+# 审批闸门必须能看见 MCP 工具的风险等级
+#
+# 这是一条**回归锁**：此前的实现里，`ApprovalGate` 读 `tool_def.metadata["risk_level"]`，
+# 而 MCP 工具是远端生成的 `ToolDefinition`，里面没有 metadata——于是闸门取到的风险等级
+# 是 None，`requires_approval(None)` 返回 False，**MCP 工具直接执行**，完全绕过 HITL。
+# 而 `RiskLevel` 的 docstring 还写着「MCP 外部工具默认按 SAFE_WRITE 处理」。
+#
+# 这个漏洞不会报错、不会告警，只是让审批静默失效。所以用真实协议栈把它钉住。
+# ---------------------------------------------------------------------
+async def test_real_mcp_tool_carries_safe_write_risk_metadata():
+    """经过装配的 MCP 工具必须自带 `risk_level=safe_write`。"""
+    from app.tools.approval import RISK_METADATA_KEY
+    from app.tools.mcp_client import RiskAnnotatingToolset
+
+    server = make_mcp_server("demo")
+    from pydantic_ai.mcp import MCPToolset
+
+    raw = MCPToolset(server, id="demo")
+    exposed = RiskAnnotatingToolset(raw.prefixed(exposed_prefix("demo")))
+
+    async with exposed:
+        from pydantic_ai.tools import RunContext
+
+        tools = await exposed.get_tools(RunContext(deps=None, model=None, usage=None))
+
+    assert set(tools) == {"demo__echo", "demo__add"}
+    for name, tool in tools.items():
+        metadata = tool.tool_def.metadata or {}
+        assert metadata.get(RISK_METADATA_KEY) == mcp_client.MCP_TOOL_RISK_LEVEL, name
+
+
+async def test_mcp_tool_is_stopped_by_the_approval_gate():
+    """闸门必须真的拦下它——只给 metadata 不够，`requires_approval` 也要认这个值。"""
+    from pydantic_ai.mcp import MCPToolset
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import RunContext
+
+    from app.tools.approval import ApprovalGate, ApprovalRequired
+    from app.tools.mcp_client import RiskAnnotatingToolset
+
+    server = make_mcp_server("demo")
+    raw = MCPToolset(server, id="demo")
+    exposed = RiskAnnotatingToolset(raw.prefixed(exposed_prefix("demo")))
+
+    async with exposed:
+        tools = await exposed.get_tools(RunContext(deps=None, model=None, usage=None))
+        tool_def = tools["demo__echo"].tool_def
+
+    gate = ApprovalGate()
+    ctx = RunContext(deps=None, model=None, usage=None)
+    # 未批准 → 必须抛 ApprovalRequired（而不是把 args 原样放行）
+    with pytest.raises(ApprovalRequired):
+        await gate.before_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name="demo__echo", args={"text": "hi"}),
+            tool_def=tool_def,
+            args={"text": "hi"},
+        )
+
+
+async def test_mcp_tool_runs_once_approved():
+    """批准之后必须放行——否则续跑会一直弹同一个审批框。"""
+    from pydantic_ai.mcp import MCPToolset
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import RunContext
+
+    from app.tools.approval import ApprovalGate
+    from app.tools.mcp_client import RiskAnnotatingToolset
+
+    server = make_mcp_server("demo")
+    raw = MCPToolset(server, id="demo")
+    exposed = RiskAnnotatingToolset(raw.prefixed(exposed_prefix("demo")))
+
+    async with exposed:
+        tools = await exposed.get_tools(RunContext(deps=None, model=None, usage=None))
+        tool_def = tools["demo__echo"].tool_def
+
+    gate = ApprovalGate()
+    approved_ctx = RunContext(deps=None, model=None, usage=None, tool_call_approved=True)
+    args = {"text": "hi"}
+
+    assert (
+        await gate.before_tool_execute(
+            approved_ctx,
+            call=ToolCallPart(tool_name="demo__echo", args=args),
+            tool_def=tool_def,
+            args=args,
+        )
+        == args
+    )
+
+
+def test_build_toolset_wires_the_risk_annotation():
+    """锁住**装配路径**：`build_toolset` 返回的 `exposed` 必须已经带上注解层。
+
+    前面两条用例直接构造注解器，验的是「注解层有用」；这一条验的是「装配时真的用了
+    它」。少了这条，把 `build_toolset` 里的 `RiskAnnotatingToolset(...)` 改回裸
+    `raw.prefixed(...)` 时全部测试仍然是绿的，而线上审批已经静默失效——这正是当初
+    那个 bug 的形态。
+    """
+    from app.tools.mcp_client import RiskAnnotatingToolset
+
+    binding = mcp_client.build_toolset(McpServerConfig(name="demo", url="https://demo.example/mcp"))
+
+    assert isinstance(binding.exposed, RiskAnnotatingToolset), (
+        "build_toolset 必须用 RiskAnnotatingToolset 包一层，否则 MCP 工具没有 risk_level，审批闸门会对它们全部放行"
+    )
