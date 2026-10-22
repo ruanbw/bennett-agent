@@ -506,6 +506,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "fastapi-users", extra = ["sqlalchemy"] },
     { name = "httpx" },
@@ -529,6 +530,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "fastapi", specifier = ">=0.142.2" },
     { name = "fastapi-users", extras = ["sqlalchemy"], specifier = ">=15.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },

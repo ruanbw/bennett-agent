@@ -667,33 +667,33 @@ def long_assistant_turn():
 
 
 async def test_the_anchor_slice_is_estimated_in_a_thread_when_long(monkeypatch):
-    """锚点路径只估算 `messages[anchor.message_index:]`，阈值也按那段算。"""
+    """锚点路径会先核对前缀、再估算切片；两段都长时都走线程。"""
     patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
     calls = spy_on_to_thread(monkeypatch)
     messages = [*history_with_chars(10), long_assistant_turn(), msg("user", "新问题")]
     anchor_index = len(messages) - 2
+    prefix_tokens = estimate_messages_tokens(messages[: anchor_index + 1])
+    credible = prefix_tokens + 40_000
 
-    budget = await resolve_context_budget("m", messages, anchor(anchor_index, 40_000))
+    budget = await resolve_context_budget("m", messages, anchor(anchor_index, credible))
 
     assert budget is not None and budget.basis == "anchor"
-    assert len(calls) == 1
-    assert budget.used_tokens == 40_000 + estimate_messages_tokens(messages[anchor_index:])
+    # 一次前缀核对 + 一次切片估算
+    assert len(calls) == 2
+    assert budget.used_tokens == credible + estimate_messages_tokens(messages[anchor_index:])
 
 
-async def test_a_short_anchor_slice_stays_synchronous(monkeypatch):
-    """锚点之前再长也不影响分流：真正被估算的切片短就走同步路径。
-
-    写成「锚点前 10 万字符 + 短的锚点回答」才能区分两种实现：按整份历史量的阈值
-    会把这里推进线程，而按切片量的不会。
-    """
+async def test_anchor_verification_offloads_when_the_prefix_is_long(monkeypatch):
+    """前缀核对本身按前缀长度分流：前缀很长时即使切片很短也要走线程。"""
     patch_limits(monkeypatch, context_window=1_000_000, max_output_tokens=8_000)
     calls = spy_on_to_thread(monkeypatch)
     messages = [*history_with_chars(THREAD_ESTIMATE_CHARS_THRESHOLD * 2), msg("assistant", "答"), msg("user", "新问题")]
     anchor_index = len(messages) - 2
+    prefix_tokens = estimate_messages_tokens(messages[: anchor_index + 1])
 
-    await resolve_context_budget("m", messages, anchor(anchor_index, 40_000))
+    await resolve_context_budget("m", messages, anchor(anchor_index, prefix_tokens + 40_000))
 
-    assert calls == []
+    assert len(calls) == 1  # 前缀核对走线程，短切片走同步
 
 
 @pytest.mark.parametrize(
@@ -808,3 +808,26 @@ def test_reset_allows_the_warning_again(caplog):
         usable_anchor(messages, anchor(99, 5_000))
 
     assert len([record for record in caplog.records if "越界" in record.getMessage()]) == 2
+
+
+async def test_understated_anchor_is_rejected(monkeypatch):
+    """客户端报一个「够过结构下限、但远小于前缀」的 token 数，不能借此跳过预检（I-08）。"""
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    messages = [msg("user", "很长的前缀" * 2_000), msg("assistant", "很长的回答" * 2_000), msg("user", "新问题")]
+
+    # 结构下限只按消息条数算，这个值能过 usable_anchor，但远小于前缀真实估算
+    floor = MESSAGE_OVERHEAD_TOKENS * 2 + 1
+    budget = await resolve_context_budget("m", messages, anchor(1, floor))
+
+    assert budget is not None
+    assert budget.basis == "estimate"
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
+async def test_credible_anchor_is_still_used(monkeypatch):
+    patch_limits(monkeypatch, context_window=100_000, max_output_tokens=8_000)
+    messages = [msg("user", "问"), msg("assistant", "答"), msg("user", "新问题")]
+
+    budget = await resolve_context_budget("m", messages, anchor(1, 40_000))
+
+    assert budget is not None and budget.basis == "anchor"

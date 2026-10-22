@@ -137,3 +137,56 @@ async def test_read_user_from_token_roundtrip_and_guards():
             if user_row is not None:
                 await session.delete(user_row)
             await session.commit()
+
+
+async def test_new_sessions_store_only_a_token_digest():
+    """会话令牌入库前必须摘要（I-10）；旧明文行仍可读，不会踢掉已有登录。"""
+    from fastapi_users.db import SQLAlchemyUserDatabase
+
+    from app.db import AccessToken, HashedAccessTokenDatabase, hash_access_token
+    from app.services.auth import HashedDatabaseStrategy, UserManager
+
+    await create_db_and_tables()
+    user_id = uuid.uuid4()
+    email = f"hash-{uuid.uuid4().hex[:12]}@example.com"
+    async with async_session_maker() as session:
+        session.add(
+            User(
+                id=user_id,
+                email=email,
+                hashed_password="x",
+                is_active=True,
+                is_superuser=False,
+                is_verified=True,
+            )
+        )
+        await session.commit()
+
+    try:
+        async with async_session_maker() as session:
+            user = await session.get(User, user_id)
+            strategy = HashedDatabaseStrategy(
+                HashedAccessTokenDatabase(session, AccessToken),
+                lifetime_seconds=3600,
+            )
+            token = await strategy.write_token(user)
+
+            stored = await session.scalar(select(AccessToken).where(AccessToken.user_id == user_id))
+            assert stored is not None
+            assert stored.token != token
+            assert stored.token == hash_access_token(token)
+            assert len(stored.token) == 43  # 表结构 String(43)，无需迁移
+
+            # 原文仍能通过摘要查回用户
+            manager = UserManager(SQLAlchemyUserDatabase(session, User))
+            restored = await strategy.read_token(token, manager)
+            assert restored is not None and restored.id == user_id
+    finally:
+        async with async_session_maker() as session:
+            rows = (await session.scalars(select(AccessToken).where(AccessToken.user_id == user_id))).all()
+            for row in rows:
+                await session.delete(row)
+            user_row = await session.get(User, user_id)
+            if user_row is not None:
+                await session.delete(user_row)
+            await session.commit()

@@ -388,6 +388,21 @@ async def resolve_context_budget(
 
     anchor = usable_anchor(messages, anchor)
     if anchor is not None:
+        # 锚点来自客户端，不能无条件相信：声称覆盖 N 条消息、却报出一个远小于前缀
+        # 真实规模的 token 数，就是拿它绕过上下文预检（I-08）。用前缀估算做一次核对，
+        # 明显低于估算就丢掉锚点、退回全量估算（攻击代价 = 一次全量估算）。
+        prefix_estimate = await _estimate_messages_tokens_off_loop(messages[: anchor.message_index + 1])
+        if anchor.context_tokens < int(prefix_estimate * 0.9):
+            _warn_anchor_dropped_once(
+                "understated",
+                "上下文锚点明显低于前缀估算，退回估算 (index=%d, context_tokens=%d, 前缀估算=%d)",
+                anchor.message_index,
+                anchor.context_tokens,
+                prefix_estimate,
+            )
+            anchor = None
+
+    if anchor is not None:
         # 从锚点那条（assistant）起算：锚点值是产生它的那次请求的 prompt，不含它自己。
         used_tokens = anchor.context_tokens + await _estimate_messages_tokens_off_loop(messages[anchor.message_index :])
         used_tokens_include_overhead = True

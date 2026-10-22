@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from app.api.rate_limit import SlidingWindowLimiter, client_key, resolve_client_ip
+from app.api.rate_limit import SlidingWindowLimiter, bucket_ip_address, client_key, resolve_client_ip
 
 
 def test_allows_up_to_limit():
@@ -242,7 +242,7 @@ def test_resolve_client_ip_handles_bracketed_ipv6():
         trusted_headers=["X-Forwarded-For"],
         trusted_proxies="10.0.0.0/8",
     )
-    assert result == "2001:db8::1"
+    assert result == "2001:db8::/64"
 
 
 def test_direct_client_cannot_spoof_proxy_headers():
@@ -309,3 +309,54 @@ def test_out_of_range_port_is_rejected(monkeypatch, port):
 
     assert excinfo.value.code == 2  # argparse 的用法错误退出码
     assert calls == []  # 校验发生在启动之前
+
+
+def test_ipv6_rotating_addresses_share_a_bucket():
+    """同一 /64 内换地址不能绕过限流（I-07）。"""
+    first = bucket_ip_address("2001:db8:1:2::1")
+    second = bucket_ip_address("2001:db8:1:2:ffff::9")
+
+    assert first == second == "2001:db8:1:2::/64"
+    assert bucket_ip_address("10.0.0.1") == "10.0.0.1"
+    assert bucket_ip_address("::ffff:10.0.0.1") == "10.0.0.1"
+
+
+# ---------------------------------------------------------------------
+# 跨进程共享限流（I-07）
+# ---------------------------------------------------------------------
+def test_shared_sqlite_limiter_is_shared_between_instances(tmp_path, monkeypatch):
+    """两个 worker 各自 new 一个 limiter，但计数必须落在同一个文件里。"""
+    from app.api.rate_limit import SharedSqliteLimiter
+
+    path = str(tmp_path / "rate-limit.db")
+    worker_a = SharedSqliteLimiter(limit=2, window_seconds=60, path=path)
+    worker_b = SharedSqliteLimiter(limit=2, window_seconds=60, path=path)
+
+    assert worker_a.check("ip")[0] is True
+    assert worker_b.check("ip")[0] is True
+    allowed, retry_after = worker_a.check("ip")
+
+    assert allowed is False
+    assert 0 < retry_after <= 60
+
+
+def test_shared_sqlite_limiter_window_slides(tmp_path, monkeypatch):
+    from app.api.rate_limit import SharedSqliteLimiter
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("app.api.rate_limit.time.monotonic", lambda: clock["now"])
+    limiter = SharedSqliteLimiter(limit=1, window_seconds=10, path=str(tmp_path / "rl.db"))
+
+    assert limiter.check("ip")[0] is True
+    assert limiter.check("ip")[0] is False
+
+    clock["now"] += 11
+    assert limiter.check("ip")[0] is True
+
+
+async def test_shared_sqlite_limiter_async_entrypoint(tmp_path):
+    from app.api.rate_limit import SharedSqliteLimiter
+
+    limiter = SharedSqliteLimiter(limit=1, window_seconds=60, path=str(tmp_path / "rl.db"))
+    assert (await limiter.acheck("ip"))[0] is True
+    assert (await limiter.acheck("ip"))[0] is False

@@ -176,6 +176,13 @@ class Settings(BaseSettings):
         ge=0,
         description=("单个**来源 IP** 每分钟可发起的登录/注册请求数；0 表示不限流。挡的是密码暴力破解与批量注册。"),
     )
+    registration_enabled: bool = Field(
+        default=True,
+        description=(
+            "是否允许公开注册。默认开启（开箱即用）；私有/内部部署建议设为 false，"
+            "并用 scripts/seed_admin.py 建号，避免任何人批量注册 + 绕过按账号限流。"
+        ),
+    )
     change_password_rate_limit_per_minute: int = Field(
         default=5,
         ge=0,
@@ -199,6 +206,20 @@ class Settings(BaseSettings):
             "受信反向代理的 IP/CIDR 列表（逗号分隔，如 '10.0.0.0/8,127.0.0.1/32'）。"
             "只有直连对端落在这些网段内时才读 TRUSTED_PROXY_HEADERS，并从右往左跳过"
             "受信代理地址、取第一个非代理地址作为客户端 IP。为空时一律使用 direct host。"
+        ),
+    )
+    rate_limit_backend: Literal["memory", "sqlite"] = Field(
+        default="sqlite",
+        description=(
+            "限流计数存储：sqlite = 跨进程共享（多 worker / 多实例共用同一个 SQLite 文件），"
+            "memory = 进程内（单 worker 够用，测试更快）。默认 sqlite 是为了让 uvicorn"
+            " 多 worker 时配额不被放大；无法确定数据库路径时自动退回 memory。"
+        ),
+    )
+    rate_limit_db_path: str = Field(
+        default="",
+        description=(
+            "SQLite 限流计数文件路径；留空时放在业务数据库同目录的 `rate-limit.db`。多 worker 必须指向同一个可写路径。"
         ),
     )
     model_upstream_timeout: float = Field(
@@ -261,7 +282,11 @@ class Settings(BaseSettings):
     )
     auth_secret: str = Field(
         default=DEFAULT_AUTH_SECRET,
-        description="重置密码/邮箱验证令牌的签名密钥。生产必须替换为 ≥32 字符的强随机串。",
+        description=(
+            "重置密码/邮箱验证令牌的签名密钥，同时用于**加密数据库里的提供商 API Key**。"
+            "生产必须替换为 ≥32 字符的强随机串；**更换它会让已加密的 API Key 无法解密**，"
+            "需要在管理后台重新填写（旧明文行不受影响，仍按原样读取）。"
+        ),
     )
     auth_cookie_name: str = Field(default="bennett_session", description="会话 cookie 名。")
     auth_cookie_secure: bool = Field(
@@ -355,15 +380,6 @@ class Settings(BaseSettings):
         default=2000,
         ge=1,
         description=("单用户最多保留的**未删除**会话行数，防止把服务端当无限存储桶。"),
-    )
-    sync_max_tombstones_per_user: int = Field(
-        default=5000,
-        ge=1,
-        description=(
-            "单用户最多保留的墓碑（已删除会话）行数。墓碑是删除信号，但此前**不计入任何配额**："
-            "客户端可以无限推送 deleted=true 的新 id，把 SQLite 文件写到磁盘满。"
-            "墓碑超过此上限后，新墓碑按 quota_exceeded 逐行拒绝；已有的删除动作不受影响。"
-        ),
     )
     sync_max_messages_per_conversation: int = Field(
         default=5000,

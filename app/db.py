@@ -22,7 +22,10 @@
   因为不同提供商可能提供同名模型。
 """
 
+import base64
+import hashlib
 import logging
+import os
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -53,11 +56,34 @@ from sqlalchemy import (
 from sqlalchemy import Uuid as SQLUuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
+from app.config.secret_box import decrypt_secret, encrypt_secret
 from app.roles import ALL_ROLES, ROLE_SUPERADMIN, ROLE_USER, Role
 
 logger = logging.getLogger(__name__)
+
+
+class EncryptedText(TypeDecorator):
+    """透明的「落库加密、读取解密」文本列（API Key 用）。
+
+    `TypeDecorator` 让所有业务代码继续把 `api_key` 当明文读写，加密只发生在
+    SQLAlchemy 的 bind/result 边界；旧明文行由 `decrypt_secret` 原样返回。
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):  # noqa: ANN001, ANN201
+        if value is None:
+            return None
+        return encrypt_secret(str(value))
+
+    def process_result_value(self, value, dialect):  # noqa: ANN001, ANN201
+        if value is None:
+            return None
+        return decrypt_secret(str(value))
 
 
 class Base(DeclarativeBase):
@@ -100,7 +126,35 @@ class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
 
     `user_id` 带 `ondelete="cascade"`，但 SQLite 默认**不启用**外键约束，
     所以下面必须显式 `PRAGMA foreign_keys=ON`，否则删用户后会话记录会残留。
+
+    **`token` 列存的是 SHA-256 的 base64url 摘要，不是 cookie 里的原文**：
+    数据库文件泄露/被读时，攻击者拿不到可直接回放的会话令牌（I-10）。
+    旧版本写入的明文行仍可读（见 `HashedAccessTokenDatabase` 的兼容回退），
+    重新登录后自然换成摘要；无需停机迁移。
     """
+
+
+def hash_access_token(token: str) -> str:
+    """会话 token → 入库值（SHA-256 base64url，43 字符）。
+
+    43 字符正好落在 fastapi-users 基表 `String(43)` 的长度内，因此不用改表结构。
+    """
+    digest = hashlib.sha256(token.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+class HashedAccessTokenDatabase(SQLAlchemyAccessTokenDatabase):
+    """写入摘要、按摘要查询；同时兼容历史明文行。
+
+    `get_by_token` 先按摘要查（新行），查不到再按原文查（旧行）——旧会话在过期前
+    仍可用，不会因为升级把所有人踢下线。
+    """
+
+    async def get_by_token(self, token: str, max_age=None):  # noqa: ANN001, ANN201
+        row = await super().get_by_token(hash_access_token(token), max_age)
+        if row is not None:
+            return row
+        return await super().get_by_token(token, max_age)
 
 
 class ModelProvider(Base):
@@ -123,7 +177,7 @@ class ModelProvider(Base):
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True, index=True)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
@@ -321,6 +375,21 @@ class Message(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+def secure_sqlite_permissions(path: str | Path) -> bool:
+    """把 SQLite 文件权限收紧到 0600（仅属主可读写）。
+
+    `bennett.db` 里有密码哈希、会话摘要与（现在加密的）API Key；默认 umask 常是
+    022，同主机其他用户可读。数据库文件不需要组/其他用户访问。失败只告警——
+    文件系统不支持 chmod（某些挂载）时不该让服务起不来。
+    """
+    try:
+        os.chmod(path, 0o600)
+        return True
+    except OSError:
+        logger.warning("收紧 SQLite 文件权限失败（不影响启动）: %s", path, exc_info=True)
+        return False
 
 
 def _resolve_database_url(url: str) -> str:
@@ -592,6 +661,11 @@ async def create_db_and_tables() -> None:
                 mode,
             )
 
+    if engine.dialect.name == "sqlite":
+        database = engine.url.database
+        if database and database != ":memory:":
+            secure_sqlite_permissions(database)
+
     logger.info("数据库就绪: %s", DATABASE_URL)
 
 
@@ -645,4 +719,4 @@ async def get_user_db(session: AsyncSession = Depends(get_async_session)):  # no
 
 
 async def get_access_token_db(session: AsyncSession = Depends(get_async_session)):  # noqa: B008
-    yield SQLAlchemyAccessTokenDatabase(session, AccessToken)
+    yield HashedAccessTokenDatabase(session, AccessToken)

@@ -498,7 +498,7 @@ describe('registerWithSession', () => {
     await expect(registerWithSession('a@example.com', 'hunter2hunter2')).resolves.toEqual({
       ok: false,
       outcome: 'login-failed',
-      message: '账号已创建，请直接登录',
+      message: '注册已提交，请尝试直接登录',
     })
     // 自动登录失败不能被静默吞掉（用户会以为注册整体失败了）
     expect(vi.mocked(console.warn)).toHaveBeenCalled()

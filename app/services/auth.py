@@ -22,9 +22,12 @@ JWT 把状态放在令牌内部，服务端无法单方面作废——登出只�
 ## AUTH_SECRET 的真实作用范围
 
 `settings.auth_secret` **不参与会话**：cookie 里放的是不透明服务端 token，既不签名，
-轮换它也不会让任何登录态失效（要让会话失效请删 `access_token` 行）。它目前只喂给
-`UserManager.reset_password_token_secret` / `verification_token_secret`，等将来接入
-邮件流程（重置密码、邮箱验证）时才真正生效。
+轮换它也不会让任何登录态失效（要让会话失效请删 `access_token` 行）。它目前喂给：
+
+- `UserManager.reset_password_token_secret` / `verification_token_secret`（将来接入
+  邮件流程时生效）；
+- `app/config/secret_box.py`，用于加密数据库里的提供商 API Key。轮换它会让已加密的
+  key 无法解密（需要在后台重填），旧明文行不受影响。
 
 ## 角色从哪里来
 
@@ -36,6 +39,7 @@ JWT 把状态放在令牌内部，服务端无法单方面作废——登出只�
 """
 
 import logging
+import secrets
 import uuid
 from typing import Any
 
@@ -45,18 +49,19 @@ from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.exceptions import InvalidPasswordException
-from fastapi_users_db_sqlalchemy.access_token import SQLAlchemyAccessTokenDatabase
 from sqlalchemy import func, select
 
 from app.config import settings
 from app.db import (
     AccessToken,
+    HashedAccessTokenDatabase,
     User,
     async_session_maker,
     cleanup_expired_access_tokens,
     delete_user_access_tokens,
     get_access_token_db,
     get_user_db,
+    hash_access_token,
 )
 from app.roles import ADMIN_LEVEL, ROLE_SUPERADMIN, Role
 
@@ -123,6 +128,20 @@ cookie_transport = CookieTransport(
 )
 
 
+class HashedDatabaseStrategy(DatabaseStrategy):
+    """在 `DatabaseStrategy` 之上把入库值换成摘要（I-10）。
+
+    框架默认把 `secrets.token_urlsafe()` 原样写进 `access_token.token`：数据库被读
+    等于所有在线会话可被直接回放。这里只改「写入」：库里存 `hash_access_token`
+    的结果，cookie 里仍是原文；读取由 `HashedAccessTokenDatabase` 先摘要后兼容明文。
+    """
+
+    async def write_token(self, user: User) -> str:
+        token = secrets.token_urlsafe()
+        await self.database.create({"token": hash_access_token(token), "user_id": user.id})
+        return token
+
+
 def get_database_strategy(
     access_token_db: AccessTokenDatabase[AccessToken] = Depends(get_access_token_db),  # noqa: B008
 ) -> DatabaseStrategy:
@@ -139,7 +158,7 @@ def get_database_strategy(
         raise ValueError(
             f"session_lifetime_seconds 必须 >=60，当前为 {lifetime}：0/负值会让服务端会话永不过期，请设 >=60。"
         )
-    return DatabaseStrategy(access_token_db, lifetime_seconds=lifetime)
+    return HashedDatabaseStrategy(access_token_db, lifetime_seconds=lifetime)
 
 
 auth_backend = AuthenticationBackend(
@@ -244,8 +263,8 @@ async def _read_user_from_token(token: str | None) -> User | None:
         )
 
     async with async_session_maker() as session:
-        strategy = DatabaseStrategy(
-            SQLAlchemyAccessTokenDatabase(session, AccessToken),
+        strategy = HashedDatabaseStrategy(
+            HashedAccessTokenDatabase(session, AccessToken),
             lifetime_seconds=lifetime,
         )
         user_manager = UserManager(SQLAlchemyUserDatabase(session, User))

@@ -19,11 +19,14 @@
 `current_active_user`（按账号计数），而本模块刻意不依赖任何业务服务。
 """
 
+import asyncio
 import ipaddress
 import logging
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from math import ceil
+from pathlib import Path
 
 from fastapi import HTTPException, Request, status
 
@@ -111,6 +114,10 @@ class SlidingWindowLimiter:
         hits.append(now)
         return True, 0.0
 
+    async def acheck(self, key: str) -> tuple[bool, float]:
+        """异步入口：内存实现直接复用同步逻辑（调用方统一 await）。"""
+        return self.check(key)
+
     def reset(self) -> None:
         """清空计数。供测试使用。"""
         self._hits.clear()
@@ -135,6 +142,23 @@ def _parse_ip(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
         return ipaddress.ip_address(candidate)
     except ValueError:
         return None
+
+
+def bucket_ip_address(value: str | None) -> str:
+    """把来源地址归一化成限流桶键。
+
+    IPv6 的一个订阅通常是一整个 /64：如果按完整地址计数，轮换地址（隐私扩展）
+    就能无限换桶绕过限流（I-07）。这里把 IPv6 归并到 /64；IPv4-mapped 先解包成
+    IPv4。无法解析的值原样返回（不能因此把请求归到 "unknown" 而放大误伤）。
+    """
+    ip = _parse_ip(value)
+    if ip is None:
+        return value or "unknown"
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 
 def parse_trusted_proxy_networks(raw: str | None) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -185,7 +209,7 @@ def resolve_client_ip(
     global _warned_missing_proxy_ips
 
     if not trusted_headers or not headers:
-        return direct_host or "unknown"
+        return bucket_ip_address(direct_host)
 
     networks = parse_trusted_proxy_networks(trusted_proxies)
     if not networks:
@@ -195,12 +219,12 @@ def resolve_client_ip(
                 "TRUSTED_PROXY_HEADERS 已配置但 TRUSTED_PROXY_IPS 为空：为避免直连伪造标头，"
                 "代理标头不会被采信，限流按 client.host 计数。请在 TRUSTED_PROXY_IPS 里配置代理网段。"
             )
-        return direct_host or "unknown"
+        return bucket_ip_address(direct_host)
 
     direct_ip = _parse_ip(direct_host)
     if direct_ip is None or not any(direct_ip in network for network in networks):
         # 直连对端不是受信代理：它带来的任何标头都不可信
-        return direct_host or "unknown"
+        return bucket_ip_address(direct_host)
 
     lower_headers = {key.lower(): value for key, value in headers.items()}
     chain: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
@@ -212,13 +236,13 @@ def resolve_client_ip(
         break
 
     if not chain:
-        return direct_host or "unknown"
+        return bucket_ip_address(direct_host)
 
     for candidate in reversed(chain):
         if not any(candidate in network for network in networks):
-            return str(candidate)
+            return bucket_ip_address(str(candidate))
     # 整条链都是受信代理（异常配置）：退回最左项，至少不会退化成空串
-    return str(chain[0])
+    return bucket_ip_address(str(chain[0]))
 
 
 def client_key(host: str | None, scope: str = "") -> str:
@@ -230,6 +254,94 @@ def client_key(host: str | None, scope: str = "") -> str:
     不该互相挤占。
     """
     return f"{scope}:{host or 'unknown'}" if scope else (host or "unknown")
+
+
+class SharedSqliteLimiter:
+    """基于 SQLite 文件的滑动窗口限流器（跨进程/worker 共享）。
+
+    进程内限流在多 worker 下配额会被乘以 worker 数（I-07）。这里把「窗口内的命中
+    时间戳」放进一个独立的 SQLite 文件：连接每次 check 打开、`BEGIN IMMEDIATE` 下
+    完成「清理过期 → 计数 → 插入」，SQLite 的写锁保证并发进程不会同时越过上限。
+
+    文件很小（一个窗口内的请求数），不参与业务库的迁移；路径默认与业务库同目录。
+    没有可写文件路径时（内存库、测试）调用方会退回 `SlidingWindowLimiter`。
+    """
+
+    def __init__(self, *, limit: int, window_seconds: float, path: str) -> None:
+        if limit < 1:
+            raise ValueError("SharedSqliteLimiter 的 limit 必须 >= 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds 必须 > 0")
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.path = path
+
+    @staticmethod
+    def _connect(path: str) -> sqlite3.Connection:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(path, timeout=10.0)
+        connection.execute("CREATE TABLE IF NOT EXISTS rate_limit_hits (key TEXT NOT NULL, ts REAL NOT NULL)")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_rate_limit_ts ON rate_limit_hits(ts)")
+        return connection
+
+    def check(self, key: str) -> tuple[bool, float]:
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        connection = self._connect(self.path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM rate_limit_hits WHERE ts <= ?", (cutoff,))
+            row = connection.execute("SELECT COUNT(*), MIN(ts) FROM rate_limit_hits WHERE key = ?", (key,)).fetchone()
+            count = int(row[0] or 0)
+            if count >= self.limit:
+                oldest = float(row[1]) if row[1] is not None else now
+                connection.commit()
+                return False, max(0.0, oldest + self.window_seconds - now)
+            connection.execute("INSERT INTO rate_limit_hits (key, ts) VALUES (?, ?)", (key, now))
+            connection.commit()
+            return True, 0.0
+        finally:
+            connection.close()
+
+    async def acheck(self, key: str) -> tuple[bool, float]:
+        """在 worker 线程执行同步 SQLite 操作，避免阻塞事件循环。"""
+        return await asyncio.to_thread(self.check, key)
+
+    def reset(self) -> None:
+        connection = self._connect(self.path)
+        try:
+            connection.execute("DELETE FROM rate_limit_hits")
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def _rate_limit_db_path() -> str:
+    """限流计数文件路径；无法确定时返回空串（退回内存）。"""
+    configured = (settings.rate_limit_db_path or "").strip()
+    if configured:
+        return configured
+    from app.db import engine  # 延迟导入：避免循环（db 导入 config）
+
+    database = engine.url.database
+    if not database or database == ":memory:":
+        return ""
+    return str(Path(database).with_name("rate-limit.db"))
+
+
+def make_limiter(current: object, limit: int):
+    """按 `RATE_LIMIT_BACKEND` 选实现；配置/路径变化时重建。
+
+    返回对象统一提供 `await limiter.acheck(key)`。
+    """
+    if settings.rate_limit_backend == "sqlite":
+        path = _rate_limit_db_path()
+        if path:
+            if isinstance(current, SharedSqliteLimiter) and current.limit == limit and current.path == path:
+                return current
+            return SharedSqliteLimiter(limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS, path=path)
+    memory = current if isinstance(current, SlidingWindowLimiter) else None
+    return limiter_with(memory, limit)
 
 
 # ---------------------------------------------------------------------
@@ -270,9 +382,9 @@ def too_many(retry_after: float, limit: int | None = None) -> HTTPException:
     )
 
 
-def get_auth_limiter() -> SlidingWindowLimiter:
+def get_auth_limiter():  # noqa: ANN201
     global _auth_limiter
-    _auth_limiter = limiter_with(_auth_limiter, max(settings.auth_rate_limit_per_minute, 1))
+    _auth_limiter = make_limiter(_auth_limiter, max(settings.auth_rate_limit_per_minute, 1))
     return _auth_limiter
 
 
@@ -309,6 +421,6 @@ async def enforce_auth_rate_limit(request: Request) -> None:
 
     scope = request.url.path.rstrip("/").rsplit("/", 1)[-1] or "auth"
     limiter = get_auth_limiter()
-    allowed, retry_after = limiter.check(client_key(ip, scope))
+    allowed, retry_after = await limiter.acheck(client_key(ip, scope))
     if not allowed:
         raise too_many(retry_after, limit=limiter.limit)

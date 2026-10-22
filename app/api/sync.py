@@ -27,7 +27,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.rate_limit import SlidingWindowLimiter, limiter_with, too_many
+from app.api.rate_limit import make_limiter, too_many
 from app.config import settings
 from app.db import User
 from app.schemas.sync import PullResult, PushRequest, PushResult
@@ -39,12 +39,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
 #: 同步限流桶。与对话桶分开：对话消耗上游额度，同步只消耗本机数据库。
-_limiter: SlidingWindowLimiter | None = None
+_limiter: object | None = None
 
 
-def get_sync_limiter() -> SlidingWindowLimiter:
+def get_sync_limiter():  # noqa: ANN201
     global _limiter
-    _limiter = limiter_with(_limiter, max(settings.sync_rate_limit_per_minute, 1))
+    _limiter = make_limiter(_limiter, max(settings.sync_rate_limit_per_minute, 1))
     return _limiter
 
 
@@ -56,7 +56,7 @@ async def enforce_sync_rate_limit(user: User = Depends(current_active_user)) -> 
     """
     if settings.sync_rate_limit_per_minute <= 0:
         return
-    allowed, retry_after = get_sync_limiter().check(f"user:{user.id}")
+    allowed, retry_after = await get_sync_limiter().acheck(f"user:{user.id}")
     if not allowed:
         raise too_many(retry_after, limit=get_sync_limiter().limit)
 

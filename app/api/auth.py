@@ -28,9 +28,9 @@ import logging
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi_users.exceptions import InvalidPasswordException
+from fastapi_users.exceptions import InvalidPasswordException, UserAlreadyExists
 
-from app.api.rate_limit import SlidingWindowLimiter, enforce_auth_rate_limit, limiter_with, too_many
+from app.api.rate_limit import enforce_auth_rate_limit, make_limiter, too_many
 from app.config import settings
 from app.db import User
 from app.schemas.user import PasswordChangeRequest, UserCreate, UserRead, UserUpdate
@@ -99,25 +99,62 @@ _limit_login_only(_auth_router)
 _localize_generated_routes(_auth_router)
 router.include_router(_auth_router)
 
-# POST /api/auth/register —— 框架自带的注册路由：建号后 role 取模型默认值（user）
-_register_router = fastapi_users.get_register_router(UserRead, UserCreate)
-for _route in _register_router.routes:
-    if getattr(_route, "path", None) == "/register":
-        # 注册是**未认证**入口，同样要按 IP 挡批量建号
-        _route.dependencies.append(Depends(enforce_auth_rate_limit))
-_localize_generated_routes(_register_router)
-router.include_router(_register_router)
+
+async def enforce_registration_enabled() -> None:
+    """注册开关：私有部署可以完全关闭公开注册（I-04）。
+
+    默认开启以保持「首次使用点注册」的开箱体验；部署者可用
+    `REGISTRATION_ENABLED=false` 关掉，改由种子脚本/管理员建号。
+    """
+    if not settings.registration_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="注册功能已关闭")
+
+
+# POST /api/auth/register
+#
+# **不用框架自带的注册路由**：它在邮箱已存在时返回 400 + REGISTER_USER_ALREADY_EXISTS，
+# 等于给了一个邮箱枚举接口（I-05）。这里无论新建成功还是邮箱已存在都返回同一个
+# 202 + 空 body；前端随后用同一组凭据登录，成功即注册成功，失败就是通用提示。
+@router.post(
+    "/register",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="注册账号（新账号的角色是普通用户）",
+    description=(
+        "邮箱 + 密码（至少 8 位）。新账号的角色固定为**普通用户**（`user`）："
+        "**没有任何请求参数能指定角色**，管理员身份只能由 `scripts/seed_admin.py` 播种"
+        "或由超管在后台授予。同一来源 IP 有请求频率上限。"
+        "无论邮箱是否已存在都返回 202，避免把注册接口变成邮箱枚举器。"
+    ),
+    dependencies=[Depends(enforce_auth_rate_limit), Depends(enforce_registration_enabled)],
+)
+async def register_account(
+    payload: UserCreate,
+    request: Request,
+    user_manager: UserManager = Depends(get_user_manager),  # noqa: B008
+) -> Response:
+    try:
+        await user_manager.create(payload, safe=True, request=request)
+    except UserAlreadyExists:
+        # 不区分「已注册」与「刚创建」：两者响应完全一致
+        logger.info("注册请求命中已存在邮箱（返回 202，不泄露存在性）")
+    except InvalidPasswordException as exc:
+        # 密码策略不是身份信息，可以如实告诉用户（与注册表单的即时反馈一致）
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"REGISTER_INVALID_PASSWORD: {exc.reason}",
+        ) from exc
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 #: 改密限流桶。与登录的 IP 桶分开：这里按**账号**计数，挡的是「拿到会话后
 #: 反复验证当前密码」与「用 Argon2 打满 CPU」。
-_change_password_limiter: SlidingWindowLimiter | None = None
+_change_password_limiter: object | None = None
 
 
-def get_change_password_limiter() -> SlidingWindowLimiter:
-    """取改密限流器；配额变化时重建（测试改 settings 后立即生效）。"""
+def get_change_password_limiter():  # noqa: ANN201
+    """取改密限流器；配额/后端变化时重建（测试改 settings 后立即生效）。"""
     global _change_password_limiter
-    _change_password_limiter = limiter_with(
+    _change_password_limiter = make_limiter(
         _change_password_limiter,
         max(settings.change_password_rate_limit_per_minute, 1),
     )
@@ -139,7 +176,7 @@ async def enforce_change_password_rate_limit(
     """
     if settings.change_password_rate_limit_per_minute <= 0:
         return
-    allowed, retry_after = get_change_password_limiter().check(f"user:{user.id}")
+    allowed, retry_after = await get_change_password_limiter().acheck(f"user:{user.id}")
     if not allowed:
         raise too_many(retry_after, limit=get_change_password_limiter().limit)
 

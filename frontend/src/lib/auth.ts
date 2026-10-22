@@ -67,7 +67,7 @@ export const LOGOUT_UNCONFIRMED_MESSAGE =
   '登出未确认：服务端会话可能仍有效，共享设备请关闭浏览器后重试';
 
 /** 账号已创建、但紧接着的自动登录没成功时给用户的下一步指示。 */
-export const REGISTER_LOGIN_FAILED_MESSAGE = '账号已创建，请直接登录';
+export const REGISTER_LOGIN_FAILED_MESSAGE = '注册已提交，请尝试直接登录';
 
 /**
  * 密码最小长度（定义在 constants，这里再导出以保持既有 import 路径）。
