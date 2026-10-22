@@ -69,3 +69,31 @@ def test_singleton_can_be_reset():
     reset_search_cache()
 
     assert len(search_cache) == 0
+
+
+def test_cache_is_isolated_by_scope():
+    """不同用户不共享搜索结果，避免注入内容在他人上下文里存续（I-03）。"""
+    from app.tools.tavily_cache import SearchResultCache
+
+    cache = SearchResultCache()
+    cache.put("query", 5, "result-for-user-a", scope="user-a")
+
+    assert cache.get("query", 5, scope="user-a") == "result-for-user-a"
+    assert cache.get("query", 5, scope="user-b") is None
+    assert cache.get("query", 5) is None
+
+
+def test_cache_scope_contextvar_isolates_concurrent_tasks():
+    import asyncio
+
+    from app.tools.cache_scope import cache_scope, current_cache_scope
+
+    async def worker(scope: str) -> str:
+        with cache_scope(scope):
+            await asyncio.sleep(0)
+            return current_cache_scope()
+
+    async def main() -> list[str]:
+        return await asyncio.gather(worker("a"), worker("b"))
+
+    assert asyncio.run(main()) == ["a", "b"]

@@ -59,13 +59,17 @@ class SearchResultCache:
         self._entries: OrderedDict[tuple[str, int], _Entry] = OrderedDict()
 
     @staticmethod
-    def make_key(query: str, max_results: int) -> tuple[str, int]:
-        """归一化关键词参与 key（大小写与首尾空白不影响命中）。"""
-        return (query.strip().lower(), max_results)
+    def make_key(query: str, max_results: int, scope: str = "") -> tuple[str, str, int]:
+        """归一化关键词参与 key（大小写与首尾空白不影响命中）。
 
-    def get(self, query: str, max_results: int, *, now: float | None = None) -> str | None:
+        `scope` 是租户维度（当前实现是用户 id）：不同用户不共享缓存，避免搜索结果里
+        的注入内容在他人上下文里存续（I-03）。空串表示不隔离（CLI / 测试）。
+        """
+        return (scope, query.strip().lower(), max_results)
+
+    def get(self, query: str, max_results: int, *, scope: str = "", now: float | None = None) -> str | None:
         """取缓存；过期条目顺手删掉并返回 None。"""
-        key = self.make_key(query, max_results)
+        key = self.make_key(query, max_results, scope)
         entry = self._entries.get(key)
         if entry is None:
             return None
@@ -76,12 +80,12 @@ class SearchResultCache:
         self._entries.move_to_end(key)
         return entry.text
 
-    def put(self, query: str, max_results: int, text: str, *, now: float | None = None) -> None:
+    def put(self, query: str, max_results: int, text: str, *, scope: str = "", now: float | None = None) -> None:
         """写入结果；超出容量时淘汰最久未用的那一条。"""
         if not text:
             return
         current = time.monotonic() if now is None else now
-        key = self.make_key(query, max_results)
+        key = self.make_key(query, max_results, scope)
         self._entries[key] = _Entry(text=text, expires_at=current + self.ttl_seconds)
         self._entries.move_to_end(key)
         while len(self._entries) > self.max_entries:

@@ -127,3 +127,22 @@ describe('claimLocalData', () => {
     expect(await readLocalOwner()).toBe('user_b');
   });
 });
+
+describe('无归属老库（L-07）', () => {
+  it('没有归属记录但已有会话/消息：先清空再认领，避免下一个账号看到', async () => {
+    await seedData(); // 老库：有数据，但没有 owner / cursor / backfill
+
+    const result = await claimLocalData('user_b');
+
+    expect(result.cleared).toBe(true);
+    expect(await db.sessions.count()).toBe(0);
+    expect(await db.messages.count()).toBe(0);
+    expect(await readLocalOwner()).toBe('user_b');
+  });
+
+  it('没有归属记录且本地为空：认领但不标记 cleared', async () => {
+    const result = await claimLocalData('user_a');
+
+    expect(result).toEqual({ cleared: false, previousOwner: null });
+  });
+});

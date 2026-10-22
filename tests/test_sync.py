@@ -249,7 +249,7 @@ async def test_other_users_rows_are_invisible_and_unwritable(env):
     )
     assert {(row.kind, row.reason) for row in result.rejected} == {
         ("conversation", "not_owned"),
-        ("message", "not_owned"),
+        ("message", "conversation_missing"),
     }
 
     page = await sync_service.pull(env.alice, 0)
@@ -544,23 +544,28 @@ async def test_tombstone_with_equal_client_rev_is_still_applied(env):
     assert page.messages == []
 
 
-async def test_tombstones_have_their_own_quota(env, monkeypatch):
-    """墓碑不能无限增长：否则客户端能靠 deleted=true 的新 id 把磁盘写满（H-02）。"""
-    monkeypatch.setattr(settings, "sync_max_tombstones_per_user", 2)
-
+async def test_new_tombstones_are_not_persisted_and_cannot_preempt_ids(env):
+    """服务端没有的会话，删除信号没有传播对象：不落库，也不能被用来预占 id（L-11）。"""
     result = await sync_service.push(
         env.alice,
         PushRequest(conversations=[conversation(f"sess_gone_{index}", deleted=True) for index in range(3)]),
     )
 
-    assert result.accepted.conversations == 2
-    assert [(row.id, row.reason) for row in result.rejected] == [("sess_gone_2", "quota_exceeded")]
+    assert result.rejected == []
+    assert result.accepted.conversations == 3  # 客户端不该重试
+
+    async with env.maker() as session:
+        assert await session.scalar(select(func.count()).select_from(Conversation)) == 0
+
+    # 同一个 id 之后仍可正常创建：没有被别人的墓碑永久占住
+    later = await sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_gone_0")]))
+    assert later.rejected == []
+    assert later.accepted.conversations == 1
 
 
 async def test_tombstones_do_not_consume_live_conversation_quota(env, monkeypatch):
     """删掉的会话不该永久占着「会话数」配额，否则删满一次就再也建不了新会话。"""
     monkeypatch.setattr(settings, "sync_max_conversations_per_user", 1)
-    monkeypatch.setattr(settings, "sync_max_tombstones_per_user", 10)
 
     first = await sync_service.push(
         env.alice,

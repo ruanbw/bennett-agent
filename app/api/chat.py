@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
-from app.api.rate_limit import SlidingWindowLimiter, limiter_with, too_many
+from app.api.rate_limit import make_limiter, too_many
 from app.config import settings
 from app.db import User
 from app.schemas.chat import (
@@ -44,7 +44,7 @@ SSE_HEADERS = {
 SSE_SEND_TIMEOUT_SECONDS = 30.0
 
 #: 对话限流桶。按**账号**计数，与认证端点的 IP 桶分开。
-_limiter: SlidingWindowLimiter | None = None
+_limiter: object | None = None
 
 
 class ChatEventSourceResponse(EventSourceResponse):
@@ -68,10 +68,10 @@ class ChatEventSourceResponse(EventSourceResponse):
         self.__dict__.pop("_headers", None)
 
 
-def get_chat_limiter() -> SlidingWindowLimiter:
-    """取对话限流器；配额变化时重建（让测试改 `settings` 后立即生效）。"""
+def get_chat_limiter():  # noqa: ANN201
+    """取对话限流器；配额/后端变化时重建（让测试改 settings 后立即生效）。"""
     global _limiter
-    _limiter = limiter_with(_limiter, max(settings.chat_rate_limit_per_minute, 1))
+    _limiter = make_limiter(_limiter, max(settings.chat_rate_limit_per_minute, 1))
     return _limiter
 
 
@@ -93,7 +93,7 @@ async def enforce_chat_rate_limit(user: User = Depends(current_active_user)) -> 
     if settings.chat_rate_limit_per_minute <= 0:
         return
 
-    allowed, retry_after = get_chat_limiter().check(f"user:{user.id}")
+    allowed, retry_after = await get_chat_limiter().acheck(f"user:{user.id}")
     if not allowed:
         # limit 显式传入：限流器不是全局单例，too_many 自己拿不到配额，
         # 不传就不会发 X-RateLimit-Limit（认证端点已有，这里此前漏了）
@@ -185,7 +185,7 @@ async def generate_title(request: TitleGenerateRequest):
     summary="对话接口（SSE 流式输出）",
     dependencies=[Depends(current_active_user), Depends(enforce_chat_rate_limit)],
 )
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, user: User = Depends(current_active_user)):  # noqa: B008
     """逐字返回思考过程、工具调用与生成内容。
 
     客户端无状态上传完整会话历史；服务端不保存任何会话状态。
@@ -200,6 +200,7 @@ async def chat_stream(request: ChatRequest):
             request.messages,
             reasoning_effort=request.reasoning_effort,
             context_anchor=request.context_anchor,
+            cache_scope_key=str(user.id),
         ):
             yield to_sse_frame(event)
 

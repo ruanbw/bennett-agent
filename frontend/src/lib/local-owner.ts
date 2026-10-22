@@ -16,9 +16,10 @@
  *   归属不一致 → 先清空本地库，再写入新归属（`cleared: true`）。
  * - **会话过期不清库**。401 不等于用户要换账号，盲目清库会把还没同步的内容直接删掉；
  *   保留下来是安全的，因为下一次登录会先核对归属。
- * - 没有归属记录的老库（本模块上线前建的）按同步元数据里的 `userId` 推断：游标和回填
- *   标记都是同步引擎按账号写入的。两者都没有时才「认领」现有数据——这是唯一能保住
- *   用户历史的选择。
+ * - 没有归属记录的老库（本模块上线前建的）先按同步元数据里的 `userId` 推断：游标和
+ *   回填标记都是同步引擎按账号写入的。两者都没有、但本地**已有会话/消息**时，无法
+ *   判断这份数据属于谁——按「不知道就不展示」处理：清空后再认领（一次性迁移代价）。
+ *   保留它等于让下一个登录的账号直接看到上一个人的对话（L-07）。
  *
  * 认领必须**串行**：登录流程和启动探测可能同时到达（StrictMode 双执行、跨标签页换号），
  * 并发执行会让两边都读到「无归属」然后各自写一遍，甚至一边清库一边读。
@@ -67,10 +68,20 @@ async function claimOnce(userId: string): Promise<ClaimResult> {
   const previousOwner = await readLocalOwner();
   if (previousOwner === userId) return { cleared: false, previousOwner };
 
-  // 没有归属记录时不删：这份数据可能就是当前用户自己的（本模块上线前留下的）。
-  const cleared = previousOwner !== null;
+  // 归属未知但本地已有数据：无法证明属于当前用户，按跨账号泄漏处理（L-07）。
+  // 全新安装（无归属、无数据）仍然走「认领但不删」。
+  let cleared = previousOwner !== null;
+  if (!cleared) {
+    const hasLocalData = (await db.sessions.count()) > 0 || (await db.messages.count()) > 0;
+    if (hasLocalData) {
+      console.warn('本地缓存没有归属记录但已有数据，无法确认属于当前账号，已清空');
+      cleared = true;
+    }
+  }
   if (cleared) {
-    console.warn(`本地缓存属于 ${previousOwner ?? '未知账号'}，切换为 ${userId} 前已清空`);
+    if (previousOwner !== null) {
+      console.warn(`本地缓存属于 ${previousOwner}，切换为 ${userId} 前已清空`);
+    }
     await clearAllLocalData();
     // 草稿在 localStorage，不在 IndexedDB；不删会在新账号的输入框里露出上一个人的文本。
     clearComposerDrafts();

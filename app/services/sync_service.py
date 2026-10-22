@@ -425,9 +425,9 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         deleted_ids: set[str] = {
             row_id for row_id, meta in existing_conversations.items() if meta.user_id == user_id and meta.deleted
         }
-        # 活会话与墓碑分开计数：墓碑是删除信号，不占「会话数」配额，但必须有
-        # 自己的上限——此前墓碑完全不计配额，客户端可以无限推送 deleted=true 的
-        # 新 id，把 SQLite 文件写到磁盘满（H-02）。
+        # 只统计**未删除**会话：墓碑是删除信号，不该永久占用「会话数」配额。
+        # 新墓碑不再落库（见下面的分支），因此墓碑行数只可能来自「删除已有会话」，
+        # 上限天然被 live 配额约束，不需要单独配额（L-11/H-02）。
         live_count = int(
             await session.scalar(
                 select(func.count())
@@ -436,16 +436,7 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
             )
             or 0
         )
-        tombstone_count = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(Conversation)
-                .where(Conversation.user_id == user_id, Conversation.deleted.is_(True))
-            )
-            or 0
-        )
         quota_left = settings.sync_max_conversations_per_user - live_count
-        tombstone_left = settings.sync_max_tombstones_per_user - tombstone_count
 
         for row in sorted(conversation_rows, key=lambda item: item.id):
             current = existing_conversations.get(row.id)
@@ -481,11 +472,20 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                     continue
                 quota_left -= 1
             else:
-                # 新墓碑：占用墓碑配额（已有的删除动作是「更新行」，不在此分支）。
-                if tombstone_left <= 0:
-                    rejected.append(_reject("conversation", row.id, "quota_exceeded"))
-                    continue
-                tombstone_left -= 1
+                # 新墓碑（服务端从来没有这条会话）：**不写库**，记账为已接受。
+                #
+                # 两个理由：
+                # 1. 墓碑的作用是让其他设备删掉它们已经同步过的行；服务端没有这条行时，
+                #    说明没有设备同步过它，墓碑没有传播对象，写下来只是永久垃圾；
+                # 2. 允许为任意新 id 写墓碑，等于让任何用户用自选 id **预占**别人未来的
+                #    会话 id（一旦被占，对方后续同 id 推送永远 not_owned），也能靠
+                #    deleted=true 无限刷行（L-11/H-02）。
+                #
+                # 客户端拿到「已接受」不会重试；之后它若真把这条会话推上来，仍按新建处理。
+                # 同批里引用它的消息仍按「已删除」拒绝（与有墓碑时语义一致）。
+                deleted_ids.add(row.id)
+                accepted_conversations += 1
+                continue
 
             version = await _next_version(session, user_id)
             statement = (
@@ -564,7 +564,10 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         for row in ordered:
             current = existing_messages.get(row.id)
             if current is not None and current.user_id != user_id:
-                rejected.append(_reject("message", row.id, "not_owned"))
+                # 不区分「存在但不是你的」与「会话不存在」：否则可以拿消息 id 探测
+                # 别人的行是否存在（L-11）。消息 id 是 uuid，正常客户端不会碰到；
+                # 真碰到时按不可写入处理即可。
+                rejected.append(_reject("message", row.id, "conversation_missing"))
                 continue
             if row.conversation_id in deleted_ids:
                 rejected.append(_reject("message", row.id, "conversation_deleted"))
