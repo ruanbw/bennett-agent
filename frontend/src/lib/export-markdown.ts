@@ -18,7 +18,7 @@
  */
 
 import type { MessageRecord, SessionRecord, ToolCallRecord } from '../types';
-import { formatTokens } from './context-usage';
+import { formatCost, formatTokens } from './context-usage';
 import { formatToolDuration } from './tool-call-view';
 
 /** 工具参数/结果各自的截断上限（字符）。 */
@@ -214,7 +214,14 @@ function renderUsage(message: MessageRecord): string[] {
     `输出 ${formatTokens(usage.outputTokens ?? 0)} tokens`,
   ];
   if (usage.cacheReadTokens > 0) parts.push(`缓存命中 ${formatTokens(usage.cacheReadTokens)}`);
-  return [`> 用量：${parts.join(' · ')}`];
+  // 金额单独一段而不是塞进上面那行：token 是客观数字，金额是**按当前登记的单价估算**的，
+  // 两者的可信度不同，混在一行里会让人以为金额和 token 一样是实测值。
+  // 没有价格时**不写 0**——那会被读成「这一轮免费」。
+  const cost =
+    typeof usage.costTotal === 'number' && Number.isFinite(usage.costTotal)
+      ? `> 估算成本：${formatCost(usage.costTotal, usage.costCurrency)}（按导出时的模型价格估算，非账单）`
+      : null;
+  return cost === null ? [`> 用量：${parts.join(' · ')}`] : [`> 用量：${parts.join(' · ')}`, cost];
 }
 
 function renderToolCall(toolCall: ToolCallRecord): string[] {
@@ -261,6 +268,38 @@ interface RenderConversationOptions {
   meta?: 'full' | 'compact';
   exportedAt?: number;
 }
+
+/**
+ * 全档累计成本；有任何一轮没有价格时返回 null（不给出一个「漏了几轮」的合计）。
+ *
+ * 与 `sumCosts` 的取舍一致，这里独立实现是因为导出走的是 `MessageRecord[]` 而不是
+ * `UsageState[]` 的数组——两者形状不同，复用会让其中一个迁就另一个。
+ *
+ * 货币混用时也不给合计：USD 与 CNY 相加是没有意义的数。
+ */
+function summarizeCost(entries: readonly ArchiveEntry[]): string | null {
+  let total = 0;
+  let currency: string | null = null;
+  let sawPriced = false;
+  for (const entry of entries) {
+    for (const message of entry.messages) {
+      const usage = message.usage;
+      if (!usage) continue;
+      const amount = usage.costTotal;
+      if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+        // 只要有一轮没价格就放弃合计——半份数据看着像完整的，会被当成账单
+        return null;
+      }
+      const code = usage.costCurrency || null;
+      if (currency === null) currency = code;
+      else if (code !== null && code !== currency) return null;
+      total += amount;
+      sawPriced = true;
+    }
+  }
+  return sawPriced ? `${formatCost(total, currency)}（非账单）` : null;
+}
+
 
 function renderConversation(
   session: Pick<SessionRecord, 'title' | 'createdAt' | 'updatedAt'>,
@@ -385,6 +424,8 @@ export function buildArchiveMarkdown(
     0,
   );
   if (outputTokens > 0) lines.push(`> 输出 token 合计：${formatTokens(outputTokens)}`);
+  const totalCost = summarizeCost(entries);
+  if (totalCost !== null) lines.push(`> 估算成本合计：${totalCost}`);
   if (rangeStart !== null && rangeEnd !== null) {
     lines.push(`> 时间范围：${formatTimestamp(rangeStart)} → ${formatTimestamp(rangeEnd)}`);
   }

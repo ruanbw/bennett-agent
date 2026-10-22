@@ -603,3 +603,38 @@ def test_compaction_event_has_no_digest_field():
 
     assert "digest" not in payload
     assert "summary" not in payload
+
+
+def test_usage_frame_carries_cost_fields():
+    """成本三个字段要真的出现在 SSE 帧里，而不是只存在于模型定义中。"""
+    raw = (
+        to_sse_frame(
+            Usage(
+                context_tokens=10_000,
+                output_tokens=2_000,
+                cache_read_tokens=4_000,
+                cost_total=0.0492,
+                cost_currency="USD",
+                cost_cache_savings=0.0108,
+            )
+        )
+        .encode()
+        .decode()
+    )
+
+    parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+    assert parsed["cost_total"] == pytest.approx(0.0492)
+    assert parsed["cost_currency"] == "USD"
+    assert parsed["cost_cache_savings"] == pytest.approx(0.0108)
+
+
+def test_usage_frame_omits_cost_when_unpriced():
+    """没配价格时字段是 null——**不是 0**。
+
+    0 会被前端显示成「$0.00」，读起来像免费；null 才会显示「未配置价格」。
+    """
+    raw = to_sse_frame(Usage(context_tokens=100, output_tokens=10)).encode().decode()
+
+    parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+    assert parsed["cost_total"] is None
+    assert parsed["cost_currency"] is None

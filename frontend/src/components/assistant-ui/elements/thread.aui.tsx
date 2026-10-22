@@ -62,7 +62,7 @@ import { getDraftStorage, readDraft, writeDraft } from "@/lib/composer-draft";
 import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
-import { readUsage } from "@/lib/context-usage";
+import { readUsage, sumCosts } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
 import { notify } from "@/lib/toast";
@@ -487,6 +487,17 @@ const Composer: FC<{
   const latestUsageModel =
     typeof latestUsageMeta?.model === "string" ? latestUsageMeta.model : null;
 
+  // 整个会话的成本累计。
+  //
+  // selector 只返回 `s.thread.messages` 本身：它是 state 里的原始数组，引用稳定。**不能**
+  // 在这里 `.map` / `.filter`——那会每次返回一个新数组，selector 的相等判断永远失败，
+  // 组件会在同一轮里无限重渲染（`latestUsageMeta` 那条注释讲的是同一件事）。汇总放在
+  // selector 之外做。
+  const messages = useAuiState((s) => s.thread.messages);
+  const sessionCost = sumCosts(
+    messages.map((message) => readUsage(message.metadata.custom?.usage)),
+  );
+
   // 附件暂不支持（后端只接受文本）。有附件时直接禁用发送，
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
@@ -614,6 +625,7 @@ const Composer: FC<{
               currentModel={currentModel}
               modelContextWindow={selectedModel?.context_window ?? null}
               locked={contextLocked}
+              sessionCost={sessionCost}
             />
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>

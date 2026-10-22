@@ -564,3 +564,62 @@ describe('导出内容的 HTML 转义（L-09）', () => {
     expect(name.endsWith('.md')).toBe(true);
   });
 });
+
+describe('成本', () => {
+  const withCost = (usage: Partial<NonNullable<MessageRecord['usage']>>) =>
+    assistantMessage({
+      usage: {
+        contextTokens: 10_000,
+        contextWindow: 128_000,
+        contextLimitTokens: 96_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 4_000,
+        costTotal: 0.0492,
+        costCurrency: 'USD',
+        costCacheSavings: 0.0108,
+        ...usage,
+      },
+    });
+
+  it('有价格时写出估算金额，并注明非账单', () => {
+    const markdown = build([withCost({})]);
+
+    expect(markdown).toContain('估算成本：$0.0492');
+    expect(markdown).toContain('非账单');
+  });
+
+  it('没价格时整行不出现，绝不写 0', () => {
+    const markdown = build([withCost({ costTotal: null, costCurrency: null, costCacheSavings: null })]);
+
+    expect(markdown).not.toContain('估算成本');
+    expect(markdown).not.toContain('$0');
+  });
+
+  it('金额与 token 分行：两者的可信度不同', () => {
+    const markdown = build([withCost({})]);
+
+    expect(markdown).toContain('> 用量：');
+    expect(markdown).toContain('> 估算成本：');
+  });
+
+  it('全档合计只在每一轮都有价格时给出', () => {
+    // 合计在归档头里（buildArchiveMarkdown），不在单个会话的 md 里
+    const archive = (messages: MessageRecord[]): string =>
+      buildArchiveMarkdown([{ session, messages }], { exportedAt: at(12) });
+
+    expect(archive([withCost({}), withCost({ costTotal: 0.02 })])).toContain(
+      '估算成本合计：$0.0692',
+    );
+
+    // 少一轮价格就不给合计——漏了几轮的合计数看起来像完整的
+    expect(archive([withCost({}), withCost({ costTotal: null })])).not.toContain('估算成本合计');
+  });
+
+  it('货币混用时不给出无意义的合计', () => {
+    const mixed = buildArchiveMarkdown([{ session, messages: [withCost({}), withCost({ costCurrency: 'CNY' })] }], {
+      exportedAt: at(12),
+    });
+
+    expect(mixed).not.toContain('估算成本合计');
+  });
+});

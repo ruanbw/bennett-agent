@@ -2,12 +2,16 @@ import { useState } from 'react';
 import { ArrowLeft, ShieldCheck } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { PricePanel } from './PricePanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import { UsersPanel } from './UsersPanel';
 import { cn } from '@/lib/utils';
 
 const TABS = [
   { id: 'providers', label: '模型提供商' },
+  // 价格与模型分成两栏而不是塞进模型弹窗里：价格的生命周期独立于模型（可以提前录入、
+  // 模型删除后仍保留），而且它是「成本展示」这套功能的唯一数据来源，值得有独立入口。
+  { id: 'prices', label: '模型价格' },
   { id: 'users', label: '用户管理' },
 ] as const;
 
@@ -98,6 +102,8 @@ export function AdminConsole({ userEmail, canManageRoles, onClose }: AdminConsol
         >
           {activeTab === 'providers' ? (
             <ProvidersPanel />
+          ) : activeTab === 'prices' ? (
+            <PricePanel />
           ) : (
             <UsersPanel currentUserEmail={userEmail} canManageRoles={canManageRoles} />
           )}

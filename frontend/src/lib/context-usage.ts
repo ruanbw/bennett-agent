@@ -67,6 +67,93 @@ export function estimateRemainingChars(remainingTokens: number | null): string {
  * 97% 了，收起态却显示「18k / 18k」，看起来像没用量。这里只在收起态补一位小数，
  * 模型菜单里的窗口徽标仍用整数 k，不受影响。
  */
+/**
+ * 金额格式化。
+ *
+ * ## 为什么不复用 `formatTokens`
+ *
+ * 钱的量级与 token 完全不同：一轮对话常常只花几厘钱（$0.0037），`toLocaleString` 会把它
+ * 显示成 `0`，`formatTokens` 的 k/M 缩写更没意义。这里的规则是：
+ *
+ * - `0` 原样显示 `0.00`：免费模型是真实存在的情况，不能显示空白；
+ * - 小于 1 时保留 4 位并去掉多余的尾零（`0.0037`、`0.0492`、`0.5`）：一轮对话的真实
+ *   量级就在这里。用 2 位会把 `0.0492` 抹成 `0.05`（差 1.6%）、把 `0.0123` 抹成 `0.01`
+ *   （差 19%）——小金额上的四舍五入，相对误差可以大到没有意义；
+ * - 1 以上保留 2 位（`1.23`）：到这个量级，分位以下的信息已经不重要了。
+ *
+ * ## 货币符号
+ *
+ * 只认识 USD / CNY / EUR 三种常见符号，其余货币原样输出代码（`SEK 1.20`）——猜错符号比
+ * 显示代码更糟。货币未知时也不加符号，只给数字：后端在有价格时一定给 currency，
+ * 走到这条路说明数据不完整，宁可少说。
+ */
+export function formatCost(amount: number, currency?: string | null): string {
+  if (!Number.isFinite(amount)) return '—';
+  const abs = Math.abs(amount);
+  let text: string;
+  if (abs === 0) {
+    text = '0.00';
+  } else if (abs < 1) {
+    // 4 位之后去掉尾零，但至少保留 2 位：0.5 -> "0.50"，0.0492 -> "0.0492"
+    const fixed = amount.toFixed(4).replace(/0+$/, '');
+    const [whole, fraction = ''] = fixed.split('.');
+    text = `${whole}.${fraction.padEnd(2, '0')}`;
+  } else {
+    text = amount.toFixed(2);
+  }
+  const code = (currency || '').trim().toUpperCase();
+  const symbols: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€' };
+  const symbol = symbols[code];
+  if (symbol) return `${symbol}${text}`;
+  return code ? `${code} ${text}` : text;
+}
+
+/**
+ * 会话累计成本。
+ *
+ * 只在**每一轮都有价格**时给出总额——任何一轮缺价格就返回 `null` 并给出「有几轮未计价」的
+ * 计数。给一个「只算了有价格那几轮」的总额是最糟的选择：它看起来是一个完整的数，而实际
+ * 漏掉了那些轮次，用户据此做预算判断会低估成本。
+ */
+export interface CumulativeCost {
+  /** 各轮金额之和；有未计价的轮次时为 null。 */
+  total: number | null;
+  currency: string | null;
+  /** 未计价（模型没配价格）的轮次数。 */
+  unpricedTurns: number;
+  /** 已计价的轮次数。 */
+  pricedTurns: number;
+}
+
+export function sumCosts(usages: (UsageState | null | undefined)[]): CumulativeCost {
+  let total = 0;
+  let pricedTurns = 0;
+  let unpricedTurns = 0;
+  let currency: string | null = null;
+  let mixedCurrency = false;
+
+  for (const usage of usages) {
+    if (!usage) continue;
+    const amount = usage.costTotal;
+    if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+      unpricedTurns += 1;
+      continue;
+    }
+    pricedTurns += 1;
+    total += amount;
+    const code = usage.costCurrency || null;
+    if (currency === null) currency = code;
+    else if (code !== null && code !== currency) mixedCurrency = true;
+  }
+
+  // 货币不一致时不给总额：把 USD 与 CNY 相加会得到一个没有意义的数
+  if (unpricedTurns > 0 || mixedCurrency) {
+    return { total: null, currency: mixedCurrency ? null : currency, unpricedTurns, pricedTurns };
+  }
+  // 0 轮已计价时也返回 null：那是「还不知道」，不是「花了 0」
+  return { total: pricedTurns > 0 ? total : null, currency, unpricedTurns, pricedTurns };
+}
+
 function formatCompactTokens(value: number): string {
   if (value >= 10_000 && value < 100_000) {
     const thousands = Math.round((value / 1000) * 10) / 10;
@@ -83,15 +170,29 @@ function formatCompactTokens(value: number): string {
  */
 export function readUsage(value: unknown): UsageState | null {
   if (!value || typeof value !== 'object') return null;
-  const { contextTokens, contextWindow, contextLimitTokens, outputTokens, cacheReadTokens } =
-    value as Partial<UsageState>;
+  const {
+    contextTokens,
+    contextWindow,
+    contextLimitTokens,
+    outputTokens,
+    cacheReadTokens,
+    costTotal,
+    costCurrency,
+    costCacheSavings,
+  } = value as Partial<UsageState>;
   if (typeof contextTokens !== 'number' || !Number.isFinite(contextTokens)) return null;
+  // 金额只在「是有效数字」时保留：0 是合法金额（免费模型），null/undefined 才是「没配价格」。
+  // 用 `?? null` 而不是 `|| null`——后者会把 0 变成 null，等于把免费模型显示成「未配置价格」。
   return {
     contextTokens,
     contextWindow: typeof contextWindow === 'number' ? contextWindow : null,
     contextLimitTokens: typeof contextLimitTokens === 'number' ? contextLimitTokens : null,
     outputTokens: typeof outputTokens === 'number' ? outputTokens : 0,
     cacheReadTokens: typeof cacheReadTokens === 'number' ? cacheReadTokens : 0,
+    costTotal: typeof costTotal === 'number' && Number.isFinite(costTotal) ? costTotal : null,
+    costCurrency: typeof costCurrency === 'string' && costCurrency ? costCurrency : null,
+    costCacheSavings:
+      typeof costCacheSavings === 'number' && Number.isFinite(costCacheSavings) ? costCacheSavings : null,
   };
 }
 

@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   describeContextUsage,
   estimateRemainingChars,
+  formatCost,
   formatPercent,
   formatTokens,
   readUsage,
+  sumCosts,
 } from './context-usage';
 import type { UsageState } from '../types';
 
@@ -15,6 +17,9 @@ const usage = (overrides: Partial<UsageState> = {}): UsageState => ({
   contextLimitTokens: null,
   outputTokens: 123,
   cacheReadTokens: 0,
+  costTotal: null,
+  costCurrency: null,
+  costCacheSavings: null,
   ...overrides,
 });
 
@@ -74,6 +79,9 @@ describe('readUsage', () => {
       contextLimitTokens: null,
       outputTokens: 0,
       cacheReadTokens: 0,
+      costTotal: null,
+      costCurrency: null,
+      costCacheSavings: null,
     });
   });
 });
@@ -234,3 +242,84 @@ describe('estimateRemainingChars', () => {
     expect(estimateRemainingChars(Number.NaN)).toBe('');
   });
 });
+
+describe('formatCost', () => {
+  it('常见货币用符号，其余用代码', () => {
+    expect(formatCost(3, 'EUR')).toBe('€3.00');
+    expect(formatCost(1.2, 'SEK')).toBe('SEK 1.20');
+  });
+
+  it('货币未知时只给数字，不猜符号', () => {
+    expect(formatCost(1.2, null)).toBe('1.20');
+    expect(formatCost(1.2)).toBe('1.20');
+  });
+
+  it('一轮对话的真实量级要能看出来，不能抹成 0.00', () => {
+    // 10000 输入 × $3/M + 2000 输出 × $15/M = $0.06
+    expect(formatCost(0.06, 'USD')).toBe('$0.06');
+    // 更小的轮次：保留 4 位，否则会显示成 $0.00
+    expect(formatCost(0.0037, 'USD')).toBe('$0.0037');
+    expect(formatCost(0.0009, 'USD')).toBe('$0.0009');
+  });
+
+  it('1 元以下保留 4 位：抹成 2 位会在小金额上放大相对误差', () => {
+    // 0.0492 抹成 0.05 是 1.6% 的误差；0.0123 抹成 0.01 是 19%
+    expect(formatCost(0.0492, 'USD')).toBe('$0.0492');
+    expect(formatCost(0.0123, 'USD')).toBe('$0.0123');
+    // 尾零去掉，但至少两位小数
+    expect(formatCost(0.5, 'USD')).toBe('$0.50');
+    expect(formatCost(0.1, 'USD')).toBe('$0.10');
+  });
+
+  it('1 元以上保留 2 位', () => {
+    expect(formatCost(1.234, 'USD')).toBe('$1.23');
+    expect(formatCost(12.5, 'CNY')).toBe('¥12.50');
+  });
+
+  it('0 是合法金额（免费模型），显示 0.00 而不是空白', () => {
+    expect(formatCost(0, 'USD')).toBe('$0.00');
+  });
+
+  it('非法数字给占位符', () => {
+    expect(formatCost(Number.NaN, 'USD')).toBe('—');
+  });
+});
+
+describe('sumCosts', () => {
+  const priced = (amount: number, currency = 'USD'): UsageState =>
+    usage({ costTotal: amount, costCurrency: currency });
+
+  it('全部有价格时给出总额', () => {
+    const result = sumCosts([priced(0.06), priced(0.04)]);
+    expect(result.total).toBeCloseTo(0.1, 6);
+    expect(result.pricedTurns).toBe(2);
+    expect(result.unpricedTurns).toBe(0);
+  });
+
+  it('有任一轮没价格就**不给**总额，只报未计价轮数', () => {
+    // 只算有价格那几轮会给出一个看起来完整、实际漏了轮次的数
+    const result = sumCosts([priced(0.06), usage({ costTotal: null })]);
+    expect(result.total).toBeNull();
+    expect(result.unpricedTurns).toBe(1);
+    expect(result.pricedTurns).toBe(1);
+  });
+
+  it('货币混用时不给总额（不同币种相加没有意义）', () => {
+    const result = sumCosts([priced(0.06, 'USD'), priced(0.04, 'CNY')]);
+    expect(result.total).toBeNull();
+    expect(result.currency).toBeNull();
+  });
+
+  it('一轮都没计价时是 null 而不是 0', () => {
+    const result = sumCosts([usage({ costTotal: null })]);
+    expect(result.total).toBeNull();
+    expect(result.pricedTurns).toBe(0);
+  });
+
+  it('免费模型（0 元）参与累加，不被当成缺价格', () => {
+    const result = sumCosts([priced(0), priced(0.05)]);
+    expect(result.total).toBeCloseTo(0.05, 6);
+    expect(result.unpricedTurns).toBe(0);
+  });
+});
+

@@ -540,6 +540,10 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
         contextLimitTokens: event.context_limit_tokens ?? null,
         outputTokens: event.output_tokens,
         cacheReadTokens: event.cache_read_tokens,
+        // 三个成本字段一起存或一起缺席：只存其中一个会让界面显示「$0.00 US?」
+        costTotal: event.cost_total ?? null,
+        costCurrency: event.cost_currency ?? null,
+        costCacheSavings: event.cost_cache_savings ?? null,
       };
       break;
 

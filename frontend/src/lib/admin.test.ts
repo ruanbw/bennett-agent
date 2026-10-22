@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   AdminApiError,
   buildModelPayload,
+  buildPricePayload,
+  draftFromPrice,
+  validatePriceDraft,
+  type PriceDraft,
   buildProviderPayload,
   clampUsersOffset,
   describeAdminError,
@@ -279,5 +283,71 @@ describe('filterAdminModels', () => {
 
   it('没有匹配时返回空数组，而不是原列表', () => {
     expect(filterAdminModels(models, '不存在')).toEqual([]);
+  });
+});
+
+describe('价格草稿', () => {
+  const draft = (overrides: Partial<PriceDraft> = {}): PriceDraft => ({
+    inputPerMtok: '',
+    outputPerMtok: '',
+    cachedInputPerMtok: '',
+    currency: 'USD',
+    ...overrides,
+  });
+
+  it('空串是合法值（= 未配置），不是错误', () => {
+    expect(validatePriceDraft(draft())).toBeNull();
+  });
+
+  it('0 是合法值（免费模型），与空串不同', () => {
+    expect(validatePriceDraft(draft({ inputPerMtok: '0' }))).toBeNull();
+    expect(buildPricePayload(draft({ inputPerMtok: '0' })).input_per_mtok).toBe(0);
+    // 空串走的是另一条路
+    expect(buildPricePayload(draft({ inputPerMtok: '' })).input_per_mtok).toBeNull();
+  });
+
+  it('负数和乱码在本地就拦下，不交给后端的英文 422', () => {
+    expect(validatePriceDraft(draft({ inputPerMtok: '-1' }))?.field).toBe('inputPerMtok');
+    expect(validatePriceDraft(draft({ outputPerMtok: 'abc' }))?.field).toBe('outputPerMtok');
+    expect(validatePriceDraft(draft({ cachedInputPerMtok: '1.2.3' }))?.field).toBe(
+      'cachedInputPerMtok',
+    );
+  });
+
+  it('小数是合法的', () => {
+    expect(validatePriceDraft(draft({ inputPerMtok: '0.15' }))).toBeNull();
+    expect(buildPricePayload(draft({ inputPerMtok: '0.15' })).input_per_mtok).toBe(0.15);
+  });
+
+  it('货币会被规范成大写，空货币拦在本地', () => {
+    expect(buildPricePayload(draft({ currency: ' usd ' })).currency).toBe('USD');
+    expect(validatePriceDraft(draft({ currency: '  ' }))?.field).toBe('currency');
+    expect(validatePriceDraft(draft({ currency: 'TOOLONGXX' }))?.field).toBe('currency');
+  });
+
+  it('draftFromPrice 把 null 转成空串，0 转成 "0"', () => {
+    const parsed = draftFromPrice({
+      model_id: 'gw/a',
+      input_per_mtok: null,
+      output_per_mtok: 0,
+      cached_input_per_mtok: 0.3,
+      currency: 'CNY',
+      updated_at: null,
+    });
+    expect(parsed).toEqual({
+      inputPerMtok: '',
+      outputPerMtok: '0',
+      cachedInputPerMtok: '0.3',
+      currency: 'CNY',
+    });
+  });
+
+  it('draftFromPrice 对 null 输入给出空表单', () => {
+    expect(draftFromPrice(null)).toEqual({
+      inputPerMtok: '',
+      outputPerMtok: '',
+      cachedInputPerMtok: '',
+      currency: 'USD',
+    });
   });
 });

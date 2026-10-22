@@ -26,6 +26,7 @@
 
 import logging
 import uuid
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -38,6 +39,8 @@ from app.schemas.admin import (
     ModelCreate,
     ModelRead,
     ModelUpdate,
+    PriceRead,
+    PriceUpdate,
     ProviderCreate,
     ProviderRead,
     ProviderSyncResult,
@@ -48,7 +51,7 @@ from app.schemas.admin import (
     UserPage,
     mask_api_key,
 )
-from app.services import model_service
+from app.services import model_service, pricing
 from app.services.auth import apply_role, current_admin, current_superadmin, role_assignment
 from app.services.model_service import (
     ApiKeyRequiredError,
@@ -270,6 +273,88 @@ async def update_model(model_uuid: uuid.UUID, payload: ModelUpdate):
 async def delete_model(model_uuid: uuid.UUID) -> Response:
     if not await model_service.delete_provider_model(model_uuid):
         raise HTTPException(status_code=404, detail="模型不存在")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------
+# 价格
+# ---------------------------------------------------------------------
+def _float_or_none(value: Decimal | None) -> float | None:
+    """`Decimal` → float，只用于**展示**接口。"""
+    return None if value is None else float(value)
+
+
+def _price_read(price: pricing.Price) -> PriceRead:
+    """把服务层的 `Price` 转成对外 schema。
+
+    `Decimal` 在这里转 float：对外是展示接口，前端只会把它格式化成人读的字符串。
+    **精确计算从不经过这里**（`app/services/pricing.py` 直接用 Decimal 算），所以转换
+    不会引入账单误差。
+    """
+    return PriceRead(
+        model_id=price.model_id,
+        input_per_mtok=_float_or_none(price.input_per_mtok),
+        output_per_mtok=_float_or_none(price.output_per_mtok),
+        cached_input_per_mtok=_float_or_none(price.cached_input_per_mtok),
+        currency=price.currency,
+        updated_at=price.updated_at,
+    )
+
+
+@router.get("/prices", response_model=list[PriceRead], summary="列出已配置的模型价格")
+async def list_prices():
+    """列出全部已登记的价格。
+
+    返回的只是**配置**，不是账单：没有任何历史用量在这里。价格表可能比模型清单大——
+    已删除模型的历史价格会保留（`ModelPrice.model_id` 刻意不做外键，理由见 `app/db.py`）。
+    """
+    return [_price_read(entry) for entry in await pricing.list_prices()]
+
+
+@router.put(
+    "/prices/{model_key:path}",
+    response_model=PriceRead,
+    summary="设置模型价格",
+)
+async def set_price(model_key: str, payload: PriceUpdate) -> PriceRead:
+    """写入某个模型的价格（不存在则创建，存在则整体覆盖）。
+
+    路径用 `{model_key:path}` 而不是普通参数：模型键是 `{provider.slug}/{model_id}`，
+    而 `model_id` 自己也常带斜杠（`openai/gpt-4o`），整条键可能形如
+    `my-gateway/openai/gpt-4o`。用普通路径参数只能拿到第一段，剩下的会被当成不存在的路由。
+
+    `model_key` 不校验「模型是否真的存在」：价格要能**提前**录入还没启用的模型，也要能
+    在模型被删后保留历史账目。这一点与 `ModelPrice` 不做外键是同一个决定。
+    """
+    cleaned = model_key.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="模型键不能为空")
+
+    try:
+        price = await pricing.upsert_price(
+            cleaned,
+            input_per_mtok=payload.input_per_mtok,
+            output_per_mtok=payload.output_per_mtok,
+            cached_input_per_mtok=payload.cached_input_per_mtok,
+            currency=payload.currency,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _price_read(price)
+
+
+@router.delete(
+    "/prices/{model_key:path}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除模型价格",
+)
+async def delete_price(model_key: str) -> Response:
+    """删除价格配置；不存在时 404。
+
+    删除后该模型的用量事件不再带金额（前端显示「未配置价格」），**不是**变成 0。
+    """
+    if not await pricing.delete_price(model_key.strip()):
+        raise HTTPException(status_code=404, detail="价格配置不存在")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

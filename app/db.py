@@ -29,6 +29,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi import Depends
@@ -47,6 +48,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -376,6 +378,59 @@ class Message(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ModelPrice(Base):
+    """模型的计价信息（每百万 token 的输入/输出价格）。
+
+    ## 为什么是独立表而不是给 `provider_model` 加两列
+
+    两个理由，第二个更重要：
+
+    1. `create_all` **不会**给已存在的表加列，加列必须手写幂等迁移。`app/db.py` 里
+       那条注释明确写着「再出现第二处加列时应该换成 Alembic」——而独立新表由
+       `create_all` 直接建出来，不需要引入整套迁移工具链。
+    2. 价格是**独立生命周期**的数据：它可以缺（未知模型）、会变（上游调价）、也可能
+       由运维批量导入。混进模型元数据表会让「同步上游模型列表」这条路径有覆盖它的
+       风险，而价格被同步动作悄悄清掉是最难发现的一类账目错误。
+
+    ## 单位与精度
+
+    `*_per_mtok` 是「每百万 token 的价格」，单位是**计价货币**（`currency`，默认 USD）。
+    用百万为单位而不是每 token：后者是 1e-6 量级的小数，浮点误差与展示都难处理。
+
+    `Decimal` 而不是 `Float`：钱不能有二进制浮点误差。SQLite 里存成 NUMERIC，
+    SQLAlchemy 会经 `Decimal` 往返——累加几百次仍然精确。
+
+    ## 为什么允许为空
+
+    绝大多数自建网关与本地模型（vLLM、LiteLLM 本地代理）没有公开计价，或者部署方
+    根本不在乎这个数。缺价格时前端显示「未配置价格」并**不显示金额**——显示 0 会被
+    读成「免费」，那是一个明确的错误结论。
+    """
+
+    __tablename__ = "model_price"
+    __table_args__ = (UniqueConstraint("model_id", name="uq_model_price_model"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    #: 对外模型键（`{provider.slug}/{model_id}`），与 `provider_model` 的对外键一致。
+    #:
+    #: 刻意**不做外键**：价格表要能提前录入还没启用的模型，也要能在模型被删除后保留
+    #: 历史账目。外键会同时挡住这两件事（删模型时 CASCADE 掉价格，历史就没了）。
+    model_id: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
+    #: 每百万输入 token 的价格；None = 未知。
+    input_per_mtok: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    #: 每百万输出 token 的价格；None = 未知。
+    output_per_mtok: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    #: 每百万缓存命中输入 token 的价格；None = 「与普通输入同价」（多数厂商如此）。
+    cached_input_per_mtok: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, default="USD")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class KnowledgeDocument(Base):
