@@ -46,6 +46,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -375,6 +376,77 @@ class Message(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class KnowledgeDocument(Base):
+    """知识库文档（RAG 的入库单位）。
+
+    `dimensions` 与 `embedding_model` 存在**文档**上而不是全局配置里：检索时要按
+    片段的维度筛掉不兼容的候选，而「换了 embedding 模型却没重建索引」是这类系统最
+    常见的静默故障——旧向量还在，与查询算出来的相似度只是噪声，检索却仍会「成功
+    返回」若干条结果。
+    """
+
+    __tablename__ = "knowledge_document"
+    __table_args__ = (Index("ix_knowledge_document_user", "user_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    #: 指向 user 的外键必须是 `GUID`，不能用 `SQLUuid`：两者在 SQLite 下存成
+    #: CHAR(36) 带横线 与 CHAR(32) 不带横线，字面量不同，外键约束会**直接拒绝**
+    #: ——症状是 500 `FOREIGN KEY constraint failed`。详见上面的 `SYNC_USER_FK`。
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    #: 来源说明（文件名、URL）。展示用，不参与检索。
+    source: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: 生成这些向量时用的模型。换模型后旧文档必须重建，否则维度对不上。
+    embedding_model: Mapped[str] = mapped_column(String(200), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class KnowledgeChunk(Base):
+    """知识库片段（检索的最小单位）。
+
+    向量存成 float32 的二进制 BLOB（`app/services/rag/store.py:pack_vector`）而不是
+    JSON：1024 维的 JSON 文本约 12KB，二进制是 4KB，且读出来不用 `json.loads`。
+    多文档检索时这个差别就是几十毫秒。
+
+    `user_id` 与 `document_id` 冗余一份：检索按用户过滤时不必 join 文档表，
+    索引能直接命中（与 `message.user_id` 同一条取舍）。
+    """
+
+    __tablename__ = "knowledge_chunk"
+    __table_args__ = (
+        Index("ix_knowledge_chunk_user", "user_id"),
+        Index("ix_knowledge_chunk_document", "document_id", "chunk_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        SQLUuid(as_uuid=True),
+        ForeignKey("knowledge_document.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: 同 `KnowledgeDocument.user_id`：指向 user 必须用 `GUID`。
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 所属章节标题（最近的 Markdown 标题）；展示「这句来自哪一节」用。
+    heading: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: float32 小端二进制（`array.array("f")` 的 tobytes）。
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 def secure_sqlite_permissions(path: str | Path) -> bool:

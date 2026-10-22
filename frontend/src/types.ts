@@ -71,6 +71,55 @@ export interface Capabilities {
   mcp_error?: string | null;
 }
 
+// =====================================================================
+// 知识库（RAG）
+// =====================================================================
+/**
+ * 知识库是否可用。
+ *
+ * `enabled=false` 意味着**服务端没配 EMBEDDING_MODEL**，不是用户没上传过东西：
+ * 前端必须先看它再决定是否显示上传表单，否则用户填完标题点提交才看到一句
+ * 「知识库未启用」。
+ */
+export interface KnowledgeCapabilities {
+  enabled: boolean;
+  /** 当前使用的 embedding 模型（未启用时为 null）。 */
+  embeddingModel: string | null;
+  /** 不可用的原因与改法（不是错误，是部署状态）。 */
+  reason: string | null;
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  /** 来源说明（文件名 / URL）；没填时为 null。 */
+  source: string | null;
+  /** 这篇文档被切成了多少块。 */
+  chunkCount: number;
+  /** 生成向量时用的模型。换模型后必须重建，否则维度对不上。 */
+  embeddingModel: string;
+  dimensions: number;
+  createdAt: string;
+}
+
+export interface KnowledgeDocumentList {
+  documents: KnowledgeDocument[];
+  /** 文档数上限与当前用量：前端据此提示「还能再传几篇」。 */
+  maxDocuments: number;
+  totalChunks: number;
+}
+
+/** 手动检索的一条结果。两路分数分开给出，便于判断「靠关键词还是靠语义命中的」。 */
+export interface KnowledgeSearchHit {
+  documentId: string;
+  documentTitle: string;
+  heading: string;
+  text: string;
+  score: number;
+  vectorScore: number;
+  lexicalScore: number;
+}
+
 /** 一个 MCP server 的运行时状态。`name` 同时也是它的工具名前缀。 */
 export interface McpServerStatus {
   name: string;

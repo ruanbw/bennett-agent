@@ -35,6 +35,7 @@ def render_system_prompt(**overrides):
         # 生产代码由 `agent_factory.mcp_server_summary(tools)` 从工具名还原；
         # 这里默认空列表，MCP 相关的用例显式传入。
         "mcp_servers": overrides.pop("mcp_servers", []),
+        "knowledge_base": "search_knowledge_base" in tools,
     }
     kwargs.update(overrides)
     return prompt_manager.render(SYSTEM_PROMPT_TEMPLATE, **kwargs)
@@ -63,6 +64,7 @@ def test_default_filter_still_works_with_strict_undefined():
         clarification=False,
         current_time=False,
         mcp_servers=[],
+        knowledge_base=False,
     )
 
     assert "Bennett" in rendered

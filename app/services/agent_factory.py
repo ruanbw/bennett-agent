@@ -48,6 +48,9 @@ CLARIFICATION_TOOL_NAME = "ask_user_clarification"
 #: 当前时间工具名。纯本地计算、目前始终挂载，但提示词仍然按真实装配渲染——
 #: 「模板里写死的工具名」正是第 4 条修过的那类漂移。
 CURRENT_TIME_TOOL_NAME = "get_current_time"
+#: 知识库检索工具名。与 `tavily_search` 同一类：没配 embedding 就不挂，提示词里
+#: 也就不该教模型去调它。
+KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
 
 #: 标题生成的上游预算（秒）。
 #:
@@ -316,6 +319,7 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         web_search=WEB_SEARCH_TOOL_NAME in names,
         clarification=CLARIFICATION_TOOL_NAME in names,
         current_time=CURRENT_TIME_TOOL_NAME in names,
+        knowledge_base=KNOWLEDGE_TOOL_NAME in names,
         # MCP 工具：名字带 `server__` 前缀，与内置工具混在同一个 tools 列表里。
         # 模板单独列一段——不列的话模型只知道「有这些名字」，不知道它们是
         # **外部**工具（可能慢、可能失败、结果需要按不可信数据处理）。

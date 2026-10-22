@@ -161,6 +161,34 @@ class Settings(BaseSettings):
             "写错的声明会让**启动失败**而不是静默跳过：声明出来的能力不能悄悄消失。"
         ),
     )
+    embedding_model: str | None = Field(
+        default=None,
+        description=(
+            "知识库（RAG）用的 embedding 模型 id，例如 `text-embedding-3-small`。"
+            "地址与密钥复用**默认提供商**（与对话同一个网关），因此不另配 base_url。"
+            "留空或仍是占位值时知识库整体不可用：入库与检索都会被跳过，对话照常。"
+            "换模型后必须重建索引——旧向量的维度与语义空间都不同，混用会让检索"
+            "静默返回不相关的结果。"
+        ),
+    )
+    rag_top_k: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        description=(
+            "每轮对话自动检索的知识库片段数上限。每多一块就多占一份上下文预算；"
+            "四块（约 3k token）已能覆盖绝大多数问题。"
+        ),
+    )
+    rag_min_score: float = Field(
+        default=0.15,
+        ge=0,
+        le=1,
+        description=(
+            "检索结果的最低混合分（向量 0.7 + 词法 0.3 加权后）。低于它的候选不返回："
+            "一条勉强相关的结果比没有结果糟——模型会拿它当依据编答案。"
+        ),
+    )
     mcp_tool_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,

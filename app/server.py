@@ -17,6 +17,7 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.capabilities import router as capabilities_router
 from app.api.chat import router as api_router
+from app.api.knowledge import router as knowledge_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
@@ -206,6 +207,10 @@ _API_TAGS = [
         "description": "运行时能力探针：报告实际装配的工具（如是否可联网搜索）。",
     },
     {
+        "name": "knowledge",
+        "description": "用户私有知识库：上传文档（分块 + 向量化）、列表、删除、手动检索。",
+    },
+    {
         "name": "sync",
         "description": "本机数据增量同步：push 逐行接受或拒绝，pull 用不透明游标做长轮询。",
     },
@@ -333,6 +338,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(api_router)
     app.include_router(capabilities_router)
+    app.include_router(knowledge_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
 

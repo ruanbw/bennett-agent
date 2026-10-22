@@ -12,6 +12,7 @@ import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useLocalDataStats } from '../hooks/use-local-stats';
+import { KnowledgePanel } from './KnowledgePanel';
 import { LocalDataStatsSection } from './LocalDataStatsSection';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
@@ -189,6 +190,9 @@ export function SettingsPanel({
         </h3>
         <PasswordChangeForm onPasswordChanged={onPasswordChanged} />
       </div>
+
+      {/* 知识库区块：上传的文档存服务端，与「本机数据」是两回事，所以分开两块 */}
+      <KnowledgePanel open={open} />
 
       {/* 本机数据区块：数据默认只存浏览器，用户应该能知道自己存了多少 */}
       <div className="space-y-2">

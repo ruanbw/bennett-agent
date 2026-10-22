@@ -201,6 +201,9 @@ async def chat_stream(request: ChatRequest, user: User = Depends(current_active_
             reasoning_effort=request.reasoning_effort,
             context_anchor=request.context_anchor,
             cache_scope_key=str(user.id),
+            # 知识库是用户私有的：工具只能查当前登录用户的文档（见
+            # `app/tools/knowledge_scope.py`）。这个值由服务端注入，绝不来自模型参数。
+            user_id=user.id,
         ):
             yield to_sse_frame(event)
 

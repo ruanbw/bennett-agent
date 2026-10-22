@@ -13,6 +13,7 @@ pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 
 """
 
 from app.config import is_usable_api_key, settings
+from app.services.rag.embeddings import EMBEDDING_TIMEOUT_SECONDS
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
 from app.tools.current_time import get_current_time as _raw_get_current_time
 from app.tools.guard import (
@@ -21,6 +22,12 @@ from app.tools.guard import (
     ToolErrorIsolation,
     collect_tool_failures,
     failure_result_message,
+)
+from app.tools.knowledge_search import (
+    is_knowledge_base_enabled,
+)
+from app.tools.knowledge_search import (
+    search_knowledge_base as _raw_search_knowledge_base,
 )
 from app.tools.registry import (
     ManagedTool,
@@ -37,6 +44,11 @@ from app.tools.tavily_search import (
 
 #: 全局工具注册中心单例
 registry = ToolRegistry()
+
+#: 知识库检索的工具级超时（外层防线）。必须**严格大于** embedding 自己的
+#: `EMBEDDING_TIMEOUT_SECONDS`：pydantic-ai 的超时会抛成 `ModelRetry`，先于工具内部
+#: 收尾触发时，工具里写的中文建议全部不可达（与 tavily 那段注释同一个坑）。
+KNOWLEDGE_TOOL_TIMEOUT_SECONDS = EMBEDDING_TIMEOUT_SECONDS + 5.0
 
 # ---------------------------------------------------------------------
 # 工具集中注册与元数据编目
@@ -77,6 +89,20 @@ tavily_tool: ManagedTool = registry.register(
     enabled_checker=lambda: is_usable_api_key(settings.tavily_api_key),
 )(_raw_tavily_search)
 
+knowledge_tool: ManagedTool = registry.register(
+    category=ToolCategory.DATA,
+    risk_level=RiskLevel.READ_ONLY,
+    tags=["knowledge", "rag", "documents"],
+    description=(
+        "在用户自己上传的知识库文档中检索相关内容。当问题涉及用户的文档、手册、规章制度、产品资料等内容时调用。"
+    ),
+    # 检索 = 一次 embedding 调用 + 一次全库扫描；给一个上限，避免 embedding 服务卡住时
+    # 整轮 SSE 被拖到总预算耗尽。这个值要大于 embedding 自己的超时（15s），否则模型
+    # 看到的是 pydantic-ai 的英文超时文案而不是本工具的可执行建议。
+    timeout=KNOWLEDGE_TOOL_TIMEOUT_SECONDS,
+    enabled_checker=is_knowledge_base_enabled,
+)(_raw_search_knowledge_base)
+
 #: **全量**工具列表（含当前配置下不可用的工具）。保留本列表供静态全量探针使用。
 ALL_TOOLS: list[ManagedTool] = registry.all_tools()
 
@@ -89,7 +115,9 @@ def build_tools() -> list[ManagedTool]:
     - `get_current_time` 始终可用：纯本地计算，没有可失败的分支；模型自己的时间感
       是过期的，缺了它「今天几号」只能靠猜；
     - `tavily_search` 只在配置了 `TAVILY_API_KEY` 时才挂：没有 key 时这个工具只会
-      给模型返回「未配置」错误，白占一轮工具调用的 token，还会让模型以为自己能联网。
+      给模型返回「未配置」错误，白占一轮工具调用的 token，还会让模型以为自己能联网；
+    - `search_knowledge_base` 只在配置了 `EMBEDDING_MODEL` 时才挂，理由同上。
+      「有没有上传文档」不参与判定：那是用户数据，不是部署能力，而且随时会变。
 
     每次调用都重新判断配置，因此调用方必须把结果纳入自己的缓存键——见
     `app/services/agent_factory.py` 的缓存键。
@@ -100,6 +128,7 @@ def build_tools() -> list[ManagedTool]:
 # 保持底层函数原样导出，确保老代码与直接测试函数调用的兼容性
 ask_user_clarification = _raw_ask_clarification
 get_current_time = _raw_get_current_time
+search_knowledge_base = _raw_search_knowledge_base
 tavily_search = _raw_tavily_search
 
 __all__ = [
@@ -118,6 +147,9 @@ __all__ = [
     "clarification_tool",
     "current_time_tool",
     "get_current_time",
+    "is_knowledge_base_enabled",
+    "knowledge_tool",
+    "search_knowledge_base",
     "registry",
     "tavily_search",
     "tavily_tool",

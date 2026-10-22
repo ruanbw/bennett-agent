@@ -521,5 +521,7 @@ def test_mcp_section_is_absent_from_rendered_prompt_without_servers():
 
     rendered = render_system_prompt(["get_current_time"])
 
-    assert "MCP" not in rendered
-    assert "外部工具" not in rendered
+    # 没有 MCP server 时整段「外部工具」不出现。注意不能只断言 "MCP" 不在提示词里：
+    # 第 7 条把「MCP 外部工具结果」列为不可信数据来源之一，那句是常驻的。
+    assert "### 外部工具（MCP）" not in rendered
+    assert "server `" not in rendered

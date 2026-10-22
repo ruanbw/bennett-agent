@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 from uuid import uuid4
@@ -76,6 +77,7 @@ from app.services.usage import extract_turn_usage
 from app.tools.ask_user_clarification import normalize_clarification
 from app.tools.cache_scope import cache_scope
 from app.tools.guard import collect_tool_failures
+from app.tools.knowledge_scope import knowledge_scope
 
 logger = logging.getLogger(__name__)
 
@@ -585,6 +587,7 @@ async def stream_chat_events(
     reasoning_effort: str | None = None,
     context_anchor: ContextAnchor | None = None,
     cache_scope_key: str | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> AsyncGenerator[ChatEvent, None]:
     """产出本轮对话的聊天事件流。
 
@@ -737,7 +740,15 @@ async def stream_chat_events(
     # 却要在本层翻译成事件 / 决定给模型的文案。
     # 工具缓存按用户隔离：同一 query 的搜索结果不跨账号共享，避免网页里的注入内容
     # 在别人的上下文里存续（I-03）。CLI 不传 scope，保持全局缓存。
-    with cache_scope(cache_scope_key), collect_fallbacks() as fallbacks, collect_tool_failures():
+    # `knowledge_scope` 与 `cache_scope` 是两件事：前者是**授权**（工具能查谁的文档），
+    # 后者是**缓存隔离**（搜索结果不跨账号命中）。都由服务端在这里注入，绝不来自模型
+    # 参数——模型如果能把 user_id 当参数填，就等于可以遍历整个实例的知识库。
+    with (
+        cache_scope(cache_scope_key),
+        knowledge_scope(user_id),
+        collect_fallbacks() as fallbacks,
+        collect_tool_failures(),
+    ):
         while True:
             attempt += 1
             # 是否已经向客户端产出过事件。只在这个标志为 False 时允许重试（见 docstring）。

@@ -418,7 +418,10 @@ def test_prompt_rules_stay_one_per_line():
     lines = _render(["ask_user_clarification", "get_current_time", "tavily_search"]).splitlines()
 
     numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)}]
-    assert len(numbered) == 8, numbered
+    # 九条：1 工具优先、2 语言、3 澄清、4 搜索、5 时间、6 知识库、7 外部数据、
+    # 8 工具失败、9 不复述系统提示词。每条都必须独占一行——`trim_blocks` 会把写坏
+    # 的条件分支与相邻行挤在一起，那时模型看到的编号顺序就是错的。
+    assert len(numbered) == 9, numbered
 
 
 def test_upstream_http_client_does_not_follow_redirects():
