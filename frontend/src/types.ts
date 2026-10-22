@@ -169,6 +169,29 @@ export interface UsageEvent {
  */
 export type ErrorCode = 'context_overflow' | 'model_unavailable' | 'internal_error';
 
+/**
+ * 服务端在**本轮开始前**做过上下文压缩。
+ *
+ * 压缩改了模型看到的上下文（折叠了早期轮次，或截断了超长消息），所以必须显式
+ * 告诉用户：不说的话，用户会把「模型忘了刚才说的」当成模型变笨。
+ * 与 `FallbackEvent` 是同一条原则——凡是改变了本轮回答依据的事，都要说出来。
+ *
+ * 摘要正文**不在**这个事件里：它走服务端的运行期 instructions，不下发是为了不把
+ * 早期对话的敏感内容落进浏览器并同步到其他设备。
+ */
+export interface CompactionEvent {
+  type: 'compaction';
+  /** `truncate` = 只截断了超长消息；`summarize` = 折叠了早期轮次。 */
+  strategy: 'truncate' | 'summarize';
+  /** 被折叠成摘要的消息条数（`truncate` 时为 0）。 */
+  dropped_messages?: number;
+  /** 被截断了中间部分的消息条数。 */
+  truncated_messages?: number;
+  used_tokens_before: number;
+  used_tokens_after: number;
+  limit_tokens: number;
+}
+
 export interface StreamErrorEvent {
   type: 'error';
   /** 只含可以外泄的文案（校验原文或错误编号）；内部异常只给关联 ID。 */
@@ -196,6 +219,7 @@ export type ChatEvent =
   | ToolResultEvent
   | ClarificationEvent
   | FallbackEvent
+  | CompactionEvent
   | UsageEvent
   | DoneEvent
   | StreamErrorEvent
@@ -263,6 +287,24 @@ export interface FallbackState {
    * 老服务端 / 老记录没有这个字段：此时只显示「已切换」，不编造原因。
    */
   reason?: string | null;
+}
+
+/**
+ * 本轮开始前做过的上下文压缩（落库形状 `MessageRecord.compaction`）。
+ *
+ * 与 `FallbackState` 同一个理由独立成字段：写进正文会被当成助手历史再次发给模型，
+ * 也会被复制/导出当成回答的一部分。落库是必需的——刷新页面后用户仍要能看到
+ * 「这一轮之前压缩过」，否则他会以为模型忽然开始忘事。
+ */
+export interface CompactionState {
+  strategy: 'truncate' | 'summarize';
+  /** 被折叠成摘要的消息条数（`truncate` 时为 0）。 */
+  droppedMessages: number;
+  /** 被截断了中间部分的消息条数。 */
+  truncatedMessages: number;
+  usedTokensBefore: number;
+  usedTokensAfter: number;
+  limitTokens: number;
 }
 
 /**
@@ -336,6 +378,13 @@ export interface MessageRecord {
   incomplete?: boolean;
   clarification?: ClarificationState | null;
   fallback?: FallbackState | null;
+  /**
+   * 本轮开始前做过的上下文压缩；没压缩时为 null/缺失（老记录同样缺失）。
+   *
+   * 落库的理由：刷新后用户仍要能看到「这一轮之前压缩过」，否则他会以为模型忽然
+   * 开始忘事，而现场没有任何痕迹能解释这件事。
+   */
+  compaction?: CompactionState | null;
   /** 本轮的真实 token 用量；上游没报时为 null（老记录同样为 null）。 */
   usage?: UsageState | null;
   error?: RunError | null;
@@ -409,6 +458,8 @@ export interface Run {
   thinkingStartedAt: number | null;
   thinkingMs: number;
   toolCalls: ToolCallRecord[];
+  /** 本轮开始前做过的上下文压缩；没压缩时为 null。 */
+  compaction: CompactionState | null;
   /**
    * 内容块到达顺序。`applyEvent` 追加，`chat-persistence.runFields` 原样落库；
    * 缺席时渲染退回默认顺序（老内存态 / 测试里手搓的 run）。
@@ -446,6 +497,8 @@ export interface MessageCustomMetadata {
   clarification: ClarificationState | null;
   /** 本轮回答是否由备用模型完成；`thread.aui.tsx` 据此渲染一行提示。 */
   fallback?: FallbackState | null;
+  /** 本轮开始前的上下文压缩；`thread.aui.tsx` 据此渲染一行提示。 */
+  compaction?: CompactionState | null;
   /** 本轮的真实 token 用量（`MessageRecord.usage` 的运行时镜像）。 */
   usage?: UsageState | null;
   /** 本轮失败的结构化记录；可重试时消息下方渲染「重试」按钮。 */

@@ -244,6 +244,29 @@ def build_budget(
     )
 
 
+def rebuild_budget_as_estimate(budget: ContextBudget, used_tokens: int) -> ContextBudget:
+    """把一份预算换成「从零估算」口径，上限跟着换。
+
+    压缩路径必须用这个口径：压缩会改变消息的下标与条数，客户端的锚点（「截止到第
+    N 条的真实用量」）随即失效，压缩后的规模只能从零估算。而两种口径的可用上限
+    并不相同——`anchor` 口径的 `used_tokens` 已含固定开销，`limit_tokens` 因此没有
+    再扣一次；`estimate` 口径要扣。直接拿锚点口径的上限去比估算值，会得到一个
+    偏宽的上限，压缩可能「判成够了却还是超」。
+
+    这里重算而不是简单调 `build_budget`：窗口、预留、固定开销都取自已解析的快照，
+    与「本轮判定用的配置」保持同源（中途管理员改配置不会让两次计算分叉）。
+    """
+    return build_budget(
+        model=budget.model,
+        context_window=budget.context_window,
+        max_output_tokens=budget.max_output_tokens,
+        used_tokens=used_tokens,
+        overhead_tokens=budget.overhead_tokens,
+        basis="estimate",
+        used_tokens_include_overhead=False,
+    )
+
+
 #: 锚点被拒的原因 → 是否已告警。客户端版本错位时**每轮**都会带着同一个坏锚点，
 #: 逐轮告警会把日志刷满（与 `_WARNED_UNKNOWN_WINDOWS` 同一个套路）。
 #: 只有三种原因，容量固定，不存在被输入灌大的风险。
@@ -463,6 +486,7 @@ def overflow_message(budget: ContextBudget) -> str:
 __all__ = [
     "ContextBudget",
     "MESSAGE_OVERHEAD_TOKENS",
+    "rebuild_budget_as_estimate",
     "THREAD_ESTIMATE_CHARS_THRESHOLD",
     "TOOL_SCHEMA_OVERHEAD_TOKENS",
     "build_budget",

@@ -36,6 +36,7 @@ import {
   GitCompareArrowsIcon,
   LightbulbIcon,
   ListChecksIcon,
+  MinimizeIcon,
   PenLineIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -47,6 +48,7 @@ import { type FC, type RefObject, useCallback, useEffect, useRef, useState } fro
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
+import { describeCompactionNotice } from "@/lib/run-error";
 import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -67,7 +69,13 @@ import {
   pickStartSuggestions,
   type StartSuggestionIcon,
 } from "@/lib/start-suggestions";
-import type { FallbackState, MessageCustomMetadata, ModelItem, RunError } from "@/types";
+import type {
+  CompactionState,
+  FallbackState,
+  MessageCustomMetadata,
+  ModelItem,
+  RunError,
+} from "@/types";
 
 /**
  * 起步建议的图标映射。文案与能力裁剪规则在 `lib/start-suggestions`：那是纯数据与
@@ -683,6 +691,33 @@ const readFallback = (value: unknown): FallbackState | null => {
   return { fromModel, toModel, reason: typeof reason === "string" ? reason : null };
 };
 
+/**
+ * 压缩信息同理：四个数字缺一不可，否则宁可不显示提示行。
+ *
+ * 不显示比显示一个「压缩了 0 条消息」更诚实：后者会让用户以为压缩出了 bug。
+ */
+const readCompaction = (value: unknown): CompactionState | null => {
+  if (!value || typeof value !== "object") return null;
+  const {
+    strategy,
+    droppedMessages,
+    truncatedMessages,
+    usedTokensBefore,
+    usedTokensAfter,
+    limitTokens,
+  } = value as Partial<CompactionState>;
+  if (strategy !== "truncate" && strategy !== "summarize") return null;
+  if (typeof usedTokensBefore !== "number" || typeof usedTokensAfter !== "number") return null;
+  return {
+    strategy,
+    droppedMessages: typeof droppedMessages === "number" ? droppedMessages : 0,
+    truncatedMessages: typeof truncatedMessages === "number" ? truncatedMessages : 0,
+    usedTokensBefore,
+    usedTokensAfter,
+    limitTokens: typeof limitTokens === "number" ? limitTokens : 0,
+  };
+};
+
 /** 失败信息同理：只在结构完整时返回，否则当作没有（老记录/写坏的数据）。 */
 const readError = (value: unknown): RunError | null => {
   if (!value || typeof value !== "object") return null;
@@ -719,6 +754,7 @@ const AssistantMessage: FC = () => {
   const stopped = useAuiState((s) => s.message.metadata.custom?.stopped === true);
   const incomplete = useAuiState(isMessageIncomplete);
   const fallback = readFallback(useAuiState((s) => s.message.metadata.custom?.fallback));
+  const compaction = readCompaction(useAuiState((s) => s.message.metadata.custom?.compaction));
   const error = readError(useAuiState((s) => s.message.metadata.custom?.error));
   // 只给最后一条助手消息显示重试：重跑历史回答会覆盖别的轮次（与 Reload 的约束一致）
   const isLast = useAuiState(isLastAssistantMessage);
@@ -756,6 +792,13 @@ const AssistantMessage: FC = () => {
         <div className="text-muted-foreground/70 mt-1 flex items-center gap-1.5 text-[11px]">
           <SquareIcon className="size-2.5 fill-current" />
           生成已停止
+        </div>
+      )}
+
+      {compaction && (
+        <div className="text-muted-foreground/70 mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+          <MinimizeIcon className="size-3" />
+          {describeCompactionNotice(compaction)}
         </div>
       )}
 

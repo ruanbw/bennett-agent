@@ -257,6 +257,55 @@ describe('事件折叠', () => {
     expect(run.content).toBe('答')
   })
 
+  it('compaction 事件记录压缩事实，且不写进正文', () => {
+    start('a')
+    expect(
+      applyEvent('a', {
+        type: 'compaction',
+        strategy: 'summarize',
+        dropped_messages: 6,
+        truncated_messages: 2,
+        used_tokens_before: 120_000,
+        used_tokens_after: 30_000,
+        limit_tokens: 40_000,
+      }),
+    ).toBe(true)
+    applyEvent('a', { type: 'content', delta: '答' })
+
+    const run = getRun('a')!
+    expect(run.compaction).toEqual({
+      strategy: 'summarize',
+      droppedMessages: 6,
+      truncatedMessages: 2,
+      usedTokensBefore: 120_000,
+      usedTokensAfter: 30_000,
+      limitTokens: 40_000,
+    })
+    // 与 fallback 同一条约束：这一行是元信息，不属于回答正文
+    expect(run.content).toBe('答')
+  })
+
+  it('compaction 事件缺少可选字段时补零而不是 undefined', () => {
+    // 老服务端可能只给必要字段：落库形状必须稳定，否则前端各处都要判空
+    start('a')
+    applyEvent('a', {
+      type: 'compaction',
+      strategy: 'truncate',
+      used_tokens_before: 10,
+      used_tokens_after: 5,
+      limit_tokens: 100,
+    })
+
+    expect(getRun('a')!.compaction).toEqual({
+      strategy: 'truncate',
+      droppedMessages: 0,
+      truncatedMessages: 0,
+      usedTokensBefore: 10,
+      usedTokensAfter: 5,
+      limitTokens: 100,
+    })
+  })
+
   it('error 事件追加可见提示', () => {
     start('a')
     applyEvent('a', { type: 'error', message: '上游炸了' })

@@ -8,6 +8,7 @@
 import type {
   ChatRole,
   ClarificationState,
+  CompactionState,
   FallbackState,
   MessageRecord,
   PartKind,
@@ -66,6 +67,7 @@ const MESSAGE_PAYLOAD_KEYS = [
   'toolCalls',
   'clarification',
   'fallback',
+  'compaction',
   'usage',
   'error',
   'partOrder',
@@ -182,6 +184,34 @@ function sanitizeFallback(value: unknown): FallbackState | undefined {
   return reason === undefined ? { fromModel, toModel } : { fromModel, toModel, reason };
 }
 
+/**
+ * 压缩记录的形状校验。
+ *
+ * `strategy` 必须是两个已知取值之一：它是**渲染分支的判据**（截断 / 折叠两套文案），
+ * 协议外的字符串会让显示层落到空白分支——用户看到一行没有任何文字的图标。
+ * 四个数字缺失时整条丢掉：一个「压缩了 0 条消息」的提示比不显示更让人困惑。
+ */
+function sanitizeCompaction(value: unknown): CompactionState | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const strategy = raw.strategy === 'truncate' || raw.strategy === 'summarize' ? raw.strategy : undefined;
+  if (strategy === undefined) return undefined;
+  const usedTokensBefore = asFiniteNumber(raw.usedTokensBefore);
+  const usedTokensAfter = asFiniteNumber(raw.usedTokensAfter);
+  const limitTokens = asFiniteNumber(raw.limitTokens);
+  if (usedTokensBefore === undefined || usedTokensAfter === undefined || limitTokens === undefined) {
+    return undefined;
+  }
+  return {
+    strategy,
+    droppedMessages: asFiniteNumber(raw.droppedMessages) ?? 0,
+    truncatedMessages: asFiniteNumber(raw.truncatedMessages) ?? 0,
+    usedTokensBefore,
+    usedTokensAfter,
+    limitTokens,
+  };
+}
+
 function sanitizeUsage(value: unknown): UsageState | undefined {
   const raw = asRecord(value);
   if (!raw) return undefined;
@@ -249,6 +279,8 @@ export function sanitizeMessagePayload(value: unknown): Partial<MessageRecord> {
   if (clarification !== undefined) sanitized.clarification = clarification;
   const fallback = sanitizeFallback(raw.fallback);
   if (fallback !== undefined) sanitized.fallback = fallback;
+  const compaction = sanitizeCompaction(raw.compaction);
+  if (compaction !== undefined) sanitized.compaction = compaction;
   const usage = sanitizeUsage(raw.usage);
   if (usage !== undefined) sanitized.usage = usage;
   const error = sanitizeError(raw.error);

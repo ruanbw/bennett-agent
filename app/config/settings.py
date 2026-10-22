@@ -244,11 +244,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # 上下文窗口预算
     # ------------------------------------------------------------------
-    context_guard_mode: Literal["off", "reject"] = Field(
-        default="reject",
+    context_guard_mode: Literal["off", "reject", "compact"] = Field(
+        default="compact",
         description=(
-            "历史超出模型上下文窗口时的处置：off = 不判定（一律放行）；"
-            "reject = 拒绝本轮并告知用户。窗口取自网关的 context_window，网关没报时一律放行。"
+            "历史超出模型上下文窗口时的处置："
+            "off = 不判定（一律放行）；"
+            "compact = 先压缩（截断超长单条 → 折叠早期轮次成摘要），压完仍超才拒绝；"
+            "reject = 直接拒绝本轮并告知用户。"
+            "窗口取自网关的 context_window，网关没报时一律放行。"
+            "默认 compact：reject 会把用户的路走死（他的消息已落库，下一轮只会更长），"
+            "而绝大多数超限里占窗口的是可以压掉的历史工具结果与旧轮次。"
         ),
     )
     context_reserve_tokens: int = Field(
@@ -267,6 +272,25 @@ class Settings(BaseSettings):
         description=(
             "预算的安全系数：可用上限 = (窗口 - 预留 - 固定开销) × 本值。token 数是估算值"
             "（无分词器依赖，见 app/services/token_budget.py），留一成余量避免贴着上限判断。"
+        ),
+    )
+    context_compact_keep_recent_turns: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "压缩时保留最近多少**轮**问答原文（一轮 = user + assistant 两条）。"
+            "更早的部分被折叠成摘要。调大 = 细节保留更多、能压出的空间更少；"
+            "调小 = 省更多窗口、但模型更容易忘记刚才说过的事。"
+            "压缩只在超预算时才发生，正常长度的会话不受影响。"
+        ),
+    )
+    context_compact_message_max_chars: int = Field(
+        default=4_000,
+        ge=500,
+        description=(
+            "压缩第一级（截断超长单条）的单条字符上限：保留首尾、中间打省略标记。"
+            "只作用于本轮问题之外的旧消息——截断最后一条等于替用户改问题。"
+            "取 4000 是因为超过它的单条几乎都是粘贴的日志/代码，而它们的两端才是结论。"
         ),
     )
 

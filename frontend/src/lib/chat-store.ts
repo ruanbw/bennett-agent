@@ -222,6 +222,7 @@ export function createRun({
     partOrder: [],
     clarification: null,
     fallback: null,
+    compaction: null,
     usage: null,
     error: null,
     sawDone: false,
@@ -496,6 +497,19 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
         toModel: event.to_model,
         // 原因是一句类别短语：只在服务端给了的时候带上，老服务端没有这个字段
         reason: typeof event.reason === 'string' && event.reason ? event.reason : null,
+      };
+      break;
+
+    case 'compaction':
+      // 压缩改了模型看到的上下文：独立字段 + 一行提示，与备用模型切换同一条原则。
+      // 不拼进正文：正文会作为助手历史再次发给模型，也会被复制/导出当成回答的一部分。
+      run.compaction = {
+        strategy: event.strategy,
+        droppedMessages: event.dropped_messages ?? 0,
+        truncatedMessages: event.truncated_messages ?? 0,
+        usedTokensBefore: event.used_tokens_before,
+        usedTokensAfter: event.used_tokens_after,
+        limitTokens: event.limit_tokens,
       };
       break;
 

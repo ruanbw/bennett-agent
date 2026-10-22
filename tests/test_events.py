@@ -35,6 +35,7 @@ from app.api.chat import to_sse_frame
 from app.schemas.events import (
     ClarificationRequest,
     ContentDelta,
+    ContextCompacted,
     StreamError,
     ThinkingDelta,
     ToolCall,
@@ -468,6 +469,14 @@ def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(caplog):
         ),
         StreamError(message="出错了"),
         StreamError(message="上下文超了", retryable=False, code="context_overflow"),
+        ContextCompacted(
+            strategy="summarize",
+            dropped_messages=4,
+            truncated_messages=1,
+            used_tokens_before=100_000,
+            used_tokens_after=30_000,
+            limit_tokens=40_000,
+        ),
     ],
 )
 def test_sse_frame_is_data_only_and_newline_safe(event):
@@ -541,3 +550,56 @@ def test_unknown_stream_error_code_is_rejected():
     """写错分类名要在构造时就报错，而不是让客户端静默落到「不认识」分支。"""
     with pytest.raises(pydantic.ValidationError):
         StreamError(message="出错了", code="not_a_real_code")
+
+
+# ---------------------------------------------------------------------
+# 上下文压缩事件
+# ---------------------------------------------------------------------
+def test_compaction_event_survives_serialization():
+    """压缩改了模型看到的上下文，前端必须能显示「发生了什么、省了多少」。"""
+    raw = (
+        to_sse_frame(
+            ContextCompacted(
+                strategy="summarize",
+                dropped_messages=6,
+                truncated_messages=2,
+                used_tokens_before=120_000,
+                used_tokens_after=30_000,
+                limit_tokens=40_000,
+            )
+        )
+        .encode()
+        .decode()
+    )
+
+    parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+    assert parsed["type"] == "compaction"
+    assert parsed["strategy"] == "summarize"
+    assert parsed["dropped_messages"] == 6
+    assert parsed["truncated_messages"] == 2
+    assert parsed["used_tokens_before"] == 120_000
+    assert parsed["used_tokens_after"] == 30_000
+
+
+def test_compaction_event_rejects_unknown_strategy():
+    """策略名写错要在构造时报错：前端按它决定文案，静默落到未知分支会显示空白。"""
+    with pytest.raises(pydantic.ValidationError):
+        ContextCompacted(
+            strategy="rewrite",  # type: ignore[arg-type]
+            used_tokens_before=1,
+            used_tokens_after=1,
+            limit_tokens=1,
+        )
+
+
+def test_compaction_event_has_no_digest_field():
+    """摘要正文不进 SSE：它可能含早期对话的敏感内容，会被前端落库并同步到其他设备。"""
+    payload = ContextCompacted(
+        strategy="truncate",
+        used_tokens_before=10,
+        used_tokens_after=5,
+        limit_tokens=100,
+    ).model_dump()
+
+    assert "digest" not in payload
+    assert "summary" not in payload

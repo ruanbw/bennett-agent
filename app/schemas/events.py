@@ -129,6 +129,31 @@ class Usage(BaseModel):
     cache_read_tokens: int = 0
 
 
+class ContextCompacted(BaseModel):
+    """本轮开始前做过上下文压缩（把早期消息折叠成摘要，或截断了超长消息）。
+
+    为什么必须告诉用户：压缩本身是**改了模型看到的上下文**。不说的话，用户会
+    把「模型忘了刚才说的」当成模型变笨；运维拿到截图也无从判断是压缩造成的还是
+    真的丢消息了。这与「切换备用模型要说明原因」是同一条原则。
+
+    只给数字与策略，不给摘要正文：摘要正文走 pydantic-ai 的运行期 instructions
+    （服务端自己拼），不进消息历史，也没有必要回传给客户端（它可能含早期对话的
+    敏感内容，而下发会被前端落库并同步到其他设备）。
+    """
+
+    type: Literal["compaction"] = "compaction"
+    #: `truncate` = 只截断了超长消息；`summarize` = 折叠了早期轮次。
+    strategy: Literal["truncate", "summarize"]
+    #: 被折叠成摘要的消息条数（`truncate` 时为 0）。
+    dropped_messages: int = 0
+    #: 被截断了中间部分的消息条数（`summarize` 时可能同时发生）。
+    truncated_messages: int = 0
+    #: 压缩前后的估算用量与上限，前端可据此说明「省了多少」。
+    used_tokens_before: int
+    used_tokens_after: int
+    limit_tokens: int
+
+
 class StreamError(BaseModel):
     """本轮失败。
 
@@ -168,6 +193,7 @@ ChatEvent = Annotated[
     | ToolResult
     | ClarificationRequest
     | FallbackUsed
+    | ContextCompacted
     | Usage
     | Done
     | StreamError,
@@ -178,6 +204,7 @@ __all__ = [
     "ChatEvent",
     "ClarificationRequest",
     "ContentDelta",
+    "ContextCompacted",
     "Done",
     "FallbackUsed",
     "StreamError",

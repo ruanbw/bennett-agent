@@ -185,6 +185,8 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         clarification: record.clarification ?? null,
         // 备用模型信息：老记录没有该字段 → null，呈现与修复前一致
         fallback: record.fallback ?? null,
+        // 压缩信息：老记录没有该字段 → null，不显示提示行
+        compaction: record.compaction ?? null,
         // 真实用量：刷新后「上下文用了多少」仍然可见
         usage: record.usage ?? null,
         // 失败信息：刷新后「重试」按钮仍按服务端当初的判定显示
@@ -231,6 +233,8 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
         incomplete: Boolean(run.incomplete),
         // 与落库记录保持一致：切换提示在生成中就显示，不必等本轮结束
         fallback: run.fallback ?? null,
+        // 压缩提示同理：它发生在生成之前，用户在第一帧就该看到
+        compaction: run.compaction ?? null,
         // 真实用量在本轮收尾前到达（done 之前），覆盖层与落库记录给出同一个数字
         usage: run.usage ?? null,
         // 失败信息：错误到达后立即映射，生成结束时按钮已可点

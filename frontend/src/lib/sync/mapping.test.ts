@@ -271,6 +271,14 @@ describe('sanitizeMessagePayload（L-08）', () => {
       toolCalls: [{ toolCallId: 'c1', toolName: 'search', argsText: '{}', status: 'running' }],
       clarification: { toolCallId: 'c1', question: '选哪个？', options: ['A', 'B'], allowCustomInput: false },
       fallback: { fromModel: 'a', toModel: 'b', reason: '上游 503' },
+      compaction: {
+        strategy: 'summarize',
+        droppedMessages: 4,
+        truncatedMessages: 1,
+        usedTokensBefore: 90_000,
+        usedTokensAfter: 20_000,
+        limitTokens: 30_000,
+      },
       usage: { contextTokens: 10, contextWindow: 100, contextLimitTokens: 80, outputTokens: 2, cacheReadTokens: 0 },
       error: { message: '失败', retryable: true, code: 'internal_error' },
     });
@@ -279,6 +287,8 @@ describe('sanitizeMessagePayload（L-08）', () => {
     expect(payload.toolCalls?.[0].status).toBe('running');
     expect(payload.clarification?.question).toBe('选哪个？');
     expect(payload.fallback?.reason).toBe('上游 503');
+    // 压缩事实同样跨设备可见：另一台设备刷新后也该知道「这一轮之前压缩过」
+    expect((payload.compaction as { strategy: string }).strategy).toBe('summarize');
     expect(payload.usage?.contextWindow).toBe(100);
     expect(payload.error?.retryable).toBe(true);
   });
@@ -286,5 +296,69 @@ describe('sanitizeMessagePayload（L-08）', () => {
   it('payload 不是对象时返回空对象，而不是抛错', () => {
     expect(sanitizeMessagePayload(null)).toEqual({});
     expect(sanitizeMessagePayload('[]')).toEqual({});
+  });
+});
+
+describe('sanitizeMessagePayload：compaction', () => {
+  it('合法记录原样保留', () => {
+    const payload = sanitizeMessagePayload({
+      compaction: {
+        strategy: 'summarize',
+        droppedMessages: 4,
+        truncatedMessages: 1,
+        usedTokensBefore: 90_000,
+        usedTokensAfter: 20_000,
+        limitTokens: 30_000,
+      },
+    });
+
+    expect(payload.compaction).toEqual({
+      strategy: 'summarize',
+      droppedMessages: 4,
+      truncatedMessages: 1,
+      usedTokensBefore: 90_000,
+      usedTokensAfter: 20_000,
+      limitTokens: 30_000,
+    });
+  });
+
+  it('协议外的 strategy 整条丢掉（它是渲染分支的判据）', () => {
+    // 带一个未知字符串进去，显示层会落到空白分支：用户看到一行没有文字的图标
+    expect(
+      sanitizeMessagePayload({
+        compaction: {
+          strategy: 'rewrite',
+          usedTokensBefore: 1,
+          usedTokensAfter: 1,
+          limitTokens: 1,
+        },
+      }).compaction,
+    ).toBeUndefined();
+  });
+
+  it('缺必要数字时整条丢掉，不显示「压缩了 0 条」', () => {
+    expect(
+      sanitizeMessagePayload({ compaction: { strategy: 'summarize' } }).compaction,
+    ).toBeUndefined();
+  });
+
+  it('可选计数缺失时补零', () => {
+    const payload = sanitizeMessagePayload({
+      compaction: { strategy: 'truncate', usedTokensBefore: 10, usedTokensAfter: 5, limitTokens: 100 },
+    });
+
+    expect(payload.compaction).toEqual({
+      strategy: 'truncate',
+      droppedMessages: 0,
+      truncatedMessages: 0,
+      usedTokensBefore: 10,
+      usedTokensAfter: 5,
+      limitTokens: 100,
+    });
+  });
+
+  it('非对象一律当缺席（老服务端不带这个字段）', () => {
+    expect(sanitizeMessagePayload({ compaction: 'oops' }).compaction).toBeUndefined();
+    expect(sanitizeMessagePayload({}).compaction).toBeUndefined();
   });
 });

@@ -10,6 +10,9 @@
  * 带进 run（它会进落库、进 metadata，再被渲染层当判据）。
  */
 
+import type { CompactionState } from '../types';
+import { formatTokens } from './context-usage';
+
 export type KnownErrorCode = 'context_overflow' | 'model_unavailable' | 'internal_error';
 
 const KNOWN_CODES: readonly KnownErrorCode[] = [
@@ -59,4 +62,23 @@ export function describeErrorHint(code: KnownErrorCode | null): string {
     default:
       return '';
   }
+}
+
+/**
+ * 上下文压缩提示行的文案（服务端事件见 `CompactionEvent`）。
+ *
+ * 与「已切换备用模型」同一原则：凡是改变了本轮回答依据的事都要说出来。这里额外
+ * 说明**代价**——早期细节可能不再完整。不说，用户会把「模型忘了刚才说的」当成
+ * 模型变笨，而现场没有任何痕迹能指向压缩。
+ *
+ * 数字用 `formatTokens`（与上下文用量指示器同一口径）：同一份数据在两处显示成
+ * 「12k」与「12,000」会让人以为是两个不同的量。
+ */
+export function describeCompactionNotice(state: CompactionState): string {
+  const saved = formatTokens(Math.max(state.usedTokensBefore - state.usedTokensAfter, 0));
+  if (state.strategy === 'truncate') {
+    return `上下文接近上限，已截断 ${state.truncatedMessages} 条超长消息的中间部分（省出约 ${saved} tokens）`;
+  }
+  const extra = state.truncatedMessages > 0 ? `，另有 ${state.truncatedMessages} 条超长消息被截断` : '';
+  return `上下文接近上限，已把最早 ${state.droppedMessages} 条消息折叠成摘要${extra}（省出约 ${saved} tokens）；早期细节可能不再完整`;
 }

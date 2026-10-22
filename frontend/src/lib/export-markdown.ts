@@ -136,6 +136,7 @@ function hasRenderableContent(message: MessageRecord): boolean {
       message.clarification ||
       message.error ||
       message.fallback ||
+      message.compaction ||
       message.stopped ||
       message.incomplete ||
       (message.toolCalls && message.toolCalls.length > 0),
@@ -164,6 +165,20 @@ function renderNotices(message: MessageRecord): string[] {
         message.fallback.toModel,
       )}${reason}`,
     );
+  }
+  if (message.compaction) {
+    // 压缩改了模型看到的上下文：导出是事后复盘用的，漏掉它会让「模型为什么忘了早期的
+    // 细节」在文件里完全无迹可寻。
+    const { strategy, droppedMessages, truncatedMessages, usedTokensBefore, usedTokensAfter } =
+      message.compaction;
+    const saved = formatTokens(Math.max(usedTokensBefore - usedTokensAfter, 0));
+    const what =
+      strategy === 'truncate'
+        ? `截断 ${truncatedMessages} 条超长消息的中间部分`
+        : `把最早 ${droppedMessages} 条消息折叠成摘要${
+            truncatedMessages > 0 ? `，另截断 ${truncatedMessages} 条超长消息` : ''
+          }`;
+    notices.push(`> ⇲ 上下文接近上限，已${what}（约 ${formatTokens(usedTokensBefore)} → ${formatTokens(usedTokensAfter)} tokens，省出 ${saved}）`);
   }
   if (message.error) notices.push(`> ✕ 本轮失败：${escapeHtml(message.error.message)}`);
   return notices;

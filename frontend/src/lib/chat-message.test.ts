@@ -199,6 +199,7 @@ describe('toRuntimeMessage', () => {
       thinkingMs: 0,
       clarification: null,
       fallback: null,
+      compaction: null,
       error: null,
       // 老记录没有 model / usage：呈现为零值而不是 undefined，否则 metadata 形状随记录而变
       model: null,

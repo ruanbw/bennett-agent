@@ -464,14 +464,17 @@ def test_samesite_none_with_secure_is_allowed():
 def test_context_guard_defaults_are_conservative():
     config = Settings(_env_file=None)
 
-    # 默认拒绝而不是默默丢掉历史：丢历史是「改了用户看到的上下文却不说」的那类改动，
-    # 不该是默认行为。
-    assert config.context_guard_mode == "reject"
+    # 默认压缩而不是直接拒绝：拒绝是「判定对了但把用户的路走死」——他的消息已经
+    # 落库，下一轮只会更长，于是这个会话从此不可用。压缩同样是「改了模型看到的
+    # 上下文」，所以它必须下发 `compaction` 事件告诉用户（见 tests/test_events.py）。
+    assert config.context_guard_mode == "compact"
     assert config.context_reserve_tokens == 8192
     assert config.context_safety_ratio == 0.9
+    assert config.context_compact_keep_recent_turns == 4
+    assert config.context_compact_message_max_chars == 4_000
 
 
-@pytest.mark.parametrize("mode", ["off", "reject"])
+@pytest.mark.parametrize("mode", ["off", "reject", "compact"])
 def test_context_guard_accepts_the_documented_modes(mode):
     assert Settings(context_guard_mode=mode, _env_file=None).context_guard_mode == mode
 
@@ -487,6 +490,28 @@ def test_context_guard_rejects_unknown_modes(mode):
         Settings(context_guard_mode=mode, _env_file=None)
 
     assert "context_guard_mode" in str(exc.value)
+
+
+@pytest.mark.parametrize("turns", [0, -1])
+def test_compact_keep_recent_turns_must_keep_at_least_one(turns):
+    """保留 0 轮会让压缩把最后一条（本轮问题）也折叠掉。
+
+    那等于替用户改问题：真正被送去模型的历史与用户输入的不再一致，而这不会有
+    任何报错，只会让回答开始答非所问。
+    """
+    with pytest.raises(ValidationError) as exc:
+        Settings(context_compact_keep_recent_turns=turns, _env_file=None)
+
+    assert "context_compact_keep_recent_turns" in str(exc.value)
+
+
+@pytest.mark.parametrize("chars", [0, 100, -5])
+def test_compact_message_max_chars_has_a_floor(chars):
+    """太小会把每条旧消息压成几个字，等于直接丢历史而不是压缩。"""
+    with pytest.raises(ValidationError) as exc:
+        Settings(context_compact_message_max_chars=chars, _env_file=None)
+
+    assert "context_compact_message_max_chars" in str(exc.value)
 
 
 @pytest.mark.parametrize("ratio", [0, -0.1, 1.5])

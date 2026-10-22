@@ -169,6 +169,66 @@ describe('buildConversationMarkdown', () => {
     expect(failed).toContain('本轮失败：上游超时');
   });
 
+  it('导出压缩事实：漏掉它，「模型为什么忘了早期细节」在文件里无迹可寻', () => {
+    const markdown = build([
+      assistantMessage({
+        content: '答',
+        compaction: {
+          strategy: 'summarize',
+          droppedMessages: 6,
+          truncatedMessages: 2,
+          usedTokensBefore: 120_000,
+          usedTokensAfter: 30_000,
+          limitTokens: 40_000,
+        },
+      }),
+    ]);
+
+    expect(markdown).toContain('折叠成摘要');
+    expect(markdown).toContain('最早 6 条');
+    expect(markdown).toContain('另截断 2 条');
+    // 数字要能看出前后对比，否则读者不知道压缩了多少
+    expect(markdown).toContain('120k');
+    expect(markdown).toContain('30k');
+  });
+
+  it('只截断时导出不提摘要', () => {
+    const markdown = build([
+      assistantMessage({
+        content: '答',
+        compaction: {
+          strategy: 'truncate',
+          droppedMessages: 0,
+          truncatedMessages: 3,
+          usedTokensBefore: 20_000,
+          usedTokensAfter: 10_000,
+          limitTokens: 12_000,
+        },
+      }),
+    ]);
+
+    expect(markdown).toContain('截断 3 条');
+    expect(markdown).not.toContain('摘要');
+  });
+
+  it('只有压缩记录、没有正文的消息也要导出（否则文件里是个无解释的空洞）', () => {
+    const markdown = build([
+      assistantMessage({
+        content: '',
+        compaction: {
+          strategy: 'truncate',
+          droppedMessages: 0,
+          truncatedMessages: 1,
+          usedTokensBefore: 10_000,
+          usedTokensAfter: 5_000,
+          limitTokens: 6_000,
+        },
+      }),
+    ]);
+
+    expect(markdown).toContain('截断 1 条');
+  });
+
   it('不导出思考链（默认折叠、体积不可控）', () => {
     const markdown = build([assistantMessage({ thinking: '这里是思考链内部草稿' })]);
     expect(markdown).not.toContain('思考链内部草稿');
