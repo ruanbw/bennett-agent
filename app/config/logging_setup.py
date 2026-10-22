@@ -22,8 +22,12 @@ import logging
 import os
 from collections.abc import Iterable
 
-#: 应用日志格式：时间、级别、logger 名、消息。级别左对齐便于肉眼扫。
-LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
+#: 应用日志格式：时间、级别、请求 ID、logger 名、消息。级别左对齐便于肉眼扫。
+#:
+#: `request_id` 由 `app/observability.py` 的 `RequestIdFilter` 注入（挂在根 handler 上），
+#: 不在请求上下文里时是 `-`。放在 logger 名之前：调试时先按请求 ID grep 出一组行，
+#: 再按 logger 名细分，比反过来更常用。
+LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(request_id)s] %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 #: uvicorn 自己的三个 logger：它们在 `uvicorn.config` 里被 `propagate=False` 固定，
@@ -107,6 +111,16 @@ def configure_logging(
 
     logging.basicConfig(level=numeric, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT, force=True)
 
+    # 给根 handler 挂上 RequestIdFilter（`basicConfig` 刚建好它）。挂在 handler 上而不是
+    # logger 上：handler 级 filter 对**所有**经过该 handler 的记录生效，包括从子 logger
+    # 冒泡上来的——这正是我们要的（每条日志都带同一个 request id）。
+    from app.observability import RequestIdFilter
+
+    for handler in logging.getLogger().handlers:
+        # 重复调用 configure_logging 时不叠加（幂等，与 basicConfig 的 force=True 对齐）
+        if not any(isinstance(existing, RequestIdFilter) for existing in handler.filters):
+            handler.addFilter(RequestIdFilter())
+
     # uvicorn 的三件套：改成同一套格式，并按需关掉 access log
     formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
     want_access = access_log_enabled() if access_log is None else access_log
@@ -116,6 +130,9 @@ def configure_logging(
             uv_logger.removeHandler(handler)
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
+        # uvicorn 的 handler 也要带 request id，否则「同一条请求」的应用日志与 uvicorn
+        # 访问日志格式不一致，混在一个文件里看不出对应关系。
+        handler.addFilter(RequestIdFilter())
         uv_logger.addHandler(handler)
         # propagate=False：否则同一条记录既走 uvicorn 的 handler、又冒泡到根 logger，
         # 同一条日志打印两遍（`log_config=None` 之后尤甚）。

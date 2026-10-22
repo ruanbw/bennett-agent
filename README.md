@@ -163,6 +163,8 @@ uv run python scripts/run_eval.py --baseline none  # 第一次跑：建立基线
 | `POST /api/auth/logout` · `GET /api/auth/me` | 登出 / 当前登录用户（含 `role`） |
 | `GET /api/models` | 可用模型列表（含思考链、上下文窗口等元数据） |
 | `GET /api/capabilities` | 运行时能力探针（当前装配的工具、是否可联网搜索、已连通的 MCP server） |
+| `GET /health` · `GET /health/ready` | 存活 / 就绪探针（后者会 ping 数据库；都不在 API 文档里） |
+| `GET /api/metrics` | 进程内指标（Prometheus 文本格式；默认关闭，见 `METRICS_ENABLED`） |
 | `GET /api/knowledge/capabilities` | 知识库是否可用（是否配了 embedding 模型） |
 | `GET/POST /api/knowledge/documents` · `DELETE /api/knowledge/documents/{id}` | 列出 / 上传 / 删除知识库文档 |
 | `POST /api/knowledge/search` | 手动检索知识库（调试用：验证分块与召回） |
@@ -511,6 +513,40 @@ metadata 读，不存 `handled` 标记。于是「刷新页面后审批框消失
 `IntegrityError: NOT NULL constraint failed`，而这条路径往往只在某个可选字段真的有值时
 才走到（例如 `conversation.model` 为空的新会话），现场极难复现。反方向（模型 NOT NULL、
 库里可空）刻意不报：历史行本来就是 NULL，报出来只是噪音。
+
+## 可观测性
+
+三个层次，各自解决的问题不同：
+
+**请求关联 ID。** 每个 HTTP 请求分配一个 ID（`app/observability.py`），出现在三处：
+响应头 `X-Request-ID`、该请求的**所有**日志行（`RequestIdFilter` 挂在根 handler 上）、
+以及出错时的 JSON 响应体（`error_id` 与它同值）。没有它时用户说「刚才那一下失败了」，
+运维只能按时间猜。客户端自带的 ID 会被保留（链路里只该有一个 ID），但要过字符集校验
+——它有换行符就能伪造一整条假日志行。
+
+**指标。** `/api/metrics` 输出 Prometheus 文本格式：HTTP 请求数与延迟分桶、对话流结局
+（done / error / stopped / timeout / approval_required）、首字节耗时、工具执行、压缩、
+备用模型切换。**默认关闭**（`METRICS_ENABLED`）：它免认证，而多数部署没有采集器。
+
+刻意**不引 `prometheus_client`**：部署形态是单机 SQLite + 单进程，没有时序库可接，
+引入 SDK 只会多一个依赖和一套配置面，换来的 `/metrics` 端点在这里没有采集方。需要回答
+的三件事（现在正常吗 / 比以前慢了吗 / 哪个子系统在失败）用进程内计数器加固定延迟桶就
+够了，约一百行。开销与边界都写清楚了：多 worker 时每个进程一份，所以它是**排障辅助**
+而不是计费依据。
+
+标签基数有硬上限（`MAX_SERIES_PER_METRIC`），且只用**路由模板**而不是实际路径——用
+`/api/x/123` 会让每个 id 变成一个标签组合，先吃光上限，然后所有真实指标都变成「被
+丢弃」，而这件事本身是静默的。
+
+**健康检查分两层**，这是最容易做错的地方：
+
+- `GET /health`：**存活**，不碰数据库、不碰上游。容器 liveness 用它。合成一个端点是
+  最常见的错误——真去 ping 数据库的话，数据库抖一下就会触发重启风暴，而在途请求全部
+  丢掉，重启还解决不了数据库的问题。
+- `GET /health/ready`：**就绪**，真的 ping 数据库（2 秒超时），失败返回 503。排障时
+  应当能立刻区分「进程死了」与「数据库没准备好」——这两件事的处置完全不同。
+
+不检查上游模型：模型挂了不该让整个实例被摘出负载均衡，那样连历史会话都看不了。
 
 ## 日志
 

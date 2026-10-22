@@ -150,6 +150,9 @@ class ToolErrorIsolation(AbstractCapability[None]):
         # 参数可能是用户数据（搜索词、提问内容），只记工具名与异常。
         # traceback 必须留全，否则工具 bug 会从此变成一条「静默的失败结果」。
         failures = record_tool_failure(call.tool_name)
+        # 工具执行指标**不在这里记**：失败会被落成 `ToolReturnPart(outcome='failed')`，
+        # 从而以一条 `ToolResultEvent` 到达 `chat_service.translate_event`，那边统一按
+        # outcome 打点。在这里再记一次会让失败率翻倍（分子重复、分母不变）。
         transient = is_transient_tool_error(error)
         # 网络/超时是预期内的（上游抖动），记 WARNING；其它异常是工具本身的 bug，记 ERROR。
         # 两者都要 traceback：没有它，工具 bug 会退化成一条「静默的失败结果」。

@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from app.services.metrics import FALLBACKS_TOTAL, metrics
+
 
 @dataclass(frozen=True)
 class FallbackOccurrence:
@@ -49,7 +51,14 @@ def collect_fallbacks() -> Iterator[list[FallbackOccurrence]]:
 
 
 def record_fallback(primary_model: str, fallback_model: str, reason: str = "") -> None:
-    """记录一次实际发生的切换；没有收集器时静默忽略。"""
+    """记录一次实际发生的切换；没有收集器时静默忽略。
+
+    同时打一笔指标：切换是**降级信号**——主模型持续限流/挂掉时，用户看到的回答来自
+    一个能力不同的模型，而这件事在日志里只是一条 WARNING。没有指标就无法回答
+    「这个月备用模型被用了几次」，也就看不出上游到底稳不稳。
+    """
     occurrences = _collector.get()
     if occurrences is not None:
         occurrences.append(FallbackOccurrence(primary_model, fallback_model, reason))
+    # 标签值来自配置里的模型 id（有限集合），不会有基数问题
+    metrics.increment(FALLBACKS_TOTAL, **{"from": primary_model, "to": fallback_model})

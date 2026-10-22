@@ -18,10 +18,12 @@ from app.api.auth import router as auth_router
 from app.api.capabilities import router as capabilities_router
 from app.api.chat import router as api_router
 from app.api.knowledge import router as knowledge_router
+from app.api.ops import router as ops_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
 from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
+from app.observability import HttpMetricsMiddleware, RequestContextMiddleware
 from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
@@ -286,6 +288,46 @@ def _install_cookie_security_scheme(app: FastAPI) -> None:
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
+def _install_unhandled_error_handler(app: FastAPI) -> None:
+    """未捕获异常统一返回 500 + 关联 ID，而不是纯文本的 "Internal Server Error"。
+
+    ## 为什么需要它
+
+    FastAPI 的默认行为是把异常交给 uvicorn，uvicorn 返回一个**纯文本** 500。前端
+    `readErrorDetail` 拿到非 JSON 响应，只能显示「请求失败（HTTP 500）」——
+    用户既不知道原因，也没有任何可以报给运维的编号。
+
+    ## 与 `chat_service` 的 error_id 的关系
+
+    流式对话**自己**处理异常并下发 `error` 事件（SSE 已经发了 200，改不了状态码），
+    那条路径不受这里影响。这个 handler 管的是普通 HTTP 端点（认证、同步、管理后台、
+    知识库）：它们抛异常时应当得到同样可回查的关联 ID。
+
+    ## 为什么不把异常原文回给客户端
+
+    异常消息可能含 SQL、文件路径、上游 URL 与凭据上下文。关联 ID + 服务端日志是唯一
+    正确的组合：用户报 ID，运维在日志里 grep 到完整堆栈。
+    """
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    from app.observability import current_request_id
+
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:  # noqa: ARG001
+        # 请求 ID 与响应头里的 `X-Request-ID` 是同一个值（由中间件注入），
+        # 所以用户从浏览器 devtools 里也能直接拿到，不必等错误文案。
+        error_id = current_request_id() or "-"
+        logger.exception("未处理异常 (error_id=%s, path=%s)", error_id, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": f"服务器内部错误，请重试（错误编号 {error_id}）",
+                "error_id": error_id,
+            },
+        )
+
+
 def create_app() -> FastAPI:
     docs_enabled = _api_docs_enabled()
     app = FastAPI(
@@ -305,6 +347,7 @@ def create_app() -> FastAPI:
     )
 
     _install_cookie_security_scheme(app)
+    _install_unhandled_error_handler(app)
 
     # 前端与后端不同源（Vite 跑在自己的端口上），跨域是常态而非例外
     cors_origins = settings.get_cors_origins()
@@ -332,6 +375,13 @@ def create_app() -> FastAPI:
         expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
+    # 指标与请求 ID 放在 CORS 之内、安全头之外：它们要给所有响应加头/计时，但不需要
+    # 看到 CORS 预检（OPTIONS 也是 http 请求，统计进去只会让请求数虚高）。
+    app.add_middleware(HttpMetricsMiddleware)
+    # 请求 ID 必须在**最外层**之一：这样连 413/403（由更外层的中间件产生）也带上
+    # X-Request-ID，用户报障时任何一类失败都有可回查的 ID。
+    app.add_middleware(RequestContextMiddleware)
+
     # 最后注册 = 最外层：连 CORS/限流产生的错误响应也带上安全头。
     app.add_middleware(SecurityHeadersMiddleware)
 
@@ -341,6 +391,9 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
+    # Ops 路由（/health、/health/ready、/api/metrics）不打 tag：它们不该出现在
+    # 业务 API 文档里，但 `include_in_schema=False` 之外仍要有 tag 供分组测试检查。
+    app.include_router(ops_router)
 
     return app
 

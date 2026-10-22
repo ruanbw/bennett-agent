@@ -189,6 +189,14 @@ class Settings(BaseSettings):
             "一条勉强相关的结果比没有结果糟——模型会拿它当依据编答案。"
         ),
     )
+    metrics_enabled: bool = Field(
+        default=False,
+        description=(
+            "是否暴露 /api/metrics（进程内指标，Prometheus 文本格式）。"
+            "**默认关闭**：它不需要登录就能访问，多开一个端点就多一分侦察面，而多数部署"
+            "并没有采集器。启用后建议同时把 /api/metrics 挡在内网或反代白名单后面。"
+        ),
+    )
     mcp_tool_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,

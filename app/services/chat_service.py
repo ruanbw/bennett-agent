@@ -63,6 +63,13 @@ from app.services.context_compaction import (
     compact_history,
 )
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
+from app.services.metrics import (
+    CHAT_FIRST_EVENT_DURATION,
+    CHAT_STREAMS_TOTAL,
+    CONTEXT_COMPACTIONS_TOTAL,
+    TOOL_EXECUTIONS_TOTAL,
+    metrics,
+)
 from app.services.model_service import ChatModelSnapshot
 from app.services.model_target import ModelTarget
 from app.services.title_text import fallback_title, normalize_title
@@ -130,6 +137,15 @@ class InvalidChatHistory(ValueError):
     若按 `ValueError` 分类，一旦这些构造失败，内部校验细节会被当成「写给用户看的
     文案」原样推给客户端。本异常的 message 才是可以外泄的那一类。
     """
+
+
+def _record_rejected_stream(outcome: str) -> None:
+    """记录一次**没有走到流式循环**就被拒绝的本轮。
+
+    这些路径（模型不可用、预算拒绝、历史非法、装配失败）不会经过流式循环末尾的统计点，
+    不在这里补一笔，指标里就只剩「成功的轮次」——错误率永远为 0，那比没有指标更糟。
+    """
+    metrics.increment(CHAT_STREAMS_TOTAL, outcome=outcome)
 
 
 def _new_error_id() -> str:
@@ -490,6 +506,15 @@ def translate_event(
             logger.debug("不转发意图确认工具的结果事件 (tool_call_id=%s)", getattr(part, "tool_call_id", ""))
             return
 
+        # 成功计入指标（失败在 `guard.on_tool_execute_error` 里记，那里才知道异常）。
+        # 两边用同一组标签 `tool`+`outcome`，所以失败率 = failed / (success + failed)；
+        # `denied` / `interrupted` 是审批与中断，不是故障，单独成组不混进失败率。
+        metrics.increment(
+            TOOL_EXECUTIONS_TOTAL,
+            tool=tool_name,
+            outcome=_tool_outcome(part),
+        )
+
         yield ToolResult(
             tool_call_id=getattr(part, "tool_call_id", "") or "",
             tool_name=tool_name,
@@ -833,6 +858,7 @@ async def stream_chat_events(
         # 到达这里之间管理员刚停用/删除）要明确拒绝，不能顺手退回环境变量里的旧网关
         # ——用户会以为自己在用一个已被停用的模型。旧版网关路径没有 target，按设计放行。
         if target is None and snapshot.registry_managed:
+            _record_rejected_stream("model_unavailable")
             yield StreamError(
                 message="模型已停用或不存在，请刷新模型列表后重试",
                 retryable=False,
@@ -854,6 +880,7 @@ async def stream_chat_events(
         # 这里是「查不出来」的内部故障。混在一起会把一次数据库抖动报成「模型已下架」。
         error_id = _new_error_id()
         logger.exception("模型预检失败 (error_id=%s, model=%s)", error_id, model_name)
+        _record_rejected_stream("error")
         yield StreamError(
             message=f"请求处理失败，请重试（错误编号 {error_id}）",
             retryable=True,
@@ -882,6 +909,7 @@ async def stream_chat_events(
                 len(messages),
                 compaction.strategy if compaction is not None else "disabled",
             )
+            _record_rejected_stream("context_overflow")
             yield StreamError(
                 message=overflow_message(budget),
                 retryable=False,
@@ -891,6 +919,14 @@ async def stream_chat_events(
 
     # 压缩改变了模型看到的上下文：必须显式告诉用户（与「切换备用模型要说明原因」
     # 同一条原则）。不说的话，用户会把「模型忘了刚才说的」当成模型变笨。
+    if compaction is not None:
+        # 压缩率是「会话还能用多久」的先行指标：频繁压缩意味着历史已经在顶格，
+        # 用户很快会撞到硬拒绝，而这件事在单条日志里看不出来。
+        metrics.increment(
+            CONTEXT_COMPACTIONS_TOTAL,
+            result="compacted" if compaction.changed else "rejected",
+        )
+
     if compaction is not None and compaction.changed:
         yield ContextCompacted(
             strategy="summarize" if compaction.strategy == "summarize" else "truncate",
@@ -923,12 +959,14 @@ async def stream_chat_events(
         current_prompt, history = convert_chat_history(effective_messages, resuming=resuming)
     except InvalidChatHistory as exc:
         # 刻意写给用户看的校验文案，可以原样返回。请求本身不合法，重试结果一样。
+        _record_rejected_stream("invalid_history")
         yield StreamError(message=str(exc), retryable=False)
         return
     except Exception:
         error_id = _new_error_id()
         logger.exception("对话历史转换失败 (error_id=%s)", error_id)
         # 内部错误而非用户输入问题：可能是瞬时故障，允许用户重试
+        _record_rejected_stream("error")
         yield StreamError(message=f"请求处理失败，请重试（错误编号 {error_id}）", retryable=True)
         return
 
@@ -941,12 +979,18 @@ async def stream_chat_events(
     except Exception:
         error_id = _new_error_id()
         logger.exception("模型初始化失败 (error_id=%s, model=%s)", error_id, model_name)
+        _record_rejected_stream("error")
         yield StreamError(message=f"模型初始化失败，请重试或切换模型（错误编号 {error_id}）", retryable=True)
         return
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + TOTAL_STREAM_BUDGET_SECONDS
     attempt = 0
+    # 首字节耗时是用户感知「卡不卡」的主要来源，单独计时（`deadline` 之前开始）
+    stream_started_at = loop.time()
+    # 本轮结局：在收尾处统计。区分 done / error / stopped 三者，因为「中断」不是
+    # 「失败」——用户自己关掉页面不该拉高错误率。
+    outcome = "error"
 
     # 收集器必须覆盖整个重试循环：切换与工具失败计数都发生在 agent 内部，
     # 却要在本层翻译成事件 / 决定给模型的文案。
@@ -1005,6 +1049,12 @@ async def stream_chat_events(
                             continue
                         deferred = _remember_deferred(event, deferred)
                         for chat_event in translate_event(event, seen_clarification_ids):
+                            if not emitted:
+                                # 第一条真正下发给用户的事件 = 首字节时刻
+                                metrics.observe(
+                                    CHAT_FIRST_EVENT_DURATION,
+                                    loop.time() - stream_started_at,
+                                )
                             emitted = True
                             yield chat_event
 
@@ -1022,6 +1072,9 @@ async def stream_chat_events(
                             cache_read_tokens=usage.cache_read_tokens,
                         )
                     emitted = True
+                    # 审批拦下不是失败：本轮正常完成，只是工具没执行。单独记一个 outcome，
+                    # 否则「用户点了拒绝」会看起来像服务端出错。
+                    outcome = "approval_required"
                     yield build_approval_event(pending)
                     break
 
@@ -1044,10 +1097,12 @@ async def stream_chat_events(
                         output_tokens=usage.output_tokens,
                         cache_read_tokens=usage.cache_read_tokens,
                     )
+                outcome = "done"
                 break
             except asyncio.CancelledError:
                 # 客户端断开 / 任务取消：必须继续上抛，交给传输层收尾。若在这里产出 StreamError，
                 # 等于往一条已经断开的连接里再写一帧，还会把「用户取消」记成生成失败。
+                outcome = "stopped"
                 raise
             except StreamTimeoutError:
                 error_id = _new_error_id()
@@ -1057,6 +1112,7 @@ async def stream_chat_events(
                     error_id,
                     model_name,
                 )
+                outcome = "timeout"
                 yield StreamError(message=STREAM_TIMEOUT_MESSAGE, retryable=True)
                 return
             except Exception as exc:
@@ -1074,12 +1130,16 @@ async def stream_chat_events(
 
                 error_id = _new_error_id()
                 logger.exception("流式生成异常 (error_id=%s, model=%s)", error_id, model_name)
+                outcome = "error"
                 yield StreamError(
                     message=f"{upstream_error_message(exc)}（错误编号 {error_id}）",
                     retryable=is_retryable_for_user(exc),
                 )
                 return
 
+    # 结局统计放在正常收尾处；早期 `return`（预检失败、装配失败）不经过这里，那些路径
+    # 各自在下面标注。用 else 分支而不是 finally：finally 里的 yield 会吞掉异常。
+    metrics.increment(CHAT_STREAMS_TOTAL, outcome=outcome)
     yield Done()
 
 
