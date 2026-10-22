@@ -8,6 +8,7 @@
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';
 import { apiFetch, readErrorDetail } from './api';
+import type { ContextToolCall } from './chat-persistence';
 import { ChatRequestError } from './chat-request-error';
 import { parseRetryAfterSeconds } from './retry-after';
 
@@ -53,12 +54,18 @@ function assertEventStreamContentType(contentType: string | null): void {
 export interface StreamChatParams {
   model: string | null;
   reasoningEffort: string | null;
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: string; content: string; tool_calls?: ContextToolCall[] }>;
   /**
    * 上一轮的真实用量锚点（可选）。服务端拿它把上下文预算从「估算整份历史」缩成
    * 「真值 + 估算新增消息」。没有（首轮、或上游没回用量）就不发这个字段。
    */
   contextAnchor?: { messageIndex: number; contextTokens: number } | null;
+  /**
+   * 审批决定（`tool_call_id` → 是否批准）。只在续跑被拦下的工具调用时带上。
+   *
+   * 缺失的决定由服务端按**拒绝**处理——所以这里只发用户真的点过的那些。
+   */
+  approvals?: Record<string, boolean> | null;
   signal: AbortSignal;
 }
 
@@ -236,6 +243,7 @@ export async function* streamChat({
   reasoningEffort,
   messages,
   contextAnchor = null,
+  approvals = null,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
   // 走 apiFetch：带上 cookie，并在会话过期（401）时通知全局退回登录页
@@ -255,6 +263,9 @@ export async function* streamChat({
             },
           }
         : {}),
+      // 审批续跑：只有真的带着决定时才出现这个字段。空对象也要省掉——
+      // 服务端会把它当成「有审批决定」，进而去找对应的工具调用。
+      ...(approvals && Object.keys(approvals).length > 0 ? { approvals } : {}),
     }),
     signal,
   });

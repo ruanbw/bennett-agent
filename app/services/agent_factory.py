@@ -20,7 +20,8 @@ from functools import lru_cache
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -34,6 +35,7 @@ from app.services.fallback_tracker import record_fallback
 from app.services.model_target import ModelTarget
 from app.services.upstream_errors import describe_fallback_reason, is_fallback_eligible
 from app.tools import build_tools
+from app.tools.approval import ApprovalGate
 from app.tools.guard import ToolErrorIsolation
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,10 @@ AGENT_CACHE_SIZE = 32
 #: 工具异常隔离能力。无状态，所有缓存条目共用同一个实例即可。
 #: 没有它时，任意工具抛出的非 `ModelRetry` 异常都会中止整轮生成（见 `app/tools/guard.py`）。
 _TOOL_ERROR_ISOLATION = ToolErrorIsolation()
+
+#: 审批闸门：把 `RiskLevel` 从元数据变成真的执行闸门（见 `app/tools/approval.py`）。
+#: 无状态，所有缓存条目共用同一个实例。**必须排在异常隔离之前**。
+_APPROVAL_GATE: AbstractCapability[None] = ApprovalGate()
 
 #: 建连 / 写 / 取连接的硬上限。它们不需要可配置：超出这些值已经说明网络或上游异常。
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -324,6 +330,10 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         # 模板单独列一段——不列的话模型只知道「有这些名字」，不知道它们是
         # **外部**工具（可能慢、可能失败、结果需要按不可信数据处理）。
         mcp_servers=mcp_server_summary(names),
+        # 审批闸门始终挂载（见 `_build_agent_cached` 的 capabilities），所以这里可以
+        # 无条件告诉模型「有些工具要用户批准」。这条必须**存在**：没有它，模型在被
+        # 拦下时会以为自己执行成功了，然后编一个「已删除」的回答。
+        approval_gate=True,
     )
 
 
@@ -394,12 +404,19 @@ def _build_agent_cached(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
+        # 输出类型允许 `DeferredToolRequests`：工具需要审批时，pydantic-ai 会把它作为
+        # **本轮输出**返回而不是执行工具（见 `app/tools/approval.py`）。这是无状态
+        # 续跑的前提——服务端不保存会话，所以「暂停等待审批」只能靠一次请求的结束。
+        output_type=str | DeferredToolRequests,
         # MCP 工具走 toolsets 而不是 tools：toolset 自己管连接生命周期与并发引用计数
         # （见 app/tools/mcp_client.py 的「生命周期」一节）。没配 server 时是空列表。
         toolsets=_mcp_toolsets(),
         # 工具是外部边界：一个工具抛异常不应该让整轮回答作废。
         # 兜底只作用于「漏网抛出来」的异常，工具自己返回文案的路径不受影响。
-        capabilities=[_TOOL_ERROR_ISOLATION],
+        # 顺序有意义：审批闸门排在异常隔离**前面**——`ApprovalRequired` 是控制流，
+        # 若先经过隔离层，它会被当成「工具失败」降级成一条失败文案，审批就失效了
+        # （实测：工具直接执行了）。
+        capabilities=[_APPROVAL_GATE, _TOOL_ERROR_ISOLATION],
     )
 
 

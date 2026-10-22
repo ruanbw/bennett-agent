@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 # =====================================================================
@@ -84,6 +84,45 @@ def _coerce_message_content(value: object) -> object:
     return "\n".join(texts)
 
 
+#: 单轮里回放的助手工具调用上限。
+#:
+#: 一个正常回答很少超十次调用；给上限是因为它们由客户端回放，没有上限意味着一个
+#: 篡改过的客户端可以塞进几千条来放大请求体。超限直接 422（见 `_check_tool_calls`）。
+MAX_REPLAYED_TOOL_CALLS = 50
+
+#: 工具调用入参的字符上限。入参是模型生成的 JSON，正常远小于这个数；这里防的是
+#: 客户端回放一份超大入参来撑爆上游请求体。
+MAX_TOOL_ARGS_CHARS = 8_000
+
+#: 单个工具调用 id 的字符上限。上游生成的 id 通常几十字符，长的是 base64 变体。
+MAX_TOOL_CALL_ID_CHARS = 200
+
+
+class ReplayedToolCall(BaseModel):
+    """客户端回放的**一次工具调用**（用于审批续跑）。
+
+    ## 为什么需要它
+
+    审批是**无状态续跑**的：工具在执行前被拦下 → 本轮结束 → 用户点批准 → 下一次
+    请求。服务端不保存会话，所以第二次请求必须自己知道「上一次到底要调用什么」。
+    这些信息只能来自客户端回放的历史。
+
+    ## 为什么只允许这几个字段
+
+    只有 `tool_call_id` / `tool_name` / `args` 三样对续跑有用。**不收 `outcome` 或
+    结果文本**：工具结果由服务端产生，让客户端回放等于允许伪造「这个删除已经成功
+    了」。续跑时 pydantic-ai 自己会用 `DeferredToolResults` 补结果，不需要历史里有。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(min_length=1, max_length=MAX_TOOL_CALL_ID_CHARS)
+    tool_name: str = Field(min_length=1, max_length=128)
+    #: 调用入参，**JSON 文本**。保持字符串而不是 dict：它是模型生成的原始产物，
+    #: 解析失败时应当原样拒绝（写错的 JSON 说明客户端在伪造或损坏），而不是猜。
+    args: str = Field(default="{}", max_length=MAX_TOOL_ARGS_CHARS)
+
+
 class ChatMessage(BaseModel):
     # 只允许 user/assistant。此前还接受 "system"，而 convert_chat_history 会把它
     # 转成 SystemPromptPart 插进历史——那等于让调用方注入系统提示词，而系统提示词
@@ -91,6 +130,24 @@ class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(..., max_length=MAX_MESSAGE_CHARS)
     thinking: str | None = Field(None, max_length=MAX_THINKING_CHARS)
+    #: 这条助手消息里发起过的工具调用（只用于审批续跑，见 `ReplayedToolCall`）。
+    #:
+    #: 只有 assistant 消息允许带；user 消息带了等于伪造模型行为，直接拒绝。
+    tool_calls: list[ReplayedToolCall] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_tool_calls(self) -> "ChatMessage":
+        """工具调用只能挂在 assistant 消息上，且数量有上限。
+
+        不校验的话，一个带 `tool_calls` 的 user 消息会进到重建逻辑里，被合成一条
+        `ModelResponse`——那是一条**凭空出现的助手回复**，模型会以为自己在上一轮
+        说过这些话。
+        """
+        if self.tool_calls and self.role != "assistant":
+            raise ValueError("只有 assistant 消息可以携带 tool_calls")
+        if len(self.tool_calls) > MAX_REPLAYED_TOOL_CALLS:
+            raise ValueError(f"单条消息的工具调用不能超过 {MAX_REPLAYED_TOOL_CALLS} 个")
+        return self
 
     _coerce_content = field_validator("content", mode="before")(_coerce_message_content)
 
@@ -151,8 +208,44 @@ class ChatRequest(BaseModel):
             "精度高于纯估算；缺失或不可用时服务端自己估算（不报错，因为这是可选的精度提升）。"
         ),
     )
+    #: 审批决定：`tool_call_id` → 是否批准。**只用于续跑**被拦下的工具调用。
+    #:
+    #: 未出现在这里的待审批调用一律按**拒绝**处理（见 `app/tools/approval.py`）：
+    #: 「没有回应」绝不能等于「批准」，否则用户关掉页面就等于同意了一次删除。
+    approvals: dict[str, bool] = Field(
+        default_factory=dict,
+        description="待审批工具调用的决定（tool_call_id → 是否批准）；缺失的一律按拒绝处理",
+    )
 
     _strip_model = field_validator("model", mode="before")(_strip_optional_model)
+
+    @model_validator(mode="after")
+    def _check_approvals(self) -> "ChatRequest":
+        """审批决定的形状校验。
+
+        两条：
+        1. 数量有上限（防篡改客户端塞几千条）；
+        2. **每个 id 必须能在历史里找到对应的工具调用**。不在历史里的 id 无法续跑
+           任何东西——pydantic-ai 拿不到对应的 `ToolCallPart`，会抛出一个用户完全
+           看不懂的内部错误。这里提前拒绝，文案说得清是哪个 id。
+        """
+        if len(self.approvals) > MAX_REPLAYED_TOOL_CALLS:
+            raise ValueError(f"单次请求的审批决定不能超过 {MAX_REPLAYED_TOOL_CALLS} 条")
+
+        if not self.approvals:
+            return self
+
+        known: set[str] = set()
+        for message in self.messages:
+            for call in message.tool_calls:
+                known.add(call.tool_call_id)
+
+        unknown = [call_id for call_id in self.approvals if call_id not in known]
+        if unknown:
+            raise ValueError(
+                f"审批决定里的工具调用 {unknown[0]} 不在本次对话历史中；只有历史里出现过的工具调用才能被审批"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_message_order(self) -> "ChatRequest":
@@ -183,9 +276,37 @@ class ChatRequest(BaseModel):
                     f"消息必须以 user 与 assistant 交替出现：第 {index} 条与第 {index + 1} 条都是 {current.role} 消息"
                 )
 
+        # 续跑审批时**允许**以 assistant 结尾：那一条是带着待审批工具调用的助手消息，
+        # 用户点「批准」并没有产生新的提问。除此之外仍必须以 user 结尾——末条不是
+        # user 就不是一次新的提问。
         if self.messages[-1].role != "user":
-            raise ValueError("最后一条消息必须是 user 消息")
+            last = self.messages[-1]
+            if not (self.pending_approval_ids and last.tool_calls):
+                raise ValueError("最后一条消息必须是 user 消息")
         return self
+
+    @property
+    def pending_approval_ids(self) -> set[str]:
+        """本次请求真正要续跑的调用 id（在历史里能找到对应工具调用的那些）。
+
+        与 `approvals` 的区别：`approvals` 是客户端给的原样决定，`pending_approval_ids`
+        是**经过形状校验**的子集。其余字段与校验都用它，以免两处对「什么算待审批」
+        给出不同答案。
+        """
+        if not self.approvals:
+            return set()
+        known = {call.tool_call_id for message in self.messages for call in message.tool_calls}
+        return {call_id for call_id in self.approvals if call_id in known}
+
+    @property
+    def is_resuming_approval(self) -> bool:
+        """这次请求是不是「续跑一次被拦下的工具调用」。
+
+        判定看两头：有审批决定，且历史里有对应的工具调用。只看 `approvals` 非空
+        不够——客户端可能在一次普通请求里顺手带上了旧的审批记录（比如重试了上一次
+        请求），那时应当按普通请求处理，而不是去续跑一个本轮根本不存在的调用。
+        """
+        return bool(self.pending_approval_ids)
 
     @model_validator(mode="after")
     def _check_history_budget(self) -> "ChatRequest":

@@ -19,8 +19,10 @@
  * 协调），本轮只把生成路径互斥掉。
  */
 
+import { db } from '../db';
 import { HISTORY_LIMIT, PARTIAL_FLUSH_INTERVAL_MS } from './constants';
 import {
+  clearMessageApproval,
   clearMessageClarification,
   loadContextMessages,
   loadSessionMessages,
@@ -45,6 +47,7 @@ import { streamChat } from './chat-transport';
 import { describeConnectionFailure } from './connection-failure';
 import { acquireRunLock, notifySessionsChanged as broadcastToOtherTabs } from './multi-tab';
 import type { RunState } from './chat-store';
+import type { ContextToolCall } from './chat-persistence';
 import type { MessageRecord } from '../types';
 
 // 对外保持单一入口：消费方只 import 本模块
@@ -63,8 +66,10 @@ export {
 export {
   buildLiveMessage,
   toRuntimeMessage,
+  pendingApproval,
   pendingClarification,
   contextExhausted,
+  type PendingApproval,
   type PendingClarification,
 } from './chat-message';
 
@@ -149,6 +154,22 @@ export interface StartChatRunParams {
   assistantMsgId: string;
   model: string | null;
   reasoningEffort: string | null;
+  /**
+   * 审批续跑：`tool_call_id` → 是否批准。
+   *
+   * 带上它就改变了这次请求的形状：历史必须以一条带工具调用的助手消息结尾，
+   * 并且把决定发回服务端。其余情况为 undefined。
+   */
+  approvals?: Record<string, boolean> | null;
+  /**
+   * 续跑时要回放的待审批调用（**从内存/库里取好的快照**）。
+   *
+   * 刻意由调用方显式传入，而不是让 `loadContextMessages` 从库里读 `approval`：
+   * 那个字段必须在本轮起跑前清掉（否则下一轮会重复回放它），于是「清掉」与
+   * 「读到」之间就有一场 IndexedDB 读写竞态——快一步读不到，慢一步又读到已经
+   * 不该出现的数据。传快照让这件事变成确定性的。
+   */
+  resumeToolCalls?: ContextToolCall[] | null;
 }
 
 // ---------------------------------------------------------------------
@@ -224,11 +245,15 @@ export function startChatRun(params: StartChatRunParams): RunState | null {
   if (!run) return null;
 
   // 故意不 await：调用方（onNew / onReload）不需要等整段流结束
-  void executeRun(run);
+  void executeRun(run, params.approvals ?? null, params.resumeToolCalls ?? null);
   return run;
 }
 
-async function executeRun(run: RunState): Promise<void> {
+async function executeRun(
+  run: RunState,
+  approvals: Record<string, boolean> | null,
+  resumeToolCalls: ContextToolCall[] | null,
+): Promise<void> {
   const { sessionId, assistantMsgId, model, reasoningEffort, controller } = run;
 
   // 跨标签互斥先于一切副作用：拿不到锁说明另一个标签页正在同一会话里生成，那条助手消息
@@ -261,10 +286,17 @@ async function executeRun(run: RunState): Promise<void> {
   let stopped = false;
 
   try {
-    const { messages: contextMessages, anchor: contextAnchor } = await loadContextMessages(sessionId, {
+    const resuming = approvals !== null && Object.keys(approvals).length > 0;
+    const { messages: loaded, anchor: contextAnchor } = await loadContextMessages(sessionId, {
       excludeId: assistantMsgId,
       limit: HISTORY_LIMIT,
     });
+    // 续跑：历史必须以「带工具调用的助手消息」结尾（服务端据此重建要续跑什么）。
+    // 这条消息由调用方给的快照**构造**出来，不从库里读——理由见 `resumeToolCalls`。
+    const contextMessages =
+      resuming && resumeToolCalls && resumeToolCalls.length > 0
+        ? [...loaded, { role: 'assistant', content: '', tool_calls: resumeToolCalls }]
+        : loaded;
 
     for await (const event of streamChat({
       model,
@@ -272,6 +304,7 @@ async function executeRun(run: RunState): Promise<void> {
       messages: contextMessages,
       // 上一轮上游回报的真实用量：有了它，服务端只估算它之后的那几条消息
       contextAnchor,
+      approvals: resuming ? approvals : null,
       signal: controller.signal,
     })) {
       if (applyEvent(sessionId, event)) flushPartial();
@@ -344,3 +377,94 @@ export function dismissClarification(sessionId: string, messageId: string): void
 // 模块加载即挂上「关页/切后台补写」：发生在任何组件挂载之前（也没有组件能保证
 // 在页面隐藏时还活着）。
 registerLifecycleFlush();
+
+// ---------------------------------------------------------------------
+// 审批续跑
+// ---------------------------------------------------------------------
+/**
+ * 用户对一批待审批调用做出决定后，续跑那一轮。
+ *
+ * ## 为什么是「重跑同一条助手消息」而不是发一条新消息
+
+    被拦下的那一轮**没有产生新的用户提问**（用户只是点了「批准」）。如果像普通消息那样
+    先追加一条 user 消息，历史里就会多出一句用户根本没说过的话，模型会看到「他批准了
+    什么？」这种不存在的追问。
+
+    所以复用那条助手消息：清掉它的内容与待审批标记，把决定带进请求，让它重新生成为
+    完整的回答。`includeExcluded` 确保那条带 `tool_calls` 的消息仍在回放历史里——
+    服务端要靠它重建「要续跑什么」。
+
+    ## 为什么先清 `approval` 再起跑
+
+    `loadContextMessages` 会把带 `approval.toolCalls` 的消息回放出去。清得太晚，
+    下一次请求会重复带上已经决定过的调用（服务端会把它当成新的待审批，于是一次又一次
+    弹同一个审批框）。清理与起跑的顺序因此不能反。
+
+    ## 失败时
+
+    起跑失败（槽位被占）不动任何数据：用户还能再点一次。落库失败只记日志——那一轮的
+    内存态仍是完整内容，终态落库会盖过去。
+ */
+export async function resumeApprovalRun({
+  sessionId,
+  assistantMsgId,
+  decisions,
+  toolCalls,
+  model,
+  reasoningEffort,
+}: {
+  sessionId: string;
+  assistantMsgId: string;
+  /** `tool_call_id` → 是否批准。必须覆盖该条消息上的**全部**待审批调用。 */
+  decisions: Record<string, boolean>;
+  /** 本次续跑要回放的待审批调用（调用方从消息 metadata 里取好的快照）。 */
+  toolCalls: ContextToolCall[];
+  model: string | null;
+  reasoningEffort: string | null;
+}): Promise<boolean> {
+  if (Object.keys(decisions).length === 0) return false;
+
+  const started = startChatRun({
+    sessionId,
+    assistantMsgId,
+    model,
+    reasoningEffort,
+    approvals: decisions,
+    resumeToolCalls: toolCalls,
+  });
+  if (!started) return false;
+
+  try {
+    await db.messages.update(assistantMsgId, {
+      content: '',
+      thinking: '',
+      thinkingMs: 0,
+      toolCalls: [],
+      stopped: false,
+      clarification: null,
+      // 决定已经带进这次请求：待审批标记必须清掉，否则下一轮还会回放它
+      approval: null,
+      fallback: null,
+      error: null,
+    });
+  } catch (err) {
+    // 清不掉不影响本轮生成：内存覆盖层与终态落库都会盖过去
+    console.warn('审批续跑：清空旧内容失败:', err);
+  }
+
+  return true;
+}
+
+/**
+ * 用户不处理这批审批调用：清掉标记，本轮作废。
+ *
+ * 与「拒绝」的区别必须清楚：拒绝是一次**明确的决定**，会带着 `false` 续跑，模型因此
+ * 知道该操作没被允许并能改走别的路；而 dismiss 是「用户不想现在决定」，续跑不会发生，
+ * 那一轮就停在那里。把 dismiss 也当成拒绝去续跑，用户会看到一条自己没要求的新回答。
+ */
+export function dismissApproval(messageId: string): void {
+  if (!messageId) return;
+  clearMessageApproval(messageId).catch((err: unknown) =>
+    console.warn('清除待审批调用失败:', err),
+  );
+}

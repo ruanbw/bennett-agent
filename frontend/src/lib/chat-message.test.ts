@@ -198,6 +198,8 @@ describe('toRuntimeMessage', () => {
       stopped: false,
       thinkingMs: 0,
       clarification: null,
+      // 老记录没有待审批调用：呈现为 null，审批卡片据此不出现
+      approval: null,
       fallback: null,
       compaction: null,
       error: null,

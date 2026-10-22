@@ -187,6 +187,35 @@ export interface ClarificationEvent {
   allow_custom_input: boolean;
 }
 
+/**
+ * 一条待审批的工具调用。
+ *
+ * 服务端把工具在**执行前**拦下来（见后端 `app/tools/approval.py`），所以收到这个
+ * 事件时那些调用一次都没有执行。
+ */
+export interface ApprovalToolCall {
+  tool_call_id: string;
+  tool_name: string;
+  /** 调用入参，JSON 文本；展示层决定怎么格式化。 */
+  args: string;
+  /** 工具说明，帮用户理解「这是要做什么」。 */
+  description: string;
+  /** 风险等级（`read_only` / `safe_write` / `dangerous` …）。 */
+  risk_level: string;
+}
+
+/**
+ * 本轮有工具调用需要用户批准，尚未执行。
+ *
+ * 审批是**分段**的：服务端无状态，没法在本轮内暂停等待，所以本轮就此结束，用户
+ * 做出决定后再发起一次请求续跑。客户端必须把 `tool_calls` 持久化到这条助手消息上
+ * ——续跑时服务端要靠它认出「上一次到底要调用什么」。
+ */
+export interface ApprovalRequiredEvent {
+  type: 'approval_required';
+  tool_calls: ApprovalToolCall[];
+}
+
 export interface FallbackEvent {
   type: 'fallback';
   /** 失败的主模型 id（网关路由格式）。 */
@@ -287,6 +316,7 @@ export type ChatEvent =
   | ToolCallEvent
   | ToolResultEvent
   | ClarificationEvent
+  | ApprovalRequiredEvent
   | FallbackEvent
   | CompactionEvent
   | UsageEvent
@@ -325,6 +355,26 @@ export interface ToolCallRecord {
    */
   startedAt?: number;
   finishedAt?: number;
+}
+
+/**
+ * 挂在本轮助手消息上的**待审批工具调用**。
+ *
+ * 与 `ClarificationState` 同一个套路：字段已在服务端解析完毕，前端不再解析
+ * `argsText` 之外的东西。「是否待批」由消息列表推导（见 `chat-message.ts`），
+ * 不存 `handled` 标记——存了就会有「标记与真实状态不一致」的第二种可能。
+ */
+export interface ApprovedToolCallRecord {
+  toolCallId: string;
+  toolName: string;
+  /** 调用入参，JSON 文本（原样展示）。 */
+  argsText: string;
+  description: string;
+  riskLevel: string;
+}
+
+export interface ApprovalState {
+  toolCalls: ApprovedToolCallRecord[];
 }
 
 /**
@@ -446,6 +496,13 @@ export interface MessageRecord {
   stopped?: boolean;
   incomplete?: boolean;
   clarification?: ClarificationState | null;
+  /**
+   * 本轮被审批拦下的工具调用；缺失=没有待审批（老记录同样缺失）。
+   *
+   * **必须落库**：续跑时服务端要靠客户端回放的 `tool_calls` 才知道「上一次要调用
+   * 什么」。刷新页面后这份数据还在，审批框才能重新出现并继续工作。
+   */
+  approval?: ApprovalState | null;
   fallback?: FallbackState | null;
   /**
    * 本轮开始前做过的上下文压缩；没压缩时为 null/缺失（老记录同样缺失）。
@@ -535,6 +592,8 @@ export interface Run {
    */
   partOrder?: PartKind[];
   clarification: ClarificationState | null;
+  /** 本轮被审批拦下的调用；没有需要审批的调用时为 null。 */
+  approval: ApprovalState | null;
   fallback: FallbackState | null;
   usage: UsageState | null;
   error: RunError | null;
@@ -564,6 +623,8 @@ export interface MessageCustomMetadata {
    */
   thinkingStartedAt?: number | null;
   clarification: ClarificationState | null;
+  /** 本轮被审批拦下的调用（运行时镜像）；`thread.aui.tsx` 据此渲染审批卡片。 */
+  approval?: ApprovalState | null;
   /** 本轮回答是否由备用模型完成；`thread.aui.tsx` 据此渲染一行提示。 */
   fallback?: FallbackState | null;
   /** 本轮开始前的上下文压缩；`thread.aui.tsx` 据此渲染一行提示。 */

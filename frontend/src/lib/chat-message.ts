@@ -12,6 +12,7 @@
 import { newId } from './constants';
 import { toolResultForDisplay } from './tool-call-view';
 import type {
+  ApprovalState,
   ClarificationState,
   MessageCustomMetadata,
   MessageRecord,
@@ -183,6 +184,8 @@ export function toRuntimeMessage(record: MessageRecord): RuntimeMessage {
         stopped: Boolean(record.stopped),
         thinkingMs: record.thinkingMs ?? 0,
         clarification: record.clarification ?? null,
+        // 待审批调用：刷新后审批卡片要能重新出现，否则那一轮被拦下的调用永久卡死
+        approval: record.approval ?? null,
         // 备用模型信息：老记录没有该字段 → null，呈现与修复前一致
         fallback: record.fallback ?? null,
         // 压缩信息：老记录没有该字段 → null，不显示提示行
@@ -244,6 +247,9 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
         // 生成中不呈现提问：等本轮完全结束再拉起浮层，
         // 否则用户还没看清选项就可能被下一段增量挤走
         clarification: run.finished ? (run.clarification ?? null) : null,
+        // 审批同理：`approval_required` 是本轮最后一条事件，所以它到达时本轮已经
+        // 没有后续增量了；仍按 finished 收口，避免卡片闪一下又被顶掉。
+        approval: run.finished ? (run.approval ?? null) : null,
       },
     },
   };
@@ -251,6 +257,9 @@ export function buildLiveMessage(run: Run): RuntimeMessage {
 
 /** 待答提问 + 它挂在哪条消息上（忽略时需要这个 id）。 */
 export type PendingClarification = ClarificationState & { messageId: string };
+
+/** 待审批调用 + 它挂在哪条消息上（续跑时需要这个 id 与那个 msgId）。 */
+export type PendingApproval = ApprovalState & { messageId: string };
 
 /**
  * 从消息列表推导当前待答提问（R-6）。
@@ -274,6 +283,31 @@ export function pendingClarification(
 
   const pending = last.metadata?.custom?.clarification as ClarificationState | null | undefined;
   return pending?.question ? { messageId: last.id ?? '', ...pending } : null;
+}
+
+/**
+ * 从消息列表推导当前待审批的工具调用。
+ *
+ * 与 `pendingClarification` 同一条原则：**只推导，不存标记**。
+ *   - 用户批准/拒绝 → 记录上的 `approval` 被清空 → 自然消解；
+ *   - 用户不发请求就关掉页面 → 记录还在 → 下次打开审批框仍然出现。
+ *
+ * `isRunning` 时返回 null：审批请求到达意味着本轮已经结束，但生成态下不该抢先拉
+ * 起卡片（那时 `done` 可能还没到，用户看到卡片却点不动）。
+ */
+export function pendingApproval(
+  messages: readonly RuntimeMessage[] | undefined,
+  isRunning: boolean,
+): PendingApproval | null {
+  if (isRunning) return null;
+
+  const list = messages ?? [];
+  const last = list[list.length - 1];
+  if (!last || last.role !== 'assistant') return null;
+
+  const pending = last.metadata?.custom?.approval as ApprovalState | null | undefined;
+  if (!pending?.toolCalls?.length) return null;
+  return { messageId: last.id ?? '', ...pending };
 }
 
 /**

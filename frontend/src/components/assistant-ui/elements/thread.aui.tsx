@@ -53,7 +53,9 @@ import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
+import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
+import { useApproval } from "@/context/approval-context";
 import { useClarification } from "@/context/clarification-context";
 import { useChatSessionId } from "@/context/chat-session";
 import { getDraftStorage, readDraft, writeDraft } from "@/lib/composer-draft";
@@ -172,6 +174,8 @@ export const Thread: FC<ThreadProps> = ({
   // 提问状态来自 context，不再由 ChatProvider 通过 cloneElement 注入
   const clarification = useClarification();
   const { dismiss: dismissPendingClarification } = clarification;
+  // 审批卡片同样来自 context：它与提问是两件事（提交动作不同），所以是两个 context
+  const approval = useApproval();
 
   /**
    * 发送后的焦点回到输入框。
@@ -369,6 +373,16 @@ export const Thread: FC<ThreadProps> = ({
               />
             )}
             <ThreadScrollToBottom onClick={handleScrollToBottom} />
+
+            {/* 工具审批卡片：位置与澄清浮层一致（输入框正上方），因为它同样在等用户输入。
+                两者不会同时出现——澄清是模型问问题，审批是模型要执行写操作，一轮只有一种。 */}
+            {approval.pending && (
+              <ApprovalCard
+                toolCalls={approval.pending.toolCalls}
+                onSubmit={approval.submit}
+                onDismiss={approval.dismiss}
+              />
+            )}
 
             {/* 输入框正上方弹出的意图澄清浮层卡片：提交后即刻消失 */}
             {clarification.pending && (

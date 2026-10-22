@@ -62,6 +62,7 @@ const makeRun = (overrides: Partial<RunState> = {}): RunState => ({
   thinkingMs: 0,
   toolCalls: [],
   clarification: null,
+  approval: null,
   fallback: null,
   compaction: null,
   usage: null,

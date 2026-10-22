@@ -19,14 +19,17 @@ import {
   abortChatRun,
   buildLiveMessage,
   clearFinishedRun,
+  dismissApproval,
   dismissClarification,
   getRun,
   getRunVersion,
   isRunActive,
   isRunPersistFailed,
   notifySessionsChanged,
+  pendingApproval,
   pendingClarification,
   contextExhausted,
+  resumeApprovalRun,
   startChatRun,
   subscribeRun,
   toRuntimeMessage,
@@ -34,9 +37,10 @@ import {
 import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
 import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
+import { ApprovalProvider } from '../context/approval-context';
 import { ClarificationProvider } from '../context/clarification-context';
 import { ChatSessionContext, type ChatSessionContextValue } from '../context/chat-session';
-import type { RuntimeMessage } from '../types';
+import type { ApprovedToolCallRecord, RuntimeMessage } from '../types';
 
 export interface ChatProviderProps {
   children: ReactNode;
@@ -179,6 +183,8 @@ export function ChatProvider({
 
   // 待答提问：从消息列表推导，不看任何可变标记
   const activeClarification = pendingClarification(messages, isRunning);
+  // 待审批调用同样是推导出来的（见 lib/chat-message.ts:pendingApproval）
+  const activeApproval = pendingApproval(messages, isRunning);
 
   // 上下文锁：同样是推导出来的。服务端每轮都会拒绝（它才是闸门），这里只是不让
   // 用户白点一次发送，并给出去处——见 lib/chat-message.ts:contextExhausted。
@@ -188,6 +194,38 @@ export function ChatProvider({
     if (!activeClarification) return;
     dismissClarification(currentSessionId, activeClarification.messageId);
   }, [activeClarification, currentSessionId]);
+
+  /**
+   * 提交审批决定：**重跑同一条助手消息**（不追加新的用户消息）。
+   *
+   * 用户点「批准」并没有提出新问题，追加一条 user 消息会在历史里造出一句他没说过的话，
+   * 模型会以为存在这么一次追问。见 `lib/chat-runs.ts:resumeApprovalRun`。
+   */
+  const submitApproval = useCallback(
+    async (decisions: Record<string, boolean>): Promise<boolean> => {
+      if (!activeApproval || !currentSessionId) return false;
+      const ok = await resumeApprovalRun({
+        sessionId: currentSessionId,
+        assistantMsgId: activeApproval.messageId,
+        decisions,
+        toolCalls: activeApproval.toolCalls.map((call: ApprovedToolCallRecord) => ({
+          tool_call_id: call.toolCallId,
+          tool_name: call.toolName,
+          args: call.argsText,
+        })),
+        model: currentModel,
+        reasoningEffort: currentReasoningEffort,
+      });
+      if (ok) setNotice(null);
+      return ok;
+    },
+    [activeApproval, currentSessionId, currentModel, currentReasoningEffort]
+  );
+
+  const dismissPendingApproval = useCallback(() => {
+    if (!activeApproval) return;
+    dismissApproval(activeApproval.messageId);
+  }, [activeApproval]);
 
   const showNotice = useCallback((text: string) => setNotice(text), []);
   const dismissNotice = useCallback(() => setNotice(null), []);
@@ -443,7 +481,15 @@ export function ChatProvider({
             dismiss: dismissPendingClarification,
           }}
         >
-          {children}
+          <ApprovalProvider
+            value={{
+              pending: activeApproval,
+              submit: submitApproval,
+              dismiss: dismissPendingApproval,
+            }}
+          >
+            {children}
+          </ApprovalProvider>
         </ClarificationProvider>
       </AssistantRuntimeProvider>
     </ChatSessionContext.Provider>

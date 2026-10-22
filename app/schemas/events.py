@@ -154,6 +154,47 @@ class ContextCompacted(BaseModel):
     limit_tokens: int
 
 
+class ApprovalToolCall(BaseModel):
+    """一条待审批的工具调用（形状与 `ReplayedToolCall` 对齐，客户端可直接回放）。"""
+
+    tool_call_id: str
+    tool_name: str
+    #: 调用入参（JSON 文本），供前端展示
+    args: str
+    #: 工具说明（取自工具自身的 description），帮用户理解「这是要做什么」
+    description: str = ""
+    #: 风险等级（`read_only` / `safe_write` / `dangerous` …）
+    risk_level: str = ""
+
+
+class ApprovalRequiredEvent(BaseModel):
+    """本轮有工具调用需要用户批准，**尚未执行**。
+
+    ## 为什么本轮就此结束
+
+    服务端无状态：历史由客户端每轮全量回放，SSE 也没有「服务端暂停等一个回答再
+    继续」的双向通道。所以审批只能**分段**做——本轮在工具执行前停下（工具一次都
+    没执行），把决定交还给用户，用户点完再发起一次请求续跑。
+
+    客户端要做两件事：
+    1. 把 `tool_calls` 原样持久化到这条助手消息上（续跑时服务端要靠它认出
+       「上一次到底要调用什么」，见 `app/tools/approval.py`）；
+    2. 用户做出决定后，下一次请求带上 `approvals: {tool_call_id: bool}`。
+
+    不批准等于不执行：缺失的决定一律按**拒绝**处理。
+
+    ## 为什么带 `risk_level` 与 `description`
+
+    用户只能对着「参数」做判断，而参数本身常常看不出后果（`{"id": 42}` 删的是什么？）。
+    `description` 取工具自身的说明，`risk_level` 取注册时的分级——两者一起构成
+    做决定所需的最小上下文。只给工具名会让审批框变成一次盲点确认。
+    """
+
+    type: Literal["approval_required"] = "approval_required"
+    #: 待批准的调用。**顺序即模型发起顺序**，用户可按同序逐条决定。
+    tool_calls: list[ApprovalToolCall]
+
+
 class StreamError(BaseModel):
     """本轮失败。
 
@@ -192,6 +233,7 @@ ChatEvent = Annotated[
     | ToolCall
     | ToolResult
     | ClarificationRequest
+    | ApprovalRequiredEvent
     | FallbackUsed
     | ContextCompacted
     | Usage

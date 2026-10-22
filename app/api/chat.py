@@ -204,6 +204,9 @@ async def chat_stream(request: ChatRequest, user: User = Depends(current_active_
             # 知识库是用户私有的：工具只能查当前登录用户的文档（见
             # `app/tools/knowledge_scope.py`）。这个值由服务端注入，绝不来自模型参数。
             user_id=user.id,
+            # 审批续跑：客户端带回「批准/拒绝」。是否真的续跑由服务层看历史形状决定
+            # （历史以带工具调用的 assistant 结尾才算），这里原样透传。
+            approvals=request.approvals,
         ):
             yield to_sse_frame(event)
 

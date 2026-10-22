@@ -33,6 +33,10 @@ function runFields(run: Run): MessageChanges {
     usage: run.usage ?? null,
     // 失败信息：刷新后「重试」按钮仍然可用（是否可重试由服务端判定并持久化）
     error: run.error ?? null,
+    // 待审批的调用：**必须落库**，因为续跑时服务端要靠客户端回放的 `tool_calls`
+    // 才知道「上一次到底要调用什么」。不落库的话刷新一次审批框就永久消失，
+    // 那一轮被拦下的调用再也无法执行。
+    approval: run.approval ?? null,
   };
 }
 
@@ -79,6 +83,20 @@ export async function clearMessageClarification(messageId: string): Promise<void
   await db.messages.update(messageId, { clarification: null });
 }
 
+/**
+ * 清掉助手消息上的待审批调用。
+ *
+ * 用户做出决定（或决定忽略）之后调用：记录上不再带 `approval`，
+ * `pendingApproval` 的推导条件自然不成立，审批卡片随之消失。
+ *
+ * 与 `clearMessageClarification` 分开而不是合成一个「清待答」：两者的数据形状与
+ * 消失时机不同——提问是「用户答了」，审批是「用户批了或拒了」，而后者还要带着
+ * 决定去续跑。
+ */
+export async function clearMessageApproval(messageId: string): Promise<void> {
+  await db.messages.update(messageId, { approval: null });
+}
+
 export async function loadSessionMessages(sessionId: string): Promise<MessageRecord[]> {
   return db.messages.where('sessionId').equals(sessionId).sortBy('createdAt');
 }
@@ -90,10 +108,25 @@ export async function countSessionMessages(sessionId: string): Promise<number> {
 // ---------------------------------------------------------------------
 // 上下文回放
 // ---------------------------------------------------------------------
-/** 送往模型的历史消息。与 `chat-transport` 的请求形状一致：只有 role 与 content。 */
+/**
+ * 回放的工具调用（**线上形状，snake_case**）。
+ *
+ * 只有续跑审批时才会带上：服务端要靠它认出「上一次到底要调用什么」。
+ * 字段名跟 `context_anchor` 一样按服务端契约写 snake_case，因为这个对象会被
+ * 原样塞进请求体，中间没有一层映射。
+ */
+export interface ContextToolCall {
+  tool_call_id: string;
+  tool_name: string;
+  args: string;
+}
+
+/** 送往模型的历史消息。与 `chat-transport` 的请求形状一致：role、content，可选 tool_calls。 */
 export interface ContextMessage {
   role: string;
   content: string;
+  /** 仅在续跑审批时出现；其余情况不带（多带会白白放大每轮请求体）。 */
+  tool_calls?: ContextToolCall[];
 }
 
 /**
@@ -236,6 +269,10 @@ export async function loadContextMessages(
 
   const replayable = all
     .filter((message) => message.id !== excludeId)
+    // 待审批的助手消息（正文往往为空）在这里被滤掉是**对的**：它只在本轮续跑时
+    // 才有意义，而续跑的历史由 `startChatRun` 的 `resumeToolCalls` 快照单独构造。
+    // 若让它常驻回放，下一次普通提问的最后一条就会变成一条没有结果的 assistant
+    // 工具调用，服务端会按非法历史拒绝（`末条必须是 user`）。
     .filter(
       (message) => message.role !== 'assistant' || message.content.trim() || message.clarification,
     )
@@ -257,5 +294,12 @@ export async function loadContextMessages(
   }
 
   // 只把协议字段交出去：`anchorTokens` 是本地推导用的，不跟着发上游
-  return { messages: clamped.map(({ role, content }) => ({ role, content })), anchor };
+  return {
+    messages: clamped.map(({ role, content, tool_calls }) => ({
+      role,
+      content,
+      ...(tool_calls ? { tool_calls } : {}),
+    })),
+    anchor,
+  };
 }

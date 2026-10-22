@@ -17,14 +17,20 @@ from pydantic_ai.tools import (
 
 
 class RiskLevel(str, Enum):
-    """工具风险等级。
+    """工具风险等级。**这个字段现在有强制力**——见 `app/tools/approval.py`。
 
-    **当前只是预留元数据，没有任何强制力**：全仓没有任何代码读 `risk_level` 做拦截或
-    审批，`build_tools()` 只看 `is_enabled`。写在这里是为了让以后接 HITL 时不必重新
-    给每个工具归类。
+    分级与它触发的行为：
 
-    不要根据这个字段推断「危险工具已被拦」：要加限制应在 `ToolRegistry.build_tools`
-    或工具自身的 `enabled_checker` 里做，而不是指望这个字段生效。
+    - `READ_ONLY` / `INTERACTIVE`：直接执行，不打断用户；
+    - `SAFE_WRITE` / `DANGEROUS`：**执行前必须拿到用户批准**（HITL）。未批准时工具
+      一次都不会执行，本轮以 `approval_required` 事件结束，用户点完再续跑。
+
+    分界线是「能不能撤销」而不是「有多危险」：本项目的删除是硬删除、没有回收站，
+    所以「低风险的写入」也必须先问一次——可以随时再问，但删完以后没法再问。
+
+    MCP 外部工具默认按 `SAFE_WRITE` 处理（见 `chat_service._describe_tool`）：它们是
+    第三方实现，我们无法确认有没有副作用。这个默认值偏向多问一次，而不是替用户
+    假设安全。
     """
 
     READ_ONLY = "read_only"
@@ -41,7 +47,11 @@ class RiskLevel(str, Enum):
 
 
 class ToolCategory(str, Enum):
-    """工具分类。**当前只是预留元数据，没有任何强制力**（同上）。"""
+    """工具分类。**仍然只是元数据**：没有任何代码按它拦截或改变行为。
+
+    它目前的用途是排障与文档（「这个工具属于哪一类」），不要据此推断「某类工具被
+    限制了」——唯一的执行闸门是 `RiskLevel`。
+    """
 
     SEARCH = "search"
     """外部检索与信息抓取。"""

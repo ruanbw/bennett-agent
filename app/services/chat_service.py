@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from typing import Any
 from uuid import uuid4
 
+from pydantic_ai import DeferredToolRequests, DeferredToolRequestsEvent, DeferredToolResults, ToolApproved, ToolDenied
 from pydantic_ai.messages import (
     FinalResultEvent,
     ModelMessage,
@@ -36,6 +37,8 @@ from pydantic_ai.run import AgentRunResultEvent
 from app.config import settings
 from app.schemas.chat import ChatMessage, ContextAnchor
 from app.schemas.events import (
+    ApprovalRequiredEvent,
+    ApprovalToolCall,
     ChatEvent,
     ClarificationRequest,
     ContentDelta,
@@ -74,10 +77,13 @@ from app.services.upstream_errors import (
     upstream_error_message,
 )
 from app.services.usage import extract_turn_usage
+from app.tools import registry
+from app.tools.approval import DENIED_RESULT, all_deferred_ids
 from app.tools.ask_user_clarification import normalize_clarification
 from app.tools.cache_scope import cache_scope
 from app.tools.guard import collect_tool_failures
 from app.tools.knowledge_scope import knowledge_scope
+from app.tools.registry import RiskLevel
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +157,11 @@ def _warn_unknown_once(key: str, message: str, *args: Any) -> None:  # noqa: ANN
 # =====================================================================
 # 历史转换
 # =====================================================================
-def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMessage]]:
+def convert_chat_history(
+    messages: list[ChatMessage],
+    *,
+    resuming: bool = False,
+) -> tuple[str, list[ModelMessage]]:
     """将前端上传的历史对话转换为 PydanticAI 所需的 (prompt, message_history)
 
     校验失败时抛出 `InvalidChatHistory`，其文案是刻意写给用户看的，调用方可以原样返回。
@@ -161,6 +171,20 @@ def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMe
 
     顺序与 schema 的 `ChatRequest._check_message_order` 一致（首条 → 交替 → 末条）：
     两处文案不同但判定相同，谁先发现就谁报，用户看到的永远是最靠近根因的那一条。
+
+    ## `resuming`：续跑审批时最后一条是 assistant
+
+    工具需要审批时，本轮在**执行前**停下（见 `app/tools/approval.py`），用户点完
+    「批准」再发一次请求。那次请求的历史以「带工具调用的 assistant 消息」结尾，
+    没有新的 user 提问——所以此时 `current_prompt` 是空串，`message_history` 覆盖
+    到最后一条。pydantic-ai 用 `deferred_tool_results` 把结果接上去继续跑，不需要
+    新的 prompt。
+
+    ## 工具调用怎么进历史
+
+    assistant 消息上的 `tool_calls` 被还原成 `ToolCallPart`，与正文一起放进**同一个**
+    `ModelResponse`——模型当初就是把它们放在同一轮里输出的，拆成两条会让历史形状
+    与真实轨迹不符（pydantic-ai 会因此报序列非法，或者模型看到两个不同的「上一轮」）。
     """
     if not messages:
         raise InvalidChatHistory("消息列表不能为空")
@@ -181,28 +205,75 @@ def convert_chat_history(messages: list[ChatMessage]) -> tuple[str, list[ModelMe
                 f"{messages[index].role} 消息"
             )
 
-    # 取最后一条消息作为当前轮 prompt
-    last_msg = messages[-1]
-    if last_msg.role != "user" or not last_msg.content or not last_msg.content.strip():
-        raise InvalidChatHistory("最后一条消息必须是内容非空的 user 消息")
+    if resuming:
+        # 续跑：末条是带工具调用的 assistant，没有新的用户提问。
+        current_prompt = ""
+        replay = messages
+        last = messages[-1]
+        if last.role != "assistant" or not last.tool_calls:
+            raise InvalidChatHistory("续跑审批时最后一条必须是带工具调用的 assistant 消息")
+    else:
+        # 取最后一条消息作为当前轮 prompt
+        last_msg = messages[-1]
+        if last_msg.role != "user" or not last_msg.content or not last_msg.content.strip():
+            raise InvalidChatHistory("最后一条消息必须是内容非空的 user 消息")
+        current_prompt = last_msg.content
+        replay = messages[:-1]
 
-    current_prompt = last_msg.content
     converted_history: list[ModelMessage] = []
 
-    for msg in messages[:-1]:
+    for msg in replay:
         if msg.role == "user":
             if msg.content:
                 converted_history.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
         else:
-            parts = []
+            parts: list[object] = []
             if msg.thinking:
                 parts.append(ThinkingPart(content=msg.thinking))
             if msg.content:
                 parts.append(TextPart(content=msg.content))
+            # 工具调用与正文同属一个 ModelResponse（见 docstring）。入参解析失败时
+            # **跳过这条调用**而不是整轮失败：历史是客户端回放的，一条写坏的 JSON
+            # 不该让整个会话不可用。跳过会让模型少看到一次调用，但比 500 好。
+            for call in msg.tool_calls:
+                arguments = _parse_tool_args(call.args, call.tool_call_id)
+                if arguments is None:
+                    continue
+                parts.append(
+                    ToolCallPart(
+                        tool_name=call.tool_name,
+                        args=arguments,
+                        tool_call_id=call.tool_call_id,
+                    )
+                )
             if parts:
                 converted_history.append(ModelResponse(parts=parts))
 
     return current_prompt, converted_history
+
+
+def _parse_tool_args(args_text: str, tool_call_id: str) -> dict[str, Any] | str | None:
+    """解析客户端回放的工具入参。失败返回 None（调用方跳过这条调用）。
+
+    pydantic-ai 的 `ToolCallPart.args` 接受 dict 或原始 JSON 字符串；这里优先给
+    dict（省去它再解析一次），JSON 不是对象时退回原字符串，解析报错就跳过。
+
+    **只记 WARNING 不抛**：这是客户端回放的数据，一条坏记录不该让对方整轮 500——
+    尤其这条历史可能是几天前存下来的，格式在当时是合法的。
+    """
+    text = (args_text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        logger.warning("工具调用入参不是合法 JSON，已跳过 (tool_call_id=%s)", tool_call_id)
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    # 非对象（数组/字符串/数字）：pydantic-ai 会当成「未解析的 JSON 文本」再校验一次，
+    # 原样交给它比拼成 dict 更忠实。
+    return text
 
 
 # =====================================================================
@@ -427,6 +498,13 @@ def translate_event(
         )
         return
 
+    if isinstance(event, DeferredToolRequestsEvent):
+        # 审批拦下的调用：本轮到此为止，工具一次都没执行。把批量请求原样交给上层
+        # （`stream_chat_events`）翻译成 `approval_required` 事件——翻译需要工具说明
+        # 与风险等级，那是装配层的知识，不该在这里再查一遍。
+        logger.debug("审批拦下 %d 个工具调用", len(event.requests.approvals))
+        return
+
     # 以下两类是**每次流式响应**的固定成分，不是异常事件：
     # - `PartEndEvent`：每个 TextPart/ThinkingPart/ToolCallPart 结束时补的一条；
     # - `FinalResultEvent`：本项目的 Agent 没传 `output_type`（默认 str），
@@ -444,6 +522,130 @@ def translate_event(
         "未处理的 pydantic-ai 流事件: %s（其正文/思考增量会被静默丢弃）",
         type(event).__name__,
     )
+
+
+# =====================================================================
+# 审批（HITL）
+# =====================================================================
+def _remember_deferred(event: Any, sink: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401
+    """记住流里出现的待审批请求。
+
+    `DeferredToolRequestsEvent` 只是**流事件**；run 的终态（`AgentRunResult.output`）
+    才是权威来源，因为它同时覆盖了「capability 的 `handle_deferred_tool_calls` 没有
+    解决任何调用」这种情况。这里记为兜底：万一终态取不到（理论上不会），至少还有它。
+    """
+    if isinstance(event, DeferredToolRequestsEvent):
+        sink["requests"] = event.requests
+    return sink
+
+
+def _pending_from_result(
+    run_result: Any,  # noqa: ANN401
+    deferred: dict[str, Any],
+) -> DeferredToolRequests | None:
+    """从本轮终态取出待审批的调用；没有则返回 None。
+
+    优先用 `run_result.output`：它是 pydantic-ai 明确声明为「本轮输出」的那个东西，
+    与 `DeferredToolRequestsEvent` 相比多一层保证——后者只是流上的通知。
+    """
+    output = getattr(run_result, "output", None)
+    if isinstance(output, DeferredToolRequests):
+        return output
+    requests = deferred.get("requests")
+    return requests if isinstance(requests, DeferredToolRequests) else None
+
+
+def build_approval_event(requests: DeferredToolRequests) -> ApprovalRequiredEvent:
+    """把 pydantic-ai 的待审批请求翻译成前端事件。
+
+    逐个补上工具说明与风险等级：用户只能对着参数做判断，而参数常常看不出后果
+    （`{"id": 42}` 删的是什么？）。这两个字段来自注册表（本地工具）或 MCP 的
+    工具定义，都是装配层的知识。
+
+    工具可能已经被卸载/改配置（管理员在两轮之间改了 `MCP_SERVERS`）：那时查不到
+    说明就留空，**不因此拒绝整轮**——审批框少一行说明，比用户拿不到审批框好。
+    """
+    calls: list[ApprovalToolCall] = []
+    for part in requests.approvals:
+        tool_call_id = getattr(part, "tool_call_id", "") or ""
+        tool_name = getattr(part, "tool_name", "") or ""
+        description, risk_level = _describe_tool(tool_name)
+        calls.append(
+            ApprovalToolCall(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                args=_serialize_tool_args(getattr(part, "args", None)),
+                description=description,
+                risk_level=risk_level,
+            )
+        )
+    return ApprovalRequiredEvent(tool_calls=calls)
+
+
+def _describe_tool(tool_name: str) -> tuple[str, str]:
+    """查一个工具的说明与风险等级；查不到返回空串。
+
+    先查本地注册表，再查 MCP（带前缀的名字）。两处都可能查不到（配置在两轮之间
+    变了），所以返回值允许为空——审批框宁可少一行说明，也不能因此不出。
+    """
+    try:
+        tool = registry.get(tool_name)
+    except Exception:  # noqa: BLE001 - 注册表读取失败不该阻断审批
+        logger.warning("读取工具元数据失败 (tool=%s)", tool_name, exc_info=True)
+        tool = None
+
+    if tool is not None:
+        risk = tool.risk_level
+        return (tool.description or "", risk.value if hasattr(risk, "value") else str(risk))
+
+    # MCP 工具：名字带 `server__` 前缀，来自远端的工具定义
+    try:
+        from app.tools.mcp_client import get_mcp_registry
+
+        for info in get_mcp_registry().cached_tools():
+            if info.qualified_name == tool_name:
+                return (info.description or "", RiskLevel.SAFE_WRITE.value)
+    except Exception:  # noqa: BLE001 - 同上
+        logger.debug("读取 MCP 工具元数据失败 (tool=%s)", tool_name, exc_info=True)
+    return ("", "")
+
+
+def build_resume_results_for(
+    approvals: dict[str, bool],
+    history: list[ModelMessage],
+) -> DeferredToolResults | None:
+    """把客户端的审批决定变成 pydantic-ai 的续跑结果；不是续跑时返回 None。
+
+    ## 为什么要用历史兜底补全
+
+    pydantic-ai 要求 `DeferredToolResults` 覆盖**每一个**待审批调用，缺失的会直接抛
+    `ValueError`。而客户端可能只回传了一部分（用户只处理了弹窗里的第一条，或者
+    页面被关掉了）。所以这里按「历史里有调用、但没有结果」这个客观事实算出全集，
+    缺失的一律按**拒绝**处理。
+
+    「没回应 = 拒绝」是唯一正确的默认值：反过来的话，用户关掉页面就等于批准了一次
+    删除。
+
+    ## 为什么拒绝也要显式给结果
+
+    `ToolDenied` 会让 pydantic-ai 往历史里写一条「调用被拒绝」的结果，模型看到它
+    才会改走别的路；不给结果则是「这个调用悬空」，模型可能又发起一次同样的调用。
+    """
+    pending_ids = all_deferred_ids(history)
+    if not pending_ids:
+        # 历史里没有悬空的调用：客户端带了 approvals 但没有对应的调用。schema 层
+        # 已经拦过一道，走到这里说明调用**已有结果**（例如它执行过又重发了）。
+        # 按普通请求处理，不要让 pydantic-ai 因为多出无主的决定而报错。
+        logger.warning("请求带了审批决定，但历史里没有对应的待审批调用，按普通请求处理")
+        return None
+
+    results = DeferredToolResults()
+    for call_id in pending_ids:
+        approved = approvals.get(call_id, False)
+        results.approvals[call_id] = ToolApproved() if approved else ToolDenied(DENIED_RESULT)
+        if not approved:
+            logger.info("用户拒绝执行工具调用 (tool_call_id=%s)", call_id)
+    return results
 
 
 # =====================================================================
@@ -588,6 +790,7 @@ async def stream_chat_events(
     context_anchor: ContextAnchor | None = None,
     cache_scope_key: str | None = None,
     user_id: uuid.UUID | None = None,
+    approvals: dict[str, bool] | None = None,
 ) -> AsyncGenerator[ChatEvent, None]:
     """产出本轮对话的聊天事件流。
 
@@ -711,8 +914,13 @@ async def stream_chat_events(
     effective_messages = compaction.messages if compaction is not None and compaction.changed else messages
     digest_instructions = build_digest_instructions(compaction.digest if compaction is not None else None)
 
+    # 续跑判定看历史形状而不是只看 `approvals`：客户端可能在一次普通请求里顺手带上
+    # 了旧的审批记录（比如重试了上一次请求），那时历史以 user 结尾，应当按普通请求
+    # 处理，而不是去续跑一个本轮根本不存在的调用。
+    resuming = bool(approvals) and effective_messages[-1].role == "assistant"
+
     try:
-        current_prompt, history = convert_chat_history(effective_messages)
+        current_prompt, history = convert_chat_history(effective_messages, resuming=resuming)
     except InvalidChatHistory as exc:
         # 刻意写给用户看的校验文案，可以原样返回。请求本身不合法，重试结果一样。
         yield StreamError(message=str(exc), retryable=False)
@@ -723,6 +931,10 @@ async def stream_chat_events(
         # 内部错误而非用户输入问题：可能是瞬时故障，允许用户重试
         yield StreamError(message=f"请求处理失败，请重试（错误编号 {error_id}）", retryable=True)
         return
+
+    # 续跑结果要在历史转换**之后**算：它需要用重建出来的 pydantic-ai 消息判断
+    # 「哪些调用还没有结果」，而不是客户端说了什么。
+    resume_results = build_resume_results_for(approvals or {}, history) if resuming else None
 
     try:
         agent = build_agent(model_name, reasoning_effort=reasoning_effort, target=target)
@@ -770,10 +982,15 @@ async def stream_chat_events(
                 # 摘要走运行期 instructions，不进 message_history：ChatMessage 只允许
                 # user/assistant 是**刻意**挡住「调用方注入 system」，压缩产物同样不能
                 # 伪造一条 system 消息把这条路开回来。
+                # 本轮被审批拦下的调用。`DeferredToolRequestsEvent` 带批量结果，
+                # 但**终态**才是权威：用 `run_result.output` 再取一次（见下）。
+                deferred: dict[str, Any] = {}
                 async with agent.run_stream_events(
                     current_prompt,
                     message_history=history,
                     instructions=digest_instructions,
+                    # 续跑审批：把客户端的决定交给 pydantic-ai。`None` 表示本轮不是续跑。
+                    deferred_tool_results=resume_results,
                 ) as stream:
                     async for event in _iterate_with_total_budget(stream, remaining):
                         # 切换发生在流打开阶段，先于任何模型事件：在第一条事件之前告诉用户。
@@ -786,9 +1003,27 @@ async def stream_chat_events(
                         if isinstance(event, AgentRunResultEvent):
                             run_result = event.result
                             continue
+                        deferred = _remember_deferred(event, deferred)
                         for chat_event in translate_event(event, seen_clarification_ids):
                             emitted = True
                             yield chat_event
+
+                # 审批拦下：本轮**正常结束**（不是错误），工具一次都没执行。
+                # 先发用量再发审批请求，用户看到的顺序才是「这一轮说完了，然后要我确认」。
+                pending = _pending_from_result(run_result, deferred)
+                if pending:
+                    usage = extract_turn_usage(run_result.all_messages() if run_result is not None else None)
+                    if usage is not None:
+                        emitted = True
+                        yield Usage(
+                            context_tokens=usage.context_tokens,
+                            context_window=snapshot.context_window_for(answered_by),
+                            output_tokens=usage.output_tokens,
+                            cache_read_tokens=usage.cache_read_tokens,
+                        )
+                    emitted = True
+                    yield build_approval_event(pending)
+                    break
 
                 # 真实用量在流结束这一刻才齐：放在正文之后、Done 之前。
                 usage = extract_turn_usage(run_result.all_messages() if run_result is not None else None)

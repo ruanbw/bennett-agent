@@ -221,6 +221,7 @@ export function createRun({
     toolCalls: [],
     partOrder: [],
     clarification: null,
+    approval: null,
     fallback: null,
     compaction: null,
     usage: null,
@@ -487,6 +488,24 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
         question: event.question,
         options: event.options ?? [],
         allowCustomInput: event.allow_custom_input !== false,
+      };
+      break;
+
+    case 'approval_required':
+      // 工具在执行前被拦下（见后端 `app/tools/approval.py`）：本轮就此结束，
+      // 用户做出决定后再发起一次请求续跑。这里只记下「要调用什么」。
+      //
+      // 不追加 `toolCalls` 记录：那些调用**没有执行**，混进执行轨迹会让用户以为
+      // 它们跑过了（`ToolCallRecord.status` 只有 running/complete 两态，没有
+      // 「待批」）。审批卡片是独立的一段 UI，数据也独立存。
+      run.approval = {
+        toolCalls: (event.tool_calls ?? []).map((call) => ({
+          toolCallId: call.tool_call_id,
+          toolName: call.tool_name,
+          argsText: call.args,
+          description: call.description ?? '',
+          riskLevel: call.risk_level ?? '',
+        })),
       };
       break;
 
