@@ -40,7 +40,7 @@ export interface ChatContainerProps {
   onCreateSession?: () => void | Promise<unknown>;
   /** 收起态胶囊工具栏的搜索入口：展开侧边栏并把光标放进搜索框。 */
   onOpenSearch?: () => void;
-  /** 收起态胶囊工具栏的设置入口（设置面板挂在 App，收起侧边栏时 AccountBar 不渲染）。 */
+  /** 收起态胶囊工具栏的设置入口（设置页挂在 App，收起侧边栏时 AccountBar 不渲染）。 */
   onOpenSettings?: () => void;
   /** 收起态胶囊工具栏的账号菜单（登出 / 管理后台 / 主题），与侧边栏底部共用同一实现。 */
   account?: ChatContainerAccountProps;
@@ -205,52 +205,59 @@ export function ChatContainer({
                   <Plus size={16} aria-hidden="true" />
                 </button>
               )}
-              {onOpenSearch && (
-                <button
-                  type="button"
-                  onClick={onOpenSearch}
-                  className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
-                  title={`搜索对话（${searchShortcutLabel()}）`}
-                  aria-label="搜索对话"
-                  aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
-                >
-                  <Search size={16} aria-hidden="true" />
-                </button>
-              )}
-              {onOpenSettings && (
-                <button
-                  type="button"
-                  onClick={onOpenSettings}
-                  className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
-                  title={`设置（${settingsShortcutLabel()}）`}
-                  aria-label="设置"
-                  aria-keyshortcuts={SETTINGS_SHORTCUT_KEYS}
-                >
-                  <Settings size={16} aria-hidden="true" />
-                </button>
-              )}
-              {/* 同步状态：与侧边栏顶部同一个组件，收起后仍然能看到失败并恢复 */}
-              <SyncStatusButton />
-              {account && (
-                <AccountMenu
-                  collapsed
-                  email={account.email}
-                  onLogout={account.onLogout}
-                  onOpenSettings={account.onOpenSettings}
-                  canOpenAdmin={account.canOpenAdmin}
-                  onOpenAdmin={account.onOpenAdmin}
-                  trigger={
-                    <button
-                      type="button"
-                      className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      title={`账号：${account.email ?? '未登录'}`}
-                      aria-label="账号与设置菜单"
-                    >
-                      <UserRound size={16} aria-hidden="true" />
-                    </button>
-                  }
-                />
-              )}
+              {/*
+                搜索 / 设置 / 同步 / 账号：桌面端侧边栏收起后由胶囊补上这些入口，
+                但移动端它们都在抽屉里（抽屉顶部有搜索与同步，底部账号菜单里有设置），
+                留在顶栏只会把 6 个图标挤成一行、还把标题挤没。窄屏统一收起。
+              */}
+              <div className="hidden items-center md:flex">
+                {onOpenSearch && (
+                  <button
+                    type="button"
+                    onClick={onOpenSearch}
+                    className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                    title={`搜索对话（${searchShortcutLabel()}）`}
+                    aria-label="搜索对话"
+                    aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
+                  >
+                    <Search size={16} aria-hidden="true" />
+                  </button>
+                )}
+                {onOpenSettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer"
+                    title={`设置（${settingsShortcutLabel()}）`}
+                    aria-label="设置"
+                    aria-keyshortcuts={SETTINGS_SHORTCUT_KEYS}
+                  >
+                    <Settings size={16} aria-hidden="true" />
+                  </button>
+                )}
+                {/* 同步状态：与侧边栏顶部同一个组件，收起后仍然能看到失败并恢复 */}
+                <SyncStatusButton />
+                {account && (
+                  <AccountMenu
+                    collapsed
+                    email={account.email}
+                    onLogout={account.onLogout}
+                    onOpenSettings={account.onOpenSettings}
+                    canOpenAdmin={account.canOpenAdmin}
+                    onOpenAdmin={account.onOpenAdmin}
+                    trigger={
+                      <button
+                        type="button"
+                        className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 transition cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        title={`账号：${account.email ?? '未登录'}`}
+                        aria-label="账号与设置菜单"
+                      >
+                        <UserRound size={16} aria-hidden="true" />
+                      </button>
+                    }
+                  />
+                )}
+              </div>
             </div>
           )}
 

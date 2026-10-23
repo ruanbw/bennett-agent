@@ -53,11 +53,21 @@ describe('ChatContainer 顶栏与可编辑标题', () => {
 
     expect(html).toContain('aria-label="展开侧边栏"');
     expect(html).toContain('aria-label="新建对话"');
-    // 搜索框、设置面板和同步面板都长在侧边栏里：收起后必须由胶囊工具栏补上入口
+    // 搜索框、设置页和同步面板都长在侧边栏里：收起后必须由胶囊工具栏补上入口
     expect(html).toContain('aria-label="搜索对话"');
     expect(html).toContain('aria-label="设置"');
     expect(html).toContain('aria-label="已同步，查看同步详情"');
     expect(html).toContain('rounded-xl');
+    // 搜索/设置/同步/账号在移动端由抽屉承担，顶栏只留「展开 + 新建」：
+    // 这四个包在一个 md 以下隐藏的容器里
+    expect(html).toContain('hidden items-center md:flex');
+    expect(html.indexOf('hidden items-center md:flex')).toBeLessThan(
+      html.indexOf('aria-label="搜索对话"')
+    );
+    // 「展开侧边栏」「新建对话」不在这层容器里，移动端仍然可见
+    expect(html.indexOf('aria-label="新建对话"')).toBeLessThan(
+      html.indexOf('hidden items-center md:flex')
+    );
   });
 
   it('没传 onOpenSearch 时不渲染搜索入口（不给出点不动的按钮）', () => {
