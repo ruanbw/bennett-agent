@@ -4,13 +4,13 @@
  * 与 `detail-level-context.ts` 同一形态：纯逻辑（白名单、存储读写、storage 事件解析）
  * 在 `lib/performance-usage.ts`，这里只负责把值递给组件树。
  *
- * 为什么需要 provider 而不是让 `ComposerStats` 各自读 localStorage：设置面板要能改它，
- * 而设置面板与输入框底部统计是两个互不相邻的组件。各自读 localStorage 会得到两个
+ * 为什么需要 provider 而不是让 `ComposerStats` 各自读 localStorage：设置页要能改它，
+ * 而设置页与输入框底部统计是两个互不相邻的组件。各自读 localStorage 会得到两个
  * 互不通知的副本——改完设置要么得刷新页面，要么得等下一次 storage 事件（同标签页内
  * 根本不会触发）。一个 provider 让「改」与「看」共享同一份状态。
  *
  * 消费者：
- *   - 设置面板的「性能与用量」两档（唯一写入入口）；
+ *   - 设置页的「性能与用量」两档（唯一写入入口）；
  *   - 输入框下方那排统计药丸（`ComposerStats`）。
  */
 
@@ -44,7 +44,7 @@ export function usePerformanceUsage(): PerformanceUsageContextValue | null {
 /**
  * 在「有 provider」与「没有 provider」两种情况下都能安全使用的读写入口。
  *
- * 设置面板与统计药丸都该用它，而不是自己处理 `null`：
+ * 设置页与统计药丸都该用它，而不是自己处理 `null`：
  *   - 有 provider → 直接透传（改了立刻全局生效）；
  *   - 没有 provider（组件被单独渲染 / 服务端渲染测试）→ 退回 localStorage 读写。
  *     读一次即定，写只落存储。这条路径下的「不联动」是可接受的：没有 provider 就没有

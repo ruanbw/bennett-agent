@@ -63,7 +63,7 @@ describe('fetchKnowledgeCapabilities', () => {
   });
 
   it('请求失败时降级为不可用，而不是把错误抛给界面', async () => {
-    // 知识库是增强能力：它的状态拉不到不该让设置面板整体渲染失败
+    // 知识库是增强能力：它的状态拉不到不该让设置页整体渲染失败
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
 
     await expect(fetchKnowledgeCapabilities()).resolves.toEqual(UNKNOWN_KNOWLEDGE);

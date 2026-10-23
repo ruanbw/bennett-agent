@@ -72,7 +72,7 @@ function sanitizeMcpServers(value: unknown): McpServerStatus[] {
 }
 
 /**
- * 设置面板里「服务端能力」一行的文案。
+ * 设置页里「服务端能力」一行的文案。
  *
  * 用户看到的示例是**裁剪过**的：没有联网搜索时搜索示例整条消失。这个裁剪如果没有
  * 任何说明，用户只会以为「这个助手就是不会搜索」，而实际上可能只是服务端没配 Key。
@@ -106,7 +106,7 @@ export function describeMcpCapability(capabilities: Capabilities | null | undefi
   return `${servers.length} 个 server · ${toolCount} 个工具`;
 }
 
-/** MCP server 名字清单（设置面板里展开显示；空串表示没有可列的东西）。 */
+/** MCP server 名字清单（设置页里展开显示；空串表示没有可列的东西）。 */
 export function describeMcpServers(capabilities: Capabilities | null | undefined): string {
   const servers = capabilities?.mcp_servers ?? [];
   return servers.map((server) => server.name).join('、');

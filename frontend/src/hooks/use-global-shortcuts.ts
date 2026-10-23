@@ -15,19 +15,31 @@ import {
 export interface GlobalShortcutHandlers {
   onOpenSearch: () => void;
   onOpenSettings: () => void;
+  /**
+   * 整屏页面（设置页）打开时置 true：此时 ⌘K 不再可用。
+   *
+   * 页面没有 `role="dialog"`，所以下面那道「模态打开时不抢快捷键」的守卫拦不住它；
+   * 搜索抽屉会在页面背后展开，用户既看不见也回不去。设置键**不**随之禁用——它被
+   * 当作「再按一次返回」。
+   */
+  blockSearch?: boolean;
 }
 
-export function useGlobalShortcuts({ onOpenSearch, onOpenSettings }: GlobalShortcutHandlers): void {
+export function useGlobalShortcuts({
+  onOpenSearch,
+  onOpenSettings,
+  blockSearch = false,
+}: GlobalShortcutHandlers): void {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       // 弹层/菜单已经处理过的按键不能再触发全局动作（Esc 关闭菜单时会 preventDefault）
       if (event.defaultPrevented) return;
 
       // 模态框打开时不抢快捷键：用户的上下文在弹层里（设置 / 确认框），
-      // 背后再打开搜索或再开一个设置面板只会让人困惑。
+      // 背后再打开搜索或再开一个设置页只会让人困惑。
       if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
 
-      if (isSearchShortcut(event)) {
+      if (!blockSearch && isSearchShortcut(event)) {
         event.preventDefault();
         onOpenSearch();
         return;
@@ -41,5 +53,5 @@ export function useGlobalShortcuts({ onOpenSearch, onOpenSettings }: GlobalShort
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onOpenSearch, onOpenSettings]);
+  }, [onOpenSearch, onOpenSettings, blockSearch]);
 }

@@ -4,7 +4,7 @@ import { formatStorageUsage } from '../lib/local-stats';
 import type { LocalDataStats } from '../lib/local-stats';
 
 /**
- * 设置面板里的「本机数据」区块。
+ * 设置页里的「本机数据」区块。
  *
  * 单独成一个组件是为了能被服务端渲染测试直接喂状态：三种状态（读到了 / 还在读 /
  * 读失败）的文案差别就是这块的全部价值，绑在 hook 里就只能靠交互测试去验证。

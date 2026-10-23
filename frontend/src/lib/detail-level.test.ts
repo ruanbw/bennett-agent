@@ -213,7 +213,7 @@ describe('四档的行为策略表', () => {
   });
 });
 
-describe('设置面板用的选项元数据', () => {
+describe('设置页用的选项元数据', () => {
   it('四档按从少到多排列，文案与 DSH 一致', () => {
     expect(DETAIL_LEVEL_OPTIONS.map((option) => option.value)).toEqual([
       'compact',

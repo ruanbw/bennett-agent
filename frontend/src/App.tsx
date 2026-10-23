@@ -5,7 +5,7 @@ import { ChatContainer } from './components/ChatContainer';
 import { ChatProvider } from './components/ChatProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LoginPage } from './components/LoginPage';
-import { SettingsDialog } from './components/SettingsDialog';
+import { SettingsPage } from './components/SettingsPage';
 import { Sidebar } from './components/Sidebar';
 import { Toaster } from './components/Toaster';
 import { AdminConsole } from './components/admin/AdminConsole';
@@ -25,6 +25,7 @@ import { ModelListShapeError, readModelListResponse } from './lib/models-respons
 import { downloadMarkdownFile } from './lib/export-markdown';
 import { resolveDrawerRestoreTarget, trapTabIndex } from './lib/focus-trap';
 import { notify } from './lib/toast';
+import { cn } from './lib/utils';
 import { startSync, stopSync } from './lib/sync/engine';
 import type { ModelItem } from './types';
 
@@ -157,7 +158,7 @@ function AuthLoadingScreen() {
 
 export interface AuthenticatedShellProps {
   userEmail: string | null;
-  /** 当前账号角色（`user` / `admin` / `superadmin`），设置面板里展示。 */
+  /** 当前账号角色（`user` / `admin` / `superadmin`），设置页里展示。 */
   userRole: string | null;
   /** 服务端已使本会话失效（改密）：切回未登录并说明原因。 */
   onSessionExpired: (message: string) => void;
@@ -258,8 +259,10 @@ function AuthenticatedShell({
   onLogout,
 }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
-  // 运行时能力只用于裁剪空对话页的起步建议；失败时降级为「无联网搜索」，不阻塞界面
-  const { capabilities, failed: capabilitiesFailed, retry: refreshCapabilities } = useCapabilities();
+  // 运行时能力只用于裁剪空对话页的起步建议；失败时降级为「无联网搜索」，不阻塞界面。
+  // `failed` 原本喂给设置页的「重新探测」提示，设置页收掉信息展示后就没消费者了；
+  // 重探入口改为模型菜单的「重试」（它顺带调 `refreshCapabilities`）。
+  const { capabilities, retry: refreshCapabilities } = useCapabilities();
   const {
     sessions,
     currentSessionId,
@@ -283,11 +286,10 @@ function AuthenticatedShell({
   // 管理后台是覆盖层。状态放在 shell 里（而不是 App）：关闭时要能就地刷新模型列表，
   // 而 `/api/models` 的 state 就在这个组件的 `useModels` 里。
   const [adminOpen, setAdminOpen] = useState(false);
-  // 设置面板挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口在顶栏胶囊工具栏
+  // 设置页挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口在顶栏胶囊工具栏
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleOpenAdmin = useCallback(() => setAdminOpen(true), []);
-  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
 
   const handleCloseAdmin = useCallback(() => {
     setAdminOpen(false);
@@ -310,6 +312,15 @@ function AuthenticatedShell({
   const isSidebarOpen = sidebarOverride ?? !isMobile;
   const setIsSidebarOpen = setSidebarOverride;
 
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+    // 移动端是从抽屉里点进来的：顺手把抽屉收掉，返回时看到的才是对话而不是抽屉
+    if (isMobile) setSidebarOverride(false);
+  }, [isMobile]);
+  const handleCloseSettings = useCallback(() => setSettingsOpen(false), []);
+  /** ⌘, 在设置页上等同于「再按一次返回」：它已经是页面，没有「关不掉的模态」这回事。 */
+  const handleToggleSettings = useCallback(() => setSettingsOpen((open) => !open), []);
+
   /**
    * 「搜索」请求：收起态没有搜索框，所以由顶栏胶囊工具栏发起「展开侧边栏 + 打开搜索」。
    *
@@ -328,8 +339,13 @@ function AuthenticatedShell({
     setSearchRequest((request) => request + 1);
   }, []);
 
-  // ⌘K / Ctrl+K 打开搜索；⌘, / Ctrl+, 打开设置（与胶囊工具栏的两个入口共用动作）
-  useGlobalShortcuts({ onOpenSearch: handleOpenSearch, onOpenSettings: handleOpenSettings });
+  // ⌘K / Ctrl+K 打开搜索；⌘, / Ctrl+, 打开设置（与胶囊工具栏的两个入口共用动作）。
+  // 设置页占据整屏时不接搜索键：抽屉在设置页背后展开，用户看不见也回不去。
+  useGlobalShortcuts({
+    onOpenSearch: handleOpenSearch,
+    onOpenSettings: handleToggleSettings,
+    blockSearch: settingsOpen,
+  });
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -390,104 +406,109 @@ function AuthenticatedShell({
 
   return (
     <div className="app-shell flex w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
-      <Sidebar
-        sessions={sessions}
-        currentSessionId={currentSessionId}
-        onSelectSession={handleSelectSession}
-        onCreateSession={handleCreateSession}
-        onUpdateTitle={updateTitle}
-        onDeleteSession={handleDeleteSession}
-        onExportSession={handleExportSession}
-        onExportSessions={handleExportSessions}
-        onTogglePinSession={togglePin}
-        onBatchDelete={removeSessions}
-        onBatchTogglePin={setPinned}
-        onClearAllSessions={clearAllSessions}
-        isOpen={isSidebarOpen}
-        onToggleOpen={handleToggleSidebar}
-        searchRequest={searchRequest}
-        userEmail={userEmail}
-        canOpenAdmin={canOpenAdmin}
-        onOpenAdmin={handleOpenAdmin}
-        onOpenSettings={handleOpenSettings}
-        onLogout={onLogout}
-      />
-
-      {/* 遮罩：仅移动端抽屉需要 */}
-      {isMobile && isSidebarOpen && (
-        <div
-          onClick={() => setIsSidebarOpen(false)}
-          aria-hidden="true"
-          className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
-        />
-      )}
-
       {/*
-        对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui。
-        `inert` 在移动端抽屉打开时封住背景（遮挡层只挡指针事件），min-h-0 保证内部
-        滚动容器拿得到确定高度。
+        对话区与设置页互斥显示，但对话区**不卸载**（只是 `hidden`）：卸载 ChatProvider
+        会掐断正在生成的回答、丢掉草稿与滚动位置。`hidden` 之后它同时退出布局、
+        退出读屏树，设置页拿走整屏。
       */}
-      <main inert={isMobile && isSidebarOpen} className="flex min-h-0 min-w-0 flex-1">
-        {currentSessionId && (
-          <ErrorBoundary key={currentSessionId} fallbackTitle="对话区域加载异常">
-            <ChatProvider
-              key={currentSessionId}
-              currentSessionId={currentSessionId}
-              currentModel={currentModel}
-              currentReasoningEffort={currentReasoningEffort}
-            >
-              <ChatContainer
-                sessionTitle={sessions.find((s) => s.id === currentSessionId)?.title}
-                /*
-                  必须把 updateTitle 的 Promise 交回去：`void` 掉之后 ChatContainer 的
-                  `await onUpdateTitle(...)` 会立刻成功，保存失败既不报错、也不会把编辑器
-                  留在原地——用户只看到标题悄悄回退，错误只出现在控制台。
-                */
-                onUpdateTitle={(title) =>
-                  currentSessionId ? updateTitle(currentSessionId, title) : undefined
-                }
-                models={models}
-                modelsError={modelsError}
-                webSearchAvailable={capabilities?.web_search ?? false}
+      <div className={cn('flex min-h-0 min-w-0 flex-1', settingsOpen && 'hidden')}>
+        <Sidebar
+          sessions={sessions}
+          currentSessionId={currentSessionId}
+          onSelectSession={handleSelectSession}
+          onCreateSession={handleCreateSession}
+          onUpdateTitle={updateTitle}
+          onDeleteSession={handleDeleteSession}
+          onExportSession={handleExportSession}
+          onExportSessions={handleExportSessions}
+          onTogglePinSession={togglePin}
+          onBatchDelete={removeSessions}
+          onBatchTogglePin={setPinned}
+          onClearAllSessions={clearAllSessions}
+          isOpen={isSidebarOpen}
+          onToggleOpen={handleToggleSidebar}
+          searchRequest={searchRequest}
+          userEmail={userEmail}
+          canOpenAdmin={canOpenAdmin}
+          onOpenAdmin={handleOpenAdmin}
+          onOpenSettings={handleOpenSettings}
+          onLogout={onLogout}
+        />
+
+        {/* 遮罩：仅移动端抽屉需要 */}
+        {isMobile && isSidebarOpen && (
+          <div
+            onClick={() => setIsSidebarOpen(false)}
+            aria-hidden="true"
+            className="fixed inset-0 bg-black/60 z-20 md:hidden backdrop-blur-xs"
+          />
+        )}
+
+        {/*
+          对话主界面：包裹在 ChatProvider (assistant-ui Runtime) 中，Thread 位于 elements/thread.aui。
+          `inert` 在移动端抽屉打开时封住背景（遮挡层只挡指针事件），min-h-0 保证内部
+          滚动容器拿得到确定高度。
+        */}
+        <main inert={isMobile && isSidebarOpen} className="flex min-h-0 min-w-0 flex-1">
+          {currentSessionId && (
+            <ErrorBoundary key={currentSessionId} fallbackTitle="对话区域加载异常">
+              <ChatProvider
+                key={currentSessionId}
+                currentSessionId={currentSessionId}
                 currentModel={currentModel}
                 currentReasoningEffort={currentReasoningEffort}
-                onSelectModel={selectModel}
-                onSelectReasoningEffort={selectReasoningEffort}
-                // 模型菜单的「重试」顺带重探运行时能力：管理员刚配好搜索 Key 时，
-                // 最常做的就是回聊天页点这个按钮——只刷模型列表会留下「已启用搜索但
-                // 起步建议里没有搜索示例」的错位。
-                onRefreshModels={async () => {
-                  refreshCapabilities();
-                  await refreshModels();
-                }}
-                onToggleSidebar={handleToggleSidebar}
-                onOpenSearch={handleOpenSearch}
-                onOpenSettings={handleOpenSettings}
-                account={{
-                  email: userEmail,
-                  onLogout,
-                  onOpenSettings: handleOpenSettings,
-                  canOpenAdmin,
-                  onOpenAdmin: handleOpenAdmin,
-                }}
-                onCreateSession={handleCreateSession}
-                isSidebarOpen={isSidebarOpen}
-              />
-            </ChatProvider>
-          </ErrorBoundary>
-        )}
-      </main>
+              >
+                <ChatContainer
+                  sessionTitle={sessions.find((s) => s.id === currentSessionId)?.title}
+                  /*
+                    必须把 updateTitle 的 Promise 交回去：`void` 掉之后 ChatContainer 的
+                    `await onUpdateTitle(...)` 会立刻成功，保存失败既不报错、也不会把编辑器
+                    留在原地——用户只看到标题悄悄回退，错误只出现在控制台。
+                  */
+                  onUpdateTitle={(title) =>
+                    currentSessionId ? updateTitle(currentSessionId, title) : undefined
+                  }
+                  models={models}
+                  modelsError={modelsError}
+                  webSearchAvailable={capabilities?.web_search ?? false}
+                  currentModel={currentModel}
+                  currentReasoningEffort={currentReasoningEffort}
+                  onSelectModel={selectModel}
+                  onSelectReasoningEffort={selectReasoningEffort}
+                  // 模型菜单的「重试」顺带重探运行时能力：管理员刚配好搜索 Key 时，
+                  // 最常做的就是回聊天页点这个按钮——只刷模型列表会留下「已启用搜索但
+                  // 起步建议里没有搜索示例」的错位。
+                  onRefreshModels={async () => {
+                    refreshCapabilities();
+                    await refreshModels();
+                  }}
+                  onToggleSidebar={handleToggleSidebar}
+                  onOpenSearch={handleOpenSearch}
+                  onOpenSettings={handleOpenSettings}
+                  account={{
+                    email: userEmail,
+                    onLogout,
+                    onOpenSettings: handleOpenSettings,
+                    canOpenAdmin,
+                    onOpenAdmin: handleOpenAdmin,
+                  }}
+                  onCreateSession={handleCreateSession}
+                  isSidebarOpen={isSidebarOpen}
+                />
+              </ChatProvider>
+            </ErrorBoundary>
+          )}
+        </main>
+      </div>
 
-      <SettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        userEmail={userEmail}
-        userRole={userRole}
-        capabilities={capabilities}
-        capabilitiesFailed={capabilitiesFailed}
-        onRefreshCapabilities={refreshCapabilities}
-        onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
-      />
+      {settingsOpen && (
+        <SettingsPage
+          onClose={handleCloseSettings}
+          userEmail={userEmail}
+          userRole={userRole}
+          onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
+        />
+      )}
 
       {adminOpen && (
         <ErrorBoundary fallbackTitle="管理后台加载异常">
@@ -545,10 +566,10 @@ export function App() {
   return (
     <ThemeProvider>
       {/* 对话显示偏好（详细/简洁）要覆盖登录页之外的整个聊天界面；
-          放在这里而不是 AuthenticatedShell 里，是因为设置面板挂在 shell 层。 */}
+          放在这里而不是 AuthenticatedShell 里，是因为设置页挂在 shell 层。 */}
       <DetailLevelProvider>
       {/* 「性能与用量」偏好（统计药丸的详细程度）：与对话显示正交，
-          同样要覆盖设置面板与聊天界面两侧，所以挂在这一层。 */}
+          同样要覆盖设置页与聊天界面两侧，所以挂在这一层。 */}
       <PerformanceUsageProvider>
       {/* 动作反馈（导出完成 / 新建失败）：持久状态仍用页面内联条，不用 toast */}
       <Toaster />

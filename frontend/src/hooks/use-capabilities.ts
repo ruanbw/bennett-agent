@@ -8,7 +8,7 @@
  * 生效、反代在建连、标签页冷启动）。所以这里做两件事：
  *
  * 1. 失败后**自动隔一会儿再试一次**——启动竞态通常几秒内就消失，用户不该为此刷新页面；
- * 2. 暴露 `retry`，让设置面板的「未知」旁边有一个可点的「重新探测」，以及模型菜单的
+ * 2. 暴露 `retry`，让设置页的「未知」旁边有一个可点的「重新探测」，以及模型菜单的
  *    「重试」顺带把它一起刷新（管理员刚配好 Key 时最常用的动作就是这个）。
  */
 
@@ -21,7 +21,7 @@ import type { Capabilities } from '../types';
 export const CAPABILITIES_AUTO_RETRY_MS = 3_000;
 
 export interface CapabilitiesState {
-  /** `null` 表示「还没拿到 / 拿不到」——设置面板要区分「未启用」与「未知」。 */
+  /** `null` 表示「还没拿到 / 拿不到」——设置页要区分「未启用」与「未知」。 */
   capabilities: Capabilities | null;
   /** 最近一次探测失败（拿到结果后清空）。界面据此给出「重新探测」入口。 */
   failed: boolean;

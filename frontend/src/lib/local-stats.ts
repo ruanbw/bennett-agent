@@ -1,5 +1,5 @@
 /**
- * 本机数据统计：设置面板里的「本机数据」区块。
+ * 本机数据统计：设置页里的「本机数据」区块。
  *
  * 这个应用的数据默认只存在本机 IndexedDB 里（服务端同步是补强），用户应该有地方看到
  * 「我这里到底存了多少东西、占了多少空间」——尤其是存储被浏览器清掉、或者配额告急时。
@@ -49,7 +49,7 @@ async function estimateStorage(): Promise<StorageEstimateResult> {
   }
 }
 
-/** 读一次本机数据统计（不缓存：设置面板每次打开都读最新的）。 */
+/** 读一次本机数据统计（不缓存：设置页每次打开都读最新的）。 */
 export async function readLocalDataStats(): Promise<LocalDataStats> {
   // 没有事务包住：两个 count 之间用户可能删了东西，但这是一份展示用的快照，
   // 数字之间的微小偏差不值得为它开一个长事务。

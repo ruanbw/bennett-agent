@@ -18,9 +18,9 @@ export interface AccountBarProps {
   canOpenAdmin?: boolean;
   onOpenAdmin?: () => void;
   /**
-   * 打开设置面板。
+   * 打开设置页。
    *
-   * 设置面板挂在 `App` 而不是这里：侧边栏收起时本组件整块不渲染，顶栏胶囊工具栏的
+   * 设置页挂在 `App` 而不是这里：侧边栏收起时本组件整块不渲染，顶栏胶囊工具栏的
    * 齿轮与头像菜单都要能打开它，因此宿主必须是常驻的父层。
    */
   onOpenSettings: () => void;

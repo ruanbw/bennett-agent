@@ -169,7 +169,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
 
   return (
     <form onSubmit={handleSubmit} aria-busy={submitting} className="space-y-2">
-      <div className="space-y-2 rounded-lg border border-border/70 bg-muted/40 p-3">
+      <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-3">
         <PasswordField
           id="password-current"
           name="current-password"
@@ -185,7 +185,8 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
           onToggleVisibility={() => toggleVisibility('current')}
         />
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {/* 单列：这个表单现在住在设置页的窄栏里（约 450px），两栏会把两个密码框挤成各 200px */}
+        <div className="space-y-2">
           <PasswordField
             id="password-new"
             name="new-password"
@@ -222,24 +223,21 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
           </p>
         )}
 
-        <div className="flex items-center justify-between gap-2">
+        {/* 说明在上、按钮在下：并排放时说明会被挤成三行 */}
+        <div className="space-y-2">
           <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
             新密码至少需要 {MIN_PASSWORD_LENGTH} 个字符；修改成功后所有设备都需要用新密码重新登录。
           </p>
-          <Button
-            type="submit"
-            size="sm"
-            variant="outline"
-            disabled={submitting}
-            className="shrink-0 text-[11px]"
-          >
-            {submitting ? (
-              <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-            ) : (
-              <KeyRound className="size-3" aria-hidden="true" />
-            )}
-            修改密码
-          </Button>
+          <div className="flex justify-end">
+            <Button type="submit" size="sm" variant="outline" disabled={submitting} className="text-[11px]">
+              {submitting ? (
+                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+              ) : (
+                <KeyRound className="size-3" aria-hidden="true" />
+              )}
+              修改密码
+            </Button>
+          </div>
         </div>
       </div>
     </form>

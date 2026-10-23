@@ -63,7 +63,7 @@ export interface ComposerStatsProps {
   /**
    * 「性能与用量」档位的**受控覆盖**（测试用）。
    *
-   * 默认由组件自己从 localStorage 读，并监听 `storage` 事件做多标签同步——设置面板
+   * 默认由组件自己从 localStorage 读，并监听 `storage` 事件做多标签同步——设置页
    * 由 Lead 接线，不应该再让调用方转一手这个偏好。
    */
   performanceUsage?: PerformanceUsage;
@@ -152,12 +152,12 @@ export const ComposerStats: FC<ComposerStatsProps> = ({
 }) => {
   const derived = useMemo(() => deriveStats(messages), [messages]);
 
-  // 偏好：优先用 provider（设置面板与这里共享同一份状态，改完立刻生效）。
+  // 偏好：优先用 provider（设置页与这里共享同一份状态，改完立刻生效）。
   // 没有 provider 时（组件被单独渲染 / 测试）退回自己读 localStorage + storage 同步；
   // 再没有就是 `performanceUsage` 这个受控覆盖。
   //
   // 为什么必须优先 provider：`storage` 事件只在**其他**标签页写入时触发，同一个标签页里
-  // 在设置面板切换档位不会触发它——只靠 localStorage 的话，用户改完设置得刷新页面才生效。
+  // 在设置页切换档位不会触发它——只靠 localStorage 的话，用户改完设置得刷新页面才生效。
   const fromContext = usePerformanceUsage();
   const [storedMode, setStoredMode] = useState<PerformanceUsage>(() => readPerformanceUsage());
   useEffect(() => {
