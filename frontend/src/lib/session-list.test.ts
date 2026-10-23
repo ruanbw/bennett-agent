@@ -6,6 +6,7 @@ import {
   batchDeleteDescription,
   clampTitle,
   deleteSessionDescription,
+  isBlankDraft,
   pinChange,
   sortSessions,
   titleChange,
@@ -83,6 +84,29 @@ describe('pinChange', () => {
     // 取消置顶后回到原来的位置：若 pinChange bump 了 updatedAt，这里会变成 ['c','a','b']
     const unpinned = pinned.map((s) => (s.id === 'c' ? { ...s, ...pinChange(false) } : s))
     expect(sortSessions(unpinned).map((s) => s.id)).toEqual(['a', 'b', 'c'])
+  })
+})
+
+describe('isBlankDraft', () => {
+  it('没有任何消息、没在生成、没置顶就是空占位', () => {
+    expect(isBlankDraft(session('s1', 100), 0, false)).toBe(true)
+  })
+
+  it('有消息就不是空占位', () => {
+    expect(isBlankDraft(session('s1', 100), 1, false)).toBe(false)
+  })
+
+  it('正在生成时不算空：流式回答还在内存里，消息条数为 0', () => {
+    expect(isBlankDraft(session('s1', 100), 0, true)).toBe(false)
+  })
+
+  it('墓碑与已置顶的会话不当作空占位（后者是显式的「留着」）', () => {
+    expect(isBlankDraft(session('s1', 100, { deleted: true }), 0, false)).toBe(false)
+    expect(isBlankDraft(session('s1', 100, { isPinned: 1 }), 0, false)).toBe(false)
+  })
+
+  it('会话行不存在时不当作空占位', () => {
+    expect(isBlankDraft(undefined, 0, false)).toBe(false)
   })
 })
 

@@ -72,6 +72,29 @@ export function pinChange(pinned: boolean): { isPinned: number } {
 }
 
 /**
+ * 一个会话是否只是「开了没聊」的空占位。
+ *
+ * 两条用户可见的规则都建立在它上面：当前会话还是空占位时，「开启新对话」不再叠一个
+ * （否则列表里攒出一串同名「新对话」）；切到历史会话时把空占位收走（它没有任何内容，
+ * 不值得留作占位）。
+ *
+ * 三个排除项都是「已经表达了内容意图」的信号：
+ *   - 墓碑：已经删掉的行不该再被判定一次；
+ *   - 正在生成：流式回答先进内存、后落库，只数消息条数会把它误判为空；
+ *   - 已置顶：置顶是显式的「留着」动作，删掉它与用户意图相反。
+ */
+export function isBlankDraft(
+  session: Pick<SessionRecord, 'deleted' | 'isPinned'> | undefined,
+  messageCount: number,
+  runActive: boolean,
+): boolean {
+  if (!session || session.deleted) return false;
+  if (runActive) return false;
+  if (session.isPinned) return false;
+  return messageCount === 0;
+}
+
+/**
  * 选中集合与「当前可见（搜索过滤后）」集合的交集。
  *
  * 批量操作只作用于这个集合：搜索把某些已选会话藏起来时不能被顺带删除，

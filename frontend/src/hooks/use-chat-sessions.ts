@@ -12,7 +12,7 @@ import {
   type ExportedConversation,
 } from '../lib/export-markdown';
 import { reconcileEffort } from '../lib/reasoning-effort';
-import { pinChange, sortSessions, titleChange } from '../lib/session-list';
+import { isBlankDraft, pinChange, sortSessions, titleChange } from '../lib/session-list';
 import {
   abortChatRun,
   isRunActive,
@@ -136,9 +136,50 @@ export function useChatSessions({
   // -------------------------------------------------------------------
   // 创建 / 切换
   // -------------------------------------------------------------------
+  /** 会话是否只是「开了没聊」的空占位（规则本身在 `isBlankDraft`，可单测）。 */
+  const isBlankSession = useCallback(async (sessionId: string): Promise<boolean> => {
+    const [session, messageCount] = await Promise.all([
+      db.sessions.get(sessionId),
+      db.messages.where('sessionId').equals(sessionId).count(),
+    ]);
+    // run 状态在读库**之后**取：刚开始的那一轮回答还在内存里，先读会把它误判成空
+    return isBlankDraft(session, messageCount, isRunActive(sessionId));
+  }, []);
+
+  /**
+   * 把一个空占位会话收走（墓碑 + 通知），返回是否真的删了。
+   *
+   * 刻意不走 `removeSessions`：那里要替「当前会话被删」挑一个替代者，而这里的调用方
+   * 正是已经选好去处的那一方，走同一套逻辑会和它抢选中。
+   */
+  const discardBlankSession = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (!(await isBlankSession(sessionId))) return false;
+
+      // 保留墓碑而不是直接 delete：与单条/批量删除同口径，同步层靠它把删除推出去
+      await db.sessions.update(sessionId, { deleted: true, updatedAt: Date.now() });
+      requestPush();
+      broadcastSessionsChanged(sessionId);
+      sessionsRef.current = sessionsRef.current.filter((session) => session.id !== sessionId);
+      setSessions((prev) => prev.filter((session) => session.id !== sessionId));
+      return true;
+    },
+    [isBlankSession],
+  );
+
   const createSession = useCallback(async (): Promise<string> => {
-    // 创建前的选中值：await 期间用户可能已经点了别的会话
+    // 当前会话还是空占位时，再点「开启新对话」不该叠第二个：两条记录都叫「新对话」，
+    // 用户分不清哪个是刚点的，列表也会慢慢攒出一串空壳。
+    // `selectedBeforeCreate` 是「创建前的选中值」：await 期间用户可能已经点了别的会话。
     const selectedBeforeCreate = currentSessionIdRef.current;
+    if (
+      selectedBeforeCreate &&
+      currentSessionIdRef.current === selectedBeforeCreate &&
+      (await isBlankSession(selectedBeforeCreate))
+    ) {
+      return selectedBeforeCreate;
+    }
+
     const now = Date.now();
     const session: SessionRecord = {
       id: newSessionId(),
@@ -163,20 +204,28 @@ export function useChatSessions({
       setCurrentSessionId(session.id);
     }
     return session.id;
-  }, [currentModel, currentReasoningEffort]);
+  }, [currentModel, currentReasoningEffort, isBlankSession]);
 
   /** 切换当前会话，并把工具栏对齐到该会话记录的模型/等级。 */
   const selectSession = useCallback(
     (sessionId: string, sessionList?: SessionRecord[]): void => {
       const source = sessionList ?? sessionsRef.current;
       const session = source.find((s) => s.id === sessionId);
+      const previouslySelected = currentSessionIdRef.current;
       currentSessionIdRef.current = sessionId;
       setCurrentSessionId(sessionId);
       // 会话没存模型时置 null，交给 `currentModel` 派生时回退到默认模型
       setSelectedModel(session?.model ?? null);
       setSelectedEffort(session?.reasoningEffort ?? defaultEffort);
+
+      // 切走时把留下的空占位收走：它没有任何内容，留着一个「新对话」只是噪声。
+      // 用 void 而不是把 selectSession 改成异步：切换本身必须发生在点击的同一拍，
+      // 否则输入框与消息区会先闪一下旧会话。
+      if (previouslySelected && previouslySelected !== sessionId) {
+        void discardBlankSession(previouslySelected);
+      }
     },
-    [defaultEffort],
+    [defaultEffort, discardBlankSession],
   );
 
   const updateTitle = useCallback(
