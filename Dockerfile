@@ -1,20 +1,26 @@
-# Bennett Agent —— 单镜像部署
+# Bennett Agent —— 后端镜像
 #
-# ## 为什么是一个镜像而不是两个
+# ## 只打包后端
 #
-# 后端可以自己托管前端构建产物（`app/frontend.py`），所以生产形态是**同源单进程**：
-# 一个容器同时提供 `/api/*` 与静态页面。这样做的理由不是「省一个容器」，而是：
+# 仓库是**前后端分离**的：本镜像只提供 `/api/*`，不托管任何前端产物。
+# 前端构建（`npm run build`）与静态托管是独立的一步——产物交给任意静态服务器或
+# CDN，`/api` 由反向代理转给本服务。
 #
-# 1. 会话走 HttpOnly cookie。跨源部署要求 CORS、`allow_credentials`、SameSite 三处
-#    同时对齐，任何一处漏掉的表现都是「登录成功了，但下一个请求又是未登录」——
-#    最难查的那类故障。同源则三处都不需要配。
-# 2. 反代方案还得额外维护一份 Nginx 配置（SSE 要关 buffering、超时要放大），
-#    而那份配置的正确性没有任何测试覆盖。放进镜像里反而少一个会坏的组件。
+# 这样切分是有意的：把前端产物塞进后端进程会让「换一次前端」变成「重启一次 API」，
+# 也让后端的镜像体积、Node 工具链与前端发版节奏绑在一起。
+#
+# 跨源部署要点（既然是分离的，就必须面对它）：
+# - 会话走 HttpOnly cookie，前端 fetch 要带 `credentials: 'include'`；
+# - 后端 CORS 必须同时给出 `allow_credentials=True` 与**明确的** `allow_origins`
+#   （浏览器拒绝 `*` + credentials 的组合），对照 `CORS_ALLOWED_ORIGINS`；
+# - 前端若与后端不同 site，cookie 的 SameSite 需要按部署形态调整。
+#
+# 更省事的形态是让 Nginx/网关把 `/api` 与静态页面收在同一个域名下（同源），
+# 上面三条就都不需要了——那是部署侧的事，不由这个镜像承担。
 #
 # ## 为什么是多阶段构建
 #
-# 前端需要 Node 才能构建，但运行时完全用不到它。多阶段让最终镜像里只有 Python、
-# 依赖与本仓库代码（约 200MB，而不是把 node_modules 一起塞进去的 800MB+）。
+# 依赖与代码分层：改一行 Python 代码不会让依赖层失效。
 #
 # ## 构建缓存怎么排
 #
@@ -23,26 +29,7 @@
 # 构建时间从 5 秒变成 2 分钟。
 
 # ---------------------------------------------------------------------
-# 阶段 1：构建前端
-# ---------------------------------------------------------------------
-FROM node:22-alpine AS frontend
-
-WORKDIR /build
-
-# 只复制依赖清单：`npm ci` 的缓存层只随 lockfile 变化
-COPY frontend/package.json frontend/package-lock.json ./
-# `npm ci` 而不是 `npm install`：严格按 lockfile 装，且 lockfile 与 package.json
-# 不一致时直接失败。用 `install` 会悄悄改写 lockfile，构建结果不再可复现。
-RUN npm ci
-
-COPY frontend/ ./
-# `npm run build` = `tsc --noEmit && vite build`：类型错误会让构建失败，
-# 而不是产出一份「能跑但类型是错的」的产物。
-RUN npm run build
-
-
-# ---------------------------------------------------------------------
-# 阶段 2：运行时
+# 运行时
 # ---------------------------------------------------------------------
 # 版本与 `.python-version` / `pyproject.toml` 的 `requires-python` 保持一致（3.10）。
 # 镜像里跑 3.12 而本地与 CI 跑 3.10 会制造一类查不清的差异——代码里就有一处明确依赖
@@ -83,10 +70,6 @@ COPY prompts/ ./prompts/
 COPY evals/ ./evals/
 COPY scripts/ ./scripts/
 COPY main.py pyproject.toml ./
-
-# 前端构建产物（阶段 1 的输出）。后端按目录存在与否自动决定是否托管
-# （见 `app/frontend.py`），所以这里放进默认位置即可。
-COPY --from=frontend /build/dist ./frontend/dist
 
 # SQLite 默认落在工作目录（`./bennett.db`）。建一个独立的数据目录并声明为卷，
 # 这样数据库与代码分开：镜像可以随时重建，数据不会跟着丢。

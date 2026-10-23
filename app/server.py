@@ -22,7 +22,6 @@ from app.api.ops import router as ops_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
-from app.frontend import mount_frontend, resolve_frontend_dir
 from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
 from app.observability import HttpMetricsMiddleware, RequestContextMiddleware
 from app.prompts import prompt_manager
@@ -395,20 +394,6 @@ def create_app() -> FastAPI:
     # Ops 路由（/health、/health/ready、/api/metrics）不打 tag：它们不该出现在
     # 业务 API 文档里，但 `include_in_schema=False` 之外仍要有 tag 供分组测试检查。
     app.include_router(ops_router)
-
-    # 前端构建产物必须在**所有路由之后**挂载：它是 catch-all，先注册会把 /api/*、
-    # /docs、/health 全部吞掉。目录不存在时静默跳过（本地开发没构建过前端是常态）。
-    if settings.serve_frontend:
-        frontend_dir = resolve_frontend_dir(settings.frontend_dir)
-        if frontend_dir is not None:
-            mount_frontend(app, frontend_dir)
-        elif settings.frontend_dir:
-            # 显式配了路径却找不到产物：这一定是配置错误，不能静默跳过
-            logger.warning(
-                "FRONTEND_DIR=%s 里没有 %s，前端不会被托管",
-                settings.frontend_dir,
-                "index.html",
-            )
 
     return app
 

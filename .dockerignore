@@ -7,8 +7,8 @@
 # 1. **密钥泄漏进镜像层。** `.env.development` 里有真实的网关 API Key。`.dockerignore`
 #    缺失时它会进镜像，而镜像层是**不可删除**的——后面 `RUN rm` 一层只是新增一层空白，
 #    原文件仍能从历史层里取出来。推到 registry 就等于把密钥公开了。
-# 2. **构建缓存频繁失效。** `.venv/`、`node_modules/`、`frontend/dist/` 每次本地构建都
-#    在变，把它们放进上下文会让 `COPY` 层每次都失效，`uv sync` 白跑一遍。
+# 2. **构建缓存频繁失效。** `.venv/`、`node_modules/` 每次本地构建都在变，
+#    把它们放进上下文会让 `COPY` 层每次都失效，`uv sync` 白跑一遍。
 #
 # 仓库自己的 `.gitignore` **不会**被 Docker 读取，两份要各自维护。
 
@@ -17,11 +17,6 @@
 **/__pycache__/
 **/*.py[cod]
 node_modules/
-frontend/node_modules/
-
-# ---- 前端构建产物：镜像里由 node 阶段重新构建 ----
-frontend/dist/
-frontend/dist-ssr/
 
 # ---- 环境文件：这是最危险的一类 ----
 # `.env*` 一次性覆盖所有变体（.env、.env.development、.env.production、.env.*.local）。

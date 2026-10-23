@@ -25,7 +25,6 @@ from app.config import settings
 from app.config.logging_setup import configure_logging
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.db import create_db_and_tables, engine
-from app.frontend import resolve_frontend_dir
 from app.services.agent_factory import build_agent, render_system_prompt
 from app.services.http_client import close_http_client
 from app.services.model_service import (
@@ -284,8 +283,7 @@ def main() -> None:
 
         print("=" * 60)
         print(f" Bennett Agent API: http://{args.host}:{args.port}{docs_hint()}")
-        # 打包镜像里前端由本进程托管（见 app/frontend.py），此时再说「另开 Vite」会
-        # 把人引到一个不存在的开发流程上。按实际是否托管来给提示。
+        # 前端不在本进程里：只写端口号会让人以为打开 8000 就能看到界面。
         print(f" {frontend_hint()}")
         print("=" * 60)
         uvicorn.run(
@@ -331,18 +329,12 @@ def _run_dev_reload(host: str, port: int) -> int:
 
 
 def frontend_hint() -> str:
-    """启动横幅里的前端提示：托管了就说地址，没托管就说怎么起开发服务器。
+    """启动横幅里的前端提示。
 
-    镜像里前端由本进程托管（`app/frontend.py`），此时提示「另开 Vite」会把人引到一个
-    不存在的开发流程上；本地开发没构建过前端时必须说清「要另开一个」，否则访问根路径
-    看到 404 会以为服务没起来。
+    前后端分离：本进程只提供 `/api/*`。说清「另开 Vite」是必要的——只写端口号会让
+    人以为打开 8000 就能看到界面，然后对着 JSON 404 找半天。
     """
-    if not settings.serve_frontend:
-        return "前端未托管（SERVE_FRONTEND=false），请自行提供或反代 frontend/dist"
-    frontend_dir = resolve_frontend_dir(settings.frontend_dir)
-    if frontend_dir is None:
-        return "前端未托管（没有 frontend/dist），开发时请另开：cd frontend && npm run dev"
-    return "Web 界面由本进程托管在根路径 /"
+    return "前端请另开：cd frontend && npm run dev（http://127.0.0.1:5173）"
 
 
 def docs_hint() -> str:
