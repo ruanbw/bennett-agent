@@ -132,7 +132,7 @@ async def tavily_search(
     # 只缓存成功结果（见 tavily_cache 的模块说明）。
     clipped_results = max(MAX_RESULTS_FLOOR, min(safe_max_results, MAX_RESULTS_CEILING))
     scope = current_cache_scope()
-    cached = search_cache.get(query, clipped_results, scope=scope)
+    cached = await search_cache.get(query, clipped_results, scope=scope)
     if cached is not None:
         logger.debug("Tavily 搜索命中缓存 (query=%r, max_results=%d)", query, clipped_results)
         return cached
@@ -160,7 +160,7 @@ async def tavily_search(
 
     try:
         formatted = _format_results(json_data, query)
-        search_cache.put(query, clipped_results, formatted, scope=scope)
+        await search_cache.put(query, clipped_results, formatted, scope=scope)
         return formatted
     except Exception:
         # 形状防御之后的最后一道：格式化无论如何不该把异常抛出工具——逃出去会把

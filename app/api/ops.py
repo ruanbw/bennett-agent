@@ -5,11 +5,23 @@
 - `GET /health`：**存活**。不碰数据库、不碰上游，只证明进程还能处理请求。容器
   liveness probe 用这个——它一旦失败就该重启进程，而数据库抖动不该触发重启
   （重启解决不了数据库的问题，只会把在途请求全丢掉）。
-- `GET /health/ready`：**就绪**。真的去 ping 数据库。readiness probe 用这个：
-  数据库不可用时应该把流量摘走，而不是让用户撞上一连串 500。
+- `GET /health/ready`：**就绪**。探测数据库、Redis、对象存储。readiness probe 用这个。
 
 把两者合成一个端点是最常见的错误：要么数据库抖一下就触发重启风暴，要么进程假活
 着却一直 500。
+
+## 为什么「探到了」不等于「必须摘流量」
+
+`/health/ready` 会报告每一项依赖的状态，但**只有 `READINESS_REQUIRED_DEPENDENCIES`
+里的项失败才返回 503**（默认只有 database）。原因是这些依赖的失败模式完全不同：
+
+- 数据库挂了：登录、历史、知识库全部不可用，实例留着只会制造 500 → 必须摘掉；
+- Redis 挂了：限流退化成进程内计数、缓存 miss、会话回源数据库——服务仍能干活，
+  摘掉实例反而会把一次可恢复的抖动放大成全站故障；
+- 对象存储挂了：只有上传/下载不可用，而对话与检索完全正常。
+
+把三者都设成必需，是「一次 Redis 抖动导致全部实例被摘、然后真的全站 500」的经典成因。
+保留 `degraded` 状态在响应体里，是为了让监控能看见降级，而不必靠摘流量来表达。
 
 ## 指标端点为什么不需要登录
 
@@ -40,6 +52,8 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import engine
 from app.services.metrics import metrics
+from app.services.redis_client import redis_health_detail
+from app.services.storage import StorageNotConfigured, get_object_store
 
 logger = logging.getLogger(__name__)
 
@@ -67,38 +81,82 @@ async def health() -> dict[str, object]:
     return {"status": "ok", "version": APP_VERSION}
 
 
+def required_dependencies() -> frozenset[str]:
+    """本次部署把哪些依赖视为「必需」。
+
+    未知名字直接忽略并告警：配置里写错一个词（`databse`）不该让服务启动失败，
+    但也不能静默当成「不需要检查」——那会让一个本该被摘流的实例继续接流量。
+    """
+    known = {"database", "redis", "storage"}
+    raw = (settings.readiness_required_dependencies or "").split(",")
+    items = {item.strip().lower() for item in raw if item.strip()}
+    unknown = items - known
+    if unknown:
+        logger.warning("READINESS_REQUIRED_DEPENDENCIES 含未知项，已忽略: %s", ", ".join(sorted(unknown)))
+    return frozenset(items & known)
+
+
 @router.get(
     "/health/ready",
-    summary="就绪探针（会 ping 数据库）",
+    summary="就绪探针（数据库 / Redis / 对象存储）",
     include_in_schema=False,
 )
 async def health_ready(response: Response) -> dict[str, object]:
-    """依赖是否就绪：这里只查数据库。
+    """逐项探测依赖，按配置决定是否把实例摘出负载均衡。
 
     不检查上游模型：它们本来就是「可能失败」的外部依赖，模型挂了不该让整个实例被
     摘出负载均衡——那样连历史会话都看不了。模型失败由指标与备用模型机制暴露。
 
-    数据库失败时返回 503：让编排器把流量摘走，用户就不会撞上一连串 500。
+    必需依赖失败时返回 503：让编排器把流量摘走，用户就不会撞上一连串 500。
+    非必需依赖失败只降级为 `degraded`（仍 200），理由见模块 docstring。
     """
+    required = required_dependencies()
 
     # 用 `wait_for` 而不是 `asyncio.timeout`：后者是 Python 3.11 才有的，本项目最低
     # 支持 3.10（`chat_service` 与 `mcp_client` 里也都是这个写法）。
-    async def ping() -> None:
+    async def ping_db() -> None:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
 
     try:
-        await asyncio.wait_for(ping(), timeout=READY_DB_TIMEOUT_SECONDS)
+        await asyncio.wait_for(ping_db(), timeout=READY_DB_TIMEOUT_SECONDS)
+        database: dict[str, object] = {"status": "ok"}
     except (TimeoutError, asyncio.TimeoutError):
         logger.warning("readiness 检查超时（数据库 %.1fs 内无响应）", READY_DB_TIMEOUT_SECONDS)
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {"status": "degraded", "database": "timeout"}
-    except Exception:  # noqa: BLE001 - 任何 DB 故障都归成「未就绪」
+        database = {"status": "unavailable", "reason": "timeout"}
+    except Exception:  # noqa: BLE001 - 任何 DB 故障都归成「不可用」
         logger.warning("readiness 检查失败：数据库不可用", exc_info=True)
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {"status": "degraded", "database": "unavailable"}
+        database = {"status": "unavailable", "reason": "unavailable"}
 
-    return {"status": "ready", "database": "ok"}
+    checks: dict[str, dict[str, object]] = {
+        "database": database,
+        "redis": await redis_health_detail(timeout=READY_DB_TIMEOUT_SECONDS),
+        "storage": await _storage_health(),
+    }
+    failed_required = [name for name in required if str(checks[name].get("status")) != "ok"]
+    if failed_required:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        overall = "not_ready"
+    elif any(str(check.get("status")) not in {"ok", "disabled"} for check in checks.values()):
+        overall = "degraded"
+    else:
+        overall = "ready"
+
+    return {"status": overall, "required": sorted(required), **checks}
+
+
+async def _storage_health() -> dict[str, object]:
+    """对象存储探测。未开启上传时显式报告 `disabled`，而不是假装 ok。"""
+    if not settings.uploads_enabled:
+        return {"status": "disabled"}
+    try:
+        ok, reason = await get_object_store().health()
+    except StorageNotConfigured:
+        return {"status": "unavailable", "reason": "not_configured"}
+    except Exception:  # noqa: BLE001 - 探针不该把异常抛给编排器
+        logger.warning("readiness 检查失败：对象存储不可用", exc_info=True)
+        return {"status": "unavailable", "reason": "error"}
+    return {"status": "ok"} if ok else {"status": "unavailable", "reason": reason}
 
 
 @router.get(

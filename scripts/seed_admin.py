@@ -50,7 +50,7 @@ from fastapi_users.exceptions import (
 )
 from sqlalchemy import select  # noqa: E402
 
-from app.db import User, async_session_maker, create_db_and_tables  # noqa: E402
+from app.db import User, async_session_maker, verify_schema_at_head  # noqa: E402
 from app.roles import ROLE_SUPERADMIN, Role  # noqa: E402
 from app.schemas.user import UserCreate, UserUpdate  # noqa: E402
 from app.services.auth import MIN_PASSWORD_LENGTH, UserManager, apply_role  # noqa: E402
@@ -175,7 +175,10 @@ async def run(args: argparse.Namespace) -> int:
         print("错误：请用 --email 指定一个合法邮箱（或设置 SEED_ADMIN_EMAIL）。", file=sys.stderr)
         return EXIT_FAILED
 
-    await create_db_and_tables()
+    # 不建表：结构由 Alembic 管理（`alembic upgrade head` / compose 的 migrate 服务）。
+    # 这里只校验「库结构已到 head」——拿着旧结构写管理员账号的后果是登录时才报
+    # UndefinedColumn，而那时运维已经在排查「为什么密码不对」了。
+    await verify_schema_at_head()
 
     existing = await _find_user(email)
 

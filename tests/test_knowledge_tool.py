@@ -29,9 +29,7 @@ from app.tools.knowledge_search import (
 @pytest.fixture(autouse=True)
 async def _tables():
     """建表：个别用例若漏了 mock 会走到真实检索路径，此时不该报「no such table」。"""
-    from app.db import create_db_and_tables
-
-    await create_db_and_tables()
+    # 结构由 conftest 的 `alembic upgrade head` 建立；用例之间由 TRUNCATE 隔离。
     yield
 
 

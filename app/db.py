@@ -1,13 +1,23 @@
-"""数据库基础设施：异步引擎、ORM 基类，以及用户 / 会话 / 模型提供商三组表。
+"""数据库基础设施：异步引擎、ORM 基类，以及业务表定义。
 
-## 为什么是 SQLite
+## 为什么是 Postgres（而不是 SQLite）
 
-本项目的写入压力很低：流式对话按 800ms 节流落库，限流上限 30 请求/分/账号，
-单进程部署。即使 100 路对话同时进行也只有约 125 次单行写/秒，SQLite（WAL 模式）
-的余量在两三个数量级。存储量同理，远未接近其上限。
+早期版本用 SQLite：单进程、写入压力低，WAL 模式足够。换库的触发点不是性能，而是
+**部署形态**——一旦要多实例（水平扩容、滚动发布、worker 与服务分离），本地文件库就
+不再成立：每个实例各写各的，会话、限流、同步游标全都对不上。
 
-**唯一会迫使换库的情况是多机部署**——SQLite 文件是本地的，多实例会各写各的。
-届时换 Postgres 只需改 `database_url` 与这里的引擎构造。
+换到 Postgres 之后，那些为 SQLite 打的补丁也一并撤掉了：`PRAGMA foreign_keys`
+（PG 默认强制外键）、`journal_mode` 检查、文件权限收紧、手写 `ALTER TABLE` 迁移。
+后者的替代品是 Alembic：**结构变更有版本、可回滚、可在部署流水线里先于应用执行**。
+
+## 结构变更的唯一入口是 Alembic
+
+`migrations/versions/` 是权威历史，应用启动时**不建表、不改表**。它只做一件事：
+校验库里的 revision 是否等于 head（`verify_schema_at_head`），不等就拒绝启动。
+
+为什么不在启动时自动 `upgrade head`：滚动发布时，先起来的实例会把结构升到新版本，
+而其他实例还在跑旧代码。那个窗口里的错误是随机的（旧查询撞新列、新列还没回填），
+比「明确拒绝启动」难查一个数量级。
 
 ## 各组表的职责
 
@@ -16,16 +26,22 @@
   全部会话行，所以在途请求与刷新页面都会立刻失效。
 - `access_token`：**服务端会话**。一条记录 = 一个登录态。这是「不用 JWT」的落点：
   token 只是一串随机值，状态在库里，因此登出/踢人/改密失效都是删一行，立即生效。
-- `model_provider` / `provider_model`：管理后台维护的模型提供商与模型清单。
-  提供商保存 base_url 与 API key（每个提供商可以指向不同的网关或官方 API），模型行
-  保存上游模型名、展示名与**启用开关**。对外路由键是 `{provider.slug}/{model_id}`，
-  因为不同提供商可能提供同名模型。
+- `model_provider` / `provider_model` / `model_price`：管理后台维护的模型清单与计价。
+- `sync_counter` / `conversation` / `message`：跨设备同步的服务端镜像。
+- `knowledge_document` / `knowledge_chunk`：知识库（RAG）。
+- `uploaded_file`：上传文件的原件元数据与解析状态（原件本身在对象存储里）。
+
+## 关于 user 表名
+
+`user` 是 SQL 保留字。SQLAlchemy 与 Alembic 都会给它加双引号，因此可用；但手写 SQL
+（运维排查时）必须写 `"user"`，否则 Postgres 会把它解析成 `current_user`——那是个函数，
+报错信息（`syntax error at or near "user"`）不会提示你少了一对引号。
 """
 
 import base64
 import hashlib
+import json
 import logging
-import os
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -40,7 +56,6 @@ from fastapi_users_db_sqlalchemy.access_token import (
 )
 from fastapi_users_db_sqlalchemy.generics import GUID
 from sqlalchemy import (
-    JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -53,19 +68,23 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     delete,
-    event,
-    text,
+    select,
 )
-from sqlalchemy import Uuid as SQLUuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
 from app.config.secret_box import decrypt_secret, encrypt_secret
-from app.roles import ALL_ROLES, ROLE_SUPERADMIN, ROLE_USER, Role
+from app.roles import ROLE_USER, Role
 
 logger = logging.getLogger(__name__)
+
+#: 项目根目录。alembic.ini 与 migrations/ 都锚在这里，**不能用当前工作目录**：
+#: 从别的目录启动（IDE、systemd、容器 WORKDIR 变化）会找不到迁移脚本，而报错是
+#: 「Can't find script directory」，与真正的原因（路径不对）毫无关系。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class EncryptedText(TypeDecorator):
@@ -109,8 +128,9 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
       否则同一个问题会有两个答案，而它们迟早不一致。
     """
 
-    #: 存储成小写字符串而不是 Enum：SQLite 里是 TEXT，加档位不用改表结构
-    #: （本项目没有 Alembic）。取值与等级见 `app/roles.py`。
+    #: 存储成小写字符串而不是 Enum：加档位只需一次迁移，不必在 PG 里维护类型。
+    #: 取值与等级见 `app/roles.py`。列的默认值由迁移显式声明（`server_default='user'`），
+    #: 因为历史行需要一个确定的落点。
     role: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -127,8 +147,9 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
 class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
     """会话表：`token` / `user_id` / `created_at`。
 
-    `user_id` 带 `ondelete="cascade"`，但 SQLite 默认**不启用**外键约束，
-    所以下面必须显式 `PRAGMA foreign_keys=ON`，否则删用户后会话记录会残留。
+    `user_id` 带 `ondelete="cascade"`，Postgres 默认强制外键，因此删用户会自动清掉
+    会话行——这一点比 SQLite 省心（那边要显式 `PRAGMA foreign_keys=ON`，且**测试里
+    忘了开就会漏掉整条级联路径**）。
 
     **`token` 列存的是 SHA-256 的 base64url 摘要，不是 cookie 里的原文**：
     数据库文件泄露/被读时，攻击者拿不到可直接回放的会话令牌（I-10）。
@@ -147,17 +168,133 @@ def hash_access_token(token: str) -> str:
 
 
 class HashedAccessTokenDatabase(SQLAlchemyAccessTokenDatabase):
-    """写入摘要、按摘要查询；同时兼容历史明文行。
+    """写入摘要、按摘要查询；同时兼容历史明文行，并用 Redis 做**热缓存**。
 
-    `get_by_token` 先按摘要查（新行），查不到再按原文查（旧行）——旧会话在过期前
-    仍可用，不会因为升级把所有人踢下线。
+    ## 为什么缓存和数据库都要写
+
+    会话查询是每个请求的必经路径（包括 SSE 与长轮询）。Postgres 上一次主键查找是
+    微秒级，但请求量乘上往返延迟之后，它仍然是连接池里最热的那条查询。
+
+    **数据库始终是权威来源**，Redis 只是 cache-aside：
+
+    - 读：命中直接返回；miss 回源数据库并回填；
+    - 写（登录）：写库成功后回填；
+    - 删（登出/改密/封禁）：先删库，再删缓存。库是权威的，所以**即使删缓存失败**，
+      Redis 一旦不可用也会回源到已删除的库行——不会出现「库删了但会话还能用」的
+      永久窗口。
+
+    ## 缓存 TTL 很短，这是有意的
+
+    `settings.redis_session_cache_ttl_seconds` 默认 60 秒，而不是会话剩余的 30 天。
+    原因：把「撤销」的传播延迟压到一分钟以内。撤销路径会尽力删缓存，但进程崩溃、
+    网络分区这类情况下缓存会残留；短 TTL 让最坏情况有界，而不是依赖一次删除成功。
+    换来的代价只是每分钟多一次主键查询，可以忽略。
+
+    ## 缓存里不出现原始 token
+
+    键是 `sha256(token)` 的摘要（与库里存的是同一个值），值是 `user_id + created_at`。
+    Redis 被读（备份、误开端口、同主机其他进程）也拿不到可回放的会话令牌——与库里
+    存摘要的理由完全一致。
     """
 
     async def get_by_token(self, token: str, max_age=None):  # noqa: ANN001, ANN201
-        row = await super().get_by_token(hash_access_token(token), max_age)
-        if row is not None:
-            return row
-        return await super().get_by_token(token, max_age)
+        hashed = hash_access_token(token)
+        cached = await _session_cache_get(hashed)
+        if cached is not None:
+            return cached
+
+        row = await super().get_by_token(hashed, max_age)
+        if row is None:
+            # 兼容升级前写入的明文行。它们无法提前哈希成键，因此只回源、不回填缓存：
+            # 重新登录后自然换成摘要行。
+            return await super().get_by_token(token, max_age)
+        await _session_cache_set(hashed, row)
+        return row
+
+    async def delete(self, access_token) -> None:  # noqa: ANN001
+        await super().delete(access_token)
+        # 先库后缓存：缓存删除失败时，TTL 到期后仍会回源到已删除的行。
+        await _session_cache_delete(str(access_token.token))
+
+
+async def _session_cache_get(hashed_token: str) -> AccessToken | None:
+    """从 Redis 取会话行；未启用/未命中/任何 Redis 故障都返回 None（回源数据库）。
+
+    这里**刻意不抛异常**：认证路径上多一个可能失败的依赖，等于把「Redis 抖动」
+    升级成「全站 401」。降级是可观测的（日志 + 指标），不是静默的。
+    """
+    if not settings.redis_session_cache_enabled:
+        return None
+    from app.services.redis_client import get_redis
+
+    try:
+        raw = await get_redis().get(f"{settings.redis_key_prefix}:session:{hashed_token}")
+    except Exception:  # noqa: BLE001 - 缓存故障绝不阻塞认证
+        logger.warning("读取会话缓存失败，回源数据库", exc_info=True)
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        return AccessToken(
+            token=hashed_token,
+            user_id=uuid.UUID(payload["user_id"]),
+            created_at=datetime.fromisoformat(payload["created_at"]),
+        )
+    except (ValueError, KeyError, TypeError):
+        # 结构不认识（版本升级/别的写者）：当作 miss，并让键尽快过期
+        logger.warning("会话缓存内容无法解析，已忽略")
+        return None
+
+
+async def _session_cache_set(hashed_token: str, row) -> None:  # noqa: ANN001
+    """把会话行写进 Redis，TTL 取「缓存上限」与「会话剩余寿命」的较小值。
+
+    剩余寿命按 `created_at + session_lifetime` 算：缓存不能比会话本身活得更久，
+    否则一个已过期的会话还能从缓存里被取出来。
+    """
+    if not settings.redis_session_cache_enabled:
+        return
+    ttl = _session_cache_ttl(row.created_at)
+    if ttl <= 0:
+        return
+    from app.services.redis_client import get_redis
+
+    payload = json.dumps(
+        {"user_id": str(row.user_id), "created_at": row.created_at.isoformat()},
+        separators=(",", ":"),
+    )
+    try:
+        await get_redis().set(
+            f"{settings.redis_key_prefix}:session:{hashed_token}",
+            payload,
+            ex=ttl,
+        )
+    except Exception:  # noqa: BLE001 - 回填失败只影响下一次读的性能
+        logger.warning("写入会话缓存失败（不影响本次请求）", exc_info=True)
+
+
+async def _session_cache_delete(hashed_token: str) -> None:
+    """删除会话缓存。失败只告警：库已经是权威状态，缓存会随 TTL 过期。"""
+    if not settings.redis_session_cache_enabled:
+        return
+    from app.services.redis_client import get_redis
+
+    try:
+        await get_redis().delete(f"{settings.redis_key_prefix}:session:{hashed_token}")
+    except Exception:  # noqa: BLE001
+        logger.warning("删除会话缓存失败（该会话最迟在缓存 TTL 后失效）", exc_info=True)
+
+
+def _session_cache_ttl(created_at: datetime) -> int:
+    """缓存剩余有效秒数：min(配置上限, 会话剩余寿命)。"""
+    lifetime = settings.session_lifetime_seconds
+    if lifetime <= 0:
+        return 0
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    remaining = int((created_at + timedelta(seconds=lifetime) - datetime.now(timezone.utc)).total_seconds())
+    return max(0, min(int(settings.redis_session_cache_ttl_seconds), remaining))
 
 
 class ModelProvider(Base):
@@ -169,14 +306,14 @@ class ModelProvider(Base):
     `slug` 是生成一次、之后不随改名变化的稳定标识——它参与对外模型路由键
     (`{slug}/{model_id}`)，改名不能把用户已保存的模型选择悄悄改掉。
 
-    **API key 明文存库**：本项目是单机部署，`.env` 里的密钥同样是明文。对外 API
-    永远只返回掩码（见 `app/schemas/admin.py:mask_api_key`），并在文档里注明：
-    需要更强隔离时应改用密钥管理服务，而不是在这里加一层自造加密。
+    **API key 落库加密**（`EncryptedText`，密钥来自 `AUTH_SECRET`）。对外 API 永远只
+    返回掩码（见 `app/schemas/admin.py:mask_api_key`）。更强的隔离应改用密钥管理服务，
+    而不是在这里再加一层自造加密。
     """
 
     __tablename__ = "model_provider"
 
-    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True, index=True)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -238,9 +375,9 @@ class ProviderModel(Base):
     __tablename__ = "provider_model"
     __table_args__ = (UniqueConstraint("provider_id", "model_id", name="uq_provider_model"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     provider_id: Mapped[uuid.UUID] = mapped_column(
-        SQLUuid(as_uuid=True),
+        GUID,
         ForeignKey("model_provider.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -249,7 +386,9 @@ class ProviderModel(Base):
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    supported_reasoning_levels: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    #: JSONB 而不是 JSON：PG 下它会解析成二进制结构，可以建表达式索引，
+    #: 也避免每次读取都重新解析一遍文本。
+    supported_reasoning_levels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -268,23 +407,15 @@ class ProviderModel(Base):
     provider: Mapped[ModelProvider] = relationship(back_populates="models")
 
 
-#: 同步表的外键列必须用 `GUID` 而不是 `SQLUuid`。
-#:
-#: fastapi-users 的 user 表用的是它自己的 `GUID` 类型：SQLite 下存成 **CHAR(36) 带横线**
-#: 的字符串，而 SQLAlchemy 的 `Uuid` 存成 CHAR(32) 不带横线。两者都是 32 个 hex 字符的
-#: uuid，但字面量不同，外键约束会直接拒绝——症状是 push 报 500
-#: `FOREIGN KEY constraint failed`，而单元测试因为没开 PRAGMA foreign_keys 反而全绿。
-SYNC_USER_FK = GUID
-
-
 class SyncCounter(Base):
     """每用户单调递增的同步版本号（跨设备同步的游标来源）。
 
     版本号由**服务端**发号，客户端只保存一个不透明游标。三件事必须由它保证：
 
     1. 单调：`version` 只增不减，任何一行发生变化都取一个新号；
-    2. 单调的来源可原子化：`UPDATE ... SET version = version + 1 ... RETURNING`
-       是一条语句，SQLite 只允许一个写者，因此并发的两次 push 不会拿到同一个号；
+    2. 单调的来源可原子化：`INSERT ... ON CONFLICT DO UPDATE SET version = version + 1
+       RETURNING version` 是一条语句。Postgres 会在该行上加行锁，因此并发的两次 push
+       不会拿到同一个号（SQLite 靠「只允许一个写者」达到同样效果，代价是整个库串行）；
     3. 与业务写入同事务：发号与写行必须一起提交，否则客户端可能拉到
        「版本号已前进、行还没写」的空洞。
 
@@ -294,7 +425,7 @@ class SyncCounter(Base):
     __tablename__ = "sync_counter"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SYNC_USER_FK,
+        GUID,
         ForeignKey("user.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -321,7 +452,7 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SYNC_USER_FK,
+        GUID,
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -345,9 +476,9 @@ class Message(Base):
     """同步用的消息行（浏览器 Dexie 里 `messages` 的服务端镜像）。
 
     前端消息形状里 `toolCalls / clarification / fallback / usage / error / partOrder`
-    都是前端私有结构。**整包存 JSON** 而不是逐列建模：拆成列等于以后前端每改一次
-    结构就要一次数据库迁移，而 `app/db.py` 已经明确写着「第二处加列就该换 Alembic」。
-    服务端只需要能校验的东西（归属、顺序、大小），不需要理解聊天语义。
+    都是前端私有结构。**整包存 JSONB** 而不是逐列建模：拆成列等于以后前端每改一次
+    结构就要一次数据库迁移。服务端只需要能校验的东西（归属、顺序、大小），
+    不需要理解聊天语义。
 
     `seq` 在**插入时**由服务端赋值并且之后不再变（改内容只前进 `version`，不动 seq），
     这是「同一会话内跨设备看到同一顺序」的唯一依据。
@@ -368,12 +499,12 @@ class Message(Base):
     )
     #: 与 conversation.user_id 冗余一份：拉取时不必 join，索引能直接命中。
     user_id: Mapped[uuid.UUID] = mapped_column(
-        SYNC_USER_FK,
+        GUID,
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     client_rev: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -385,21 +516,16 @@ class ModelPrice(Base):
 
     ## 为什么是独立表而不是给 `provider_model` 加两列
 
-    两个理由，第二个更重要：
-
-    1. `create_all` **不会**给已存在的表加列，加列必须手写幂等迁移。`app/db.py` 里
-       那条注释明确写着「再出现第二处加列时应该换成 Alembic」——而独立新表由
-       `create_all` 直接建出来，不需要引入整套迁移工具链。
-    2. 价格是**独立生命周期**的数据：它可以缺（未知模型）、会变（上游调价）、也可能
-       由运维批量导入。混进模型元数据表会让「同步上游模型列表」这条路径有覆盖它的
-       风险，而价格被同步动作悄悄清掉是最难发现的一类账目错误。
+    价格是**独立生命周期**的数据：它可以缺（未知模型）、会变（上游调价）、也可能
+    由运维批量导入。混进模型元数据表会让「同步上游模型列表」这条路径有覆盖它的
+    风险，而价格被同步动作悄悄清掉是最难发现的一类账目错误。
 
     ## 单位与精度
 
     `*_per_mtok` 是「每百万 token 的价格」，单位是**计价货币**（`currency`，默认 USD）。
     用百万为单位而不是每 token：后者是 1e-6 量级的小数，浮点误差与展示都难处理。
 
-    `Decimal` 而不是 `Float`：钱不能有二进制浮点误差。SQLite 里存成 NUMERIC，
+    `Decimal` 而不是 `Float`：钱不能有二进制浮点误差。PG 的 NUMERIC 是精确十进制，
     SQLAlchemy 会经 `Decimal` 往返——累加几百次仍然精确。
 
     ## 为什么允许为空
@@ -412,7 +538,7 @@ class ModelPrice(Base):
     __tablename__ = "model_price"
     __table_args__ = (UniqueConstraint("model_id", name="uq_model_price_model"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     #: 对外模型键（`{provider.slug}/{model_id}`），与 `provider_model` 的对外键一致。
     #:
     #: 刻意**不做外键**：价格表要能提前录入还没启用的模型，也要能在模型被删除后保留
@@ -445,10 +571,7 @@ class KnowledgeDocument(Base):
     __tablename__ = "knowledge_document"
     __table_args__ = (Index("ix_knowledge_document_user", "user_id", "created_at"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    #: 指向 user 的外键必须是 `GUID`，不能用 `SQLUuid`：两者在 SQLite 下存成
-    #: CHAR(36) 带横线 与 CHAR(32) 不带横线，字面量不同，外键约束会**直接拒绝**
-    #: ——症状是 500 `FOREIGN KEY constraint failed`。详见上面的 `SYNC_USER_FK`。
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         GUID,
         ForeignKey("user.id", ondelete="CASCADE"),
@@ -469,9 +592,15 @@ class KnowledgeDocument(Base):
 class KnowledgeChunk(Base):
     """知识库片段（检索的最小单位）。
 
-    向量存成 float32 的二进制 BLOB（`app/services/rag/store.py:pack_vector`）而不是
+    向量存成 float32 的二进制（`app/services/rag/store.py:pack_vector`）而不是
     JSON：1024 维的 JSON 文本约 12KB，二进制是 4KB，且读出来不用 `json.loads`。
     多文档检索时这个差别就是几十毫秒。
+
+    为什么不用 pgvector：当前检索是「按用户取全量片段，在 Python 里算余弦 + 词法
+    加权」。片段规模在万级以内时这是几十毫秒的事，而 pgvector 会引入一个**必须由
+    数据库镜像预装**的扩展（`CREATE EXTENSION vector` 在多数托管 PG 上需要单独开通）。
+    规模上去之后再换：`embedding` 列改成 `vector(N)` + HNSW 索引，混合检索的权重
+    逻辑可以保留。
 
     `user_id` 与 `document_id` 冗余一份：检索按用户过滤时不必 join 文档表，
     索引能直接命中（与 `message.user_id` 同一条取舍）。
@@ -483,13 +612,12 @@ class KnowledgeChunk(Base):
         Index("ix_knowledge_chunk_document", "document_id", "chunk_index"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(SQLUuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(
-        SQLUuid(as_uuid=True),
+        GUID,
         ForeignKey("knowledge_document.id", ondelete="CASCADE"),
         nullable=False,
     )
-    #: 同 `KnowledgeDocument.user_id`：指向 user 必须用 `GUID`。
     user_id: Mapped[uuid.UUID] = mapped_column(
         GUID,
         ForeignKey("user.id", ondelete="CASCADE"),
@@ -504,296 +632,208 @@ class KnowledgeChunk(Base):
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-def secure_sqlite_permissions(path: str | Path) -> bool:
-    """把 SQLite 文件权限收紧到 0600（仅属主可读写）。
+# ---------------------------------------------------------------------
+# 上传文件
+# ---------------------------------------------------------------------
+#: 排队中，等待 worker 取走。
+UPLOAD_STATUS_PENDING = "pending"
+#: 已被某个 worker 取走（带租约，见 `processing_started_at`）。
+UPLOAD_STATUS_PROCESSING = "processing"
+#: 原件已存入对象存储、文本已解析、片段已写入知识库。
+UPLOAD_STATUS_READY = "ready"
+#: 重试次数用尽或遇到不可重试的错误（格式损坏、加密 PDF…）。
+UPLOAD_STATUS_FAILED = "failed"
 
-    `bennett.db` 里有密码哈希、会话摘要与（现在加密的）API Key；默认 umask 常是
-    022，同主机其他用户可读。数据库文件不需要组/其他用户访问。失败只告警——
-    文件系统不支持 chmod（某些挂载）时不该让服务起不来。
+UPLOAD_STATUSES = frozenset(
+    {UPLOAD_STATUS_PENDING, UPLOAD_STATUS_PROCESSING, UPLOAD_STATUS_READY, UPLOAD_STATUS_FAILED}
+)
+
+
+class UploadedFile(Base):
+    """上传文件的原件元数据与解析状态。
+
+    原件在对象存储里（`storage_key`），**库里不存二进制**：把 PDF 塞进 BYTEA 会让
+    每次备份、每条 `SELECT *`、每个连接都拖着它们走。库里只留「去哪儿找 + 处理到哪一步」。
+
+    ## 状态机
+
+        pending → processing → ready
+                    ↓ 失败且还有重试次数
+                  pending
+                    ↓ 次数用尽 / 不可重试
+                  failed
+
+    `processing` 带租约（`processing_started_at`）：worker 崩溃后行会永久卡在该状态，
+    所以取任务的查询会把「租约过期的 processing」重新当作可领取。没有这一步，
+    一次 OOM Kill 就能让某个用户的文件永远停在「解析中」。
+
+    ## 去重
+
+    `(user_id, sha256)` 唯一：同一用户重复上传同一份文件不会产生第二个原件、
+    第二份切片，也不会烧第二次 embedding 配额。跨用户**不共享**——知识库是私有的，
+    共享原件会把「谁传过什么」泄露成 timing 侧信道。
     """
-    try:
-        os.chmod(path, 0o600)
-        return True
-    except OSError:
-        logger.warning("收紧 SQLite 文件权限失败（不影响启动）: %s", path, exc_info=True)
-        return False
+
+    __tablename__ = "uploaded_file"
+    __table_args__ = (
+        Index("ix_uploaded_file_user", "user_id", "created_at"),
+        # worker 的取任务查询走这个索引：WHERE status=... ORDER BY created_at
+        Index("ix_uploaded_file_queue", "status", "created_at"),
+        UniqueConstraint("user_id", "sha256", name="uq_uploaded_file_user_sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: 用户提供的原始文件名（**只用于展示**，绝不参与对象键构造）。
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: 嗅探/用户声明的 MIME，供解析器选择与展示。
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: 原件内容的 SHA-256（hex），用于去重与完整性校验。
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: 对象存储里的键：`{prefix}/{user_id}/{uuid}`，不含扩展名与用户文件名。
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=UPLOAD_STATUS_PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 失败原因（给用户看的一句话）与内部细节（日志里看）。
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 租约起点。worker 每处理一份就写一次，用于判断「是不是被崩溃的 worker 拿走了」。
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 解析成功后指向的知识库文档。删除文档时置空（原件仍保留，可重新解析）。
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("knowledge_document.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
-def _resolve_database_url(url: str) -> str:
-    """把相对的 SQLite 路径固定到项目根目录。
+# ---------------------------------------------------------------------
+# 引擎与会话
+# ---------------------------------------------------------------------
+DATABASE_URL = settings.database_url
 
-    `sqlite+aiosqlite:///./bennett.db` 是相对**当前工作目录**解析的。从别的目录
-    启动（例如 `python /path/to/main.py` 或在 IDE 里跑测试）就会悄悄创建出第二个
-    空库，表现为「注册过的账号不见了」。这里统一锚到 `BASE_DIR`。
+
+def _engine_kwargs() -> dict[str, object]:
+    """引擎参数。单独成函数是为了让测试能构造同参数的独立引擎。
+
+    `pool_pre_ping`：Postgres 重启、pgbouncer 空闲断连、云厂商的静默回收都会让池里
+    留下死连接。没有 pre-ping 时第一个拿到死连接的请求报 `ConnectionDoesNotExist`，
+    而它看起来像「偶发的 500」。代价是每次从池里取连接多一次往返——比偶发 500 便宜。
+
+    `server_settings` 随连接下发：
+    - `application_name` 让 `pg_stat_activity` 里能区分本服务与其他客户端，排查锁
+      等待时是必需品（否则只有一串 `asyncpg`）；
+    - `statement_timeout` 让**服务端**真正取消超时查询。应用层 `wait_for` 只是放弃
+      等待，查询还在库里跑并占着连接——连接池被一条烂查询耗尽是最常见的雪崩起点。
     """
-    prefix = "sqlite+aiosqlite:///"
-    if not url.startswith(prefix):
-        return url
+    from sqlalchemy.pool import NullPool
 
-    raw_path = url[len(prefix) :]
-    # 已是绝对路径（/xxx），或内存库（:memory:），都原样返回
-    if raw_path.startswith("/") or raw_path.startswith(":memory:"):
-        return url
+    server_settings = {"application_name": "bennett-agent"}
+    if settings.database_statement_timeout_ms > 0:
+        server_settings["statement_timeout"] = str(settings.database_statement_timeout_ms)
 
-    absolute = (Path(__file__).resolve().parent.parent / raw_path).resolve()
-    return f"{prefix}{absolute}"
+    if settings.database_pool_mode == "null":
+        return {
+            "poolclass": NullPool,
+            "pool_pre_ping": False,
+            "connect_args": {
+                "server_settings": server_settings,
+                "timeout": settings.database_connect_timeout,
+            },
+        }
+
+    return {
+        "pool_size": settings.database_pool_size,
+        "max_overflow": settings.database_max_overflow,
+        "pool_timeout": settings.database_pool_timeout,
+        "pool_recycle": settings.database_pool_recycle,
+        "pool_pre_ping": True,
+        "connect_args": {
+            "server_settings": server_settings,
+            # 建连超时（asyncpg 默认 60s）：数据库不可达时不该让请求挂一分钟
+            "timeout": settings.database_connect_timeout,
+        },
+    }
 
 
-DATABASE_URL = _resolve_database_url(settings.database_url)
-
-engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs())  # type: ignore[arg-type]
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 
-def apply_sqlite_pragmas(dbapi_connection) -> None:  # noqa: ANN001 - DBAPI connection
-    """给一个 SQLite 连接设置本项目需要的 PRAGMA（幂等）。
+def build_engine(url: str | None = None):  # noqa: ANN201 - 返回值是 AsyncEngine
+    """按当前配置（或指定 URL）构造一个引擎。测试与运维脚本用。"""
+    return create_async_engine(url or DATABASE_URL, **_engine_kwargs())  # type: ignore[arg-type]
 
-    SQLite 的 PRAGMA 是**每连接**生效，不是数据库级的持久设置。
 
-        - `foreign_keys=ON`：SQLite 默认关闭外键约束，不开则级联删除失效。
-        - `journal_mode=WAL`：读写不互相阻塞，避免流式对话期间的写锁卡住读请求。
-          **注意它不是每个文件都能生效**：网络文件系统/某些容器卷会静默退回
-          `delete` 模式（见 `check_journal_mode`）。
-        - `synchronous=NORMAL`：WAL 下这是官方推荐的搭配。默认的 `FULL` 每次提交都
-          fsync，而 WAL + NORMAL 只在检查点 fsync——掉电最多丢最后几个事务（对聊天
-          记录可接受），换来的是流式落库不再被磁盘拖慢。`OFF` 绝对不能用：那是真会坏库。
-        - `busy_timeout=5000`：并发写入时排队等待而不是立刻抛 `database is locked`。
+# ---------------------------------------------------------------------
+# Alembic：版本校验（不做自动迁移）
+# ---------------------------------------------------------------------
+def _alembic_config():  # noqa: ANN202 - alembic.config.Config
+    """加载 alembic.ini。路径锚定项目根，不依赖当前工作目录。"""
+    from alembic.config import Config
 
-    独立成模块级函数（而不是只做事件回调）：测试可以直接拿一条裸 `sqlite3` 连接调用它，
-    不用去动全局 engine。
+    return Config(str(PROJECT_ROOT / "alembic.ini"))
+
+
+def expected_head_revision() -> str:
+    """迁移脚本里的 head revision（纯文件读取，不连库）。"""
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(_alembic_config())
+    head = script.get_current_head()
+    if head is None:
+        raise RuntimeError("migrations/versions 里没有任何迁移脚本：数据库结构无从建立。")
+    return head
+
+
+async def current_revision() -> str | None:
+    """库里的当前 revision；`alembic_version` 表不存在时返回 None。"""
+    from alembic.runtime.migration import MigrationContext
+
+    def read(connection) -> str | None:  # noqa: ANN001 - run_sync 要求同步函数
+        return MigrationContext.configure(connection).get_current_revision()
+
+    async with engine.connect() as connection:
+        return await connection.run_sync(read)
+
+
+async def verify_schema_at_head() -> None:
+    """启动自检：库结构必须与迁移脚本的 head 一致，否则拒绝启动。
+
+    为什么不自动升级、也不只是打个警告：
+
+    - 自动升级：滚动发布时先起来的实例会把结构推到新版本，而旧代码还在跑。错误
+      变成随机的（旧查询撞新列），最难排查的那一类。
+    - 只警告：结构不匹配的表现是运行期某条查询报 `UndefinedColumn`，用户先发现。
+      这里是纯配置/部署问题，启动时拒绝比线上猜快得多。
+
+    本地开发想省一步可以设 `DATABASE_REQUIRE_HEAD_REVISION=false`——那等于承认
+    「我在拿旧结构跑新代码」，仅限本机。
     """
-    cursor = dbapi_connection.cursor()
-    try:
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-    finally:
-        cursor.close()
-
-
-if engine.dialect.name == "sqlite":
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _apply_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
-        apply_sqlite_pragmas(dbapi_connection)
-
-
-async def check_journal_mode(conn) -> str:  # noqa: ANN001 - AsyncConnection
-    """返回数据库当前实际使用的日志模式（小写）。
-
-    为什么要在启动时查一次：`PRAGMA journal_mode=WAL` **可能静默失败**——SQLite 在网络
-    文件系统（NFS/SMB）、某些只读挂载或容器卷上会返回 `delete`，而不是报错。此时一切
-    照常工作，只是并发读写开始互相阻塞，表现为「流式回答进行中查列表会卡住」，而日志里
-    没有任何线索。SQLite 文件不应放在 NFS/SMB 一类网络文件系统上，这条检查就是把这个
-    约定变成可观测的信号。
-
-    查询失败不抛：这是诊断信息，不该让服务起不来。
-    """
-    try:
-        row = (await conn.exec_driver_sql("PRAGMA journal_mode")).fetchone()
-    except Exception:  # noqa: BLE001 - 诊断失败不影响启动
-        logger.warning("读取 SQLite journal_mode 失败，跳过 WAL 检查", exc_info=True)
-        return ""
-    return str(row[0]).lower() if row else ""
-
-
-async def _migrate_user_role_column(conn) -> None:  # noqa: ANN001 - AsyncConnection
-    """给已存在的 `user` 表补上 `role` 列并回填历史数据（幂等）。
-
-    **为什么需要手写**：`create_all` 只创建缺失的**表**，对已存在的表一个字节都不
-    改。而 `bennett.db` 里已经有账号了，不加这一步，升级后每次查询都会撞上
-    `no such column: user.role`——表现为「整个站点 500」。
-
-    四步，**顺序不可换**，且每一步都要让后续步骤不再命中它：
-
-    1. 列不存在 → `ALTER TABLE user ADD COLUMN role`（SQLite 允许带 DEFAULT 的 NOT NULL
-       加列，已有行自动取默认值 `'user'`）；
-    2. **归一化大小写与空白**（`lower(trim(role))`）：手工改库写成 `'ADMIN'` / `' admin '`
-       的行先变成 `'admin'`，否则第 4 步会把它们当成非法值丢掉；
-    3. **回填**：仍是 `'user'` 且 `is_superuser=1` 的账号是角色列出现之前的历史超管，
-       升级为 `superadmin`——否则老管理员会在升级瞬间失去入口，而服务里**没有**任何
-       自助恢复路径；
-    4. **规范化非法值**：认不出的值降为 `'user'`，**同时清掉 `is_superuser`**。
-
-    第 4 步那个「同时清掉」是幂等的关键：不清的话该行变成 `role='user'` 但
-    `is_superuser` 仍是 1，下次启动第 3 步就会把一枚写错的 role 值提成 `superadmin`
-    ——正是 HTTP 层刻意禁止授予的档位（`app/api/admin.py` 的 `set_user_role` 只能
-    由超管调用且不能改自己）。清理之后结果与启动次数无关，且失败方向是**降权**
-    而不是提权。
-
-    归一化口径必须与 `app/roles.py::Role.parse` 一致（`strip().lower()`）：两处不一致
-    时，`Role.parse('ADMIN')` 说是管理员、而这里把它降成普通用户，运维手改库的行为
-    就成了看运气。
-    """
-    columns = {row[1] for row in (await conn.execute(text("PRAGMA table_info(user)"))).fetchall()}
-    if not columns:
-        # 表还不存在（全新库且 create_all 尚未建出）——create_all 会带上 role，无需处理
+    head = expected_head_revision()
+    current = await current_revision()
+    if current == head:
+        logger.info("数据库结构已是最新: revision=%s", head)
         return
 
-    if "role" not in columns:
-        await conn.execute(text(f"ALTER TABLE user ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT '{ROLE_USER}'"))
-        logger.info("已为 user 表添加 role 列（默认 %s）", ROLE_USER)
-
-    # 2. 归一化：只动需要动的行，重复执行时 rowcount 为 0。
-    #    SQLite 的 lower() 只处理 ASCII，而 role 的全部取值都是 ASCII，够用。
-    normalized_case = await conn.execute(
-        text("UPDATE user SET role = lower(trim(role)) WHERE role <> lower(trim(role))")
-    )
-    if normalized_case.rowcount:
-        logger.info("已归一化 %d 个 role 值的大小写/空白", normalized_case.rowcount)
-
-    # 3. 回填：必须在归一化之后，否则 'ADMIN' 会先被第 4 步降成 'user' 再被这里提权。
-    backfilled = await conn.execute(
-        text("UPDATE user SET role = :admin WHERE is_superuser = 1 AND role = :user").bindparams(
-            admin=ROLE_SUPERADMIN, user=ROLE_USER
-        )
-    )
-    if backfilled.rowcount:
-        logger.info("已把 %d 个历史超级管理员回填为 role=%s", backfilled.rowcount, ROLE_SUPERADMIN)
-
-    # 4. 规范化非法值。占位符显式展开，不拼字符串（role 值来自本模块常量，非常不可信
-    #    输入，但仍不把变量名拼进 SQL）。
-    placeholders = ", ".join(f":r{index}" for index in range(len(ALL_ROLES)))
-    role_params: dict[str, str] = {f"r{index}": value for index, value in enumerate(ALL_ROLES)}
-    invalid = await conn.execute(
-        text(f"SELECT DISTINCT role FROM user WHERE role NOT IN ({placeholders})").bindparams(**role_params)
-    )
-    bad_values = [row[0] for row in invalid.fetchall()]
-    if not bad_values:
-        return
-
-    # is_superuser 一并清零：否则下次启动会被第 3 步当成历史超管提权（见 docstring）。
-    dropped = await conn.execute(
-        text(f"UPDATE user SET role = :user, is_superuser = 0 WHERE role NOT IN ({placeholders})").bindparams(
-            **role_params, user=ROLE_USER
-        )
-    )
-    logger.warning(
-        "已把 %d 个非法 role 值降为 %s 并清除 is_superuser（非法取值: %s）",
-        dropped.rowcount,
-        ROLE_USER,
-        ", ".join(repr(value) for value in bad_values),
-    )
-
-
-def _model_columns() -> dict[str, set[str]]:
-    """ORM 声明的 `{表名: 列名集合}`（不读库，纯元数据）。"""
-    return {table.name: {column.name for column in table.columns} for table in Base.metadata.sorted_tables}
-
-
-def diff_schema(actual: dict[str, set[str]]) -> dict[str, set[str]]:
-    """比对「代码里的表结构」与「库里的表结构」，返回**库里缺的列**。
-
-    `create_all` 只建缺失的表，对已存在的表一个字节都不改：新增一列而忘了写迁移时，
-    服务能正常启动，直到某个查询撞上 `no such column` 才 500——而那时用户已经在用了。
-    这个比对在启动时就把缺口指出来（表名 + 列名 + 该怎么补），比运行期报错可查得多。
-
-    只报「模型有、库里没有」的列。库里多出来的列不报：那可能是旧版本遗留，删它才危险。
-    表整个缺失也不报（`create_all` 会建出来）。
-    """
-    expected = _model_columns()
-    missing: dict[str, set[str]] = {}
-    for table, columns in expected.items():
-        present = actual.get(table)
-        if present is None:
-            continue
-        gap = columns - present
-        if gap:
-            missing[table] = gap
-    return missing
-
-
-def diff_column_constraints(actual: dict[str, dict[str, bool]]) -> dict[str, set[str]]:
-    """比对「列是否允许 NULL」，返回**库里比代码更严格**的列。
-
-    `actual` 是 `{表名: {列名: 是否 NOT NULL}}`（来自 `PRAGMA table_info`）。
-
-    只报这一个方向：**模型允许 NULL、库里是 NOT NULL**。此时应用会按模型写 NULL，然后在
-    运行期撞 `IntegrityError: NOT NULL constraint failed`——而这条路径往往只在某个可选字段
-    真的有值时才走到（比如 `null` 的 error 字段），现场极难复现。
-
-    反方向（模型 NOT NULL、库里可空）不报：约束交给应用层，历史库里有旧行本来就是 NULL，
-    报出来只会制造噪音。
-    """
-    stricter: dict[str, set[str]] = {}
-    for table in Base.metadata.sorted_tables:
-        columns = actual.get(table.name)
-        if not columns:
-            continue
-        bad = {column.name for column in table.columns if column.nullable and columns.get(column.name) is True}
-        if bad:
-            stricter[table.name] = bad
-    return stricter
-
-
-async def _warn_on_missing_columns(conn) -> None:  # noqa: ANN001 - AsyncConnection
-    """启动时检查「加了字段却没写迁移」的漂移，并把缺口写进日志。
-
-    两类漂移：**库里缺列**（查询会 `no such column`）与**库里比代码更严格**（写 NULL 会
-    `IntegrityError`）。两者都只在运行期某条冷路径上炸，启动日志是唯一能提前发现的地方。
-    """
-    actual: dict[str, set[str]] = {}
-    not_null: dict[str, dict[str, bool]] = {}
-    for table in Base.metadata.sorted_tables:
-        rows = (await conn.execute(text(f"PRAGMA table_info({table.name})"))).fetchall()
-        if not rows:
-            continue
-        # PRAGMA table_info 列序：cid, name, type, notnull, dflt_value, pk
-        actual[table.name] = {row[1] for row in rows}
-        not_null[table.name] = {str(row[1]): bool(row[3]) for row in rows}
-
-    missing = diff_schema(actual)
-    if missing:
-        detail = "；".join(f"{table} 缺 {', '.join(sorted(columns))}" for table, columns in missing.items())
-        logger.warning(
-            "数据库结构与代码不一致（%s）。create_all 不会给已存在的表加列，"
-            "需要在 app/db.py 里补一段幂等的迁移，否则相关查询会报 no such column。",
-            detail,
-        )
-
-    stricter = diff_column_constraints(not_null)
-    if stricter:
-        detail = "；".join(f"{table}.{', '.join(sorted(columns))}" for table, columns in stricter.items())
-        logger.warning(
-            "数据库里有列比代码更严格（%s 在库里是 NOT NULL，而代码允许 NULL）。"
-            "写入 NULL 时会在运行期报 IntegrityError，需要在迁移里重建该表或补默认值。",
-            detail,
-        )
-
-
-async def create_db_and_tables() -> None:
-    """启动时建表 + 补齐列（幂等）。
-
-    新增的 `model_provider` / `provider_model` / `conversation` / `message` /
-    `sync_counter` 表由 `create_all` 自动创建；已有表（user / access_token）不会被动到。
-
-    **没有引入 Alembic**：迁移需求目前只有「给 user 表加 role 列」这一处，为它引入
-    一整套工具链不划算。代价是新增的列改动必须在 `_migrate_user_role_column` 里手写
-    并保持幂等。**再出现第二处加列时应该换成 Alembic**，而不是继续往这里堆。
-
-    为降低「忘了写迁移」的代价，建表之后会做一次结构比对（`diff_schema`）：缺列时在
-    启动日志里点名是哪张表的哪一列，而不是等某个查询在运行期报 `no such column`。
-    """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await _migrate_user_role_column(conn)
-        await _warn_on_missing_columns(conn)
-        mode = await check_journal_mode(conn)
-        if mode and mode != "wal":
-            logger.warning(
-                "SQLite 未启用 WAL（当前 journal_mode=%s）。常见原因是数据库文件放在网络文件系统"
-                "（NFS/SMB）或不受支持的容器卷上：读写会互相阻塞，流式对话期间查列表可能卡住。"
-                "请把数据库放到本地磁盘。",
-                mode,
-            )
-
-    if engine.dialect.name == "sqlite":
-        database = engine.url.database
-        if database and database != ":memory:":
-            secure_sqlite_permissions(database)
-
-    logger.info("数据库就绪: %s", DATABASE_URL)
+    detail = f"数据库结构不是最新：当前 revision={current or '（无，未执行过迁移）'}，代码期望 {head}。"
+    hint = "请先执行迁移：docker compose run --rm migrate（或 alembic upgrade head）。"
+    if settings.database_require_head_revision:
+        raise RuntimeError(f"{detail} {hint}")
+    logger.warning("%s 已按配置继续启动（DATABASE_REQUIRE_HEAD_REVISION=false）。", detail)
 
 
 # ---------------------------------------------------------------------
@@ -808,7 +848,7 @@ async def cleanup_expired_access_tokens(lifetime_seconds: int) -> int:
     已过期的会话 token 也长期留在库里。
 
     用独立会话（`async_session_maker`）而不是请求级 session：调用方（登录钩子、
-    将来的启动清理）通常正处于自己的事务里，清理是与该请求无关的维护动作。
+    启动清理）通常正处于自己的事务里，清理是与该请求无关的维护动作。
     """
     if lifetime_seconds <= 0:
         # 与 services/auth.py 里 get_database_strategy 的防御同源：lifetime<=0 时
@@ -820,20 +860,36 @@ async def cleanup_expired_access_tokens(lifetime_seconds: int) -> int:
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=lifetime_seconds)
     async with async_session_maker() as session:
-        result = await session.execute(delete(AccessToken).where(AccessToken.created_at < cutoff))
+        stale = (await session.execute(select(AccessToken.token).where(AccessToken.created_at < cutoff))).scalars()
+        tokens = list(stale)
+        await session.execute(delete(AccessToken).where(AccessToken.created_at < cutoff))
         await session.commit()
-        return result.rowcount
+
+    # 缓存与库一起清：只删库时，已登出的会话还能从 Redis 里取出来用（最坏到 TTL）。
+    for token in tokens:
+        await _session_cache_delete(token)
+    return len(tokens)
 
 
 async def delete_user_access_tokens(user_id: uuid.UUID) -> int:
     """删除某个用户的**全部**会话行，返回删除条数（改密 / 踢人 / 停用账号用）。
 
     只按 `user_id` 过滤：同一部署下改 A 的密码不能把 B 踢下线。
+
+    先把 token 摘要读出来再删：Redis 缓存是按摘要建的键，不知道键名就没法让撤销
+    立即生效。会话数量在这张表的量级下很小（每用户几十条顶天），一次全取不会成为
+    负担；反过来，省略这一步会让「改密后旧会话仍能用一个 TTL」变成安全缺陷。
     """
     async with async_session_maker() as session:
+        tokens = list(
+            (await session.execute(select(AccessToken.token).where(AccessToken.user_id == user_id))).scalars()
+        )
         result = await session.execute(delete(AccessToken).where(AccessToken.user_id == user_id))
         await session.commit()
-        return result.rowcount
+
+    for token in tokens:
+        await _session_cache_delete(token)
+    return result.rowcount or 0
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
@@ -847,3 +903,39 @@ async def get_user_db(session: AsyncSession = Depends(get_async_session)):  # no
 
 async def get_access_token_db(session: AsyncSession = Depends(get_async_session)):  # noqa: B008
     yield HashedAccessTokenDatabase(session, AccessToken)
+
+
+__all__ = [
+    "DATABASE_URL",
+    "UPLOAD_STATUSES",
+    "UPLOAD_STATUS_FAILED",
+    "UPLOAD_STATUS_PENDING",
+    "UPLOAD_STATUS_PROCESSING",
+    "UPLOAD_STATUS_READY",
+    "AccessToken",
+    "AppSetting",
+    "Base",
+    "Conversation",
+    "HashedAccessTokenDatabase",
+    "KnowledgeChunk",
+    "KnowledgeDocument",
+    "Message",
+    "ModelPrice",
+    "ModelProvider",
+    "ProviderModel",
+    "SyncCounter",
+    "UploadedFile",
+    "User",
+    "async_session_maker",
+    "build_engine",
+    "cleanup_expired_access_tokens",
+    "current_revision",
+    "delete_user_access_tokens",
+    "engine",
+    "expected_head_revision",
+    "get_access_token_db",
+    "get_async_session",
+    "get_user_db",
+    "hash_access_token",
+    "verify_schema_at_head",
+]

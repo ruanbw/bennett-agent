@@ -19,9 +19,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import delete
 
-from app.db import ModelPrice, async_session_maker
 from app.services import pricing
 from app.services.pricing import (
     Price,
@@ -209,16 +207,9 @@ async def _tables():
     `tests/conftest.py` 只重定向 `DATABASE_URL`，**建表**是应用启动才做的；本模块直接
     调服务层，所以自己建一次（幂等）。
     """
-    from app.db import create_db_and_tables
-
-    await create_db_and_tables()
-    async with async_session_maker() as session:
-        await session.execute(delete(ModelPrice))
-        await session.commit()
+    # 结构由 conftest 的 alembic 建立，用例之间由 TRUNCATE ... CASCADE 隔离，
+    # 因此不再需要各自清 `model_price`。
     yield
-    async with async_session_maker() as session:
-        await session.execute(delete(ModelPrice))
-        await session.commit()
 
 
 async def test_get_price_returns_none_for_unknown_model():

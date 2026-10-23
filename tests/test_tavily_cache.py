@@ -64,11 +64,27 @@ def test_invalid_construction_is_rejected(kwargs):
         SearchResultCache(**kwargs)
 
 
-def test_singleton_can_be_reset():
-    search_cache.put("q", 5, "内容", now=1.0)
-    reset_search_cache()
+async def test_facade_can_be_reset():
+    """外观层（`SearchCache`）是 async 的：Redis 后端需要 IO。
 
-    assert len(search_cache) == 0
+    这里刻意只验证「清空后读不到」，不验证后端是哪个——后端由
+    `SEARCH_CACHE_BACKEND` 决定，两种实现共用同一个契约。
+    """
+    await search_cache.put("q", 5, "内容")
+    assert await search_cache.get("q", 5) == "内容"
+
+    await reset_search_cache()
+
+    assert await search_cache.get("q", 5) is None
+
+
+async def test_facade_isolates_by_scope():
+    """不同用户不共享搜索结果，避免注入内容在他人上下文里存续（I-03）。"""
+    await search_cache.put("query", 5, "result-for-user-a", scope="user-a")
+
+    assert await search_cache.get("query", 5, scope="user-a") == "result-for-user-a"
+    assert await search_cache.get("query", 5, scope="user-b") is None
+    assert await search_cache.get("query", 5) is None
 
 
 def test_cache_is_isolated_by_scope():

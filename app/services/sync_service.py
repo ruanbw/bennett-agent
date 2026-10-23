@@ -44,7 +44,12 @@ from typing import Literal
 from weakref import WeakValueDictionary
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+# PostgreSQL 的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。
+# 曾经误用的是 SQLite 方言的同名构造：它在 SQLite 上工作，在 PG 上编译期就抛
+# `AttributeError: 'OnConflictDoUpdate' object has no attribute 'constraint_target'`
+# ——方言对象不可跨库混用，测试基座换库时这类耦合必须一起拔掉。
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -167,7 +172,7 @@ async def wait_for_change(user_id: uuid.UUID, since: int, timeout: float) -> Non
 async def _next_version(session: AsyncSession, user_id: uuid.UUID) -> int:
     """原子发号：一条语句完成「没有就建、有就 +1 并返回」。"""
     statement = (
-        sqlite_insert(SyncCounter)
+        pg_insert(SyncCounter)
         .values(user_id=user_id, version=1)
         .on_conflict_do_update(
             index_elements=[SyncCounter.user_id],
@@ -489,7 +494,7 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
 
             version = await _next_version(session, user_id)
             statement = (
-                sqlite_insert(Conversation)
+                pg_insert(Conversation)
                 .values(
                     id=row.id,
                     user_id=user_id,
@@ -603,7 +608,7 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
 
             version = await _next_version(session, user_id)
             statement = (
-                sqlite_insert(Message)
+                pg_insert(Message)
                 .values(
                     id=row.id,
                     conversation_id=row.conversation_id,

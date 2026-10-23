@@ -5,13 +5,25 @@ description = "基于 PydanticAI + LiteLLM 的 Agent 框架，含 FastAPI SSE �
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "aiosqlite>=0.22.1",
+    # 数据库：异步驱动 + 迁移工具。SQLite 已从支持矩阵里移除，见 app/db.py
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    # 共享状态：限流计数、业务缓存、会话热缓存
+    "redis>=5.2",
+    # 对象存储（S3 / RustFS 同一套 API）。同步客户端放到线程池里用，见 app/services/storage/s3.py
+    "boto3>=1.35",
     "cryptography>=42.0",
     "fastapi>=0.142.2",
     "fastapi-users[sqlalchemy]>=15.0.0",
     "httpx>=0.28.1",
     "jinja2>=3.1.5",
     "litellm>=1.104.0",
+    # 上传文件解析：PDF / DOCX / HTML
+    "beautifulsoup4>=4.12",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+    # FastAPI 的 multipart 表单解析（UploadFile）靠它
+    "python-multipart>=0.0.20",
     "pydantic-ai>=2.31.1",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.2.4",
@@ -35,6 +47,13 @@ pythonpath = ["."]
 addopts = "-q"
 # 异步用例直接写 async def，不用逐个包 asyncio.run
 asyncio_mode = "auto"
+# **整个测试会话共用一个事件循环**。
+# app/db.py 的 engine 是模块级单例，连接池里的 asyncpg 连接绑定在创建它的事件循环上。
+# 默认的「每个测试一个循环」会让第二个用例拿到上一个循环的连接，报
+# `Future attached to a different loop`——而那个报错发生在任何断言之泚，看起来像
+# 「测试框架坏了」。共用会话级循环是最小、也最接近生产的做法（生产只有一个循环）。
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.ruff]
 target-version = "py310"

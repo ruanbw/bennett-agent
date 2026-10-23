@@ -50,7 +50,7 @@ ENV PYTHONUNBUFFERED=1 \
 # uv 从官方镜像复制：比 `pip install uv` 快，且不占构建缓存的一层。
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
 
-# 非 root 运行。容器默认是 root，而本服务会写 SQLite 文件——root 写出来的文件
+# 非 root 运行。容器默认是 root，而应用会写日志/临时文件——root 写出来的文件
 # 在宿主上属于 root，之后运维想改权限就得 sudo。
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid app --create-home app
@@ -65,16 +65,18 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # 业务代码放在依赖之后：这一层最容易变，放最后能让上面的层全部命中缓存
-COPY app/ ./app/
-COPY prompts/ ./prompts/
-COPY evals/ ./evals/
-COPY scripts/ ./scripts/
-COPY main.py pyproject.toml ./
-
-# SQLite 默认落在工作目录（`./bennett.db`）。建一个独立的数据目录并声明为卷，
-# 这样数据库与代码分开：镜像可以随时重建，数据不会跟着丢。
-RUN mkdir -p /data && chown -R app:app /data /app
-ENV DATABASE_URL="sqlite+aiosqlite:////data/bennett.db"
+# `--chown`：容器以非 root（app）运行，而 COPY 默认把文件留给 root。源文件在宿主上
+# 若还是 0600（本仓库里有这类文件），root:0600 的文件对 app 用户就是「不可读」——
+# 症状是启动时 `PermissionError: /app/app/config/logging_setup.py`，看着像镜像坏了。
+COPY --chown=app:app app/ ./app/
+COPY --chown=app:app prompts/ ./prompts/
+COPY --chown=app:app evals/ ./evals/
+COPY --chown=app:app scripts/ ./scripts/
+# 迁移脚本与 alembic 配置必须进镜像：`migrate` 服务用同一个镜像执行
+# `alembic upgrade head`，镜像里缺 migrations/ 会让部署在第一步就失败。
+COPY --chown=app:app migrations/ ./migrations/
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app main.py pyproject.toml ./
 
 USER app
 
@@ -85,6 +87,8 @@ EXPOSE 8000
 # 就绪探针用 `/health/ready`（真的 ping 数据库），不是 `/health`。
 # 用 liveness 做 readiness 会让「进程活着但数据库坏了」的实例留在负载均衡里。
 # `python -c` 而不是 curl：slim 镜像里没有 curl，为一个探针装它不值得。
+# 注意探针只检查 database；Redis/对象存储挂了时端点返回 200 + degraded，
+# 理由见 settings.readiness_required_dependencies。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status == 200 else 1)"
 

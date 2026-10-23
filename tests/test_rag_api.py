@@ -202,9 +202,7 @@ async def _tables():
     用一次性的临时库：`conftest.py` 只把 `DATABASE_URL` 指向临时文件，建表是
     应用启动才做的。
     """
-    from app.db import create_db_and_tables
-
-    await create_db_and_tables()
+    # 结构由 conftest 的 `alembic upgrade head` 建立；用例之间由 TRUNCATE 隔离。
     yield
 
 

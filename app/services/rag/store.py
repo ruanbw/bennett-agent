@@ -16,10 +16,12 @@
 词法分用**字符二元组重合度**（bigram）而不是分词：
 
 - 中文没有空格，标准 BM25 需要先分词，引一个分词器依赖不划算；
-- SQLite 的 FTS5 `trigram` 中文虽可用，但**两字词查不到**（trigram 至少要 3 个
-  字符），而「退款」「发票」这类两字查询恰恰最常见——这个坑实测踩过（见
-  `tests/test_rag_store.py` 的注释）；
-- 二元组在纯 Python 里是一次集合交集，对中文与英文同时成立。
+- 词法检索的常见替代是 `pg_trgm` / `tsvector`：`pg_trgm` 的 trigram 同样**查不到
+  两字词**（「退款」「发票」这类恰恰最常见），`tsvector` 要做中文分词就得引入
+  分词器与字典（并随词表漂移）；两者都要额外的扩展或配置，而本部署把扩展留给
+  运维决定（见 `app/db.py` 关于 pgvector 的说明）；
+- 二元组在纯 Python 里是一次集合交集，对中文与英文同时成立，且**不需要数据库
+  特性**——同一套打分在 Postgres、测试库与 CLI 里完全一致。
 
 ## 分数怎么合
 
@@ -284,8 +286,8 @@ async def delete_document(user_id: uuid.UUID, document_id: uuid.UUID) -> bool:
     """删除一篇文档及其全部片段；返回是否真的删了。
 
     按 `(id, user_id)` 双条件删：单按 id 会让拿到别人文档 id 的人删掉它——越权删除
-    比越权读更糟，数据直接没了。片段由外键 `ondelete=CASCADE` 清理（依赖
-    `PRAGMA foreign_keys=ON`，见 `app/db.py:apply_sqlite_pragmas`）。
+    比越权读更糟，数据直接没了。片段与上传记录的关联由外键清理（`ondelete=CASCADE`
+    与 `SET NULL`）——Postgres 默认强制外键，不存在「忘了开 PRAGMA 就静默失效」的形态。
     """
     async with async_session_maker() as session:
         result = await session.execute(

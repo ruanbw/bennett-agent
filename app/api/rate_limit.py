@@ -1,11 +1,18 @@
-"""进程内滑动窗口限流。
+"""滑动窗口限流（Redis 共享计数 + 进程内降级）。
 
 本模块的 IP 限流服务于**认证端点**（注册/登录，防密码暴力破解与批量注册）；
 对话端点 `/api/chat` 已要求登录，按**账号**限流（见 `app/api/chat.py`），
 因为反代部署下 `client.host` 是代理地址，按 IP 计数会退化成全站共享配额。
 
-**本实现是进程内的**：多 worker / 多实例部署时每个进程各自计数，因此它挡的是
-「单个来源猛打」，不是精确的全局配额。需要精确配额时应换成 Redis 之类的共享存储。
+## 计数存在哪里
+
+默认在 **Redis**（`RedisSlidingWindowLimiter`）：滑动窗口用 ZSET，判断、写入、
+设过期在同一个 Lua 脚本里完成，多 worker / 多实例拿到的是同一份配额。
+曾经用过一个共享 SQLite 文件，它在多机部署下直接不成立（文件是本地的），
+而多机一旦出现，配额就会被乘以机器数。
+
+Redis 不可用时按 `RATE_LIMIT_ON_REDIS_ERROR` 处置（默认退到进程内计数）：
+降级是可接受的，**静默降级不是**——每一类降级都记日志与指标。
 
 **不信任客户端可写的 `X-Forwarded-For`**：只有显式配置 `trusted_proxy_headers`
 才会读它，且取**最右侧**非空地址——那才是最后一跳代理写入的真实来源；客户端自己
@@ -14,19 +21,18 @@
 
 ## 两种限流键
 
-本模块提供基元（`SlidingWindowLimiter` / `resolve_client_ip` / `client_key`）与
-**认证端点**的限流依赖。对话端点的限流在 `app/api/chat.py`，因为它需要
-`current_active_user`（按账号计数），而本模块刻意不依赖任何业务服务。
+本模块提供基元（`SlidingWindowLimiter` / `RedisSlidingWindowLimiter` /
+`resolve_client_ip` / `client_key`）与**认证端点**的限流依赖。对话端点的限流在
+`app/api/chat.py`，因为它需要 `current_active_user`（按账号计数），而本模块刻意
+不依赖任何业务服务。
 """
 
-import asyncio
 import ipaddress
 import logging
-import sqlite3
 import time
+import uuid
 from collections import OrderedDict, deque
 from math import ceil
-from pathlib import Path
 
 from fastapi import HTTPException, Request, status
 
@@ -256,90 +262,138 @@ def client_key(host: str | None, scope: str = "") -> str:
     return f"{scope}:{host or 'unknown'}" if scope else (host or "unknown")
 
 
-class SharedSqliteLimiter:
-    """基于 SQLite 文件的滑动窗口限流器（跨进程/worker 共享）。
+class RedisSlidingWindowLimiter:
+    """基于 Redis 的滑动窗口限流器（跨进程 / 跨实例共享配额）。
 
-    进程内限流在多 worker 下配额会被乘以 worker 数（I-07）。这里把「窗口内的命中
-    时间戳」放进一个独立的 SQLite 文件：连接每次 check 打开、`BEGIN IMMEDIATE` 下
-    完成「清理过期 → 计数 → 插入」，SQLite 的写锁保证并发进程不会同时越过上限。
+    ## 为什么必须是原子脚本
 
-    文件很小（一个窗口内的请求数），不参与业务库的迁移；路径默认与业务库同目录。
-    没有可写文件路径时（内存库、测试）调用方会退回 `SlidingWindowLimiter`。
+    「先清理过期、再计数、再插入」三步如果分开执行，两个并发请求会同时读到
+    `count = limit - 1`，然后一起放行——超出的量正好等于并发度。限流器在压力下
+    失效是最糟的失效方式，而这类 bug 在低并发测试里永远复现不了。
+
+    Lua 脚本在 Redis 里单线程执行，整段判断天然原子；`ZADD` 与 `PEXPIRE` 也在同一
+    段里完成，不会出现「键写进去了但没过期时间」的泄漏。
+
+    ## 时间源用 Redis 的时钟（`TIME`），不用应用进程的
+
+    多实例部署时各机器的时钟可能有偏差（NTP 漂移、容器时钟）。用进程本地时间做窗口
+    边界，会让「同一秒」在不同实例上落在不同窗口，配额变成「大致正确」。
+    Redis 的 `TIME` 是单一时钟源，且与脚本在同一台机器上，误差可以忽略。
+
+    ## Redis 不可用时（`rate_limit_on_redis_error`）
+
+    - `local_fallback`（默认）：退到进程内计数。配额在故障期间会乘以实例数，
+      但攻击者至少仍有配额约束，且登录/对话不会因为缓存抖动而全部 429。
+    - `fail_closed`：一律拒绝（可用性换确定性）。适合安全要求高、且 Redis 自身
+      是高可用部署的场景。
+    - `fail_open`：一律放行。仅在「限流是纯优化」的部署里合理。
+
+    三种模式都会记日志与 `redis_unavailable_total{reason="rate_limit"}` 指标——
+    降级可以接受，静默降级不行。
     """
 
-    def __init__(self, *, limit: int, window_seconds: float, path: str) -> None:
+    #: KEYS[1] = 限流键；ARGV = limit, window_ms, member。
+    #: 返回 {是否允许(0/1), Retry-After 毫秒}。
+    _SCRIPT = """
+    local key = KEYS[1]
+    local limit = tonumber(ARGV[1])
+    local window = tonumber(ARGV[2])
+    local member = ARGV[3]
+
+    local t = redis.call('TIME')
+    local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+    local cutoff = now - window
+
+    redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
+    local count = redis.call('ZCARD', key)
+
+    if count >= limit then
+        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+        local retry = window
+        if oldest[2] then
+            retry = tonumber(oldest[2]) + window - now
+        end
+        if retry < 0 then retry = 0 end
+        return {0, retry}
+    end
+
+    redis.call('ZADD', key, now, member)
+    -- 过期时间与窗口一致：窗口内没有新请求时键自然消失，不需要单独的清理任务
+    redis.call('PEXPIRE', key, window)
+    return {1, 0}
+    """
+
+    def __init__(self, *, limit: int, window_seconds: float) -> None:
         if limit < 1:
-            raise ValueError("SharedSqliteLimiter 的 limit 必须 >= 1")
+            raise ValueError("RedisSlidingWindowLimiter 的 limit 必须 >= 1")
         if window_seconds <= 0:
             raise ValueError("window_seconds 必须 > 0")
         self.limit = limit
         self.window_seconds = window_seconds
-        self.path = path
+        #: 降级用的进程内计数器。与 Redis 同配额，但它只看得到本进程的请求。
+        self._fallback = SlidingWindowLimiter(limit=limit, window_seconds=window_seconds)
 
-    @staticmethod
-    def _connect(path: str) -> sqlite3.Connection:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(path, timeout=10.0)
-        connection.execute("CREATE TABLE IF NOT EXISTS rate_limit_hits (key TEXT NOT NULL, ts REAL NOT NULL)")
-        connection.execute("CREATE INDEX IF NOT EXISTS ix_rate_limit_ts ON rate_limit_hits(ts)")
-        return connection
-
-    def check(self, key: str) -> tuple[bool, float]:
-        now = time.monotonic()
-        cutoff = now - self.window_seconds
-        connection = self._connect(self.path)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM rate_limit_hits WHERE ts <= ?", (cutoff,))
-            row = connection.execute("SELECT COUNT(*), MIN(ts) FROM rate_limit_hits WHERE key = ?", (key,)).fetchone()
-            count = int(row[0] or 0)
-            if count >= self.limit:
-                oldest = float(row[1]) if row[1] is not None else now
-                connection.commit()
-                return False, max(0.0, oldest + self.window_seconds - now)
-            connection.execute("INSERT INTO rate_limit_hits (key, ts) VALUES (?, ?)", (key, now))
-            connection.commit()
-            return True, 0.0
-        finally:
-            connection.close()
+    def _key(self, key: str) -> str:
+        return f"{settings.redis_key_prefix}:ratelimit:{key}"
 
     async def acheck(self, key: str) -> tuple[bool, float]:
-        """在 worker 线程执行同步 SQLite 操作，避免阻塞事件循环。"""
-        return await asyncio.to_thread(self.check, key)
+        from app.services.redis_client import get_redis, warn_throttled
 
-    def reset(self) -> None:
-        connection = self._connect(self.path)
         try:
-            connection.execute("DELETE FROM rate_limit_hits")
-            connection.commit()
-        finally:
-            connection.close()
+            result = await get_redis().eval(
+                self._SCRIPT,
+                1,
+                self._key(key),
+                self.limit,
+                int(self.window_seconds * 1000),
+                f"{time.time():.6f}:{uuid.uuid4().hex}",
+            )
+        except Exception:  # noqa: BLE001 - 任何 Redis 故障都走同一个降级决策
+            return self._on_redis_failure(key, warn_throttled)
 
+        # redis-py 对 Lua 的返回是 list[bytes|int]，这里统一成 int
+        allowed = int(result[0]) == 1
+        retry_ms = int(result[1])
+        return allowed, max(0.0, retry_ms / 1000.0)
 
-def _rate_limit_db_path() -> str:
-    """限流计数文件路径；无法确定时返回空串（退回内存）。"""
-    configured = (settings.rate_limit_db_path or "").strip()
-    if configured:
-        return configured
-    from app.db import engine  # 延迟导入：避免循环（db 导入 config）
+    def _on_redis_failure(self, key: str, warn_throttled) -> tuple[bool, float]:  # noqa: ANN001
+        """按配置的失败模式决定放行还是拒绝。"""
+        mode = settings.rate_limit_on_redis_error
+        warn_throttled(
+            "rate_limit",
+            f"Redis 限流不可用，降级模式={mode}。local_fallback 期间配额会乘以实例数；fail_closed 会让请求直接 429。",
+        )
+        if mode == "fail_open":
+            return True, 0.0
+        if mode == "fail_closed":
+            return False, self.window_seconds
+        return self._fallback.check(key)
 
-    database = engine.url.database
-    if not database or database == ":memory:":
-        return ""
-    return str(Path(database).with_name("rate-limit.db"))
+    async def reset(self) -> None:
+        """清空本限流器的计数（测试与「人工解封」用）。
+
+        只删自己前缀下的键：`FLUSHDB` 会连带清掉会话缓存与搜索缓存，
+        而调用方想要的是「把限流窗口归零」，不是「把整个 Redis 清空」。
+        """
+        from app.services.redis_client import get_redis
+
+        self._fallback.reset()
+        client = get_redis()
+        prefix = f"{settings.redis_key_prefix}:ratelimit:*"
+        keys = [key async for key in client.scan_iter(match=prefix, count=500)]
+        if keys:
+            await client.delete(*keys)
 
 
 def make_limiter(current: object, limit: int):
-    """按 `RATE_LIMIT_BACKEND` 选实现；配置/路径变化时重建。
+    """按 `RATE_LIMIT_BACKEND` 选实现；配置/配额变化时重建。
 
     返回对象统一提供 `await limiter.acheck(key)`。
     """
-    if settings.rate_limit_backend == "sqlite":
-        path = _rate_limit_db_path()
-        if path:
-            if isinstance(current, SharedSqliteLimiter) and current.limit == limit and current.path == path:
-                return current
-            return SharedSqliteLimiter(limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS, path=path)
+    if settings.rate_limit_backend == "redis":
+        if isinstance(current, RedisSlidingWindowLimiter) and current.limit == limit:
+            return current
+        return RedisSlidingWindowLimiter(limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
     memory = current if isinstance(current, SlidingWindowLimiter) else None
     return limiter_with(memory, limit)
 

@@ -1,16 +1,20 @@
-"""进程内限流的算法与启动参数校验（`app/api/rate_limit.py`、`main.py`）。
+"""限流的算法、降级语义与启动参数校验（`app/api/rate_limit.py`、`main.py`）。
 
-HTTP 层用例（429 响应、按账号/按 IP 分流、端点接线）已随全量/端到端层移除；这里保留
-`SlidingWindowLimiter` 的算法行为、来源识别（`resolve_client_ip` / `client_key`），
-以及 `main.py` 的启动参数校验。
+HTTP 层用例（429 响应、按账号/按 IP 分流、端点接线）已随全量/端到端层移除；这里保留：
+
+- `SlidingWindowLimiter` 的进程内算法（Redis 不可用时的降级实现）；
+- `RedisSlidingWindowLimiter` 的共享计数、窗口过期与三种失败模式；
+- 来源识别（`resolve_client_ip` / `client_key`）。
 """
 
+import asyncio
 import sys
 import threading
 
 import pytest
 
 from app.api.rate_limit import SlidingWindowLimiter, bucket_ip_address, client_key, resolve_client_ip
+from app.config import settings
 
 
 def test_allows_up_to_limit():
@@ -322,41 +326,70 @@ def test_ipv6_rotating_addresses_share_a_bucket():
 
 
 # ---------------------------------------------------------------------
-# 跨进程共享限流（I-07）
+# 跨进程共享限流（I-07）：Redis ZSET + Lua
 # ---------------------------------------------------------------------
-def test_shared_sqlite_limiter_is_shared_between_instances(tmp_path, monkeypatch):
-    """两个 worker 各自 new 一个 limiter，但计数必须落在同一个文件里。"""
-    from app.api.rate_limit import SharedSqliteLimiter
+async def test_redis_limiter_is_shared_between_instances():
+    """两个 worker 各自 new 一个 limiter，但配额必须来自同一份共享计数。"""
+    from app.api.rate_limit import RedisSlidingWindowLimiter
 
-    path = str(tmp_path / "rate-limit.db")
-    worker_a = SharedSqliteLimiter(limit=2, window_seconds=60, path=path)
-    worker_b = SharedSqliteLimiter(limit=2, window_seconds=60, path=path)
+    worker_a = RedisSlidingWindowLimiter(limit=2, window_seconds=60)
+    worker_b = RedisSlidingWindowLimiter(limit=2, window_seconds=60)
+    await worker_a.reset()
 
-    assert worker_a.check("ip")[0] is True
-    assert worker_b.check("ip")[0] is True
-    allowed, retry_after = worker_a.check("ip")
+    assert (await worker_a.acheck("shared-ip"))[0] is True
+    assert (await worker_b.acheck("shared-ip"))[0] is True
+    allowed, retry_after = await worker_a.acheck("shared-ip")
 
     assert allowed is False
     assert 0 < retry_after <= 60
 
 
-def test_shared_sqlite_limiter_window_slides(tmp_path, monkeypatch):
-    from app.api.rate_limit import SharedSqliteLimiter
+async def test_redis_limiter_window_expires():
+    """窗口过后计数归零：键的 PEXPIRE 与窗口一致，不需要额外清理任务。"""
+    from app.api.rate_limit import RedisSlidingWindowLimiter
 
-    clock = {"now": 1000.0}
-    monkeypatch.setattr("app.api.rate_limit.time.monotonic", lambda: clock["now"])
-    limiter = SharedSqliteLimiter(limit=1, window_seconds=10, path=str(tmp_path / "rl.db"))
+    limiter = RedisSlidingWindowLimiter(limit=1, window_seconds=1)
+    await limiter.reset()
 
-    assert limiter.check("ip")[0] is True
-    assert limiter.check("ip")[0] is False
+    assert (await limiter.acheck("expiring-ip"))[0] is True
+    assert (await limiter.acheck("expiring-ip"))[0] is False
 
-    clock["now"] += 11
-    assert limiter.check("ip")[0] is True
+    await asyncio.sleep(1.1)
+    assert (await limiter.acheck("expiring-ip"))[0] is True
+    await limiter.reset()
 
 
-async def test_shared_sqlite_limiter_async_entrypoint(tmp_path):
-    from app.api.rate_limit import SharedSqliteLimiter
+async def test_redis_limiter_falls_back_to_local_counting(monkeypatch):
+    """Redis 抖动时按 `local_fallback` 降级：**仍有配额约束**，且不会抛给调用方。"""
+    import app.services.redis_client as redis_client
+    from app.api.rate_limit import RedisSlidingWindowLimiter
 
-    limiter = SharedSqliteLimiter(limit=1, window_seconds=60, path=str(tmp_path / "rl.db"))
-    assert (await limiter.acheck("ip"))[0] is True
-    assert (await limiter.acheck("ip"))[0] is False
+    class BrokenRedis:
+        async def eval(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: BrokenRedis())
+    monkeypatch.setattr(settings, "rate_limit_on_redis_error", "local_fallback")
+
+    limiter = RedisSlidingWindowLimiter(limit=1, window_seconds=60)
+    assert (await limiter.acheck("degraded-ip"))[0] is True
+    assert (await limiter.acheck("degraded-ip"))[0] is False
+
+
+async def test_redis_limiter_fail_closed_mode(monkeypatch):
+    """`fail_closed`：宁可拒绝也不放宽——适合把配额当安全边界的部署。"""
+    import app.services.redis_client as redis_client
+    from app.api.rate_limit import RedisSlidingWindowLimiter
+
+    class BrokenRedis:
+        async def eval(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: BrokenRedis())
+    monkeypatch.setattr(settings, "rate_limit_on_redis_error", "fail_closed")
+
+    limiter = RedisSlidingWindowLimiter(limit=5, window_seconds=60)
+    allowed, retry_after = await limiter.acheck("closed-ip")
+
+    assert allowed is False
+    assert retry_after == 60

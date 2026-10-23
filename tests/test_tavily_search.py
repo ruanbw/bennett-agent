@@ -35,11 +35,15 @@ module = importlib.import_module("app.tools.tavily_search")
 
 
 @pytest.fixture(autouse=True)
-def _isolate_search_cache():
-    """搜索结果缓存是进程级单例：不清空的话，前一个用例的结果会被后一个用例命中。"""
-    reset_search_cache()
+async def _isolate_search_cache():
+    """搜索结果缓存是进程级单例：不清空的话，前一个用例的结果会被后一个用例命中。
+
+    清理是 async 的（Redis 后端需要 IO）：`reset_search_cache()` 只删本服务前缀下的键，
+    不会碰到限流计数或会话缓存。
+    """
+    await reset_search_cache()
     yield
-    reset_search_cache()
+    await reset_search_cache()
 
 
 class FakeResponse:

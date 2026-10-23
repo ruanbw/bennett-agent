@@ -75,7 +75,7 @@ TEMPLATE_SUFFIXES: tuple[str, ...] = (".jinja", ".jinja2", ".j2", ".txt")
 DEFAULT_DEBOUNCE_MS = 500
 
 #: 等子进程优雅退出的上限（秒）。必须**大于** uvicorn 的 `timeout_graceful_shutdown=5`，
-#: 否则会把还在正常收尾的进程直接 SIGKILL，SQLite 的 WAL 就没有机会被干净地合并回主库。
+#: 否则会把还在正常收尾的进程直接 SIGKILL，在飞的请求与连接收尾机会都没有。
 DEFAULT_GRACEFUL_TIMEOUT = 6.0
 
 
@@ -83,8 +83,12 @@ def should_reload(path: Path) -> bool:
     """这个文件的变化是否要触发重启（纯函数，便于单测）。
 
     只认三类：Python 源码、`prompts/` 下的模板、**settings 真的会加载的** `.env` 文件。
-    其余一律忽略——最要紧的是数据库文件：`bennett.db-wal` 每个请求都在写，若被当成
-    变更源就会变成「一有请求就重启」。
+    其余一律忽略。
+
+    **数据库/缓存文件必须排除**，即使现在业务库已经不在本地（Postgres/Redis 都在容器里）：
+    脚本、评测或临时调试仍可能在仓库里落下 `*.db` 及其 `-wal/-shm`，而本地 LLM 网关的
+    写入型缓存同理。它们随请求持续变化，被当成变更源就会变成「一有请求就重启」——
+    症状是「服务自己不停重启」，很难联想到监听列表上。
     """
     if path.name.startswith(".env"):
         # 只有 `get_env_files()` 列出的那几个真被 settings 读取。用 glob 会把

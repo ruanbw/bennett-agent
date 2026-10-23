@@ -10,8 +10,10 @@
 5. 删除单向 —— 墓碑不能让「离线设备重新推送」复活；
 6. 有界 —— 行数/大小/配额超限时**逐行拒绝**，同批其余行照常成功。
 
-数据库一律用每个用例自己的临时 SQLite 文件：共用库会让「第几个版本号」随用例顺序
-漂移，而版本号正是这里最需要精确断言的东西。
+数据库用 conftest 的共享测试库：每个用例开始前 `TRUNCATE ... RESTART IDENTITY`，
+版本号因此总是从 1 开始、可精确断言。**不用临时 SQLite 文件**，因为 Postgres 上
+`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 的行锁语义是这套发号器的核心，
+SQLite 的「全局写锁」只是碰巧等价。
 """
 
 import asyncio
@@ -19,11 +21,10 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import event, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import func, select
 
 from app.config import settings
-from app.db import Base, Conversation, Message, User
+from app.db import Conversation, Message, User, async_session_maker
 from app.schemas.sync import ConversationIn, MessageIn, PushRequest
 from app.services import sync_service
 
@@ -38,21 +39,13 @@ class Env:
 
 
 @pytest.fixture
-async def env(tmp_path, monkeypatch):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sync.db'}")
+async def env(monkeypatch):
+    """共享测试库 + 两个用户。
 
-    # 与 app/db.py 保持一致：SQLite 默认**不开**外键约束，不开的话「外键列类型写错」
-    # 这类问题在测试里完全看不见——线上第一次 push 才 500。
-    @event.listens_for(engine.sync_engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, _record):  # noqa: ANN001
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    maker = async_sessionmaker(engine, expire_on_commit=False)
+    `sync_service` 用的是模块级 `async_session_maker`，指向 conftest 配置的测试库，
+    所以这里不需要再 monkeypatch 它——以前换掉 maker 是因为用了临时库。
+    """
+    maker = async_session_maker
     alice, bob = uuid.uuid4(), uuid.uuid4()
     async with maker() as session:
         for user_id, email in ((alice, "alice@example.com"), (bob, "bob@example.com")):
@@ -68,13 +61,11 @@ async def env(tmp_path, monkeypatch):
             )
         await session.commit()
 
-    monkeypatch.setattr(sync_service, "async_session_maker", maker)
     sync_service.reset_notifier()
     try:
         yield Env(maker, alice, bob)
     finally:
         sync_service.reset_notifier()
-        await engine.dispose()
 
 
 def conversation(session_id: str, **overrides) -> ConversationIn:

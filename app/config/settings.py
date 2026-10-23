@@ -18,6 +18,9 @@ ALLOWED_APP_ENVS = frozenset({"development", "production", "staging", "test"})
 #: 认证密钥的占位默认值。生产环境若仍是这个值，启动时直接报错而不是静默放行。
 DEFAULT_AUTH_SECRET = "dev-insecure-secret-change-me"
 
+#: 桶名正则（S3 兼容规则）。不匹配的桶名在 AWS 上建不出来，在自建网关上是未定义行为。
+S3_BUCKET_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+
 #: 合法 cookie 名（RFC 6265 token）。前缀 `__Host-` / `__Secure-` 也落在这个集合里。
 COOKIE_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
@@ -262,18 +265,23 @@ class Settings(BaseSettings):
             "受信代理地址、取第一个非代理地址作为客户端 IP。为空时一律使用 direct host。"
         ),
     )
-    rate_limit_backend: Literal["memory", "sqlite"] = Field(
-        default="sqlite",
+    rate_limit_backend: Literal["redis", "memory"] = Field(
+        default="redis",
         description=(
-            "限流计数存储：sqlite = 跨进程共享（多 worker / 多实例共用同一个 SQLite 文件），"
-            "memory = 进程内（单 worker 够用，测试更快）。默认 sqlite 是为了让 uvicorn"
-            " 多 worker 时配额不被放大；无法确定数据库路径时自动退回 memory。"
+            "限流计数存储：redis = 跨进程/多实例的共享配额（生产默认）；"
+            "memory = 进程内（单 worker 够用，测试更快）。"
+            "redis 不可用时自动降级为进程内计数并在日志里报警——可用性优先，"
+            "但降级期间的配额是乘以实例数的，这一点必须在告警里说清。"
         ),
     )
-    rate_limit_db_path: str = Field(
-        default="",
+    rate_limit_on_redis_error: Literal["local_fallback", "fail_closed", "fail_open"] = Field(
+        default="local_fallback",
         description=(
-            "SQLite 限流计数文件路径；留空时放在业务数据库同目录的 `rate-limit.db`。多 worker 必须指向同一个可写路径。"
+            "Redis 限流不可用时的处置："
+            "local_fallback = 退到进程内计数（配额乘以实例数，但仍然有约束，默认）；"
+            "fail_closed = 一律 429（可用性换确定性，需 Redis 自身高可用）；"
+            "fail_open = 一律放行（仅当限流是纯优化时合理）。"
+            "三种都会告警并计入 redis_unavailable_total，静默降级是不允许的。"
         ),
     )
     model_upstream_timeout: float = Field(
@@ -285,7 +293,7 @@ class Settings(BaseSettings):
         ),
     )
     max_request_body_bytes: int = Field(
-        default=16 * 1024 * 1024,
+        default=32 * 1024 * 1024,
         ge=1024,
         description=(
             "单个 HTTP 请求体的硬上限（字节）。没有这一道时，任意已登录用户（注册开放）"
@@ -352,12 +360,281 @@ class Settings(BaseSettings):
     # 数据库与认证
     # ------------------------------------------------------------------
     database_url: str = Field(
-        default="sqlite+aiosqlite:///./bennett.db",
+        default="postgresql+asyncpg://bennett:bennett@127.0.0.1:5432/bennett",
         description=(
-            "SQLAlchemy 异步连接串。默认 SQLite 落在工作目录，单机部署够用；"
-            "注意 SQLite 文件不能放在 NFS 等网络文件系统上，会损坏。"
+            "SQLAlchemy 异步连接串，必须是 `postgresql+asyncpg://`。"
+            "SQLite 已从支持矩阵移除：并发写入、外键语义、迁移工具链都不足以支撑"
+            "多实例部署（见 app/db.py 的模块说明）。"
         ),
     )
+    database_pool_size: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "连接池常驻连接数。每个 uvicorn worker 各有一份，**总连接数 = pool_size + "
+            "max_overflow 再乘以 worker 数**，必须小于 Postgres 的 max_connections"
+            "（默认 100）：4 个 worker × (10+10) 正好打满，是「一扩容就全站 500」的经典成因。"
+        ),
+    )
+    database_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description="池满之后允许临时新建的连接数；超出后请求等待 pool_timeout 再报错。",
+    )
+    database_connect_timeout: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "建连超时（秒）。asyncpg 默认 60 秒：数据库不可达时，一个请求会挂一分钟看不出原因，"
+            "然后才报一个跟“数据库没起来”毫无关系的 `TimeoutError`。"
+        ),
+    )
+    database_pool_timeout: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "等空闲连接的最长秒数。**必须明显小于客户端/反代的超时**："
+            "等 30s 再报错时，用户侧的连接早就断了，日志里只剩一堆无意义的 500。"
+        ),
+    )
+    database_pool_recycle: int = Field(
+        default=1800,
+        ge=0,
+        description=(
+            "连接的最长存活秒数（0=不回收）。Postgres 侧或中间的连接代理（pgbouncer/云"
+            "负载均衡）会单方面掐掉空闲连接，回收周期必须短于那个静默超时。"
+        ),
+    )
+    database_statement_timeout_ms: int = Field(
+        default=30_000,
+        ge=0,
+        description=(
+            "服务端语句超时（毫秒，0=不限制），随连接下发。应用层超时只能放弃等待、"
+            "**请求仍在数据库里跑着**；服务端超时才会真正取消它，避免一条烂查询把连接池耗干。"
+        ),
+    )
+    database_pool_mode: Literal["pool", "null"] = Field(
+        default="pool",
+        description=(
+            "连接池策略。`pool` = 常驻连接池（服务进程）；`null` = 每次取用都新建连接。"
+            "`null` 用于两种场景：①短命进程（迁移/脚本/CLI），省掉池的初始化与回收；"
+            "②测试里的同步 `TestClient`——它在**另一个线程的事件循环**里执行请求，"
+            "而池里的 asyncpg 连接绑定在创建它的事件循环上，跨循环复用会抛"
+            "`Future attached to a different loop`，报错点与真正原因毫无关系。"
+        ),
+    )
+    database_require_head_revision: bool = Field(
+        default=True,
+        description=(
+            "启动时校验库结构是否已到 Alembic 的 head，未到则拒绝启动。"
+            "迁移交给部署步骤（compose 的 migrate 服务 / CI），**不在应用启动时自动升级**："
+            "多实例滚动发布时，自动升级会让「旧代码 + 新结构」的窗口无法避免。"
+            "本地开发想省一步可以设 false，但要清楚它意味着可能带着旧结构跑新代码。"
+        ),
+    )
+    # ------------------------------------------------------------------
+    # Redis（限流计数 / 业务缓存 / 会话热缓存）
+    # ------------------------------------------------------------------
+    redis_url: str = Field(
+        default="redis://127.0.0.1:6379/0",
+        description=(
+            "Redis 连接串。**Redis 不是可用性单点**：每一处使用都有明确的降级路径（限流退化为"
+            "进程内计数、缓存 miss、会话回源数据库），但这些降级必须能在日志与就绪探针里看到，"
+            "否则“限流悄悄失效”会变成一个没人知道的漏洞。"
+        ),
+    )
+    redis_key_prefix: str = Field(
+        default="bennett",
+        description=(
+            "所有键的公共前缀。多套部署共用一个 Redis 实例时必须各不相同——"
+            "否则开发环境的 flush 或键名冲突会直接干掉生产的会话缓存。"
+        ),
+    )
+    redis_connect_timeout: float = Field(
+        default=2.0,
+        gt=0,
+        description=(
+            "建连超时（秒）。必须短：Redis 不可达时每个请求都要白等这么久，而它只是限流/缓存，不该拖垮对话主链路。"
+        ),
+    )
+    redis_socket_timeout: float = Field(
+        default=1.0,
+        gt=0,
+        description="单次命令的读写超时（秒）。与上面同理：宁可降级，不要挂住。",
+    )
+    redis_max_connections: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "连接池上限。每个 uvicorn worker（以及 worker 进程）各自一份："
+            "总连接数 = 本值 × 进程数，必须小于 Redis 的 `maxclients`（默认 10000，通常不是瓶颈）。"
+        ),
+    )
+    redis_session_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "是否用 Redis 加速会话 token → 用户的解析。**数据库仍是权威来源**："
+            "Redis 只是 cache-aside，删会话时两边都删。这样 Redis 重启不会把所有人踢下线，"
+            "而即时登出/改密失效依然成立（见 app/db.py 的 CachedAccessTokenDatabase）。"
+        ),
+    )
+    redis_session_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "会话缓存的最长存活秒数（同时不得超过会话剩余寿命）。刻意远小于 30 天的会话期："
+            "把「撤销未及时传播」（进程崩溃、网络分区、缓存删除失败）的窗口压到一分钟，"
+            "代价只是每分钟多一次主键查询。"
+        ),
+    )
+    search_cache_backend: Literal["redis", "memory"] = Field(
+        default="redis",
+        description=(
+            "Tavily 搜索缓存的存放位置。redis = 同实例多 worker 共享（命中率更高，也更省配额）；"
+            "memory = 进程内 LRU（Redis 不可用时的降级形态，不会报错）。"
+        ),
+    )
+    readiness_required_dependencies: str = Field(
+        default="database",
+        description=(
+            "就绪探针里**必须可用**的依赖（逗号分隔，可选 database/redis/storage）。"
+            "默认只有数据库：它挂了服务真的不能干活；而 Redis 挂了只会降级（限流变进程内、"
+            "会话回源库），对象存储挂了只影响上传。把这些也列为必需会让一次可恢复的抖动"
+            "把所有实例一起摘出负载均衡，把降级变成全站故障。"
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # 对象存储（S3 / RustFS）：上传文件的原件
+    # ------------------------------------------------------------------
+    s3_endpoint_url: str = Field(
+        default="",
+        description=(
+            "S3 API 地址，如 `http://127.0.0.1:9000`（RustFS / MinIO）。"
+            "留空则用 boto3 的默认 AWS 端点——仅在真的用 AWS S3 时成立。"
+        ),
+    )
+    s3_region: str = Field(
+        default="us-east-1",
+        description=(
+            "签名 region。RustFS 默认 `us-east-1`；与真实桶所在 region 不一致时"
+            "会被拒绝为 `AuthorizationHeaderMalformed`，而错误信息不会告诉你改哪个配置。"
+        ),
+    )
+    s3_access_key: str = Field(default="", description="S3 / RustFS 的 access key（与 secret 成对出现）。")
+    s3_secret_key: str = Field(
+        default="",
+        description="S3 / RustFS 的 secret key。**生产必须由密钥管理注入**，不写进镜像或 compose 文件。",
+    )
+    s3_bucket: str = Field(
+        default="bennett-uploads",
+        description=(
+            "上传文件的原件桶。桶名全局唯一（跨账号），且必须是小写 DNS 兼容名——"
+            "带下划线或大写会在建桶时被 S3 直接拒绝。"
+        ),
+    )
+    s3_prefix: str = Field(
+        default="uploads",
+        description=(
+            "桶内键前缀。**只用固定前缀 + 服务端生成的 UUID 拼键，绝不拼接用户文件名**："
+            "用户文件名里的 `../`、控制字符或超长中文会在对象键里变成另一层注入面。"
+        ),
+    )
+    s3_use_path_style: bool = Field(
+        default=True,
+        description=(
+            "是否用 path-style 寻址（`endpoint/bucket/key`）。RustFS / MinIO / 大多数自建"
+            "S3 网关**只支持 path-style**；AWS 官方 S3 建议关掉（virtual-hosted 走 TLS 证书通配）。"
+        ),
+    )
+    s3_create_bucket: bool = Field(
+        default=True,
+        description=(
+            "启动时确保桶存在（幂等）。开发环境省一步手工操作；生产建议关掉，"
+            "由 IaC 建桶并单独授予 `s3:PutObject` 等最小权限，而不是给应用 `s3:CreateBucket`。"
+        ),
+    )
+    s3_presign_expiry_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description=(
+            "下载原件的预签名 URL 有效期（秒）。默认 5 分钟：链接会被浏览器历史/日志/"
+            "团队群聊留存，有效期过长等于把私有对象变成半公开。"
+        ),
+    )
+    s3_connect_timeout: float = Field(default=3.0, gt=0, description="S3 建连超时（秒）。")
+    s3_read_timeout: float = Field(
+        default=60.0,
+        gt=0,
+        description="S3 读写超时（秒）。比对话上游宽松：上传几十 MB 文件是正常操作，不是故障。",
+    )
+
+    # ------------------------------------------------------------------
+    # 文件上传（原件 → 对象存储 → 解析 → 知识库）
+    # ------------------------------------------------------------------
+    uploads_enabled: bool = Field(
+        default=True,
+        description=(
+            "是否开放上传接口。关闭时端点返回 404（而不是 403）："
+            "对未启用的部署，声明“不存在”比“存在但你不能用”泄露更少。"
+        ),
+    )
+    upload_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        ge=1024,
+        description=(
+            "单个文件的大小上限（字节）。**在流式读取过程中累计计数并在超限时立即中止**，"
+            "而不是先收完再判断——后者等于让任何人用 10GB 的 body 把磁盘/内存吃满。"
+        ),
+    )
+    upload_allowed_extensions: str = Field(
+        default="pdf,docx,md,txt,html,htm",
+        description=(
+            "允许的扩展名白名单（逗号分隔）。同时校验扩展名与嗅探到的 MIME："
+            "只看扩展名挡不住改名上传，只看 MIME 又不可靠（很多环境把一切非标准类型报成"
+            "application/octet-stream）。"
+        ),
+    )
+    upload_max_files_per_user: int = Field(
+        default=200,
+        ge=1,
+        description="单用户最多保留的上传记录数（含已失败）。防把对象存储当无限盘用。",
+    )
+    upload_total_bytes_per_user: int = Field(
+        default=1024 * 1024 * 1024,
+        ge=1024,
+        description="单用户上传原件累计字节上限（按未删除的记录求和）。",
+    )
+    upload_max_extracted_chars: int = Field(
+        default=200_000,
+        ge=10_000,
+        description=(
+            "单个文件允许入库的抽取文本上限（字符）。**必须不超过知识库的单篇上限**"
+            "（app/services/rag/store.py 的 MAX_DOCUMENT_CHARS，200k）：否则一份超长文档"
+            "会先烧完 embedding 配额再被入库层拒绝，用户等了几分钟只拿到一个错。"
+            "超限时解析会明确失败并提示拆分文件，而不是静默截断——被截掉的后半篇"
+            "用户永远不知道它不在索引里。"
+        ),
+    )
+    upload_worker_poll_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description=(
+            "解析 worker 在没有待处理任务时的轮询间隔（秒）。与 PostgreSQL 的"
+            "`LISTEN/NOTIFY` 相比这是朴素的轮询，但它在多实例、断连重连、重启恢复上都只有"
+            "一条路径要验证，且 2 秒延迟对“上传后后台解析”完全可接受。"
+        ),
+    )
+    upload_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "单个文件解析失败后最多重试几次。超过后置为 failed 并把原因写进记录："
+            "无限重试会让一份坏文件永远占着 worker，且每次重试都在烧 embedding 配额。"
+        ),
+    )
+
     auth_secret: str = Field(
         default=DEFAULT_AUTH_SECRET,
         description=(
@@ -474,6 +751,87 @@ class Settings(BaseSettings):
             "多 worker 时需要用 SSE 或共享 pub/sub 才能正确唤醒。"
         ),
     )
+
+    @field_validator("database_url")
+    @classmethod
+    def _require_postgres_driver(cls, value: str) -> str:
+        """只接受 `postgresql+asyncpg://`。
+
+        为什么在配置层硬性拒绝（而不是“跑起来再看”）：SQLite 曾经是支持项，升级后很
+        容易留下一个 `sqlite+aiosqlite://` 的旧 `.env`。它不会报错，会**静默建出一个
+        空库**——表现为“所有账号都没了”，而日志里一切正常。把错误提前到进程启动，
+        比让人事后去查“用户表为什么是空的”便宜得多。
+        """
+        cleaned = value.strip()
+        if not cleaned.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                f"DATABASE_URL 必须是 postgresql+asyncpg://…，收到 {cleaned.split('://')[0]}://…。"
+                "SQLite 已不再支持：请改用 Postgres（本地可用 `docker compose up -d postgres`）。"
+            )
+        return cleaned
+
+    @field_validator("s3_bucket")
+    @classmethod
+    def _validate_bucket_name(cls, value: str) -> str:
+        """桶名必须是 S3 兼容的小写 DNS 名。
+
+        带大写/下划线的桶名在 AWS S3 上会被建桶请求直接拒绝，在自建网关上的行为则
+        看实现——属于“只在某些环境炸”的配置错误，因此在启动时就归一化检查。
+        """
+        cleaned = value.strip()
+        if not S3_BUCKET_PATTERN.match(cleaned):
+            raise ValueError(
+                f"S3_BUCKET={cleaned!r} 不是合法的桶名：只允许 3-63 位小写字母/数字/连字符/点，"
+                "且不能以点或连字符开头结尾。"
+            )
+        return cleaned
+
+    @field_validator("upload_allowed_extensions")
+    @classmethod
+    def _normalise_extensions(cls, value: str) -> str:
+        """扩展名白名单归一化：去点、小写、去重、去空。
+
+        配置里写 `.PDF` 或 `pdf, pdf` 是常见笔误。若不归一化，白名单比较会变成
+        “看你怎么写的”——同一个文件在不同部署上时好时坏。
+        """
+        seen: list[str] = []
+        for item in value.split(","):
+            cleaned = item.strip().lower().lstrip(".")
+            if cleaned and cleaned not in seen:
+                seen.append(cleaned)
+        if not seen:
+            raise ValueError("UPLOAD_ALLOWED_EXTENSIONS 不能为空：至少要允许一种可解析的文本格式。")
+        return ",".join(seen)
+
+    @model_validator(mode="after")
+    def _validate_upload_limits(self) -> "Settings":
+        """上传上限必须小于全局请求体上限，否则文件永远传不进来。
+
+        两个限额分别由 `MaxBodySizeMiddleware`（整个请求体）与流式计数（文件本身）执行。
+        配反了的表现极具误导性：用户上传一个 20MB 的文件，收到的是
+        「请求体过大」而不是「文件过大」，而后端日志里根本看不到这次上传——它在进
+        应用之前就被中间件截断了。
+        """
+        if self.uploads_enabled:
+            # multipart 边界与表单字段的额外开销约几百字节，留 1MB 余量
+            headroom = 1 * 1024 * 1024
+            if self.max_request_body_bytes < self.upload_max_bytes + headroom:
+                raise ValueError(
+                    f"MAX_REQUEST_BODY_BYTES（{self.max_request_body_bytes:,} 字节）必须至少比 "
+                    f"UPLOAD_MAX_BYTES（{self.upload_max_bytes:,} 字节）大 1MB，"
+                    "否则中间件会在文件进入上传逻辑之前就返回 413（用户看到的是「请求体过大」，"
+                    "而后端日志里看不到这次上传）。"
+                )
+        return self
+
+    def is_upload_extension_allowed(self, filename: str) -> bool:
+        """文件名扩展名是否在白名单内（大小写不敏感）。
+
+        只看扩展名，不代替 MIME 嗅探：两者任一不匹配都拒绝，见
+        `app/services/uploads/validators.py`。
+        """
+        suffix = Path(filename or "").suffix.lower().lstrip(".")
+        return bool(suffix) and suffix in set(self.upload_allowed_extensions.split(","))
 
     @field_validator("app_env", mode="before")
     @classmethod

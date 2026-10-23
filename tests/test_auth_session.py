@@ -23,7 +23,6 @@ from app.db import (
     AccessToken,
     User,
     async_session_maker,
-    create_db_and_tables,
     get_async_session,
 )
 from app.services.auth import _read_user_from_token, current_active_user
@@ -66,7 +65,6 @@ def test_streaming_routes_do_not_hold_a_request_scoped_session():
 
 
 async def test_read_user_from_token_roundtrip_and_guards():
-    await create_db_and_tables()
     user_id = uuid.uuid4()
     token = f"test-token-{uuid.uuid4().hex}"
     email = f"session-{uuid.uuid4().hex[:12]}@example.com"
@@ -146,7 +144,6 @@ async def test_new_sessions_store_only_a_token_digest():
     from app.db import AccessToken, HashedAccessTokenDatabase, hash_access_token
     from app.services.auth import HashedDatabaseStrategy, UserManager
 
-    await create_db_and_tables()
     user_id = uuid.uuid4()
     email = f"hash-{uuid.uuid4().hex[:12]}@example.com"
     async with async_session_maker() as session:

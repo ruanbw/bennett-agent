@@ -10,18 +10,20 @@
 - 换 Base URL 必须重填 API Key，但只对**确实存了 key** 的提供商生效。
 - 并发写撞唯一约束必须翻译成可读的服务层错误，而不是 500。
 
-数据库一律用每个用例自己的临时 SQLite 文件（替换 `registry.async_session_maker`）：
-共用会话库会让「库里有没有提供商」「有没有 marker」随用例顺序漂移。
+数据库用 conftest 的共享测试库：每个用例前 `TRUNCATE ... RESTART IDENTITY`，因此
+「库里有没有提供商 / 有没有 marker」不会随用例顺序漂移（以前靠每用例一个临时 SQLite
+文件达到同样的隔离）。这里仍然替换 `registry.async_session_maker` 指向同一个 maker，
+因为注册表在导入时按名字绑定了它——这正是「测试通过但线上没生效」的经典形态。
 """
 
 import socket
 
 import pytest
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.db import Base, ModelProvider, ProviderModel
+from app.db import ModelProvider, ProviderModel, async_session_maker
+from app.db import engine as app_engine
 from app.schemas.chat import ModelListResponse
 from app.services import fallback_config, model_service
 from app.services.model_service import registry
@@ -104,18 +106,14 @@ async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
 # 每个用例一个临时库
 # ---------------------------------------------------------------------
 @pytest.fixture
-async def registry_db(tmp_path, monkeypatch):
-    """把模型注册表指向一个全新的 SQLite 文件，并返回它的 engine。
+def registry_db(monkeypatch):
+    """把模型注册表指向共享测试库，并返回 engine（供 `queries` 监听 SQL）。
 
     替换的是 `registry.async_session_maker`：注册表在导入时按名字绑定了它，改
     `app.db` 里的同名对象对已绑定的引用无效（这正是「测试通过但线上没生效」的经典形态）。
     """
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'registry.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    monkeypatch.setattr(registry, "async_session_maker", async_sessionmaker(engine, expire_on_commit=False))
-    yield engine
-    await engine.dispose()
+    monkeypatch.setattr(registry, "async_session_maker", async_session_maker)
+    return app_engine
 
 
 @pytest.fixture
@@ -132,8 +130,7 @@ def queries(registry_db):
 
 async def _seed_provider(registry_db, *, name="网关", api_key="sk-test", base_url="http://127.0.0.1:4000/v1"):
     """直接写库造一条提供商；`enabled` 之类的默认值由 ORM 补。"""
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         provider = ModelProvider(name=name, slug="gw", base_url=base_url, api_key=api_key, enabled=True)
         session.add(provider)
         await session.commit()
@@ -141,8 +138,7 @@ async def _seed_provider(registry_db, *, name="网关", api_key="sk-test", base_
 
 
 async def _add_model(registry_db, provider_id, model_id="openai/gpt-4o", **fields):
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         model = ProviderModel(
             provider_id=provider_id,
             model_id=model_id,
@@ -469,8 +465,7 @@ async def test_cross_provider_fallback_is_warned(registry_db, monkeypatch, caplo
     """备用模型在另一个提供商下：不做跨提供商兜底（参数兼容性无法保证），但要告警。"""
     provider_id = await _seed_provider(registry_db)
     await _add_model(registry_db, provider_id, model_id="openai/primary")
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         other = ModelProvider(name="另一个", slug="other", base_url="http://127.0.0.1:5000/v1", enabled=True)
         session.add(other)
         await session.commit()
@@ -515,8 +510,7 @@ async def test_escape_like_pattern_escapes_metacharacters():
 async def _seed_users(registry_db, emails):
     from app.db import User
 
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         for email in emails:
             session.add(User(email=email, hashed_password="x", is_active=True, is_verified=True))
         await session.commit()
@@ -525,8 +519,7 @@ async def _seed_users(registry_db, emails):
 async def _search(registry_db, query):
     from app.api.admin import list_users
 
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         page = await list_users(query=query, limit=50, offset=0, session=session)
     return [item.email for item in page.items]
 
@@ -621,8 +614,7 @@ async def test_valid_bootstrap_url_still_seeds_a_provider(registry_db, monkeypat
 async def _seed_mixed_users(registry_db):
     from app.db import User
 
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         session.add_all(
             [
                 User(email="alice@example.com", hashed_password="x", is_active=True, is_verified=True),
@@ -636,8 +628,7 @@ async def _seed_mixed_users(registry_db):
 async def _list_users_page(registry_db, *, query=None, status="all"):
     from app.api.admin import list_users
 
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
-    async with maker() as session:
+    async with async_session_maker() as session:
         return await list_users(
             query=query,
             status_filter=status,
@@ -793,9 +784,8 @@ async def _role_users(registry_db, **specs):
     """按 `email=role` 造用户，返回 {email: id}。"""
     from app.db import User
 
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
     ids: dict[str, object] = {}
-    async with maker() as session:
+    async with async_session_maker() as session:
         for email, role in specs.items():
             user = User(
                 email=email,
@@ -826,15 +816,14 @@ async def test_demoting_the_last_superadmin_is_rejected_atomically(registry_db, 
 
     monkeypatch.setattr("app.api.admin.delete_user_access_tokens", _noop)
     ids = await _role_users(registry_db, **{"caller@example.com": "admin", "target@example.com": "superadmin"})
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
 
-    async with maker() as session:
+    async with async_session_maker() as session:
         caller = await session.get(User, ids["caller@example.com"])
         with pytest.raises(HTTPException) as excinfo:
             await set_user_role(ids["target@example.com"], RoleUpdate(role="user"), caller, session)
         assert excinfo.value.status_code == 400
 
-    async with maker() as session:
+    async with async_session_maker() as session:
         remaining = await session.scalar(select(func.count()).select_from(User).where(User.role == "superadmin"))
     assert remaining == 1
 
@@ -851,14 +840,13 @@ async def test_superadmin_can_be_demoted_when_another_one_remains(registry_db, m
 
     monkeypatch.setattr("app.api.admin.delete_user_access_tokens", _noop)
     ids = await _role_users(registry_db, **{"caller@example.com": "superadmin", "target@example.com": "superadmin"})
-    maker = async_sessionmaker(registry_db, expire_on_commit=False)
 
-    async with maker() as session:
+    async with async_session_maker() as session:
         caller = await session.get(User, ids["caller@example.com"])
         result = await set_user_role(ids["target@example.com"], RoleUpdate(role="user"), caller, session)
         assert result.role == "user"
 
-    async with maker() as session:
+    async with async_session_maker() as session:
         target = await session.get(User, ids["target@example.com"])
         assert target.role == "user" and target.is_superuser is False
         assert await session.scalar(select(User.role).where(User.id == ids["caller@example.com"])) == "superadmin"

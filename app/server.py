@@ -20,13 +20,15 @@ from app.api.chat import router as api_router
 from app.api.knowledge import router as knowledge_router
 from app.api.ops import router as ops_router
 from app.api.sync import router as sync_router
+from app.api.uploads import router as uploads_router
 from app.config import settings
-from app.db import cleanup_expired_access_tokens, create_db_and_tables, engine
+from app.db import cleanup_expired_access_tokens, engine, verify_schema_at_head
 from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
 from app.observability import HttpMetricsMiddleware, RequestContextMiddleware
 from app.prompts import prompt_manager
 from app.services.http_client import close_http_client
 from app.services.model_service import seed_default_provider
+from app.services.redis_client import close_redis
 from app.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -112,9 +114,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.error("提示词自检失败，服务不会启动: %s", exc)
         raise
 
-    # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
-    # 使用 create_all + 手写幂等补列（而非 Alembic）的取舍见 app/db.py。
-    await create_db_and_tables()
+    # 结构校验必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
+    # **不在启动时自动迁移**：结构升级是部署步骤（migrate 服务 / alembic upgrade head），
+    # 这里的职责是「结构不对就拒绝启动」，理由见 app/db.py:verify_schema_at_head。
+    await verify_schema_at_head()
 
     # 首次启动（或库里一条提供商都没有）时，用环境变量引导出一条「默认网关」，
     # 让管理后台还没配置时也不至于没有任何模型可用。只写库不联网。
@@ -126,6 +129,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await _cleanup_expired_sessions_on_startup()
     _warn_if_auth_rate_limit_is_global()
+    await _ensure_object_storage()
     await _discover_mcp_tools()
 
     try:
@@ -137,11 +141,42 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await close_http_client()
         except Exception:  # noqa: BLE001 - 单个资源关闭失败不能遮蔽另一个资源
             logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
-        # 释放 SQLite 连接，让 WAL 文件能被干净地合并回主库
+        try:
+            await close_redis()
+        except Exception:  # noqa: BLE001 - 同上，三个清理动作互不遮蔽
+            logger.warning("关闭 Redis 连接失败", exc_info=True)
         try:
             await engine.dispose()
-        except Exception:  # noqa: BLE001 - 同上，两个清理动作互不遮蔽
+        except Exception:  # noqa: BLE001
             logger.warning("释放数据库连接失败", exc_info=True)
+
+
+async def _ensure_object_storage() -> None:
+    """启动时确保上传用的桶存在（幂等，失败不阻止启动）。
+
+    为什么不阻止启动：对象存储只影响上传/下载，而对话、知识库检索、历史记录都不依赖它。
+    一次 S3 侧的网络抖动不该让整个服务起不来——那是把「部分功能不可用」升级成
+    「全站不可用」。但要在日志里说清：`/health/ready` 的 storage 段会一直显示不可用，
+    直到桶可达。
+
+    `S3_CREATE_BUCKET=false` 时不建桶（生产通常由 IaC 建桶并只授予对象级权限），
+    但仍做一次可达性检查，让「端点填错了」在启动日志里就暴露。
+    """
+    from app.services.storage import StorageNotConfigured, get_object_store
+
+    if not settings.uploads_enabled:
+        return
+    store = get_object_store()
+    try:
+        if settings.s3_create_bucket:
+            await store.ensure_bucket()
+        ok, reason = await store.health()
+        if not ok:
+            logger.warning("对象存储不可用（上传功能会失败）: reason=%s", reason)
+    except StorageNotConfigured as exc:
+        logger.warning("对象存储未配置，上传接口将返回 503: %s", exc)
+    except Exception:  # noqa: BLE001 - 见 docstring：不影响启动
+        logger.warning("对象存储初始化失败（不影响启动）", exc_info=True)
 
 
 async def _discover_mcp_tools() -> None:
@@ -215,6 +250,10 @@ _API_TAGS = [
     {
         "name": "sync",
         "description": "本机数据增量同步：push 逐行接受或拒绝，pull 用不透明游标做长轮询。",
+    },
+    {
+        "name": "uploads",
+        "description": "文件上传：原件入对象存储，后台解析为知识库文档；含状态、下载链接与删除。",
     },
     {
         "name": "admin",
@@ -391,6 +430,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
+    app.include_router(uploads_router)
     # Ops 路由（/health、/health/ready、/api/metrics）不打 tag：它们不该出现在
     # 业务 API 文档里，但 `include_in_schema=False` 之外仍要有 tag 供分组测试检查。
     app.include_router(ops_router)

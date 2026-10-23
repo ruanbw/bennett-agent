@@ -18,24 +18,16 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
 
 from app.api.admin import router as admin_router
-from app.db import ModelPrice, async_session_maker, create_db_and_tables
 from app.services import pricing
 from app.services.auth import current_admin
 
 
 @pytest.fixture(autouse=True)
 async def _tables():
-    await create_db_and_tables()
-    async with async_session_maker() as session:
-        await session.execute(delete(ModelPrice))
-        await session.commit()
+    # 结构由 conftest 的 alembic 建立；用例之间由 TRUNCATE ... CASCADE 隔离。
     yield
-    async with async_session_maker() as session:
-        await session.execute(delete(ModelPrice))
-        await session.commit()
 
 
 @pytest.fixture

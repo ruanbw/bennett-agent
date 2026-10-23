@@ -1,13 +1,15 @@
-"""API Key 落库加密与会话摘要（I-06/I-10）。"""
+"""API Key 落库加密与会话摘要（I-06/I-10）。
 
-import os
+加密发生在 SQLAlchemy 的 bind/result 边界：**库里是密文、ORM 读出来是明文**。
+这个性质必须在真实数据库上验证——SQLite 时代它碰巧也成立，但那时测不到
+`TEXT` 列在 PG 上的实际存储形态（以及 `EncryptedText` 与 `Text` 的渲染一致性）。
+"""
 
 from cryptography.fernet import Fernet
-from sqlalchemy import event, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select, text
 
 from app.config import secret_box
-from app.db import Base, ModelProvider, secure_sqlite_permissions
+from app.db import ModelProvider, async_session_maker
 
 
 def test_secret_roundtrip_hides_plaintext():
@@ -34,19 +36,9 @@ def test_wrong_key_returns_empty_instead_of_ciphertext(monkeypatch, caplog):
     assert "解密失败" in caplog.text
 
 
-async def test_provider_api_key_is_encrypted_in_database(tmp_path):
-    """ORM 语义不变（读出来是明文），但磁盘上的列必须是密文。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'secrets.db'}")
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _fk(dbapi_connection, _record):  # noqa: ANN001
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as session:
+async def test_provider_api_key_is_encrypted_in_database():
+    """ORM 语义不变（读出来是明文），但库里存的列必须是密文。"""
+    async with async_session_maker() as session:
         session.add(
             ModelProvider(
                 name="gw",
@@ -57,7 +49,7 @@ async def test_provider_api_key_is_encrypted_in_database(tmp_path):
             )
         )
         await session.commit()
-    async with maker() as session:
+    async with async_session_maker() as session:
         raw = (await session.execute(text("SELECT api_key FROM model_provider"))).scalar_one()
         assert raw.startswith(secret_box.PREFIX)
         assert "sk-plaintext-key" not in raw
@@ -65,14 +57,3 @@ async def test_provider_api_key_is_encrypted_in_database(tmp_path):
         # ORM 读出来必须是明文，业务代码不用感知加密
         loaded = (await session.scalars(select(ModelProvider))).first()
         assert loaded is not None and loaded.api_key == "sk-plaintext-key"
-
-    await engine.dispose()
-
-
-def test_sqlite_permissions_are_tightened(tmp_path):
-    path = tmp_path / "perm.db"
-    path.write_text("x")
-    os.chmod(path, 0o644)
-
-    assert secure_sqlite_permissions(path) is True
-    assert (os.stat(path).st_mode & 0o777) == 0o600

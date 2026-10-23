@@ -1,34 +1,186 @@
-"""测试全局配置。
+"""测试全局配置：真实 Postgres + 真实 Redis，测试库与开发库物理隔离。
 
-**必须在导入任何 app 模块之前**把数据库指向临时文件。原因：`app/db.py` 在导入时
-就构造 engine，而默认的 `sqlite+aiosqlite:///./bennett.db` 会被 `_resolve_database_url`
-锚定到**仓库根目录**——不提前覆盖 `DATABASE_URL` 的话，测试会直接读写开发用的
-bennett.db（真实账号与会话都在里面），并留下 -wal / -shm 副产品。
+## 为什么不再用临时 SQLite 文件
 
-写在模块级（而不是 fixture 里）是刻意的：fixture 执行时 app 模块通常已被导入，
-engine 早已按默认路径建好了，此时再改环境变量为时已晚。临时目录的删除放在
-session 级 fixture：它晚于本会话所有用例执行，顺序比 atexit 更明确。
+**数据库层已经不支持 SQLite**（见 `app/db.py` 的模块说明）。测试如果继续跑 SQLite，
+它们验证的是「另一套数据库语义」：外键默认不强制、`FOR UPDATE SKIP LOCKED` 不存在、
+`JSONB` 退化成 TEXT、并发发号靠全局写锁而不是行锁。那些用例会全绿，而生产上的锁、
+约束、迁移全都没被执行过一次。
+
+现在的测试基座是：
+
+    Postgres   `bennett_test` 库（可用 TEST_DATABASE_URL 覆盖）
+    Redis      第 15 号库（`REDIS_URL` 默认指向它，键前缀带 `bennett-test`）
+    RustFS     `bennett-test-uploads` 桶
+
+后两者由 `docker compose up -d postgres redis rustfs` 提供。**没有它们时测试会失败**，
+而不是静默跳过：一个「悄悄跳过集成测试」的套件会让人误以为全绿，而 CI 与本地跑的
+根本不是同一件事。
+
+## 为什么在导入 app 之前设置环境变量
+
+`app/db.py` 在导入时就按 `settings.database_url` 构造 engine，`app/config/settings.py`
+在导入时就实例化 `Settings`。所有重定向必须在**任何 app 模块被导入之前**完成，因此
+写在 conftest 的模块级（pytest 保证 conftest 先于测试模块导入），而不是 fixture 里。
+
+## 结构怎么来：跑真实的 Alembic
+
+测试库的结构由 `alembic upgrade head` 建立，**不用 `metadata.create_all`**。二者
+在多数据库上会分叉（server_default、索引名、列序），而分叉的代价是「迁移里写错的
+DDL 在测试里永远不会被发现」——那正是迁移最需要被测的部分。
+
+每个用例开始前 TRUNCATE 所有表（保留 `alembic_version`），因此用例之间互不影响，
+也不需要在用例里自己清表。
 """
 
+from __future__ import annotations
+
+import asyncio
 import os
-import shutil
-import tempfile
+import re
 from pathlib import Path
 
 import pytest
 
-#: 整个测试会话共用一个临时库。当前套件是纯逻辑单测，不读共享库；这层重定向是
-#: 安全网——个别用例（如启动迁移）会直接构造 engine，任何测试都不该碰到开发库。
-_TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="bennett-test-db-"))
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB_DIR}/test.db"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+#: 测试库连接串。默认值对应 docker-compose 里 postgres 服务的本地端口。
+#: CI 与需要并行跑多套测试时用 TEST_DATABASE_URL 覆盖。
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://bennett:bennett@127.0.0.1:5432/bennett_test",
+)
+
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
+#: Redis 用第 15 号库并加独立前缀：与开发库（0 号）物理分开，
+#: 即使有人在本机同时跑服务和测试，也不会互相清掉限流计数与会话缓存。
+os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
+os.environ.setdefault("REDIS_KEY_PREFIX", "bennett-test")
+
+#: 测试用自己的桶：上传用例会删对象，落到开发桶里就是真实数据丢失。
+os.environ.setdefault("S3_BUCKET", "bennett-test-uploads")
+os.environ.setdefault("S3_PREFIX", "test-uploads")
+
+#: APP_ENV=test 让 .env.development 的覆盖失效（.env.test 不存在时其余配置来自 .env）。
+#: 取值合法性由 settings 的白名单校验（development/production/staging/test）。
+os.environ.setdefault("APP_ENV", "test")
+
+#: 测试里用 NullPool：部分用例用同步 `TestClient`，它在另一个线程的事件循环里跑请求，
+#: 而池里的 asyncpg 连接绑定在会话循环上——复用会报「Future attached to a different loop」。
+os.environ.setdefault("DATABASE_POOL_MODE", "null")
+
+#: 关掉上传解析的自动轮询这类后台行为？没有——worker 是显式调用的函数，
+#: 不会在测试里自启动。这里只把轮询间隔调到很小，避免等待型用例真的睡 2 秒。
+os.environ.setdefault("UPLOAD_WORKER_POLL_SECONDS", "0.05")
+
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+async def _ensure_database_exists() -> None:
+    """确保测试库存在（幂等）。
+
+    `docker compose up` 只建 `POSTGRES_DB`（bennett），不会建测试库。让测试自己建，
+    是为了避免「先手工执行一条 psql」这种只在某台机器上成立的隐性前置条件。
+    """
+    import asyncpg
+    from sqlalchemy.engine import make_url
+
+    url = make_url(TEST_DATABASE_URL)
+    database = url.database or "bennett_test"
+    if not _SAFE_IDENTIFIER.match(database):
+        raise pytest.UsageError(f"TEST_DATABASE_URL 里的库名不合法：{database!r}")
+
+    connection = await asyncpg.connect(
+        host=url.host or "127.0.0.1",
+        port=url.port or 5432,
+        user=url.username,
+        password=url.password,
+        database="postgres",
+    )
+    try:
+        exists = await connection.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database)
+        if not exists:
+            # 库名已通过白名单校验，不可能是注入面
+            await connection.execute(f'CREATE DATABASE "{database}"')
+    finally:
+        await connection.close()
+
+
+def _upgrade_to_head() -> None:
+    """在测试库上执行迁移（同步入口，Alembic 自己会起事件循环）。"""
+    from alembic import command
+    from alembic.config import Config
+
+    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _cleanup_test_db_dir():
-    """会话结束后删除临时库目录。
+def _prepare_test_database() -> None:
+    """会话级：建库（如缺失）→ 迁移到 head → 清空 Redis 测试库。
 
-    `ignore_errors=True`：个别平台可能仍持有文件句柄，清理失败不该让测试结果变红；
-    目录位于系统临时区，最坏情况由系统自行回收。
+    这三件事都必须是**会话级**：每个用例重跑一遍迁移会让套件慢到没人愿意跑，
+    而 Redis 不先清空会让上一次运行残留的键影响限流用例（窗口计数在 60 秒内有效）。
+    """
+    asyncio.run(_ensure_database_exists())
+    _upgrade_to_head()
+
+    async def flush_redis() -> None:
+        # 这里**不用** `get_redis()`：它是进程级单例，而 `asyncio.run` 会开一个用完就关的
+        # 临时事件循环。把单例建在那上面，后续用例拿到的就是「绑定在已关闭循环上的客户端」，
+        # 报错发生在第一次 Redis 调用处，看起来跟 Redis 本身完全无关。
+        from redis.asyncio import Redis
+
+        client = Redis.from_url(os.environ["REDIS_URL"], decode_responses=False)
+        try:
+            await client.flushdb()
+        finally:
+            await client.aclose()
+
+    asyncio.run(flush_redis())
+    yield
+
+
+@pytest.fixture(autouse=True)
+async def _reset_state_between_tests():
+    """每个用例前清空业务表与进程内缓存。
+
+    用 TRUNCATE 而不是逐个 DELETE：
+    - 一条语句清掉所有表，`CASCADE` 自动处理外键顺序，不需要维护删除顺序；
+    - `RESTART IDENTITY` 让自增序列归零（本项目的序列只用于 sync 版本号，但仍要确定）；
+    - **保留 `alembic_version`**：它不在 Base.metadata 里，TRUNCATE 只列业务表。
+
+    为什么是「之前」而不是「之后」：用例失败时残留数据会让后续用例莫名其妙地红，
+    而在失败现场再清一次会把报错堆栈弄乱。之前清一次就够。
+    """
+    from sqlalchemy import text
+
+    from app.db import Base, engine
+
+    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    async with engine.begin() as connection:
+        await connection.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+    # 进程内状态：限流告警节流、搜索缓存 LRU。它们不随数据库清空而复位。
+    from app.services.redis_client import reset_state_for_tests
+    from app.tools.tavily_cache import reset_search_cache_memory_only
+
+    reset_state_for_tests()
+    reset_search_cache_memory_only()
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def _dispose_engine_at_end():
+    """会话结束释放连接池，避免 pytest 退出时挂着一堆 Postgres 连接。
+
+    必须是**异步**的会话级 fixture：`asyncio.run` 会开一个新循环，而连接池里的连接
+    属于会话循环，跨循环 `dispose()` 会抛 `Future attached to a different loop`。
     """
     yield
-    shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
+
+    from app.db import engine
+    from app.services.redis_client import close_redis
+
+    await close_redis()
+    await engine.dispose()

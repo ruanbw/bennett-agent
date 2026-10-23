@@ -14,6 +14,7 @@ CLI 早期一样都没有，于是「本地跑得通、Web 却拒」这类差异
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 from typing import Literal
@@ -24,7 +25,7 @@ from pydantic_ai.messages import ModelMessage
 from app.config import settings
 from app.config.logging_setup import configure_logging
 from app.config.proxy_env import sanitize_no_proxy_env
-from app.db import create_db_and_tables, engine
+from app.db import engine, verify_schema_at_head
 from app.services.agent_factory import build_agent, render_system_prompt
 from app.services.http_client import close_http_client
 from app.services.model_service import (
@@ -33,6 +34,7 @@ from app.services.model_service import (
     resolve_chat_model,
     seed_default_provider,
 )
+from app.services.redis_client import close_redis
 from app.services.token_budget import (
     TOOL_SCHEMA_OVERHEAD_TOKENS,
     build_budget,
@@ -200,6 +202,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="开发期热重启：保存 Python / 提示词 / .env 后自动重启（隐含 --web，仅限非 production）",
     )
+    # 上传解析 worker：与 web 进程同一镜像、不同命令（见 docker-compose 的 worker 服务）
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help="运行上传解析 worker（消费 uploaded_file 队列；不监听 HTTP）",
+    )
     return parser
 
 
@@ -214,7 +222,7 @@ async def build_cli_agent() -> tuple[Agent, ChatModelSnapshot]:  # noqa: ANN401
     调用方不必再为预算预检单独查一遍库（以前 `resolve_model_target` 被调了两次）。
     返回整个快照而不是 `(agent, key)`：快照里的窗口上限就是 CLI 预算预检要的数字。
     """
-    await create_db_and_tables()
+    await verify_schema_at_head()
     await seed_default_provider()
 
     snapshot = await resolve_chat_model(settings.model_name)
@@ -278,6 +286,9 @@ def main() -> None:
             )
         return _run_dev_reload(host=args.host, port=args.port)
 
+    if args.worker:
+        return asyncio.run(_run_upload_worker())
+
     if args.web:
         import uvicorn
 
@@ -306,6 +317,47 @@ def main() -> None:
         )
     else:
         asyncio.run(_run_cli())
+
+
+async def _run_upload_worker() -> None:
+    """上传解析 worker 的主流程：**单一事件循环** + 优雅停机。
+
+    为什么单独一个入口而不是塞进 web 进程：worker 的负载特征（长 CPU 任务、可重启、
+    可水平扩）与 API 完全不同。混在 web 进程里意味着一次大 PDF 的解析会参与抢占同一
+    个进程的事件循环与内存，而它还带着正在流式输出的对话。
+
+    SIGTERM 转成 `stop` 事件而不是直接退出：worker 可能正写到一半（文档已 flush、
+    状态还没提交），要让它把手上这条处理完再走。`docker stop` 的超时
+    （compose 里配了 30s）就是给这个窗口的。
+    """
+    import signal
+
+    from app.services.uploads.worker import run_worker
+
+    await verify_schema_at_head()
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Windows 的事件循环不支持信号处理器（那边靠 Ctrl-C 的 KeyboardInterrupt）
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
+
+    try:
+        await run_worker(stop)
+    finally:
+        try:
+            await close_redis()
+        except Exception:  # noqa: BLE001 - 收尾失败不遮蔽其他清理
+            logger.warning("关闭 Redis 连接失败", exc_info=True)
+        try:
+            await close_http_client()
+        except Exception:  # noqa: BLE001
+            logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
+        try:
+            await engine.dispose()
+        except Exception:  # noqa: BLE001
+            logger.warning("释放数据库连接失败", exc_info=True)
 
 
 def _run_dev_reload(host: str, port: int) -> int:
