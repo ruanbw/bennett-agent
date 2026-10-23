@@ -18,6 +18,7 @@ import { notify } from '../lib/toast';
 import { useMidnightRefresh } from '../hooks/use-midnight-refresh';
 import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
+import { BrandMark } from './BrandMark';
 import { ConfirmDialog } from './ui/confirm-dialog';
 import { SidebarBatchBar } from './SidebarBatchBar';
 import { SidebarSearchEmpty, SidebarSearchError } from './SidebarSearchEmpty';
@@ -421,9 +422,12 @@ export function Sidebar({
       <div className="px-3 pt-4 pb-3 space-y-3 shrink-0">
         {/* 品牌 + 顶部图标 */}
         <div className="flex items-center justify-between px-1">
-          <span className="text-[15px] font-semibold tracking-tight text-foreground select-none">
-            Bennett
-          </span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <BrandMark size={24} />
+            <span className="truncate text-[15px] font-semibold tracking-tight text-foreground select-none">
+              Bennett
+            </span>
+          </div>
           <div className="flex items-center gap-0.5">
             <SyncStatusButton />
             <button

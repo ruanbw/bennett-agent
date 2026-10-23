@@ -14,6 +14,7 @@ import { Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 
 import { MIN_PASSWORD_LENGTH, modeAfterRegister, type RegisterOutcome } from '../lib/auth';
 import { readAuthFieldState } from '../lib/auth-form';
+import { BrandMark } from './BrandMark';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -103,6 +104,7 @@ export function LoginPage({
 
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
+          <BrandMark size={56} className="mx-auto mb-4" />
           <h1 className="text-2xl font-semibold tracking-tight">Bennett Agent</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {isRegister ? '创建一个账号' : '登录以继续'}
