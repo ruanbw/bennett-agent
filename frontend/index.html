@@ -2,12 +2,37 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- 品牌图标：头像里的手写连笔字（详见 frontend/brand/build-icons.py）。
+         印章形态是深底白墨迹，所以在浅色与深色标签栏上都有对比度，
+         不需要按 prefers-color-scheme 切两套 favicon。 -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Safari 固定标签页只吃单色蒙版，color 由 Safari 上色 -->
+    <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#09090b" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- og:image 用相对路径只在同域抓取时有效；对外分享前把它换成部署域名下的绝对地址 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Bennett Agent" />
+    <meta property="og:title" content="Bennett Agent" />
+    <meta
+      property="og:description"
+      content="基于 PydanticAI 与 LiteLLM 的 Agent Loop 框架：FastAPI SSE 流式 + React 19 前端，带工具审批、知识库、文件上传与行为回归评测。"
+    />
+    <meta property="og:image" content="/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Bennett Agent" />
+    <meta name="twitter:card" content="summary_large_image" />
     <!-- 移动端浏览器工具栏颜色：与 index.css 的 --background、src/context/theme-context.ts
          的 THEME_COLORS 保持一致，并由下面的首屏脚本与 ThemeProvider 动态更新 -->
     <meta name="theme-color" content="#ffffff" />
     <title>Bennett Agent</title>
+    <meta
+      name="description"
+      content="基于 PydanticAI 与 LiteLLM 的 Agent Loop 框架：FastAPI SSE 流式 + React 19 前端，带工具审批、知识库、文件上传与行为回归评测。"
+    />
     <!--
       首屏主题引导：在 React 挂载前决定 dark class 与 color-scheme，避免首帧闪白。
 

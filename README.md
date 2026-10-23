@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/public/icons/icon-192.png" width="96" height="96" alt="Bennett Agent 图标（头像里的手写连笔字）">
+</p>
+
 # Bennett Agent
 
 基于 [PydanticAI](https://ai.pydantic.dev/) 与 [LiteLLM](https://docs.litellm.ai/) 的 Agent Loop 框架，
@@ -139,6 +143,7 @@ app/          FastAPI：api / config / prompts / schemas / services / tools / db
 migrations/   Alembic 迁移（结构变更的唯一入口；初始 revision 即完整基线）
 evals/        行为回归评测：用例、断言与执行器
 frontend/     React 19 + Vite + Tailwind 4 + assistant-ui（详见 frontend/README.md）
+frontend/brand/  品牌图标的母版（GitHub 头像）与生成脚本，产物在 frontend/public/
 prompts/      Jinja2 提示词模板
 scripts/      seed_admin.py（播种初始超管）、run_eval.py（跑评测）
 alembic.ini   Alembic 配置（连接串从 settings 读，不写第二份）

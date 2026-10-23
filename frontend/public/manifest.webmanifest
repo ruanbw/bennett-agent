@@ -1,0 +1,16 @@
+{
+  "name": "Bennett Agent",
+  "short_name": "Bennett",
+  "description": "基于 PydanticAI 与 LiteLLM 的 Agent Loop 框架，带 FastAPI SSE 后端与 React 19 前端。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

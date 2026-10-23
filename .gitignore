@@ -11,6 +11,8 @@ wheels/
 .ruff_cache/
 # 评测产物：报告里有完整回答与 token 用量，属于运行数据不是源码
 evals/runs/
+# 品牌图标生成脚本的中间文件（见 frontend/brand/README.md）
+frontend/brand/.*.png
 
 # 本地数据库文件。
 # SQLite 已从支持矩阵移除（见 app/db.py），这三条保留为**防御性**规则：
