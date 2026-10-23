@@ -41,6 +41,7 @@ from app.schemas.events import (
     ToolCall,
     ToolResult,
     Usage,
+    UsageTiming,
 )
 from app.services import chat_service
 from app.services.chat_service import CLARIFICATION_TOOL_NAME, translate_event
@@ -638,3 +639,107 @@ def test_usage_frame_omits_cost_when_unpriced():
     parsed = json.loads(raw[len("data: ") : -len("\r\n\r\n")])
     assert parsed["cost_total"] is None
     assert parsed["cost_currency"] is None
+
+
+# ---------------------------------------------------------------------
+# 计时明细的线上契约
+#
+# `timing` 是「整块给或整块缺席」的一个块，前端按它显示「37 步 · 208 tok/s」。
+# 这里的用例锁两件事：字段名/形状（前端镜像已冻结在 types.ts），以及
+# 「缺省时是 null 而不是一堆 0」——0 会被读成明确的错误结论。
+# ---------------------------------------------------------------------
+def _payload(event):
+    raw = to_sse_frame(event).encode().decode()
+    return json.loads(raw[len("data: ") : -len("\r\n\r\n")])
+
+
+def test_usage_frame_carries_full_timing_block():
+    """齐全时七个字段全部下发，且字段名是**蛇形**（前端做 camelCase 映射）。"""
+    parsed = _payload(
+        Usage(
+            context_tokens=10_000,
+            output_tokens=2_000,
+            timing=UsageTiming(
+                steps=37,
+                turn_ms=9_600,
+                llm_ms=8_000,
+                tool_ms=1_600,
+                ttft_ms=420,
+                decode_ms=7_600,
+                decode_tokens=1_580,
+            ),
+        )
+    )
+
+    assert parsed["timing"] == {
+        "steps": 37,
+        "turn_ms": 9_600,
+        "llm_ms": 8_000,
+        "tool_ms": 1_600,
+        "ttft_ms": 420,
+        "decode_ms": 7_600,
+        "decode_tokens": 1_580,
+    }
+    # 208 tok/s = 1580 / 7.6s，前端除得出来
+    assert parsed["timing"]["decode_tokens"] / (parsed["timing"]["decode_ms"] / 1_000) == pytest.approx(207.9, abs=0.1)
+
+
+def test_usage_frame_sends_null_timing_when_not_measured():
+    """量不到时整块是 null。**不能**退化成一串 0：那会被读成「模型卡住了」。"""
+    parsed = _payload(Usage(context_tokens=100, output_tokens=10))
+
+    assert parsed["timing"] is None
+
+
+def test_timing_block_allows_partial_decode_samples():
+    """`ttft_ms`/`decode_ms`/`decode_tokens` 在**块内**允许为 null（其余照常给）。
+
+    真实场景：网关一次性回整段文本时解码窗口不可测，但步数与总耗时仍然是真的。
+    这时只隐藏速度那一项，不要让整块数字消失。
+    """
+    parsed = _payload(
+        Usage(
+            context_tokens=100,
+            output_tokens=10,
+            timing=UsageTiming(steps=3, turn_ms=900, llm_ms=800, tool_ms=100),
+        )
+    )
+
+    assert parsed["timing"]["steps"] == 3
+    assert parsed["timing"]["turn_ms"] == 900
+    assert parsed["timing"]["ttft_ms"] is None
+    assert parsed["timing"]["decode_ms"] is None
+    assert parsed["timing"]["decode_tokens"] is None
+
+
+def test_timing_keeps_a_real_zero_tool_ms():
+    """`tool_ms` 的 0 是**测量结果**（一轮没调工具），必须原样下发。
+
+    它与「量不到」不是一回事：量不到时整块 `timing` 缺席。把 0 也抹成 null
+    会让「这轮没调工具」和「这轮没测到」在前端长得一模一样。
+    """
+    parsed = _payload(
+        Usage(
+            context_tokens=100,
+            output_tokens=10,
+            timing=UsageTiming(steps=1, turn_ms=500, llm_ms=500, tool_ms=0, ttft_ms=120),
+        )
+    )
+
+    assert parsed["timing"]["tool_ms"] == 0
+
+
+def test_timing_fields_are_integers():
+    """协议层只用整毫秒：浮点秒会带一串尾数，前端还得自己 round。"""
+    timing = UsageTiming(steps=2, turn_ms=1_234, llm_ms=1_000, tool_ms=234, ttft_ms=200)
+    payload = timing.model_dump()
+
+    for name in ("steps", "turn_ms", "llm_ms", "tool_ms", "ttft_ms"):
+        assert isinstance(payload[name], int), name
+
+
+def test_usage_timing_is_not_required_for_old_clients():
+    """`timing` 有默认值：老服务端不发这个字段时，解析回来的对象仍然成立。"""
+    parsed = Usage.model_validate({"type": "usage", "context_tokens": 42})
+
+    assert parsed.timing is None

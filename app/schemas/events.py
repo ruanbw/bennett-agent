@@ -102,6 +102,50 @@ class Done(BaseModel):
     type: Literal["done"] = "done"
 
 
+class UsageTiming(BaseModel):
+    """本轮计时的**实测**明细（服务端量的，不是估算）。
+
+    这个类存在的理由：前端要显示「1 轮 37 步 · 208 tok/s」与一个统计弹层，
+    而 `tok/s` 的分母必须是**真正的解码阶段**。用整轮墙钟当分母会把工具执行、
+    上游排队、重试退避都算成「生成速度」——一个跑了 20 秒工具的一轮会显示成
+    3 tok/s。那不是模型慢，是工具慢，而这个错误结论会让用户去换模型。
+
+    ## 一起给，或一起缺席
+
+    七个字段在协议上是**同一个块**：服务端只在真的量到了才给 `timing`，整块缺席
+    时前端不显示这些统计项，**绝不补 0**。0 会被读成明确的错误结论：
+    `0 tok/s` = 模型卡住了，`首字 0ms` = 秒回，`0 步` = 一个请求都没发。
+    宁可不显示，也不要给一个看起来像测量结果、实际只是默认值的数。
+
+    `ttft_ms` / `decode_ms` / `decode_tokens` 在块内额外允许为 null：某几步可能
+    量不到分片时间（网关一次性返回整段文本，解码窗口约等于 0）。它们缺席时前端
+    只隐藏对应的那一项，其余照常显示。
+
+    口径（与 `app/services/usage.py::TurnTimer` 逐条对应，改一边要改另一边）：
+
+    - `steps`：本轮模型请求次数。有工具调用时一轮不止一次请求。
+    - `turn_ms`：整轮墙钟。含上游排队、重试退避、备用模型切换与工具执行；
+      **不含**上下文压缩、历史转换、Agent 装配（那三段发生在流式生成之前）。
+    - `llm_ms`：模型请求占用累计 = Σ(每步「请求发出 → 该步最后一个输出分片到达」)。
+      含首字等待与解码，是分辨「慢在模型」还是「慢在工具」的那一半。
+    - `tool_ms`：工具执行占用累计 = Σ(每次工具「开始执行 → 返回」)。并发工具时
+      是各自耗时之和，可能大于墙钟里的那一段。**没有工具时是真实的 0**——
+      它与「量不到」不是一回事：量不到时整块 `timing` 都不下发。
+    - `ttft_ms`：首 token 延迟，按步取平均。没有可测样本时 null。
+    - `decode_ms` / `decode_tokens`：只统计真正的解码窗口（该步第一个输出分片 →
+      最后一个输出分片）与落在这些窗口里的输出 token。两者**成对**：只有一个为正、
+      另一个为零时会算出无穷大的速度，那种情况两者都给 null。
+    """
+
+    steps: int
+    turn_ms: int
+    llm_ms: int
+    tool_ms: int
+    ttft_ms: int | None = None
+    decode_ms: int | None = None
+    decode_tokens: int | None = None
+
+
 class Usage(BaseModel):
     """本轮的**真实** token 用量（来自上游响应，不是估算）。
 
@@ -136,6 +180,10 @@ class Usage(BaseModel):
     cost_currency: str | None = None
     #: 缓存命中省下的钱（相对全部按普通输入价）。0 表示没有缓存收益。
     cost_cache_savings: float | None = None
+    #: 本轮计时明细。**整块给或整块缺席**：`None` 表示服务端没量到（老服务端、
+    #: 或流式链路拿不到分片时序），前端此时不显示步数/速度/首字，**不要补 0**。
+    #: 口径见 `UsageTiming` 的 docstring。
+    timing: UsageTiming | None = None
 
 
 class ContextCompacted(BaseModel):
@@ -263,4 +311,5 @@ __all__ = [
     "ToolCall",
     "ToolResult",
     "Usage",
+    "UsageTiming",
 ]

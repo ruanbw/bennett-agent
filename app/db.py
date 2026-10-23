@@ -585,8 +585,8 @@ async def check_journal_mode(conn) -> str:  # noqa: ANN001 - AsyncConnection
     为什么要在启动时查一次：`PRAGMA journal_mode=WAL` **可能静默失败**——SQLite 在网络
     文件系统（NFS/SMB）、某些只读挂载或容器卷上会返回 `delete`，而不是报错。此时一切
     照常工作，只是并发读写开始互相阻塞，表现为「流式回答进行中查列表会卡住」，而日志里
-    没有任何线索。README 已经写明「SQLite 文件不要放在 NFS 上」，这条检查就是把它变成
-    可观测的。
+    没有任何线索。SQLite 文件不应放在 NFS/SMB 一类网络文件系统上，这条检查就是把这个
+    约定变成可观测的信号。
 
     查询失败不抛：这是诊断信息，不该让服务起不来。
     """

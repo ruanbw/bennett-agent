@@ -50,6 +50,7 @@ from app.schemas.events import (
     ToolCall,
     ToolResult,
     Usage,
+    UsageTiming,
 )
 from app.services.agent_factory import (
     TITLE_TIMEOUT_SECONDS,
@@ -84,7 +85,7 @@ from app.services.upstream_errors import (
     is_retryable_upstream_error,
     upstream_error_message,
 )
-from app.services.usage import extract_turn_usage
+from app.services.usage import TurnTimer, extract_turn_usage
 from app.tools import registry
 from app.tools.approval import DENIED_RESULT, all_deferred_ids
 from app.tools.ask_user_clarification import normalize_clarification
@@ -138,6 +139,34 @@ class InvalidChatHistory(ValueError):
     若按 `ValueError` 分类，一旦这些构造失败，内部校验细节会被当成「写给用户看的
     文案」原样推给客户端。本异常的 message 才是可以外泄的那一类。
     """
+
+
+def _turn_timing(
+    timer: TurnTimer,
+    run_result: Any,  # noqa: ANN401 - AgentRunResult
+) -> UsageTiming | None:
+    """把流里的打点折算成本轮计时明细；量不到返回 `None`。
+
+    用 `new_messages()` 而不是 `all_messages()` 取响应序列：后者含客户端回放的
+    历史，拿来数步数会把**以前几轮**的请求算进「本轮 37 步」，而且解码 token
+    会按下标错位对应到别人的响应上。两处 `Usage(...)` 构造点共用这一个口径。
+
+    备用模型接手的轮次照常计时：`run_result` 是真正跑完的那次运行，步数、分片
+    时刻与工具耗时都属于本轮，模型是谁不影响「用户等了多久」这件事。
+
+    任何异常都降级成 `None`：计时是增强信息，不该成为新的失败点——尤其它是在
+    一轮已经成功之后才计算的。
+    """
+    if run_result is None:
+        # 流没给出终态事件（理论上不该发生）。用量那边同样按「缺席」处理，
+        # 这里保持一致，而不是为这种情况打一条带 traceback 的告警。
+        return None
+    try:
+        responses = [message for message in run_result.new_messages() if isinstance(message, ModelResponse)]
+    except Exception:
+        logger.warning("取本轮响应序列失败，不报计时", exc_info=True)
+        return None
+    return timer.finish(responses)
 
 
 async def _turn_cost_fields(
@@ -1022,6 +1051,11 @@ async def stream_chat_events(
     attempt = 0
     # 首字节耗时是用户感知「卡不卡」的主要来源，单独计时（`deadline` 之前开始）
     stream_started_at = loop.time()
+    # 本轮计时明细的采集器。**必须建在重试循环之外**：`turn_ms` 量的是用户
+    # 实际等了多久，含重试退避与备用模型切换；步数/工具耗时则在每次尝试开始时
+    # 重置（见 `TurnTimer.begin_attempt`），否则失败尝试的请求会混进「本轮几步」。
+    # 时间源用 `loop.time()`，与上面两个锚点同源。
+    timer = TurnTimer(clock=loop.time)
     # 本轮结局：在收尾处统计。区分 done / error / stopped 三者，因为「中断」不是
     # 「失败」——用户自己关掉页面不该拉高错误率。
     outcome = "error"
@@ -1049,6 +1083,9 @@ async def stream_chat_events(
             # 上一次尝试可能记录了切换却没走到事件阶段（随后整体失败）。重试成功后
             # 用户看到的是这一轮的结果，不能把上一轮的切换误报成「本轮已切换」。
             fallbacks.clear()
+            # 每次尝试都重置步/工具明细：`run_result` 只覆盖最终成功的那次尝试，
+            # 它的响应序列里没有失败尝试的请求。`turn_ms` 的起点不重置（见上）。
+            timer.begin_attempt()
 
             try:
                 remaining = deadline - loop.time()
@@ -1081,6 +1118,9 @@ async def stream_chat_events(
                         if isinstance(event, AgentRunResultEvent):
                             run_result = event.result
                             continue
+                        # 计时打点：只记账、不改事件。放在终态事件之后，因为
+                        # `AgentRunResultEvent` 不属于任何一步的模型耗时。
+                        timer.observe(event)
                         deferred = _remember_deferred(event, deferred)
                         for chat_event in translate_event(event, seen_clarification_ids):
                             if not emitted:
@@ -1105,6 +1145,10 @@ async def stream_chat_events(
                             output_tokens=usage.output_tokens,
                             cache_read_tokens=usage.cache_read_tokens,
                             **await _turn_cost_fields(answered_by, usage),
+                            # 审批拦下也要给计时：用户在这一轮里同样等了几秒、
+                            # 同样看到了首字。缺了它，需要审批的轮次会永远显示
+                            # 「没有用时」——而这类轮次恰恰是最需要判断慢在哪的。
+                            timing=_turn_timing(timer, run_result),
                         )
                     emitted = True
                     # 审批拦下不是失败：本轮正常完成，只是工具没执行。单独记一个 outcome，
@@ -1134,6 +1178,9 @@ async def stream_chat_events(
                         # 成本按**真正回答的模型**计价：备用模型接手的轮次必须用备用
                         # 模型的单价，否则成本会按主模型（可能贵十倍）算错。
                         **await _turn_cost_fields(answered_by, usage),
+                        # 计时同理属于**本轮**而不是某个模型：备用模型接手的轮次
+                        # 照常下发，那正是用户想知道「换模型之后是快了还是慢了」的时刻。
+                        timing=_turn_timing(timer, run_result),
                     )
                 outcome = "done"
                 break

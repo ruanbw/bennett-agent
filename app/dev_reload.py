@@ -4,8 +4,7 @@
 
 `uvicorn --reload` 的子进程是用 `spawn` 起的（`uvicorn/_subprocess.py` 的
 `get_subprocess`），它只 `import app.server:app`，**不会重新执行 `main.py`**。而本仓库
-把三件启动动作刻意放在 `main.py` 里（理由见该文件的 `main()` 与 README 的
-「入口是 `main.py --web`」）：
+把三件启动动作刻意放在 `main.py` 里（理由见该文件的 `main()`）：
 
 1. `configure_logging()`：日志格式带 `[request_id]`，并给 uvicorn 的三个 logger 换 handler；
 2. `sanitize_no_proxy_env()`：清理会让**所有** httpx 客户端在构造阶段失败的 `no_proxy` 条目；

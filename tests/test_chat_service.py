@@ -553,3 +553,88 @@ async def test_turn_cost_reports_cache_savings(monkeypatch):
 
     assert fields["cost_total"] == pytest.approx(0.0492)
     assert fields["cost_cache_savings"] == pytest.approx(0.0108)
+
+
+# ---------------------------------------------------------------------
+# 计时明细的接线
+#
+# `_turn_timing` 是计时块进入 `Usage(...)` 的唯一入口，它的正确性全在**用哪批响应
+# 数步数**：`new_messages()` 只含本轮，`all_messages()` 含客户端回放的历史。用错
+# 那个，界面上的「37 步」会把以前几轮也数进去，而解码 token 还会按下标错位。
+# ---------------------------------------------------------------------
+class _FakeRunResult:
+    """`AgentRunResult` 的最小替身：只区分 `all_messages` 与 `new_messages`。"""
+
+    def __init__(self, new_messages, history_messages=()):
+        self._new = list(new_messages)
+        self._all = [*history_messages, *new_messages]
+
+    def all_messages(self):
+        return self._all
+
+    def new_messages(self):
+        return self._new
+
+
+class _FakeTimer:
+    """记下 `finish` 收到了哪些响应，用来验证接线**传对了哪批**。"""
+
+    def __init__(self, result=None):
+        self.result = result
+        self.seen = None
+
+    def finish(self, responses):
+        self.seen = list(responses)
+        return self.result
+
+
+def _response(output_tokens=5):
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.usage import RequestUsage
+
+    return ModelResponse(
+        parts=[TextPart(content="答")],
+        usage=RequestUsage(input_tokens=100, output_tokens=output_tokens),
+    )
+
+
+def test_turn_timing_counts_only_this_turn_messages():
+    """步数只看 `new_messages()`：历史里的响应不算进「本轮几步」。"""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    from app.schemas.events import UsageTiming
+
+    prior = [
+        ModelRequest(parts=[UserPromptPart(content="旧问题")]),
+        _response(output_tokens=99),
+        _response(output_tokens=99),
+    ]
+    run_result = _FakeRunResult([_response(output_tokens=7)], history_messages=prior)
+    timer = _FakeTimer(result=UsageTiming(steps=1, turn_ms=300, llm_ms=300, tool_ms=0))
+
+    timing = chat_service._turn_timing(timer, run_result)
+
+    assert [r.usage.output_tokens for r in timer.seen] == [7]  # 不是 99
+    assert timing is not None and timing.steps == 1
+
+
+def test_turn_timing_returns_none_when_timer_cannot_measure():
+    """量不到就是 None，由 `Usage.timing` 的默认值落成 null——不是 0。"""
+    run_result = _FakeRunResult([_response()])
+
+    assert chat_service._turn_timing(_FakeTimer(result=None), run_result) is None
+
+
+def test_turn_timing_degrades_instead_of_raising():
+    """取消息都失败时降级为 None：计时在**一轮成功之后**才算，不能变成新的失败点。"""
+
+    class _Broken:
+        def new_messages(self):
+            raise RuntimeError("结构变了")
+
+    assert chat_service._turn_timing(_FakeTimer(), _Broken()) is None
+
+
+def test_turn_timing_is_none_without_a_run_result():
+    """流没给终态事件时按「缺席」处理，且不为这种情况打带 traceback 的告警。"""
+    assert chat_service._turn_timing(_FakeTimer(), None) is None
