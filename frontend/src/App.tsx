@@ -10,6 +10,7 @@ import { Sidebar } from './components/Sidebar';
 import { Toaster } from './components/Toaster';
 import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
+import { DetailLevelProvider } from './context/DetailLevelContext';
 import { useAuth } from './hooks/use-auth';
 import { useCapabilities } from './hooks/use-capabilities';
 import { useChatSessions } from './hooks/use-chat-sessions';
@@ -542,6 +543,9 @@ export function App() {
 
   return (
     <ThemeProvider>
+      {/* 对话显示偏好（详细/简洁）要覆盖登录页之外的整个聊天界面；
+          放在这里而不是 AuthenticatedShell 里，是因为设置面板挂在 shell 层。 */}
+      <DetailLevelProvider>
       {/* 动作反馈（导出完成 / 新建失败）：持久状态仍用页面内联条，不用 toast */}
       <Toaster />
       {status === 'loading' ? (
@@ -570,6 +574,7 @@ export function App() {
           onLogout={logout}
         />
       )}
+      </DetailLevelProvider>
     </ThemeProvider>
   );
 }

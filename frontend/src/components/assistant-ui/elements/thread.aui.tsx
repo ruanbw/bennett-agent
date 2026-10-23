@@ -2,8 +2,9 @@ import {
   ComposerAddAttachment,
   ComposerAttachments,
 } from "@/components/assistant-ui/elements/attachment.aui";
-import { ReasoningView } from "@/components/assistant-ui/elements/reasoning-view";
 import { MarkdownText } from "@/components/assistant-ui/elements/markdown-text";
+import { ReasoningView } from "@/components/assistant-ui/elements/reasoning-view";
+import { TraceGroup } from "@/components/assistant-ui/elements/trace-group";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
@@ -17,8 +18,9 @@ import {
   ComposerPrimitive,
   ErrorPrimitive,
   MessagePrimitive,
-  type ReasoningMessagePartComponent,
+  groupPartByType,
   type TextMessagePartComponent,
+  type ToolCallMessagePartProps,
   ThreadPrimitive,
   useAui,
   useAuiEvent,
@@ -44,7 +46,15 @@ import {
   SquareIcon,
   type LucideIcon,
 } from "lucide-react";
-import { type FC, type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FC,
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
@@ -118,21 +128,51 @@ const isMessageIncomplete = (s: AssistantState) =>
   s.message.metadata.custom?.incomplete === true;
 
 /**
- * 部件组件必须是模块级常量。
+ * 思考与工具调用合成一个「过程」块（`group-trace`）。
  *
- * `MessagePrimitive.Parts` 用**引用相等**判断 components 是否变化（见 @assistant-ui/core
- * 的比较器：`prev.components.Text === next.components.Text`），内联对象与箭头函数每次渲染
- * 都是新引用，于是任何一次重渲染都会整棵重挂 Markdown 子树——划走的选区被清掉、DOM 抖动。
+ * 相邻的 reasoning / tool-call 部件共享同一个前缀，于是被 `GroupedParts` 合并成一个
+ * 可折叠分组；正文（text）不参与分组，始终露在外面。这正是「只有最终响应展示在外面」
+ * 的实现方式——过程收进一行摘要，正文才是页面上真正要读的东西。
  */
-const AssistantTextPart: TextMessagePartComponent = () => <MarkdownText />;
-const AssistantReasoningPart: ReasoningMessagePartComponent = ({ text, status }) => (
-  <ReasoningMessage text={text} status={status} />
-);
-const ASSISTANT_PART_COMPONENTS = {
-  Reasoning: AssistantReasoningPart,
-  Text: AssistantTextPart,
-  tools: { Fallback: ToolFallback },
-};
+const ASSISTANT_GROUP_BY = groupPartByType({
+  reasoning: ["group-trace"],
+  "tool-call": ["group-trace"],
+});
+
+/**
+ * 分组渲染入口。
+ *
+ * 参数形状是 assistant-ui 的 `RenderInfo`：可能是分组（`group-…`）、部件（`text` /
+ * `tool-call` / `reasoning`）或流式占位（`indicator`）。按 `type` 分发；展开后的子部件
+ * 仍走与原来一致的分部组件，所以「详细」档下的外观没有变化。
+ *
+ * 返回类型显式写成 `ReactNode`：`GroupedParts` 的 children 是普通函数而不是组件，
+ * 用 `FC` 会把「组件可以返回 Promise（React 19 异步组件）」的类型也带进来。
+ */
+function renderAssistantPart({ part, children }: { part: { type: string }; children: ReactNode }): ReactNode {
+  if (part.type === "group-trace") {
+    const group = part as unknown as {
+      indices: readonly number[];
+      counts: { running: number; complete: number; incomplete: number; requiresAction: number };
+    };
+    return (
+      <TraceGroup indices={group.indices} counts={group.counts}>
+        {children}
+      </TraceGroup>
+    );
+  }
+  if (part.type === "text") return <MarkdownText />;
+  if (part.type === "tool-call") {
+    // 注册过专用 UI 的用专用 UI，其余走通用折叠行
+    const toolPart = part as unknown as ToolCallMessagePartProps & { toolUI?: ReactNode };
+    return toolPart.toolUI ?? <ToolFallback {...toolPart} />;
+  }
+  if (part.type === "reasoning") {
+    const reasoningPart = part as unknown as { text?: string; status?: { type?: string } };
+    return <ReasoningMessage {...reasoningPart} />;
+  }
+  return null;
+}
 
 const UserTextPart: TextMessagePartComponent = ({ text }) => <span>{text}</span>;
 const USER_PART_COMPONENTS = {
@@ -681,9 +721,12 @@ const MessageError: FC = () => {
   );
 };
 
+/**
+ * 思考过程：`ReasoningView` 自己是一条折叠条（`已思考（15s）`），默认收起。
+ * 这里只把消息上持久化的耗时与开始时间递进去——组件重挂载（切会话再回来）时
+ * 靠 `startedAt` 续计时。
+ */
 const ReasoningMessage: FC<{ text?: string; status?: { type?: string } }> = (props) => {
-  // 历史消息把思考耗时持久化在 metadata.custom.thinkingMs；生成中的消息另有
-  // thinkingStartedAt，用于组件重挂载后续计时。
   const elapsedMs = useAuiState((s) => {
     const value = s.message.metadata.custom?.thinkingMs;
     return typeof value === "number" ? value : 0;
@@ -803,7 +846,9 @@ const AssistantMessage: FC = () => {
       className="group flex flex-col gap-1 w-full"
     >
       <div className="text-foreground text-sm leading-relaxed wrap-break-word">
-        <MessagePrimitive.Parts components={ASSISTANT_PART_COMPONENTS} />
+        <MessagePrimitive.GroupedParts groupBy={ASSISTANT_GROUP_BY}>
+          {renderAssistantPart}
+        </MessagePrimitive.GroupedParts>
         <MessageError />
       </div>
 

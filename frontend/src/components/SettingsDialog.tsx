@@ -1,4 +1,4 @@
-import { Check, Laptop, Moon, Sun, User, Info, HardDrive, KeyRound } from 'lucide-react';
+import { Check, Laptop, Moon, Sun, User, Info, HardDrive, KeyRound, AlignLeft, Rows3 } from 'lucide-react';
 
 import {
   Dialog,
@@ -11,12 +11,14 @@ import {
 import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
+import { useDetailLevel } from '../context/detail-level-context';
 import { useLocalDataStats } from '../hooks/use-local-stats';
 import { KnowledgePanel } from './KnowledgePanel';
 import { LocalDataStatsSection } from './LocalDataStatsSection';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
+import { DETAIL_LEVEL_OPTIONS, type DetailLevel } from '../lib/detail-level';
 import {
   describeMcpCapability,
   describeMcpServers,
@@ -84,6 +86,12 @@ const THEME_OPTIONS: Array<{
   },
 ];
 
+/** 「对话显示」两个档位的图标；文案与顺序来自 `lib/detail-level`（纯数据，可单测）。 */
+const DETAIL_LEVEL_ICONS: Record<DetailLevel, typeof Sun> = {
+  concise: Rows3,
+  detailed: AlignLeft,
+};
+
 /**
  * 设置面板内容组件：支持独立复用与服务端渲染测试。
  */
@@ -97,6 +105,7 @@ export function SettingsPanel({
   onRefreshCapabilities,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
+  const { level: detailLevel, setLevel: setDetailLevel } = useDetailLevel();
   const localStats = useLocalDataStats(open);
 
   // 从邮箱派生昵称与头像首字母
@@ -180,6 +189,51 @@ export function SettingsPanel({
             );
           })}
         </div>
+      </div>
+
+      {/* 对话显示：思考与工具调用的默认折叠方式。放在外观之后，因为它同样是
+          「界面长什么样」的偏好，但改的是对话区，不是配色。 */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <AlignLeft className="size-3.5" />
+          <span>对话显示</span>
+        </h3>
+        <div role="group" aria-label="对话显示" className="grid grid-cols-2 gap-2">
+          {DETAIL_LEVEL_OPTIONS.map(({ value, label, description }) => {
+            const Icon = DETAIL_LEVEL_ICONS[value];
+            const isActive = detailLevel === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setDetailLevel(value)}
+                aria-pressed={isActive}
+                className={`relative flex flex-col items-center justify-center p-3 rounded-xl border text-center transition cursor-pointer select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 ${
+                  isActive
+                    ? 'border-primary bg-primary/5 text-foreground shadow-xs ring-1 ring-primary/40'
+                    : 'border-border/70 hover:border-border hover:bg-muted/50 text-muted-foreground'
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute top-2 right-2 text-primary">
+                    <Check className="size-3.5" aria-hidden="true" />
+                  </span>
+                )}
+                <Icon
+                  className={`size-5 mb-1.5 ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-xs font-medium text-foreground">{label}</span>
+                <span className="text-[10px] text-muted-foreground mt-0.5 leading-tight">
+                  {description}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          两种模式都能展开看细节；这里只决定思考与工具调用默认是否展开。
+        </p>
       </div>
 
       {/* 修改密码：成功会让所有设备下线，由 App 统一退回登录页 */}

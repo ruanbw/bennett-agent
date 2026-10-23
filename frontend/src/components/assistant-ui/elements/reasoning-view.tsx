@@ -6,6 +6,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ArrowDown, ChevronDown, Loader2 } from "lucide-react";
 import { useDeferredValue, useState, useEffect, useRef } from "react";
+import { useDetailLevel } from "@/context/detail-level-context";
 import { thinkingSeconds, thinkingStartTime } from "@/lib/reasoning-time";
 import { isNearScrollBottom } from "@/lib/scroll-follow";
 
@@ -22,12 +23,22 @@ interface ReasoningViewProps {
   startedAt?: number | null;
 }
 
+/**
+ * 思考过程：自己也是**一条折叠条**（`已思考（15s）`），默认收起。
+ *
+ * 它嵌在「过程」块里面：外层那一行是「这一轮做了什么」的摘要，点开后才看到
+ * 「想了多久 / 想了什么」。所以这里**不能**默认铺开原文——否则外层刚收好的东西
+ * 一点开就变成一大段灰色思考，工具调用反而被挤到下面。
+ *
+ * 展开与否跟设置里的「对话显示」走（简洁收起 / 详细展开）；用户点过以自己为准。
+ */
 export function ReasoningView({
   text,
   isStreaming = false,
   elapsedMs = 0,
   startedAt = null,
 }: ReasoningViewProps) {
+  const { level } = useDetailLevel();
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
@@ -37,24 +48,24 @@ export function ReasoningView({
   // 思考文本每个增量都会整串重渲染：推后一帧渲染，让输入与滚动先跟上
   const deferredText = useDeferredValue(text);
 
-  // 新一轮思考开始时：重置计时，流式中默认展开并恢复跟随
+  // 新一轮思考开始时：重置计时并恢复跟随（折叠状态由用户/模式决定，不在流式时强行摊开）
   if (prevStreaming !== isStreaming) {
     setPrevStreaming(isStreaming);
     if (isStreaming) {
-      setUserToggled(null);
       setLiveElapsed(0);
       setFollow(true);
     }
   }
 
-  // 流式中默认展开，思考结束后默认收起（与主流平台一致，也可以点开看完整思考过程）
-  const isOpen = userToggled !== null ? userToggled : isStreaming;
+  // 默认收起：思考是「过程」里的细节，不该默认占据阅读视线。
+  // 只有「详细」档才默认摊开。
+  const isOpen = userToggled ?? level === "detailed";
   const settledElapsed = thinkingSeconds(elapsedMs);
   const elapsed = isStreaming ? liveElapsed : settledElapsed > 0 ? settledElapsed : liveElapsed;
 
   // 思考计时器
   useEffect(() => {
-    if (!isStreaming) return;
+    if (!isStreaming) return undefined;
 
     const start = thinkingStartTime(startedAt, elapsedMs);
     const timer = setInterval(() => {
@@ -89,50 +100,35 @@ export function ReasoningView({
     <Collapsible
       open={isOpen}
       onOpenChange={setUserToggled}
-      className="my-2 w-full transition-all select-none"
+      className="w-full select-none"
     >
       <CollapsibleTrigger
         render={
           <button
             type="button"
-            className="group inline-flex items-center gap-1.5 py-1.5 text-xs text-muted-foreground/80 hover:text-foreground transition-colors cursor-pointer"
+            className="group/thought inline-flex items-center gap-1.5 py-1 text-xs text-muted-foreground/80 hover:text-foreground transition-colors cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
           />
         }
       >
         {isStreaming ? (
-          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
         ) : (
           <ChevronDown
             className={cn(
-              "size-3.5 transition-transform duration-200 text-muted-foreground/70 group-hover:text-foreground",
+              "size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-hover/thought:text-foreground",
               isOpen ? "rotate-0" : "-rotate-90"
             )}
           />
         )}
-
         <span className="font-medium tracking-tight">
-          {isStreaming ? '思考中' : '已思考'}
-          {elapsed > 0 && (
-            <span className="ml-1 tabular-nums font-mono text-[11px] text-muted-foreground/70">
-              ({elapsed}s)
-            </span>
-          )}
+          {isStreaming ? "思考中" : "已思考"}
+          {elapsed > 0 && <span className="ml-0.5 tabular-nums font-mono text-[11px]">（{elapsed}s）</span>}
         </span>
-
-        {isStreaming && (
-          <ChevronDown
-            className={cn(
-              "size-3 transition-transform duration-200 text-muted-foreground/60 ml-0.5",
-              isOpen ? "rotate-0" : "-rotate-90"
-            )}
-          />
-        )}
       </CollapsibleTrigger>
 
-      {/* data-[state=*] 是 Radix 的写法，base-ui 的 CollapsiblePanel 只挂 data-open/data-closed
-          （见 @base-ui/react/collapsible/panel/CollapsiblePanelDataAttributes），原类名永远不匹配 */}
+      {/* base-ui 的 Panel 只挂 data-open/data-closed，不是 Radix 的 data-state */}
       <CollapsibleContent className="transition-all data-closed:animate-collapsible-up data-open:animate-collapsible-down">
-        <div className="mt-1.5 ml-1 pl-3 border-l-2 border-border/70">
+        <div className="mt-1 ml-1 pl-3 border-l-2 border-border/70">
           <div
             ref={scrollRef}
             role="group"

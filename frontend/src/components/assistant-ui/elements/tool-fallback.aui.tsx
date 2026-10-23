@@ -404,6 +404,10 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 }) => {
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
+  // 行的默认状态**不跟**「对话显示」走：那一档只决定外层「过程」块是否展开。
+  // 单个调用始终收成一行（工具名 + 主参数 + 耗时），点开才看参数与结果的全文——
+  // 否则「详细」模式会把每轮的 JSON 全铺在页面上，反而没法读回答。
+  // 待用户动作的调用是例外：它正等着人点，必须默认展开。
   const [open, setOpen] = useState(status?.type === "requires-action");
 
   return (

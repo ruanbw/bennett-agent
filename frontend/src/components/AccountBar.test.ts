@@ -151,10 +151,11 @@ describe('SettingsPanel 设置面板内容', () => {
     expect(html).toContain('跟随系统');
     // 主题卡片是 toggle 按钮：读屏要能知道当前选中哪一个
     expect(html).toContain('role="group" aria-label="外观主题"');
-    // 只看主题分组这一段：改密表单也有一组 aria-pressed 的显隐按钮，不能全局数
+    // 只看主题分组这一段：改密表单也有一组 aria-pressed 的显隐按钮，不能全局数。
+    // 终点取紧随其后的「对话显示」分组——它同样是 aria-pressed 按钮构成的卡片组。
     const themeGroup = html.slice(
       html.indexOf('aria-label="外观主题"'),
-      html.indexOf('修改密码')
+      html.indexOf('aria-label="对话显示"')
     );
     expect(themeGroup.match(/aria-pressed="true"/g)).toHaveLength(1);
     expect(themeGroup.match(/aria-pressed="false"/g)).toHaveLength(2);
