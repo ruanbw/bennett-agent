@@ -193,6 +193,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="监听地址（默认仅本机；需局域网访问请显式指定 0.0.0.0）",
     )
     parser.add_argument("--port", type=int, default=8000, help="服务端口（1-65535）")
+    # 开发期热重启。它**隐含 --web** 且**禁止在 production 下使用**（理由见 main() 里的
+    # 拒绝逻辑）；实现不是 uvicorn 的 --reload，而是「重启完整的 main.py --web 子进程」，
+    # 见 `app/dev_reload.py` 的模块 docstring——那边记录了为什么不能直接借 uvicorn 的。
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="开发期热重启：保存 Python / 提示词 / .env 后自动重启（隐含 --web，仅限非 production）",
+    )
     return parser
 
 
@@ -260,6 +268,17 @@ def main() -> None:
     if not 1 <= args.port <= 65535:
         parser.error(f"--port 必须在 1..65535 之间，收到 {args.port}")
 
+    if args.reload:
+        # production 下直接拒绝而不是「警告后照跑」：热重启会让进程在文件变化时反复重启，
+        # 而生产环境里任何一次重启都会掐断在飞请求（单轮 SSE 预算 600s，优雅关闭只等 5s）。
+        # 更糟的是它让「进程为什么会重启」变成一个和部署动作无关的问题。
+        if settings.app_env == "production":
+            parser.error(
+                "--reload 是开发期功能，禁止在 APP_ENV=production 下使用；"
+                "生产环境改配置请走重启/重建镜像，并接受在飞请求会被中断。"
+            )
+        return _run_dev_reload(host=args.host, port=args.port)
+
     if args.web:
         import uvicorn
 
@@ -289,6 +308,26 @@ def main() -> None:
         )
     else:
         asyncio.run(_run_cli())
+
+
+def _run_dev_reload(host: str, port: int) -> int:
+    """开发期热重启的入口：把 `--host/--port` 原样交给 supervisor。
+
+    这里**不做** `configure_logging()` 之外的准备工作：真正干活的是
+    `app/dev_reload.py`，它负责监听文件、起停 `main.py --web` 子进程。父进程只打印一行
+    横幅，日志由子进程按 `configure_logging()` 的格式输出（父进程自己也配一次，
+    是为了让「检测到变更」「子进程没起来」这类 supervisor 日志同样带统一格式）。
+    """
+    from app.dev_reload import run_dev_reload
+
+    # flush=True：stdout 被重定向到文件时是块缓冲，不刷新的话这段横幅会一直压到进程
+    # 退出才出现——看起来像「热重启没打横幅」，而且会排在所有子进程日志之后。
+    print("=" * 60, flush=True)
+    print(f" Bennett Agent 开发热重启: http://{host}:{port}{docs_hint()}", flush=True)
+    print(f" {frontend_hint()}", flush=True)
+    print("=" * 60, flush=True)
+    run_dev_reload(host=host, port=port)
+    return 0
 
 
 def frontend_hint() -> str:

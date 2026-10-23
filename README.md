@@ -97,7 +97,18 @@ uv sync
 cp .env.example .env.development   # 填 LiteLLM 网关地址与 API Key
 uv run python main.py              # CLI 交互
 uv run python main.py --web        # 后端 API（http://127.0.0.1:8000）
+uv run python main.py --reload     # 后端 + 开发期热重启（保存即重启，隐含 --web）
 ```
+
+`--reload` 不是 uvicorn 的 `--reload`：那个用 `spawn` 起子进程，只 `import app.server:app`，
+**不执行 `main.py`**，于是 `configure_logging()`（带 `[request_id]` 的日志格式）、
+`sanitize_no_proxy_env()`、`proxy_headers=False` 全部丢失，日志退化成 `INFO:     ...`。
+这里的子进程就是完整的 `main.py --web`，supervisor 只负责「看文件 → SIGTERM → 重启」，
+所以开发与部署走同一条启动路径。监听 `.py`、`prompts/` 下的模板与 settings 实际加载的
+`.env*`；数据库文件**不在**监听范围内（WAL 每个请求都在写，否则会变成重启风暴）。
+`APP_ENV=production` 下直接拒绝。细节见 `app/dev_reload.py` 的模块 docstring。
+
+注意：保存会掐断正在生成的回答——子进程优雅关闭只等 5 秒，而单轮 SSE 预算 600 秒。
 
 CLI 交互模式内置命令：`exit` / `quit` / `q` 退出、`clear` 重置上下文、`help` / `?`
 查看帮助。启动横幅会同时显示 `MODEL_NAME` 与**实际解析到的路由**——环境变量不是后台
