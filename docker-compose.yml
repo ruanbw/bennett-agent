@@ -1,0 +1,67 @@
+# Bennett Agent 的 Compose 部署
+#
+# ## 为什么这个文件这么短
+#
+# 服务只有一个容器（后端托管前端，同源），没有 Redis / Postgres / Nginx 要编排。
+# 保留 compose 的理由不是「多服务」，而是它把**一卷持久化 + 一组必须齐备的环境变量**
+# 固定成可复现的一份描述——直接 `docker run` 也能跑，但环境变量会散落在 shell 历史里，
+# 而 AUTH_SECRET 漏配的表现是「重启后所有人被登出」。
+#
+# ## 用法
+#
+#   cp .env.example .env      # 至少填 AUTH_SECRET / LITELLM_API_BASE / LITELLM_API_KEY
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 数据库在命名卷 `bennett-data` 里，`docker compose down` 不会删它（加 `-v` 才会）。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bennett-agent:local
+    container_name: bennett-agent
+    restart: unless-stopped
+    ports:
+      # 默认只绑回环：**注册入口是开放的**，绑到 0.0.0.0 等于把注册与上游模型额度
+      # 开放给同网段。要对外提供就在前面放一个带 TLS 的反向代理，并改成
+      # "127.0.0.1:8000:8000"（只让本机反代能连）。
+      - "127.0.0.1:8000:8000"
+    env_file:
+      # 环境变量全部从这里来。**不用 `environment:` 逐条列**：那样 AUTH_SECRET 之类的
+      # 密钥会出现在 `docker inspect` 与 compose 文件里，而 env_file 的内容不会被
+      # 打进容器元数据。
+      - .env
+    environment:
+      # 数据落在卷上，与代码分离（镜像可以随时重建）
+      DATABASE_URL: "sqlite+aiosqlite:////data/bennett.db"
+      # 容器内必须监听 0.0.0.0，否则宿主映射的端口进不来
+      APP_ENV: ${APP_ENV:-production}
+    volumes:
+      - bennett-data:/data
+    healthcheck:
+      # 与 Dockerfile 里的一致：用 readiness（真的 ping 数据库）。
+      # 写在这里是为了让 `docker compose ps` 能直接显示健康状态——
+      # 镜像里的 HEALTHCHECK 只在 `docker run` / compose 都生效，但显式声明可读性更好。
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      # 默认的 json-file 驱动**没有任何大小上限**，长期运行会把宿主磁盘写满。
+      # 这是「容器跑了两周突然整个机器卡死」的一个常见原因。
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bennett-data:
+    # 显式命名，避免 `docker compose down -v` 之外的重建把它丢掉
+    name: bennett-data

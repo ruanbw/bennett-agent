@@ -197,6 +197,21 @@ class Settings(BaseSettings):
             "并没有采集器。启用后建议同时把 /api/metrics 挡在内网或反代白名单后面。"
         ),
     )
+    serve_frontend: bool = Field(
+        default=True,
+        description=(
+            "是否托管前端构建产物（`frontend/dist`）。默认开启，但**目录不存在时自动跳过**"
+            "——本地开发通常没构建过前端，此时后端只提供 /api，前端另开 Vite。"
+            "设为 false 可强制关闭（例如产物在、但你要用自己的 Nginx 反代）。"
+        ),
+    )
+    frontend_dir: str = Field(
+        default="",
+        description=(
+            "前端构建产物目录；留空表示默认的 `frontend/dist`（相对**项目根**，不是工作目录）。"
+            "只在这个目录里确实有 index.html 时才会托管。"
+        ),
+    )
     mcp_tool_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,

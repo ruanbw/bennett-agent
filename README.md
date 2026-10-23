@@ -137,6 +137,96 @@ uv run python scripts/seed_admin.py --email admin@example.com --password '改成
 `total` 要是筛选后的总数，否则分页器会指向一个不存在的页数；切换档位要回到第一页，
 否则会停在越界的 offset 上。
 
+## Docker 部署
+
+```bash
+cp .env.example .env    # 至少填 AUTH_SECRET、LITELLM_API_BASE、LITELLM_API_KEY
+docker compose up -d --build
+```
+
+打开 <http://127.0.0.1:8000> 就是完整界面——**没有第二个容器**。
+
+### 为什么是一个镜像而不是前后端两个
+
+后端能自己托管前端构建产物（`app/frontend.py`），所以生产形态是同源单进程。理由不是
+「省一个容器」，而是同源让三件容易配错的事同时消失：
+
+- 会话走 HttpOnly cookie。跨源要求 CORS、`allow_credentials`、`SameSite` 三处对齐，
+  任何一处漏掉的表现都是「登录成功了，但下一个请求又是未登录」；
+- 反代方案还得维护一份 Nginx 配置（SSE 要关 `proxy_buffering`、超时要放大），而那份
+  配置的正确性没有测试覆盖；
+- `CORS_ALLOWED_ORIGINS` 可以留空。
+
+代价是前端构建产物有了一个**部署期耦合**：改前端要重建镜像。这在本项目是可接受的
+（前端构建 16 秒），换来的是运维只需要理解一个进程。
+
+### 构建里几个刻意的决定
+
+**多阶段构建。** 前端需要 Node，运行时不需要。最终镜像里没有 `node_modules`。
+`npm ci` 而不是 `npm install`：严格按 lockfile 装，且 lockfile 不一致时直接失败，
+否则构建结果不可复现。
+
+**依赖层单独一层。** `pyproject.toml` + `uv.lock` 在 `COPY . .` **之前**复制并
+`uv sync --frozen --no-dev`。改一行 Python 代码不会让依赖层失效，构建从 2 分钟降到几秒。
+
+**镜像里的 Python 是 3.10**，与 `.python-version` 和 `requires-python` 一致。版本错位
+会制造查不清的差异——代码里就有一处明确依赖 3.10 行为（没有 `asyncio.timeout`，一律
+`asyncio.wait_for`）。
+
+**入口是 `main.py --web`，不是直接调 uvicorn。** `main.py` 在 `uvicorn.run` 之前做了
+容器里同样必需的三件事：配置日志（带 `[request_id]` 与 `RequestIdFilter`）、清理坏掉的
+`no_proxy`、以及把 `proxy_headers=False` / `timeout_graceful_shutdown=5` 这些参数定死。
+直接起 uvicorn 会得到一套完全不同的日志格式，而且**没有请求 ID**——报障时无法回查。
+
+**非 root 运行。** 容器默认是 root，而本服务会写 SQLite 文件；root 写出来的文件在宿主上
+属于 root，之后运维改权限就得 `sudo`。
+
+**健康检查用 `/health/ready` 而不是 `/health`。** 后者不碰数据库，用它做 readiness 会让
+「进程活着但数据库坏了」的实例留在负载均衡里。
+
+### 三个部署时容易踩的坑
+
+**1. 容器里的 `127.0.0.1` 不是宿主的 `127.0.0.1`。**
+
+如果模型网关跑在宿主上（很常见：本机 LiteLLM），`LITELLM_API_BASE=http://127.0.0.1:3425/v1`
+在容器里会连不上，报 `httpx.ConnectError: All connection attempts failed`。要么用
+`host.docker.internal`（macOS/Windows 自带；Linux 需要 `--add-host=host.docker.internal:host-gateway`），
+要么把网关也放进 compose 并改用服务名。
+
+**2. `APP_ENV=production` 有硬性守卫，且它们都会让容器起不来。**
+
+- `AUTH_SECRET` 必须是强随机值（至少 32 字符、不能是占位值）
+- `AUTH_COOKIE_SECURE` 必须是 `true`
+
+这两条是刻意的「启动即报错」而不是警告。用明文 HTTP 试跑时把 `APP_ENV` 设成
+`development`，不要为了跑起来去关守卫——那正是守卫要防的事。
+
+生成密钥：
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+**3. 数据在命名卷里，不在镜像里。**
+
+`bennett.db` 落在 `/data`（卷 `bennett-data`）。`docker compose down` 不删它，`down -v` 才删。
+备份直接 `docker cp bennett-agent:/data/bennett.db ./backup.db`——但要在停服后做，
+SQLite 的 WAL 模式下热拷会得到一个不一致的快照。
+
+### 不用 compose 时
+
+```bash
+docker build -t bennett-agent .
+docker run -d --name bennett-agent \
+  -p 127.0.0.1:8000:8000 \
+  --env-file .env \
+  -v bennett-data:/data \
+  bennett-agent
+```
+
+端口默认只绑回环：**注册入口是开放的**，绑到 `0.0.0.0` 等于把注册与上游模型额度开放给
+同网段。要对外提供就在前面放一个带 TLS 的反向代理。
+
 ## 系统提示词与工具装配
 
 `prompts/system_prompt.jinja` 里的「可用工具」一节与联网搜索规则都由**实际装配结果**
@@ -647,3 +737,7 @@ float 是刻意的：那条路径只做配置回显，精确计算从不经过�
 - 访问日志默认关闭：SSE 长连接与前端轮询会把它变成噪音，真正的 WARNING 会被淹没。
 - **DEBUG 下第三方库仍压在 WARNING**：httpx / openai 会逐条打印请求头，里面就是
   `Authorization: Bearer <key>`——那不是「日志多」，而是把凭据写进日志文件。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

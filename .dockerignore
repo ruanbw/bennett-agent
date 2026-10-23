@@ -1,0 +1,68 @@
+# Docker 构建上下文里要排除的东西。
+#
+# ## 为什么这份清单值得认真写
+#
+# `COPY . .` 会把**上下文里的所有文件**送进构建缓存与镜像。常见的两个代价：
+#
+# 1. **密钥泄漏进镜像层。** `.env.development` 里有真实的网关 API Key。`.dockerignore`
+#    缺失时它会进镜像，而镜像层是**不可删除**的——后面 `RUN rm` 一层只是新增一层空白，
+#    原文件仍能从历史层里取出来。推到 registry 就等于把密钥公开了。
+# 2. **构建缓存频繁失效。** `.venv/`、`node_modules/`、`frontend/dist/` 每次本地构建都
+#    在变，把它们放进上下文会让 `COPY` 层每次都失效，`uv sync` 白跑一遍。
+#
+# 仓库自己的 `.gitignore` **不会**被 Docker 读取，两份要各自维护。
+
+# ---- 依赖目录：镜像里从 lockfile 重装，不需要这些 ----
+.venv/
+**/__pycache__/
+**/*.py[cod]
+node_modules/
+frontend/node_modules/
+
+# ---- 前端构建产物：镜像里由 node 阶段重新构建 ----
+frontend/dist/
+frontend/dist-ssr/
+
+# ---- 环境文件：这是最危险的一类 ----
+# `.env*` 一次性覆盖所有变体（.env、.env.development、.env.production、.env.*.local）。
+# 逐个枚举会在新增环境时漏掉，导致真实密钥随镜像发布。
+# **故意不写 `!` 例外**：`.env.example` 虽然不含密钥，但镜像里也不需要它（运行时读的是
+# 真实环境变量）。加例外只会多一个「以为改了但没生效」的入口。
+.env*
+
+# ---- 数据库与运行产物 ----
+# 开发库里有真实账号与会话。一旦进镜像，任何拿到镜像的人都能读出密码哈希。
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+.ruff_cache/
+evals/runs/
+
+# ---- 本地 / 交付物 ----
+deliverables/
+docs/screenshots/
+*.log
+.DS_Store
+
+# ---- 版本控制与编辑器 ----
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# ---- 构建与部署描述文件本身 ----
+# Dockerfile 与 compose 不需要放进镜像；`.dockerignore` 把自己也排除掉。
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# ---- 测试 ----
+# 测试不进运行镜像：`uv sync --no-dev` 已经排除了 pytest 等依赖，留着测试文件
+# 只会让镜像里出现一堆 import 不了的东西。
+#
+# `evals/` **不排除**：它是运行时无关的独立脚本，但 `scripts/run_eval.py` 会 import 它。
+# 排除掉之后镜像里跑评测会直接 ModuleNotFoundError，而那是这个镜像的一个正当用法
+# （在容器里对真实网关跑行为级评测）。
+tests/
