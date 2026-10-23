@@ -86,7 +86,7 @@ describe('buildParts', () => {
     expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'text'])
   })
 
-  it('有到达顺序时严格照办：工具调用可以夹在正文之间', () => {
+  it('有到达顺序时照办（思考与工具按到达顺序），但正文整块钉在最后', () => {
     const parts = assertParts(
       buildParts({
         toolCalls: [
@@ -101,7 +101,8 @@ describe('buildParts', () => {
       }),
     )
 
-    expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'text', 'tool-call'])
+    // 顺序表里 text 夹在两个调用中间，但正文只有一个块、无法拆开去夹；整块排在最后
+    expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'tool-call', 'text'])
     expect(parts.filter((p) => p.type === 'tool-call').map((p) => p.toolCallId)).toEqual(['c1', 'c2'])
   })
 
@@ -117,7 +118,7 @@ describe('buildParts', () => {
       }),
     )
 
-    expect(parts.map((p) => p.type)).toEqual(['text', 'reasoning', 'tool-call'])
+    expect(parts.map((p) => p.type)).toEqual(['reasoning', 'tool-call', 'text'])
   })
 
   it('空内容不产出空 part', () => {
@@ -345,6 +346,19 @@ describe('事件到达顺序（buildLiveMessage / toRuntimeMessage 一致）', (
 
   it('toRuntimeMessage 照记录的顺序排布', () => {
     const message = assertMessage(toRuntimeMessage(record))
+
+    expect(message.content.map((p) => p.type)).toEqual(['tool-call', 'reasoning', 'text'])
+  })
+
+  it('正文永远排在最后：先吐半句开场白再调工具，也不能把答案顶到过程组上面', () => {
+    const earlyText: PartKind[] = ['text', 'tool-call', 'reasoning']
+
+    const message = assertMessage(
+      toRuntimeMessage({
+        ...record,
+        partOrder: earlyText,
+      } as MessageRecord & { partOrder?: PartKind[] }),
+    )
 
     expect(message.content.map((p) => p.type)).toEqual(['tool-call', 'reasoning', 'text'])
   })

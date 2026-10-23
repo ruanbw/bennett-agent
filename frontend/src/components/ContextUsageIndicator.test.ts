@@ -212,3 +212,105 @@ describe('成本展示', () => {
     expect(html).not.toContain('会话累计');
   });
 });
+
+describe('圆环视觉（与 DSH 的 ContextMeter 对齐）', () => {
+  it('收起态是一个 14px 圆环 + 百分比，而不是横向进度条', () => {
+    const html = render({ usage: usage(), currentModel: 'auto/x', usageModel: 'auto/x' });
+
+    // 几何逐值对齐：viewBox 0 0 14 14、r=5.5、描边 2px、从 12 点方向顺时针
+    expect(html).toContain('viewBox="0 0 14 14"');
+    expect(html).toContain('r="5.5"');
+    expect(html).toContain('stroke-width="2"');
+    expect(html).toContain('transform="rotate(-90 7 7)"');
+    // 851 / 1.0M = 0.085% → 显示 <1%，而不是四舍五入成 0%（看起来像没用量）
+    expect(html).toContain('&lt;1%');
+  });
+
+  it('圆环填充比例就是占比（用 stroke-dasharray 表达，不是 CSS 宽度）', () => {
+    const html = render({
+      usage: usage({ contextTokens: 9_000, contextWindow: 18_000, contextLimitTokens: 18_000 }),
+      currentModel: 'auto/x',
+      usageModel: 'auto/x',
+    });
+
+    // 9000/18000 = 50% → dasharray 前半 = 周长的一半（2π*5.5/2 ≈ 17.28）
+    expect(html).toContain('stroke-dasharray="17.27875959474386 34.55751918948772"');
+    expect(html).toContain('50%');
+  });
+
+  it('锁定时圆环画满，读数写「已满」', () => {
+    const html = render({ usage: usage(), locked: true });
+
+    expect(html).toContain('已满');
+    // 画满 = dasharray 前后相等（周长）
+    expect(html).toContain('stroke-dasharray="34.55751918948772 34.55751918948772"');
+  });
+
+  it('比例很大但不到 1% 时写成 <1%（不写成 0%）', () => {
+    const html = render({
+      usage: usage({ contextTokens: 500, contextWindow: 1_000_000, contextLimitTokens: 1_000_000 }),
+      currentModel: 'auto/x',
+      usageModel: 'auto/x',
+    });
+
+    expect(html).toContain('&lt;1%');
+  });
+});
+
+describe('上下文档的分段条', () => {
+  it('拿不到分段时退化成单色整条，绝不编造三段比例', () => {
+    const html = render({ usage: usage(), initialOpen: true, currentModel: 'auto/x', usageModel: 'auto/x' });
+
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-label="上下文占用"');
+    // 图例只在真有分段时出现
+    expect(html).not.toContain('工具定义');
+    expect(html).not.toContain('对话消息');
+    // 并且明确说明「没拆分」而不是让人以为条上只有一段是设计如此
+    expect(html).toContain('没有回报上下文各成分的占比');
+  });
+
+  it('有分段时按比例切三段并给出图例与近似值', () => {
+    const html = render({
+      usage: usage({ contextTokens: 10_000, contextWindow: 100_000, contextLimitTokens: 100_000 }),
+      initialOpen: true,
+      currentModel: 'auto/x',
+      usageModel: 'auto/x',
+      breakdown: { systemTokens: 2_000, toolsTokens: 3_000, messageTokens: 5_000 },
+    });
+
+    expect(html).toContain('系统提示词');
+    expect(html).toContain('工具定义');
+    expect(html).toContain('对话消息');
+    // 10% 已用，按 2:3:5 切成 2% / 3% / 5%
+    expect(html).toContain('width:2%');
+    expect(html).toContain('width:3%');
+    expect(html).toContain('width:5%');
+    expect(html).toContain('~2k');
+  });
+
+  it('分段数据全为 0 时同样退化成单色（不是三条 0 宽的线）', () => {
+    const html = render({
+      usage: usage(),
+      initialOpen: true,
+      currentModel: 'auto/x',
+      usageModel: 'auto/x',
+      breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 },
+    });
+
+    expect(html).not.toContain('工具定义');
+  });
+
+  it('顶部标题是「上下文已用 + 百分比 + 右侧绝对值」（与 DSH 的 header 一致）', () => {
+    const html = render({
+      usage: usage({ contextTokens: 9_000, contextWindow: 18_000, contextLimitTokens: 18_000 }),
+      initialOpen: true,
+      currentModel: 'auto/x',
+      usageModel: 'auto/x',
+    });
+
+    expect(html).toContain('上下文已用');
+    expect(html).toContain('50%');
+    expect(html).toContain('~9k / 18k');
+  });
+});

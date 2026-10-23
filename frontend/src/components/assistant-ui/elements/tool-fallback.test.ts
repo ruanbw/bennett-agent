@@ -67,7 +67,7 @@ describe('ToolFallbackTrigger 的状态展示', () => {
       createElement(
         ToolFallbackRoot,
         null,
-        createElement(ToolFallbackTrigger, { toolName: 'search', status, result }),
+        createElement(ToolFallbackTrigger, { toolName: 'read', status, result }),
       ),
     )
 
@@ -76,15 +76,26 @@ describe('ToolFallbackTrigger 的状态展示', () => {
 
     expect(html).toContain('未完成')
     expect(html).toContain('lucide-circle-minus')
-    expect(html).not.toContain('lucide-check')
     expect(html).toContain('amber')
-    expect(html).toContain('aria-label="search：未完成，工具没有返回结果"')
+    expect(html).toContain('aria-label="读取：未完成，工具没有返回结果"')
   })
 
-  it('拿到 result 才显示完成态的绿勾', () => {
+  it('拿到 result 时不再报「未完成」，行首是动作图标而不是状态图标', () => {
     const html = renderTrigger({ type: 'complete' }, '{"ok":true}')
 
-    expect(html).toContain('lucide-check')
+    // 行首图标改为「这是什么调用」（读取 → 指南针），状态由右侧耗时位表达。
+    // 对勾曾经是行首图标，现在只有异常终态才抢这个位置。
     expect(html).not.toContain('未完成')
+    expect(html).toContain('lucide-compass')
+    expect(html).toContain('aria-label="读取：已完成"')
+  })
+
+  it('行首标题是名词短语（读取），不是工具名也不是叙述句', () => {
+    const html = renderTrigger({ type: 'complete' }, '{"ok":true}')
+
+    // 组头说「已读取文件」（叙述），这一行说「读取」（标签）；两者分工不同
+    expect(html).toContain('data-slot="tool-fallback-trigger-label"')
+    expect(html).toContain('>读取<')
+    expect(html).not.toContain('已读取文件')
   })
 })

@@ -260,7 +260,7 @@ describe('partOrder 落库与读回', () => {
     expect(dbMock.update).toHaveBeenCalledWith('m1', expect.objectContaining({ partOrder: [] }))
   })
 
-  it('loadSessionMessages 读出的顺序能把工具夹在正文两侧还原', async () => {
+  it('loadSessionMessages 保留到达顺序：工具按顺序排，正文整块排在最后', async () => {
     dbMock.records = [
       record({
         id: 'a1',
@@ -278,7 +278,8 @@ describe('partOrder 落库与读回', () => {
     const [loaded] = await loadSessionMessages('s1')
     const parts = toRuntimeMessage(loaded).content as unknown as Array<{ type: string }>
 
-    expect(parts.map((part) => part.type)).toEqual(['tool-call', 'text', 'tool-call'])
+    // 顺序表里正文夹在两个调用之间，但正文只有一个块、无法拆开去夹（见 buildParts 注释）
+    expect(parts.map((part) => part.type)).toEqual(['tool-call', 'tool-call', 'text'])
   })
 })
 

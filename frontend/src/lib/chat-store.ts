@@ -21,6 +21,7 @@
 
 import { NOTIFY_COALESCE_MS } from './constants';
 import { describeErrorLabel, readKnownErrorCode } from './run-error';
+import { usageTimingFromWire } from './usage-timing';
 import {
   TRANSPORT_INCOMPLETE,
   type ChatEvent,
@@ -544,6 +545,11 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
         costTotal: event.cost_total ?? null,
         costCurrency: event.cost_currency ?? null,
         costCacheSavings: event.cost_cache_savings ?? null,
+        // 计时明细：线上是 snake_case，这里是**唯一**一次改名（转成 camelCase）。
+        // 之后所有消费端（`lib/usage-timing.ts`、统计药丸）都只见 camelCase——
+        // 让「读取时兼容两种命名」散到各个消费点，每加一个字段就要各兼容一遍，
+        // 漏掉一处就是静默返回 null：药丸不出现，却没有任何报错指向真正的原因。
+        timing: usageTimingFromWire(event.timing),
       };
       break;
 

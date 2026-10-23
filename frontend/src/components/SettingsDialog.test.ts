@@ -100,3 +100,73 @@ describe('运行时能力：未知时的「重新探测」入口', () => {
     expect(html).not.toContain('还没有拿到能力清单');
   });
 });
+
+describe('工作步骤展示与收起时机', () => {
+  /** 只截「工作步骤展示」那一组卡片：改密表单也有 aria-pressed 按钮，不能全局数。 */
+  const detailGroup = (html: string) =>
+    html.slice(html.indexOf('aria-label="工作步骤展示"'), html.indexOf('aria-label="工作步骤收起时机"'));
+
+  /**
+   * 终点取紧随其后的「性能与用量」区块，而不是「修改密码」：后者之间还夹着一组
+   * 同样用 aria-pressed 的两张卡片，截到最末会把它们一起数进来。
+   */
+  const timingGroup = (html: string) => {
+    const start = html.indexOf('aria-label="工作步骤收起时机"');
+    const end = html.indexOf('aria-label="性能与用量"', start);
+    return html.slice(start, end === -1 ? undefined : end);
+  };
+
+  /** 「性能与用量」两档：终点取「修改密码」（那一块也有 aria-pressed 的显隐按钮）。 */
+  const performanceGroup = (html: string) => {
+    const start = html.indexOf('aria-label="性能与用量"');
+    const end = html.indexOf('修改密码', start);
+    return html.slice(start, end === -1 ? undefined : end);
+  };
+
+  it('四档都在，且默认选中「标准」', () => {
+    const group = detailGroup(render());
+
+    for (const label of ['简洁', '标准', '详细', '完全展开']) {
+      expect(group).toContain(label);
+    }
+    // 四张卡片，恰好一个被选中
+    expect(group.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(group.match(/aria-pressed="false"/g)).toHaveLength(3);
+  });
+
+  it('收起时机两档独立成组，默认「回答结束后」', () => {
+    const group = timingGroup(render());
+
+    expect(group).toContain('回答结束后');
+    expect(group).toContain('下次有新消息时');
+    expect(group.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(group.match(/aria-pressed="false"/g)).toHaveLength(1);
+  });
+
+  it('性能与用量两档独立成组，默认「详细」', () => {
+    const group = performanceGroup(render());
+
+    expect(group).toContain('简洁');
+    expect(group).toContain('详细');
+    // 两档，恰好一个被选中
+    expect(group.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(group.match(/aria-pressed="false"/g)).toHaveLength(1);
+  });
+
+  it('性能与用量说明它不影响记账与上下文圆环', () => {
+    const group = performanceGroup(render());
+    expect(group).toContain('上下文占用环始终显示');
+  });
+
+  it('两块分组各自带 2×2 / 1×2 的网格，不是一个 6 项的列表', () => {
+    const html = render();
+    // 组头标题各自独立：读屏按标题导航时能分清「露多少」与「何时收」
+    expect(html).toContain('工作步骤展示');
+    expect(html).toContain('工作步骤收起时机');
+  });
+
+  it('注释说明改的是默认值而不是能力：四档都能点开看细节', () => {
+    const html = render();
+    expect(html).toContain('只决定默认露多少');
+  });
+});

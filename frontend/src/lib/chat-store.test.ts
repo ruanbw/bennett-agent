@@ -407,9 +407,66 @@ describe('事件折叠', () => {
       costTotal: null,
       costCurrency: null,
       costCacheSavings: null,
+      // 事件里没有计时块 → null（=「没量到」），不是补一个 0 步的空块
+      timing: null,
     })
     // 与 fallback 同一条约束：这一行是元信息，不属于回答正文
     expect(run.content).toBe('答')
+  })
+
+  it('usage 事件里的计时块被转成 camelCase（线上 snake_case → 本地形状）', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'usage',
+      context_tokens: 1066,
+      output_tokens: 320,
+      cache_read_tokens: 896,
+      timing: {
+        steps: 3,
+        turn_ms: 6800,
+        llm_ms: 4200,
+        tool_ms: 2400,
+        ttft_ms: 520,
+        decode_ms: 2000,
+        decode_tokens: 400,
+      },
+    })
+
+    // store 是**唯一**改名的地方：之后所有消费端只见 camelCase，不需要各自兼容两套
+    // 命名。漏掉这次改名就是静默返回 null——药丸不出现，而没有任何报错指出原因。
+    expect(getRun('a')!.usage?.timing).toEqual({
+      steps: 3,
+      turnMs: 6800,
+      llmMs: 4200,
+      toolMs: 2400,
+      ttftMs: 520,
+      decodeMs: 2000,
+      decodeTokens: 400,
+    })
+  })
+
+  it('计时块里部分字段缺席时，解码相关的成对字段保持 null 而不是 0', () => {
+    start('a')
+    applyEvent('a', {
+      type: 'usage',
+      context_tokens: 100,
+      output_tokens: 5,
+      cache_read_tokens: 0,
+      timing: { steps: 1, turn_ms: 1200, llm_ms: 1200, tool_ms: 0 },
+    })
+
+    const timing = getRun('a')!.usage?.timing
+    expect(timing).not.toBeNull()
+    expect(timing!.ttftMs).toBeNull()
+    expect(timing!.decodeMs).toBeNull()
+    expect(timing!.decodeTokens).toBeNull()
+  })
+
+  it('计时块缺席时是 null，而不是补一个 0 步的空块', () => {
+    start('a')
+    applyEvent('a', { type: 'usage', context_tokens: 100, output_tokens: 1, cache_read_tokens: 0 })
+
+    expect(getRun('a')!.usage?.timing).toBeNull()
   })
 
   it('usage 事件里的成本字段原样记录（有价格时才有值）', () => {
@@ -591,7 +648,7 @@ describe('partOrder（内容块到达顺序）', () => {
     expect(getRun('a')!.partOrder).toEqual([])
   })
 
-  it('与 chat-message 对接：渲染出的部件顺序等于事件到达顺序', () => {
+  it('与 chat-message 对接：工具按到达顺序排，正文整块排在最后', () => {
     start('a')
     applyEvent('a', { type: 'tool_call', tool_call_id: 'c1', tool_name: 't', args: '{}' })
     applyEvent('a', { type: 'content', delta: '中间的话' })
@@ -599,8 +656,10 @@ describe('partOrder（内容块到达顺序）', () => {
 
     const parts = buildLiveMessage(getRun('a')!).content as unknown as Array<{ type: string }>
 
-    // 按类型分组会把工具全顶到最前面，这里锁住「工具夹在正文两侧」的还原能力
-    expect(parts.map((part) => part.type)).toEqual(['tool-call', 'text', 'tool-call'])
+    // 顺序表记的是「第一个正文增量」的位置；渲染时正文整块钉在最后，
+    // 否则「先吐半句开场白再调工具」会把最终答案顶到过程组上面（见 buildParts 注释）
+    expect(parts.map((part) => part.type)).toEqual(['tool-call', 'tool-call', 'text'])
+    expect(getRun('a')!.partOrder).toEqual(['tool-call', 'text', 'tool-call'])
   })
 })
 

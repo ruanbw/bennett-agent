@@ -188,3 +188,35 @@
   margin-inline-start: 0.25rem;
   color: var(--primary);
 }
+
+/*
+ * 折叠面板的高度动画（`src/components/ui/collapsible.tsx` 默认挂这个类）。
+ *
+ * 为什么不用 tw-animate-css 的 `animate-collapsible-down/up`：那套 keyframes 读的是
+ * `--radix-collapsible-content-height` / `--bits-…` 一族的变量名，而本项目用的
+ * base-ui 把量到的高度写成 `--collapsible-panel-height`（见
+ * `@base-ui/react/collapsible/panel/CollapsiblePanelCssVars.js`）。变量名对不上时
+ * keyframe 的 `to` 落回 `height: auto`；auto 不可插值 → 动画退化成离散跳变。
+ * 实测（Chrome，200ms）：点开后高度先保持 0，约 50–100ms 后一帧跳到满高，
+ * 看起来就是「点了没反应，然后内容突然出现」。
+ *
+ * base-ui 官方写法是 height 过渡 + data-starting-style / data-ending-style
+ * （见 node_modules/@base-ui/react/docs/react/components/collapsible.md 的 Panel 示例），
+ * 这里照抄，变量名换成 base-ui 自己的。`overflow: hidden` 是过渡期间裁掉溢出内容用的。
+ */
+.aui-collapse-panel {
+  height: var(--collapsible-panel-height, auto);
+  overflow: hidden;
+  transition: height 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.aui-collapse-panel[data-starting-style],
+.aui-collapse-panel[data-ending-style] {
+  height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aui-collapse-panel {
+    transition: none;
+  }
+}

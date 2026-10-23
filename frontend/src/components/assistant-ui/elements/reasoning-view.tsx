@@ -3,12 +3,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { usePresentationPolicy } from "@/context/detail-level-context";
 import { cn } from "@/lib/utils";
-import { ArrowDown, ChevronDown, Loader2 } from "lucide-react";
-import { useDeferredValue, useState, useEffect, useRef } from "react";
-import { useDetailLevel } from "@/context/detail-level-context";
+import { ArrowDown, Brain, Loader2 } from "lucide-react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { thinkingSeconds, thinkingStartTime } from "@/lib/reasoning-time";
 import { isNearScrollBottom } from "@/lib/scroll-follow";
+import { reasoningPreview } from "@/lib/trace-summary";
 
 interface ReasoningViewProps {
   text?: string;
@@ -24,13 +25,16 @@ interface ReasoningViewProps {
 }
 
 /**
- * 思考过程：自己也是**一条折叠条**（`已思考（15s）`），默认收起。
+ * 思考行：**一行**，不是一块折叠面板。
  *
- * 它嵌在「过程」块里面：外层那一行是「这一轮做了什么」的摘要，点开后才看到
- * 「想了多久 / 想了什么」。所以这里**不能**默认铺开原文——否则外层刚收好的东西
- * 一点开就变成一大段灰色思考，工具调用反而被挤到下面。
+ * 对齐 DSH 的 `ReasoningRow`：思考图标 + 「思考」+ 分隔点 + 一行预览摘要。
+ * 点开后是正文（次要字号、左内边距 22px 对齐到标题文字，而不是对齐到图标）。
  *
- * 展开与否跟设置里的「对话显示」走（简洁收起 / 详细展开）；用户点过以自己为准。
+ * 为什么把「已思考（15s）」改掉：耗时是「这一轮花了多久」的一部分，现在挂在整轮的
+ * 时长行上；思考行自己只需要说「这里有一段思考」，以及它大概在讲什么。
+ *
+ * 预览只在「标准 / 详细 / 完全展开」出现（`settledReasoningPreview`）；「简洁」档
+ * 只留「思考」两个字——那一档的整个主张就是「过程别占地方」。
  */
 export function ReasoningView({
   text,
@@ -38,7 +42,7 @@ export function ReasoningView({
   elapsedMs = 0,
   startedAt = null,
 }: ReasoningViewProps) {
-  const { level } = useDetailLevel();
+  const policy = usePresentationPolicy();
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [prevStreaming, setPrevStreaming] = useState(isStreaming);
@@ -58,8 +62,8 @@ export function ReasoningView({
   }
 
   // 默认收起：思考是「过程」里的细节，不该默认占据阅读视线。
-  // 只有「详细」档才默认摊开。
-  const isOpen = userToggled ?? level === "detailed";
+  // 「详细」档同样收起——那一档展开的是**过程组**，不是每一段思考正文。
+  const isOpen = userToggled ?? false;
   const settledElapsed = thinkingSeconds(elapsedMs);
   const elapsed = isStreaming ? liveElapsed : settledElapsed > 0 ? settledElapsed : liveElapsed;
 
@@ -96,55 +100,94 @@ export function ReasoningView({
 
   if (!text && !isStreaming) return null;
 
+  // 运行中取「最后一个已完成段落的首行」，已结束取首行；没有可用预览时为空串
+  const preview = reasoningPreview(text, isStreaming);
+  /*
+    收起时才需要预览：展开后正文就在下面，再顶一行摘要只是重复。
+
+    简洁档**连运行中也不给预览**（只有「思考」两个字）：那一档的整个主张是「过程别
+    占地方」，而流式过程中的预览还在不停变化——它既占地方又抢注意力。DSH 在简洁档下
+    运行中仍会显示预览，这里按本项目的四档定义收得更紧。
+  */
+  const showPreview = !isOpen && policy.settledReasoningPreview && preview !== "";
+
   return (
     <Collapsible
       open={isOpen}
       onOpenChange={setUserToggled}
-      className="w-full select-none"
+      className="flex w-full flex-col select-none"
     >
+      {/*
+        单行：图标 + 「思考」 + 分隔点 + 预览 + 耗时。
+        `py-0.5` 让整行高约 24px（DSH 的 24px 行高），和工具行对齐。
+
+        `w-full` 是必需的：耗时用 `ml-auto` 钉在行尾，得先有一条满宽的 flex 行可推。
+        之前是 `inline-flex`（宽度跟着内容长），耗时只能紧贴在预览后面，于是
+        「预览多长」直接决定了耗时的横向位置。
+      */}
       <CollapsibleTrigger
         render={
           <button
             type="button"
-            className="group/thought inline-flex items-center gap-1.5 py-1 text-xs text-muted-foreground/80 hover:text-foreground transition-colors cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60"
+            className="group/thought flex w-full cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left text-sm text-muted-foreground transition-colors hover:text-secondary-foreground focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none"
           />
         }
       >
         {isStreaming ? (
-          <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+          <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
         ) : (
-          <ChevronDown
-            className={cn(
-              "size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-hover/thought:text-foreground",
-              isOpen ? "rotate-0" : "-rotate-90"
-            )}
+          <Brain className="size-3.5 shrink-0" aria-hidden="true" />
+        )}
+        <span className="shrink-0">思考</span>
+        {/* 分隔点：2×2 的圆角方块，caption 色。没有预览时整组隐藏 */}
+        {showPreview && (
+          <span
+            className="mx-0.5 inline-block size-0.5 shrink-0 rounded-[1px] bg-muted-foreground/40"
+            aria-hidden="true"
           />
         )}
-        <span className="font-medium tracking-tight">
-          {isStreaming ? "思考中" : "已思考"}
-          {elapsed > 0 && <span className="ml-0.5 tabular-nums font-mono text-[11px]">（{elapsed}s）</span>}
-        </span>
+        {showPreview && (
+          <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground/80">
+            <span className={cn(isStreaming && "shimmer motion-reduce:animate-none")}>{preview}</span>
+          </span>
+        )}
+        {/*
+          耗时**始终**渲染并固定在行尾（`ml-auto` + `shrink-0`）：展开、收起、不同
+          预览长度下都在同一个位置。此前只在展开时渲染，且紧贴「思考」二字，于是
+          一点开耗时就从行尾跳到左边——那正是「位置不对」。
+          没有耗时数据时整段不渲染，不显示「0s」。
+        */}
+        {elapsed > 0 && (
+          <span className="ml-auto shrink-0 pl-2 font-mono text-[11px] tabular-nums text-muted-foreground/60">
+            {elapsed}s
+          </span>
+        )}
       </CollapsibleTrigger>
 
       {/* base-ui 的 Panel 只挂 data-open/data-closed，不是 Radix 的 data-state */}
-      <CollapsibleContent className="transition-all data-closed:animate-collapsible-up data-open:animate-collapsible-down">
-        <div className="mt-1 ml-1 pl-3 border-l-2 border-border/70">
+      <CollapsibleContent>
+        {/*
+          正文：次要字号、次要色。左内边距 22px = 图标(14) + gap(6) + 2px 微调，
+          让正文左缘与「思考」两个字对齐，而不是与图标对齐——读者是在读正文，
+          不是在读图标列。
+        */}
+        <div className="py-1 pl-[22px] pr-0">
           <div
             ref={scrollRef}
             role="group"
             aria-label="思考过程"
             tabIndex={0}
             onScroll={handleScroll}
-            className="max-h-64 overflow-y-auto pr-2 text-xs leading-relaxed text-muted-foreground/85 whitespace-pre-wrap select-text font-sans"
+            className="max-h-72 overflow-y-auto text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground select-text [scrollbar-gutter:stable]"
           >
-            {deferredText || "思考中..."}
+            {deferredText || "思考中…"}
           </div>
           {isStreaming && !follow && (
             <div className="mt-1 flex justify-end">
               <button
                 type="button"
                 onClick={resumeFollow}
-                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 cursor-pointer"
+                className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none"
               >
                 <ArrowDown className="size-3" aria-hidden="true" />
                 回到最新思考

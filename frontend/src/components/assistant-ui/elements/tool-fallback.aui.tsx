@@ -1,17 +1,30 @@
 "use client";
 
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import {
   AlertCircleIcon,
   BanIcon,
+  BookOpen,
+  Bot,
+  Brain,
   CheckIcon,
   ChevronDownIcon,
   CircleMinusIcon,
+  Clock,
+  Code,
+  Compass,
+  Globe,
+  Image as ImageIcon,
+  ListChecks,
   LoaderIcon,
+  MessageCircleQuestion,
+  PencilLine,
+  Search,
+  Sparkles,
+  SquareTerminal,
   XCircleIcon,
 } from "lucide-react";
 import {
-  useScrollLock,
   useToolCallElapsed,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
@@ -32,8 +45,7 @@ import {
   toolTextLength,
   type ToolCallViewStatus,
 } from "@/lib/tool-call-view";
-
-const ANIMATION_DURATION = 200;
+import { classifyActivity, toolRowTitle, type ActivityKind } from "@/lib/step-process";
 
 export type ToolFallbackRootProps = Omit<
   React.ComponentProps<typeof Collapsible>,
@@ -44,6 +56,15 @@ export type ToolFallbackRootProps = Omit<
   defaultOpen?: boolean;
 };
 
+/**
+ * 工具调用的折叠单元。
+ *
+ * 这里**刻意不**接 assistant-ui 的 `useScrollLock`：它会在每次展开时找到最近的
+ * 可滚动祖先，把 `scrollbar-width` 设成 none、按滚动条宽度改 padding，并在 200ms 内
+ * 把 scrollTop 钉回原位。三件事都发生在点击的那一帧——强制重排、滚动条闪烁，
+ * 期间用户也滚不动。高度过渡改成真正的 transition 之后（见 `src/index.css`），
+ * 内容高度是连续变化的，浏览器自己的滚动锚定足以处理，不需要这个补丁。
+ */
 function ToolFallbackRoot({
   className,
   open: controlledOpen,
@@ -52,27 +73,23 @@ function ToolFallbackRoot({
   children,
   ...props
 }: ToolFallbackRootProps) {
-  const collapsibleRef = useRef<HTMLDivElement>(null);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
-  const lockScroll = useScrollLock(collapsibleRef, ANIMATION_DURATION);
 
   const isControlled = controlledOpen !== undefined;
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen;
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
-      lockScroll();
       if (!isControlled) {
         setUncontrolledOpen(open);
       }
       controlledOnOpenChange?.(open);
     },
-    [lockScroll, isControlled, controlledOnOpenChange],
+    [isControlled, controlledOnOpenChange],
   );
 
   return (
     <Collapsible
-      ref={collapsibleRef}
       data-slot="tool-fallback-root"
       open={isOpen}
       onOpenChange={handleOpenChange}
@@ -80,11 +97,6 @@ function ToolFallbackRoot({
         "aui-tool-fallback-root group/tool-fallback-root w-full",
         className,
       )}
-      style={
-        {
-          "--animation-duration": `${ANIMATION_DURATION}ms`,
-        } as React.CSSProperties
-      }
       {...props}
     >
       {children}
@@ -101,6 +113,32 @@ const statusIconMap: Record<ToolCallViewStatus, React.ElementType> = {
   interrupted: CircleMinusIcon,
   failed: XCircleIcon,
   denied: BanIcon,
+};
+
+/**
+ * 动作类型 → 行首图标。
+ *
+ * 与「过程」组头的图标表同源（`trace-group.tsx` 的 `ACTIVITY_ICONS`）：同一次调用
+ * 在组头里是「正在运行命令」，在工具行里也必须还是那个终端图标，否则用户会以为是
+ * 两件事。分组标题用的是名词（运行命令），组头用的是叙述（执行了命令）。
+ */
+const ACTIVITY_ICONS: Record<ActivityKind, React.ElementType> = {
+  thinking: Brain,
+  read: Compass,
+  readImage: ImageIcon,
+  write: PencilLine,
+  search: Search,
+  edit: PencilLine,
+  commands: SquareTerminal,
+  code: Code,
+  webSearch: Globe,
+  webFetch: Compass,
+  time: Clock,
+  knowledge: BookOpen,
+  subagents: Bot,
+  plan: ListChecks,
+  questions: MessageCircleQuestion,
+  tools: Sparkles,
 };
 
 /** 触发条的无障碍状态文案：可见文案只有「未完成」一档，这里给出完整语义。 */
@@ -159,73 +197,116 @@ function ToolFallbackTrigger({
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 
-  const Icon = statusIconMap[viewStatus];
+  // 行首图标按**动作类型**给（终端、放大镜、指南针…），而不是按状态给对勾/叉：
+  // 状态已经在右侧的耗时位与失败文案里表达，图标位置留给「这是什么调用」。
+  const ActivityIcon = ACTIVITY_ICONS[classifyActivity(toolName)] ?? Sparkles;
+  const title = toolRowTitle(toolName);
+  // 失败/被停止用状态图标覆盖动作图标：这两种是异常终态，必须一眼看出
+  const StatusIcon = statusIconMap[viewStatus];
+  const useStatusIcon = isFailed || isDenied || isInterrupted || isCancelled;
+  const Icon = useStatusIcon ? StatusIcon : ActivityIcon;
 
   return (
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
-      aria-label={`${toolName}${preview ? `（${preview}）` : ""}：${STATUS_ARIA_LABEL[viewStatus]}`}
+      aria-label={`${title}${preview ? `（${preview}）` : ""}：${STATUS_ARIA_LABEL[viewStatus]}`}
       className={cn(
-        "aui-tool-fallback-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-tool-fallback-trigger group/trigger flex w-full max-w-full cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left text-sm text-muted-foreground transition-colors",
+        "hover:text-secondary-foreground focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none",
         className,
       )}
       {...props}
     >
-      <Icon
-        data-slot="tool-fallback-trigger-icon"
-        className={cn(
-          "aui-tool-fallback-trigger-icon size-4 shrink-0",
-          isCancelled && "text-muted-foreground",
-          isInterrupted && "text-amber-600 dark:text-amber-400",
-          isFailed && "text-destructive",
-          isDenied && "text-amber-600 dark:text-amber-400",
-          isRunning && "animate-spin [animation-duration:0.6s]",
-        )}
-      />
+      {/*
+        图标位：16px 定宽，动作图标与 chevron 叠在同一格里。
+        hover 或展开时图标淡出换成 chevron——与「过程」组头同一套交互语言，
+        用户不必学两遍「哪里可以点开」。
+      */}
+      <span className="relative inline-flex size-4 shrink-0 items-center justify-center">
+        <span
+          className={cn(
+            "absolute inset-0 inline-flex items-center justify-center transition-opacity duration-100",
+            "group-hover/trigger:opacity-0 group-data-panel-open/trigger:opacity-0",
+          )}
+          aria-hidden="true"
+        >
+          <Icon
+            data-slot="tool-fallback-trigger-icon"
+            className={cn(
+              "aui-tool-fallback-trigger-icon size-3.5",
+              isCancelled && "text-muted-foreground/70",
+              isInterrupted && "text-amber-600 dark:text-amber-400",
+              isFailed && "text-destructive",
+              isDenied && "text-amber-600 dark:text-amber-400",
+              isRunning && "animate-spin [animation-duration:0.6s]",
+            )}
+          />
+        </span>
+        <span
+          className={cn(
+            "absolute inset-0 inline-flex items-center justify-center opacity-0 transition-opacity duration-100",
+            "group-hover/trigger:opacity-100 group-data-panel-open/trigger:opacity-100",
+          )}
+          aria-hidden="true"
+        >
+          <ChevronDownIcon className="size-3.5 transition-transform duration-150 group-data-panel-open/trigger:rotate-180" />
+        </span>
+      </span>
+      {/*
+        标题：名词短语（运行命令 / 读取文件 / 网页搜索），与组头的叙述式文案
+        （执行了命令 / 已读取文件）分工不同——组头讲「这一轮干了什么」，
+        这一行讲「这是一次什么调用」。
+      */}
       <span
         data-slot="tool-fallback-trigger-label"
         className={cn(
-          "aui-tool-fallback-trigger-label-wrapper inline-block text-start leading-none",
-          isCancelled && "text-muted-foreground line-through",
+          "aui-tool-fallback-trigger-label shrink-0 leading-none",
+          isCancelled && "text-muted-foreground/70 line-through",
           isInterrupted && "text-amber-700 dark:text-amber-400",
           isFailed && "text-destructive",
           isDenied && "text-amber-700 dark:text-amber-400",
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
-        <b>{toolName}</b>
+        {title}
       </span>
+      {/* 分隔点：2×2 圆角方块。没有摘要时整组隐藏，避免出现「运行命令 · 」 */}
+      {preview && (
+        <span
+          data-slot="tool-fallback-trigger-separator"
+          className="inline-block size-0.5 shrink-0 rounded-[1px] bg-muted-foreground/40"
+          aria-hidden="true"
+        />
+      )}
       {/* 折叠时也看得懂在干什么：只展示主参数，完整 args 展开后看 */}
       {preview && (
         <span
           data-slot="tool-fallback-trigger-preview"
-          className="aui-tool-fallback-trigger-preview max-w-[45vw] truncate text-xs text-muted-foreground/70 sm:max-w-xs"
+          className={cn(
+            "aui-tool-fallback-trigger-preview min-w-0 flex-1 truncate text-[13px]",
+            // 失败摘要用错误色、被停止用警告色：颜色是这两种终态的**第二重**提示
+            // （第一重是行首的状态图标与右侧文案，色弱也读得出）
+            isFailed ? "text-destructive" : "",
+            (isInterrupted || isDenied) && "text-amber-700 dark:text-amber-400",
+            !isFailed && !isInterrupted && !isDenied && "text-muted-foreground/80",
+          )}
         >
           {preview}
         </span>
       )}
+      {!preview && <span className="min-w-0 flex-1" />}
       {(isInterrupted || isFailed || isDenied) && (
         <span
           data-slot="tool-fallback-trigger-status"
           className={cn(
-            "aui-tool-fallback-trigger-status text-xs",
+            "aui-tool-fallback-trigger-status shrink-0 text-xs",
             isFailed ? "text-destructive" : "text-amber-700 dark:text-amber-400",
           )}
         >
           {isInterrupted ? "未完成" : isFailed ? "失败" : "被拒绝"}
         </span>
       )}
-      <ToolFallbackDuration />
-      <ChevronDownIcon
-        data-slot="tool-fallback-trigger-chevron"
-        className={cn(
-          "aui-tool-fallback-trigger-chevron size-4 shrink-0",
-          "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-          "-rotate-90",
-          "group-data-open/trigger:rotate-0",
-          "group-data-panel-open/trigger:rotate-0",
-        )}
-      />
+      <ToolFallbackDuration className="shrink-0" />
     </CollapsibleTrigger>
   );
 }
@@ -239,25 +320,21 @@ function ToolFallbackContent({
     <CollapsibleContent
       data-slot="tool-fallback-content"
       className={cn(
-        "aui-tool-fallback-content relative overflow-hidden text-sm outline-none",
-        "group/collapsible-content ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:animate-none",
-        "data-closed:animate-collapsible-up",
-        "data-open:animate-collapsible-down",
-        "data-closed:fill-mode-forwards",
+        "aui-tool-fallback-content relative text-sm outline-none",
         "data-closed:pointer-events-none",
-        "[--tw-duration:var(--animation-duration)]",
         className,
       )}
       {...props}
     >
-      <div
-        className={cn(
-          "flex flex-col gap-2 ps-6 pt-1 pb-2 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:animate-none",
-          "group-data-open/collapsible-content:animate-in group-data-open/collapsible-content:fade-in-0 group-data-open/collapsible-content:blur-in-[2px] group-data-open/collapsible-content:slide-in-from-top-1",
-          "group-data-closed/collapsible-content:animate-out group-data-closed/collapsible-content:fade-out-0 group-data-closed/collapsible-content:blur-out-[2px] group-data-closed/collapsible-content:slide-out-to-top-1",
-          "group-data-closed/collapsible-content:animation-duration-(--animation-duration) group-data-open/collapsible-content:animation-duration-(--animation-duration)",
-        )}
-      >
+      {/*
+        ps-5 = 20px：与标题文字（图标 16 + gap 4）左缘对齐，参数块不会跑到图标列下方。
+
+        内层刻意没有第二套进场动画（此前是 `animate-in fade-in-0 blur-in-[2px]
+        slide-in-from-top-1`）：blur 滤镜要在大片区域上逐帧重新栅格化，还要和父级的
+        高度过渡抢同一帧，是「点开一顿」的直接成本之一。高度过渡本身已经足够表达
+        「这里展开了」。
+      */}
+      <div className="flex flex-col gap-2 ps-5 pt-1 pb-2">
         {children}
       </div>
     </CollapsibleContent>

@@ -27,7 +27,6 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
-  AlertTriangleIcon,
   ArrowDownIcon,
   ArrowLeftRightIcon,
   ArrowUpIcon,
@@ -55,14 +54,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { ContextUsageIndicator } from "@/components/ContextUsageIndicator";
+import { ComposerStats } from "@/components/ComposerStats";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { messageTextForCopy } from "@/lib/message-copy";
 import { describeCompactionNotice } from "@/lib/run-error";
 import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
-import { ReasoningEffortSelector } from "@/components/ReasoningEffortSelector";
+import { TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
 import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useApproval } from "@/context/approval-context";
@@ -72,9 +71,9 @@ import { getDraftStorage, readDraft, writeDraft } from "@/lib/composer-draft";
 import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
-import { readUsage, sumCosts } from "@/lib/context-usage";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
-import { levelsFor, shouldShowEffortSelector } from "@/lib/reasoning-effort";
+import { readUsageTiming } from "@/lib/usage-timing";
+import { formatRunDurationText, type TurnEndReason } from "@/lib/step-process";
 import { notify } from "@/lib/toast";
 import {
   availableStartSuggestions,
@@ -325,7 +324,7 @@ export const Thread: FC<ThreadProps> = ({
         turnAnchor="top"
         data-slot="aui_thread-viewport"
         aria-busy={isRunning}
-        className="relative flex flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth"
+        className="relative flex flex-1 flex-col overflow-x-hidden overflow-y-auto"
       >
         <div
           className={cn(
@@ -392,11 +391,18 @@ export const Thread: FC<ThreadProps> = ({
             </div>
           </AuiIf>
 
-          {/* 消息流列表：role="log" 让读屏把它当对话日志（多轮追加，不是一条新页面） */}
+          {/*
+            消息流列表：role="log" 让读屏把它当对话日志（多轮追加，不是一条新页面）。
+
+            `aria-busy` 让读屏在生成期间只标记「内容还在变」，等本轮结束再一次性播报。
+            没有它的话，每个 token 都是一次 live-region 变更：读屏读不完，浏览器的
+            可访问性树也要为每帧做一次增量更新（长回答下这部分会吃掉可观的帧预算）。
+          */}
           <div
             role="log"
             aria-live="polite"
             aria-relevant="additions text"
+            aria-busy={isRunning}
             className="mb-6 flex flex-col gap-y-6 empty:hidden"
           >
             <ThreadPrimitive.Messages>
@@ -460,7 +466,10 @@ const ThreadMessage: FC = () => {
 
 const ThreadScrollToBottom: FC<{ onClick?: () => void }> = ({ onClick }) => {
   return (
-    <ThreadPrimitive.ScrollToBottom asChild>
+    // behavior 显式传 smooth：视口上的 scroll-smooth 已经去掉（它会把键盘翻页、
+    // 锚点跳转等所有程序化滚动都变成动画，长会话上就是「按了 End 半天不动」），
+    // 只有这个按钮需要平滑。
+    <ThreadPrimitive.ScrollToBottom behavior="smooth" asChild>
       <TooltipIconButton
         tooltip="滚动到底部"
         variant="outline"
@@ -513,30 +522,13 @@ const Composer: FC<{
     if (draft && aui.composer.getState().text.trim() === "") aui.composer.setText(draft);
   }, [aui, sessionId]);
 
-  // 整个会话里最近一次回报的用量：上下文会不会被锁、占比多少，只跟最新那次请求有关。
-  // 用量此前挂在每条回答下面，越往上越旧却长得像「当前上下文」，现在统一收进输入框。
-  // selector 必须返回稳定引用，所以这里返回 metadata.custom 原始对象，校验交给 readUsage。
-  const latestUsageMeta = useAuiState((s) => {
-    for (let index = s.thread.messages.length - 1; index >= 0; index -= 1) {
-      const custom = s.thread.messages[index].metadata.custom;
-      if (custom && typeof custom.usage === "object" && custom.usage !== null) return custom;
-    }
-    return null;
-  });
-  const latestUsage = readUsage(latestUsageMeta?.usage);
-  const latestUsageModel =
-    typeof latestUsageMeta?.model === "string" ? latestUsageMeta.model : null;
-
-  // 整个会话的成本累计。
+  // 整个会话的消息数组。
   //
   // selector 只返回 `s.thread.messages` 本身：它是 state 里的原始数组，引用稳定。**不能**
   // 在这里 `.map` / `.filter`——那会每次返回一个新数组，selector 的相等判断永远失败，
-  // 组件会在同一轮里无限重渲染（`latestUsageMeta` 那条注释讲的是同一件事）。汇总放在
-  // selector 之外做。
+  // 组件会在同一轮里无限重渲染。用量、成本、轮次/步数/速度的聚合都交给
+  // `ComposerStats` 内部做一次遍历（它拿到的也是这个原数组）。
   const messages = useAuiState((s) => s.thread.messages);
-  const sessionCost = sumCosts(
-    messages.map((message) => readUsage(message.metadata.custom?.usage)),
-  );
 
   // 附件暂不支持（后端只接受文本）。有附件时直接禁用发送，
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
@@ -631,42 +623,30 @@ const Composer: FC<{
           }}
         />
 
-        {/* 输入框底部工具条：附件/模型选择器/思考等级在左侧，发送/停止在右侧。
-            窄屏用更小的间距、并允许模型名与思考等级被压缩（见两个选择器的 min-w-0）：
-            发送按钮必须留在同一行，不能独占第二行把输入区撑高 34px。这里用 nowrap
-            而不是 wrap——wrap 会先换行再考虑压缩，模型名永远等不到收缩的机会。 */}
+        {/* 输入框底部工具条：附件/模型选择器在左侧，发送/停止在右侧。
+            模型与思考等级已经合成**一个**触发器（`模型名 · 等级`）：DSH 里它们是同一次
+            选择的两个维度，拆成两个并排按钮会让人以为可以分别生效，也会在窄屏上把
+            发送按钮顶到第二行。min-w-0 让模型名先被截断而不是撑破工具栏。 */}
         <div className="flex flex-nowrap items-center justify-between gap-x-1 gap-y-1 px-2 pb-2.5 pt-1 sm:gap-x-2 sm:px-3">
           <div className="flex min-w-0 items-center gap-1 sm:gap-2">
             <ComposerAddAttachment />
-            {(models.length > 0 || modelsError) && (
-              <ModelSelector
-                models={models}
-                modelsError={modelsError}
-                currentModel={currentModel}
-                onSelectModel={onSelectModel}
-                onRefreshModels={onRefreshModels}
-              />
-            )}
-            {shouldShowEffortSelector(selectedModel) && (
-              <ReasoningEffortSelector
-                levels={levelsFor(selectedModel)}
-                currentEffort={currentReasoningEffort}
-                onSelectEffort={onSelectReasoningEffort}
-              />
-            )}
+            {/*
+              不再按 `models.length > 0 || modelsError` 包一层：空目录时组件自己会显示
+              错误文案与「重试」按钮，被条件挡住就等于用户永远点不到那次重试。
+            */}
+            <ModelSelector
+              models={models}
+              modelsError={modelsError}
+              currentModel={currentModel}
+              currentReasoningEffort={currentReasoningEffort}
+              onSelectModel={onSelectModel}
+              onSelectEffort={onSelectReasoningEffort}
+              onRefreshModels={onRefreshModels}
+            />
           </div>
 
           {/* 发送/停止合并为同一个位置：生成中显示停止，空闲时显示发送 */}
           <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
-            {/* 上下文用量紧贴发送按钮左侧：它是「能不能继续问」的唯一依据，位置要固定。 */}
-            <ContextUsageIndicator
-              usage={latestUsage}
-              usageModel={latestUsageModel}
-              currentModel={currentModel}
-              modelContextWindow={selectedModel?.context_window ?? null}
-              locked={contextLocked}
-              sessionCost={sessionCost}
-            />
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>
                 <Button
@@ -707,6 +687,20 @@ const Composer: FC<{
           </div>
         </div>
       </div>
+
+      {/*
+        统计读数在**输入卡片下方**（DSH 的位置），不在卡片里面：它们是「这一轮/这个
+        会话花了多少」的旁注，压进卡片会把输入区撑高、也会和发送按钮抢视线。
+        上下文占用、token 账单、轮次/步数/速度三颗药丸都在这里面——此前上下文指示器
+        单独挂在发送按钮左侧，是为了「能不能继续问」必须可见；现在它作为第一颗药丸
+        仍在同一视线上，却与另外两个读数归到一处，口径也统一由 ComposerStats 算一次。
+      */}
+      <ComposerStats
+        messages={messages}
+        currentModel={currentModel}
+        modelContextWindow={selectedModel?.context_window ?? null}
+        locked={contextLocked}
+      />
     </ComposerPrimitive.Root>
   );
 };
@@ -839,32 +833,48 @@ const AssistantMessage: FC = () => {
   // 429 有冷却期：把「还要等几秒」直接写在按钮上，否则用户只能反复点、反复失败
   const cooldownLabel = useRetryCooldown(error?.retryAfterAt);
 
+  /**
+   * 本轮墙钟耗时（服务端实测，含工具执行与排队）。
+   *
+   * 正常结束的一轮把它显示在**底部操作栏**里（`14:32 · 用时 1分12秒`），异常结束的
+   * 一轮显示在顶部状态行里。仅当 `usage.timing` 完整时才有时长——老记录没有这个
+   * 字段，那就不显示，不编一个 0。
+   */
+  const turnMs = useAuiState((s) => {
+    const timing = readUsageTiming(s.message.metadata.custom?.usage);
+    return timing ? timing.turnMs : null;
+  });
+  const messageStatus = useAuiState((s) => s.message.status?.type);
+  const settled = messageStatus !== "running";
+  // 任何 error 都是「处理失败」：此前只认 context_overflow / model_unavailable 两个码，
+  // 上游 500、鉴权失败这类错误会被归成 ok，于是显示成「已完成」。
+  const turnReason: TurnEndReason = error
+    ? "error"
+    : stopped
+      ? "aborted"
+      : incomplete
+        ? "interrupted"
+        : "ok";
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
       className="group flex flex-col gap-1 w-full"
     >
+      {/*
+        只有**异常结束**才在内容上方留一行状态（已停止 / 回复不完整 / 处理失败）。
+        正常结束不再有「已完成，用时 …」这一行：它给每条回答都加一行文字与一条下边框，
+        而信息量为零——回答在下面，耗时在底部操作栏。这一行同时取代了原先内容下方
+        重复的「生成已停止」「回复不完整（已中断）」两条。
+      */}
+      {settled && <TurnStatusRow reason={turnReason} elapsedMs={turnMs} className="mb-1" />}
+
       <div className="text-foreground text-sm leading-relaxed wrap-break-word">
         <MessagePrimitive.GroupedParts groupBy={ASSISTANT_GROUP_BY}>
           {renderAssistantPart}
         </MessagePrimitive.GroupedParts>
         <MessageError />
       </div>
-
-      {incomplete && (
-        <div className="text-destructive/80 mt-1 flex items-center gap-1.5 text-[11px]">
-          <AlertTriangleIcon className="size-3" />
-          回复不完整（已中断）
-        </div>
-      )}
-
-      {stopped && (
-        <div className="text-muted-foreground/70 mt-1 flex items-center gap-1.5 text-[11px]">
-          <SquareIcon className="size-2.5 fill-current" />
-          生成已停止
-        </div>
-      )}
 
       {compaction && (
         <div className="text-muted-foreground/70 mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -907,8 +917,27 @@ const AssistantMessage: FC = () => {
       <div className="flex items-center min-h-7 mt-1 gap-1">
         <AssistantActionBar />
         <MessageTimestamp className="ml-1" />
+        {/* 正常结束的耗时并进这一排：和「复制 / 重新生成 / 时间」同属一轮的旁注 */}
+        {settled && <TurnElapsed elapsedMs={turnReason === "ok" ? turnMs : null} />}
       </div>
     </MessagePrimitive.Root>
+  );
+};
+
+/**
+ * 正常结束的一轮在操作栏末尾的耗时旁注：`· 用时 1分12秒`。
+ *
+ * 从原先的整轮抬头行搬过来。抬头行把「这一轮花了多久」放在正文之前，等于让一个旁注
+ * 占据最贵的版面；放进操作栏后它仍随时可读，但只占一行里的一小截。
+ *
+ * 拿不到耗时（老记录没有 `usage.timing`）时整段不渲染——不写「用时 0秒」。
+ */
+const TurnElapsed: FC<{ elapsedMs: number | null }> = ({ elapsedMs }) => {
+  if (elapsedMs === null || !Number.isFinite(elapsedMs)) return null;
+  return (
+    <span className="select-none text-[10px] tabular-nums text-muted-foreground/60">
+      · 用时 {formatRunDurationText(Math.max(1000, elapsedMs))}
+    </span>
   );
 };
 

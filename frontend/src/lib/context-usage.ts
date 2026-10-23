@@ -9,6 +9,7 @@
  * 触发上下文锁的那个数对不上——用户看到 60% 却被拒绝，比看不到数字更糟。
  */
 
+import { readUsageTiming } from './usage-timing';
 import type { UsageState } from '@/types';
 
 /** 占比小于这个值时不说「0.0%」：那看起来像「没用量」，其实是「用量很小」。 */
@@ -193,6 +194,11 @@ export function readUsage(value: unknown): UsageState | null {
     costCurrency: typeof costCurrency === 'string' && costCurrency ? costCurrency : null,
     costCacheSavings:
       typeof costCacheSavings === 'number' && Number.isFinite(costCacheSavings) ? costCacheSavings : null,
+    // 计时明细单独走 `readUsageTiming`（容错：缺 steps/turnMs 就整块算没有）。
+    // 这里**不能**自己逐字段校验：那条口径已经写在 usage-timing.ts 里，复制一遍
+    // 就会出现两套「什么算有效计时」的判定。上下文占比与计时是两件事，
+    // `describeContextUsage` 刻意不碰它。
+    timing: readUsageTiming((value as Partial<UsageState>).timing),
   };
 }
 

@@ -1,5 +1,4 @@
 import { type FC, useCallback, useEffect, useRef, useState } from 'react';
-import { Gauge } from 'lucide-react';
 
 import {
   CONTEXT_CRITICAL_PERCENT,
@@ -12,6 +11,7 @@ import {
   type ContextUsageView,
   type CumulativeCost,
 } from '@/lib/context-usage';
+import { formatCompactTokens } from '@/lib/session-stats';
 import type { UsageState } from '@/types';
 
 /**
@@ -21,6 +21,34 @@ import type { UsageState } from '@/types';
  * 对使用者的意义完全不同（前者可以随便用，后者意味着看不到真实成本）。
  */
 export const UNPRICED_COST_LABEL = '未配置价格';
+
+/**
+ * 圆环几何（与 DSH 的 ContextMeter 逐值对齐）：
+ * 14×14 的 viewBox、半径 5.5、描边 2px。周长必须自己算——
+ * `stroke-dasharray` 的单位是路径长度，不是百分比。
+ */
+const RADIUS = 5.5;
+const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+
+/** 环上的百分比读数：整数，但「很小但不是零」写成 `<1%`（0% 会被读成没用量）。 */
+function formatRingPercent(percent: number | null): string {
+  if (percent === null) return '';
+  if (percent > 0 && percent < 1) return '<1%';
+  return `${Math.round(Math.min(Math.max(percent, 0), 100))}%`;
+}
+
+/**
+ * 上下文面板里那条 4px 分段条的分段。
+ *
+ * 后端目前**没有**回报 `contextBreakdown`（系统提示词 / 工具 / 对话各占多少），
+ * 所以调用方不传时这里只有一段单色整条。`null` = 拿不到分段，绝不按经验比例编造
+ * 三段——那会让人以为「工具占了 30%」，而那个数字根本不存在。
+ */
+export interface ContextBreakdown {
+  systemTokens: number;
+  toolsTokens: number;
+  messageTokens: number;
+}
 
 export interface ContextUsageIndicatorProps {
   /** 最近一轮的真实用量；没有（首轮 / 上游没报）且未锁定时整个指示器不出现。 */
@@ -42,22 +70,39 @@ export interface ContextUsageIndicatorProps {
    * 本会话的**累计**成本（各轮相加）。
    *
    * 与 `usage.costTotal`（本轮）分开两个 prop 而不是让组件自己遍历消息：累计需要整个
-   * 会话的用量数组，而这个组件只该关心「显示什么」。汇总逻辑在 `sumCosts` 里，调用方
-   * （`thread.aui.tsx`）把结果传进来。
+   * 会话的用量数组，而这个组件只该关心「显示什么」。汇总逻辑在 `sumCosts` 里。
    *
    * 未提供时那一行不渲染。`total` 为 null 表示「不能给合计」（有轮次没配价格，或货币
    * 混用），此时显示未计价的轮数而不是一个残缺的金额。
    */
   sessionCost?: CumulativeCost | null;
   /**
-   * 弹层初始是否展开。默认 false：桌面端靠 hover/焦点打开，触屏靠点按。
+   * 上下文分段（系统提示词 / 工具 / 对话）。后端目前不提供，缺失时整条单色。
+   * 传进来但三段都是 0 时同样退化成单色。
+   */
+  breakdown?: ContextBreakdown | null;
+  /**
+   * 弹层初始是否展开。默认 false。
    * 主要用于渲染测试（SSR 没有交互，收起的弹层根本不会出现在输出里）。
    */
   initialOpen?: boolean;
+  /**
+   * 受控的展开态（可选）。
+   *
+   * 只有同一排里还有别的弹出面板时才需要它——那时必须保证「同一时刻只开一个」，
+   * 而本组件自己的 `open` 状态没法被同级兄弟面板关掉。不传就是自管理（默认）。
+   */
+  open?: boolean;
+  /** 受控模式下的状态回传。 */
+  onOpenChange?: (open: boolean) => void;
 }
 
 /**
- * 上下文用量指示器：**唯一**展示上下文用量的地方（输入框发送按钮左侧）。
+ * 上下文用量指示器：**唯一**展示上下文用量的地方（输入卡片下方统计行里）。
+ *
+ * 视觉与 DSH 的 ContextMeter 一致：14px 圆环（2px 描边、从 12 点方向顺时针填充）
+ * + 百分比读数。圆环比进度条更适合这个位置——它只占 14px，能在输入框下方那排小字
+ * 里与其它读数并排，而横向进度条会吃掉整行宽度。
  *
  * 为什么不在每条回答下面各摆一行：那是「那一轮请求」的快照，越往上越旧，
  * 看起来像「当前上下文」却答不上「现在还剩多少」。上下文是否会被锁住只跟
@@ -66,8 +111,9 @@ export interface ContextUsageIndicatorProps {
  * 分母优先用后端随用量回报的「可用上限」（窗口扣掉回答预留与安全余量），而不是
  * 原始窗口：两者在 32k 模型上可能差一倍，用原始窗口会把「快满了」显示成「还很空」。
  *
- * 悬浮/聚焦/点按都会展开详情（触屏没有 hover，点按是唯一入口）。指针移开只在
- * 焦点也离开容器后才关闭，键盘用户 Tab 到别处不会留下一个幽灵弹层。
+ * 点按展开详情。**刻意不做 hover 展开**：它现在与另外两个统计药丸排在输入框下方
+ * 同一行里，鼠标扫过整行会连续弹开三个面板，每个都盖住刚读到的数字。点按 + Escape /
+ * 外部 pointerdown 关闭，与另外两个药丸一致；键盘用户 Tab 到别处也不会留下幽灵弹层。
  */
 export function ContextUsageIndicator({
   usage,
@@ -76,10 +122,23 @@ export function ContextUsageIndicator({
   modelContextWindow = null,
   locked = false,
   sessionCost = null,
+  breakdown = null,
   initialOpen = false,
+  open: openProp,
+  onOpenChange,
 }: ContextUsageIndicatorProps) {
   const view = describeContextUsage(usage, { usageModel, currentModel, modelContextWindow });
-  const [open, setOpen] = useState(initialOpen);
+  const [internalOpen, setInternalOpen] = useState(initialOpen);
+  // 受控 / 自管理两态：不传 `open` 时行为与之前完全一致
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : internalOpen;
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (!controlled) setInternalOpen(next);
+      onOpenChange?.(next);
+    },
+    [controlled, onOpenChange],
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<number | null>(null);
 
@@ -97,12 +156,12 @@ export function ContextUsageIndicator({
       closeTimer.current = null;
       setOpen(false);
     }, 120);
-  }, [cancelClose]);
+  }, [cancelClose, setOpen]);
 
   useEffect(() => cancelClose, [cancelClose]);
 
-  // 触屏没有 hover：点开之后只能靠「点外面 / Esc」关掉。桌面端指针离开容器就会关，
-  // 这里同时兜住「点开后又去点别处」的情况。
+  // 点开之后靠「点外面 / Esc」关掉（同一排里兄弟面板的打开也会把这里关掉——见
+  // ComposerStats 的受控用法）。
   useEffect(() => {
     if (!open) return undefined;
     const handlePointerDown = (event: PointerEvent) => {
@@ -117,7 +176,7 @@ export function ContextUsageIndicator({
       document.removeEventListener('pointerdown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open]);
+  }, [open, setOpen]);
 
   // 锁定是持续状态，即使没有用量记录也必须能看到「为什么发不出去」。
   if (!view && !locked) return null;
@@ -128,14 +187,21 @@ export function ContextUsageIndicator({
   const warning = !nearFull && usedPercent !== null && usedPercent >= CONTEXT_WARN_PERCENT;
   const alerting = locked || nearFull;
 
+  // 锁定态的环画满：真实占用比上一轮回报的更大（历史 + 回答预留），画成 60% 会自相矛盾
+  const ringPercent = locked ? 100 : (usedPercent ?? 0);
+  const reading = locked ? '已满' : (formatRingPercent(usedPercent) || view?.compactLabel || '');
+  const ringLabel = locked ? '上下文已满，查看说明' : `上下文用量：${view?.summary ?? ''}`;
+
   return (
     <div
       ref={containerRef}
       className="relative inline-flex"
-      onPointerEnter={() => {
-        cancelClose();
-        setOpen(true);
-      }}
+      // 容器只负责「指针进到弹层里别关」，**不**用 hover 打开面板。
+      //
+      // 上一版是 hover 打开；搬到输入框下方那排药丸之后必须改成点按：三个药丸紧挨着，
+      // 鼠标从左往右扫一遍会连续弹三个面板，每次都盖住刚读到的数字。
+      // 点按 + Escape/外部 pointerdown 关闭也与另外两个药丸一致。
+      onPointerEnter={cancelClose}
       onPointerLeave={scheduleClose}
       onBlur={(event) => {
         // 焦点还在容器里（例如从按钮 Tab 到弹层里的可聚焦元素）就别关；
@@ -145,24 +211,20 @@ export function ContextUsageIndicator({
     >
       <button
         type="button"
-        aria-label={locked ? '上下文已满，查看说明' : `上下文用量：${view?.summary ?? ''}`}
+        aria-label={ringLabel}
         aria-haspopup="dialog"
         aria-expanded={open}
         // 不写原生 title：悬停时它会和自绘弹层同时出现，两块提示互相打架。
         // 完整数字在弹层与 aria-label 里（读屏走 aria-label）。
-        onFocus={() => setOpen(true)}
-        onClick={() => setOpen(true)}
-        className={`flex h-7 items-center gap-1 rounded-lg px-1.5 text-[11px] transition-colors cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none pointer-coarse:min-h-9 pointer-coarse:min-w-9 pointer-coarse:justify-center ${
+        onClick={() => setOpen(!open)}
+        className={`inline-flex h-5 items-center gap-1.5 rounded-sm px-2 text-xs leading-5 tabular-nums transition-colors cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none ${
           alerting
             ? 'text-destructive hover:bg-destructive/10'
             : 'text-muted-foreground hover:bg-muted hover:text-foreground'
         }`}
       >
-        <Gauge size={13} className="shrink-0" />
-        {/* 窄屏只留图标：底部工具条本来就快挤满了，文字会把它顶出屏幕。
-            异常态补一个红点，否则手机上只能看到一个同样大小的图标。 */}
-        <span className="hidden tabular-nums sm:inline">{locked ? '已满' : view?.compactLabel}</span>
-        {alerting && <span className="size-1.5 rounded-full bg-destructive sm:hidden" aria-hidden="true" />}
+        <ContextRing percent={ringPercent} />
+        <span className="whitespace-nowrap">{reading}</span>
       </button>
 
       {open && (
@@ -171,15 +233,23 @@ export function ContextUsageIndicator({
           aria-label="上下文用量详情"
           onPointerEnter={cancelClose}
           onPointerLeave={scheduleClose}
-          /* 右对齐到用量按钮，而按钮离屏幕右缘只有约 4rem（发送按钮 + 内边距）。
-             320px 屏幕上只减 1.5rem 会让弹层左边出界（右侧 251 - 256 = -5），
-             这里按实际留白收窄；大屏仍由 w-64 限制。 */
-          className="absolute right-0 bottom-full z-50 mb-2 w-64 max-w-[calc(100vw-5rem)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-xl"
+          /* 右对齐到圆环，而它离屏幕右缘只有一点内边距；320px 屏幕上按实际留白收窄，
+             大屏仍由 264px（DSH 的 `min(264px, 100vw - 24px)`）限制。 */
+          className="absolute right-0 bottom-full z-50 mb-2 w-[264px] max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-xl"
         >
-          <div className="mb-2 flex items-baseline justify-between gap-2">
-            <span className="text-xs font-medium text-foreground">{locked ? '上下文已满' : '上下文用量'}</span>
-            <span className="text-[10px] text-muted-foreground">
-              {locked ? '本会话无法继续提问' : '上一轮上游回报'}
+          <div className="mb-2 flex items-center gap-1.5">
+            <span className="text-muted-foreground">{locked ? '上下文已满' : '上下文已用'}</span>
+            {!locked && (
+              <span className="font-medium text-foreground">{formatRingPercent(usedPercent)}</span>
+            )}
+            <span className="ml-auto font-medium tabular-nums text-foreground">
+              {locked
+                ? '本会话无法继续提问'
+                : `~${formatCompactTokens(view?.contextTokens ?? 0)} / ${
+                    view?.limitTokens === null || view?.limitTokens === undefined
+                      ? '—'
+                      : formatCompactTokens(view.limitTokens)
+                  }`}
             </span>
           </div>
 
@@ -190,7 +260,18 @@ export function ContextUsageIndicator({
           ) : (
             view && (
               <>
-                <UsageBar view={view} />
+                <UsageBar view={view} breakdown={breakdown} />
+                {breakdown !== null && breakdownTotal(breakdown) > 0 && (
+                  <dl className="mt-2 space-y-1">
+                    <LegendRow
+                      label="系统提示词"
+                      tokens={breakdown.systemTokens}
+                      dot="bg-[#94a3b8]"
+                    />
+                    <LegendRow label="工具定义" tokens={breakdown.toolsTokens} dot="bg-[#a78bfa]" />
+                    <LegendRow label="对话消息" tokens={breakdown.messageTokens} dot="bg-[#3b82f6]" />
+                  </dl>
+                )}
                 <dl className="mt-2.5 space-y-1.5">
                   <UsageRow
                     label="已用"
@@ -293,6 +374,11 @@ export function ContextUsageIndicator({
                         ? ' 窗口取自当前模型配置。'
                         : null}
                 </p>
+                {breakdown === null && (
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground/80">
+                    这条进度只有总量：服务端还没有回报上下文各成分的占比，所以不拆分——编一个比例会比不显示更糟。
+                  </p>
+                )}
               </>
             )
           )}
@@ -302,15 +388,62 @@ export function ContextUsageIndicator({
   );
 }
 
-const UsageBar: FC<{ view: ContextUsageView }> = ({ view }) => {
-  const percent = view.usedPercent ?? 0;
-  // 阈值与「已接近可用上限」文案共用同一份常量：红条与警告必须同时出现
+/** 14px 圆环：底环 + 从 12 点方向顺时针填充的进度环。 */
+const ContextRing: FC<{ percent: number }> = ({ percent }) => {
+  const clamped = Math.min(Math.max(percent, 0), 100);
+  return (
+    <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true" className="shrink-0">
+      <circle cx="7" cy="7" r={RADIUS} fill="none" strokeWidth={2} className="stroke-border" />
+      <circle
+        cx="7"
+        cy="7"
+        r={RADIUS}
+        fill="none"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeDasharray={`${(CIRCUMFERENCE * clamped) / 100} ${CIRCUMFERENCE}`}
+        transform="rotate(-90 7 7)"
+        className="stroke-current transition-[stroke-dasharray] duration-300"
+      />
+    </svg>
+  );
+};
+
+const breakdownTotal = (breakdown: ContextBreakdown): number =>
+  breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens;
+
+/**
+ * 4px 分段条。
+ *
+ * 拿不到分段（后端不回报）时只有一段单色、宽度 = 已用占比——这正是 DSH 在
+ * `contextBreakdown` 缺席时的做法。**不按经验比例编造三段**：那条条的每一段都在暗示
+ * 「这一类占了多少」，编出来的比例会被当成事实。
+ */
+const UsageBar: FC<{ view: ContextUsageView; breakdown: ContextBreakdown | null }> = ({
+  view,
+  breakdown,
+}) => {
+  const percent = Math.min(Math.max(view.usedPercent ?? 0, 0), 100);
+  // 阈值与「已接近可用上限」文案共用同一份常量：红条与警告必须同时出现。
+  // 拿不到上限时（usedPercent 为 null）条是空的，tone 无所谓，用中性色。
   const tone =
-    percent >= CONTEXT_CRITICAL_PERCENT
-      ? 'bg-destructive'
-      : percent >= CONTEXT_WARN_PERCENT
-        ? 'bg-amber-500'
-        : 'bg-primary';
+    view.usedPercent === null
+      ? 'bg-muted-foreground'
+      : view.usedPercent >= CONTEXT_CRITICAL_PERCENT
+        ? 'bg-destructive'
+        : view.usedPercent >= CONTEXT_WARN_PERCENT
+          ? 'bg-amber-500'
+          : 'bg-primary';
+
+  const total = breakdown === null ? 0 : breakdownTotal(breakdown);
+  const segments =
+    breakdown === null || total === 0
+      ? [{ key: 'total', width: percent, dot: tone }]
+      : [
+          { key: 'system', width: (percent * breakdown.systemTokens) / total, dot: 'bg-[#94a3b8]' },
+          { key: 'tools', width: (percent * breakdown.toolsTokens) / total, dot: 'bg-[#a78bfa]' },
+          { key: 'messages', width: (percent * breakdown.messageTokens) / total, dot: 'bg-[#3b82f6]' },
+        ].filter((segment) => segment.width > 0);
 
   return (
     <div
@@ -319,15 +452,32 @@ const UsageBar: FC<{ view: ContextUsageView }> = ({ view }) => {
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Number(percent.toFixed(1))}
-      className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      className="flex h-1 w-full gap-px overflow-hidden rounded-full bg-muted"
     >
-      <div
-        className={`h-full rounded-full transition-[width] duration-300 ${tone}`}
-        style={{ width: `${Math.min(Math.max(percent, 0), 100)}%` }}
-      />
+      {segments.map((segment) => (
+        <div
+          key={segment.key}
+          className={`h-full flex-none rounded-[1px] transition-[width] duration-300 ${segment.dot}`}
+          style={{ width: `${Math.max(segment.width, 0)}%` }}
+        />
+      ))}
     </div>
   );
 };
+
+const LegendRow: FC<{ label: string; tokens: number; dot: string }> = ({
+  label,
+  tokens,
+  dot,
+}) => (
+  <div className="flex items-center justify-between gap-3 py-0.5">
+    <dt className="flex items-center gap-1.5 text-muted-foreground">
+      <span className={`inline-block size-2 rounded-sm ${dot}`} aria-hidden="true" />
+      {label}
+    </dt>
+    <dd className="m-0 tabular-nums text-foreground">{`~${formatCompactTokens(tokens)}`}</dd>
+  </div>
+);
 
 const UsageRow: FC<{ label: string; value: string; hint: string }> = ({
   label,

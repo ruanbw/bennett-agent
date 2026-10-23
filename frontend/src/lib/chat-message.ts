@@ -104,10 +104,17 @@ function readPartOrder(source: object | null | undefined): PartKind[] | undefine
 /**
  * 构造消息内容数组。已完成的消息与生成中的消息共用，差异只在 status。
  *
- * 顺序：有 `order` 时严格按事件到达顺序排布——按类型分组（工具→思考→正文）会把
- * 交替出现的思考与工具调用画成另一番顺序。没有 order 时退回「思考 → 工具 → 正文」：
- * 思考先于工具调用、正文在工具之后，是这套后端事件流的常态，比把工具顶到最前面
- * 更接近事实（老记录没有顺序字段，只能近似）。
+ * 顺序：有 `order` 时按事件到达顺序排布**思考与工具调用**——按类型分组会把交替出现的
+ * 思考与调用画成另一番顺序。没有 order 时退回「思考 → 工具 → 正文」。
+ *
+ * **正文（text）不参与这个顺序，永远排在最后。** 三个理由：
+ *   1. 一轮里所有正文增量只合并成**一个** text 块，顺序表记的是「第一个增量」的位置。
+ *      模型常先吐半句开场白（「我先查一下」）再调工具，那半句就替整段回答占了位——
+ *      结果最后那段真正的答案被画到工具组**上面**。用户读到的顺序就成了
+ *      「答案 → 过程」，与事实相反。
+ *   2. 即使顺序表把 text 记在中间，我们也无法把一个块拆成两段去夹住工具调用；
+ *      要么整块在前，要么整块在后。整块在后 === 最终答案在过程之后，这是唯一可读的选法。
+ *   3. 「过程在前、答案在后」是这套界面的既定读法（过程组默认收起成一行）。
  */
 export function buildParts({
   toolCalls,
@@ -136,7 +143,6 @@ export function buildParts({
 
   let toolIndex = 0;
   let reasoningPlaced = false;
-  let textPlaced = false;
 
   for (const kind of order) {
     if (kind === 'tool-call') {
@@ -146,16 +152,14 @@ export function buildParts({
     } else if (kind === 'reasoning' && !reasoningPlaced) {
       reasoningPlaced = true;
       if (reasoning) parts.push(reasoning);
-    } else if (kind === 'text' && !textPlaced) {
-      textPlaced = true;
-      if (text) parts.push(text);
     }
+    // `text` 刻意在这里不处理：它整块排在最后（理由见函数注释）
   }
 
   // 顺序表没覆盖到的块补在末尾：字段写坏或写一半也不能吞掉用户的内容
   if (!reasoningPlaced && reasoning) parts.push(reasoning);
   for (; toolIndex < tools.length; toolIndex += 1) parts.push(tools[toolIndex]);
-  if (!textPlaced && text) parts.push(text);
+  if (text) parts.push(text);
 
   return parts;
 }

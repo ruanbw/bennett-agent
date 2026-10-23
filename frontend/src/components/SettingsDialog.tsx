@@ -1,4 +1,20 @@
-import { Check, Laptop, Moon, Sun, User, Info, HardDrive, KeyRound, AlignLeft, Rows3 } from 'lucide-react';
+import {
+  AlignLeft,
+  Activity,
+  Check,
+  ChevronsUpDown,
+  FoldVertical,
+  HardDrive,
+  Info,
+  KeyRound,
+  Laptop,
+  ListTree,
+  Moon,
+  Rows3,
+  Sun,
+  UnfoldVertical,
+  User,
+} from 'lucide-react';
 
 import {
   Dialog,
@@ -12,13 +28,23 @@ import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useDetailLevel } from '../context/detail-level-context';
+import { usePerformanceUsageState } from '../context/performance-usage-context';
+import {
+  PERFORMANCE_USAGE_OPTIONS,
+  type PerformanceUsage,
+} from '../lib/performance-usage';
 import { useLocalDataStats } from '../hooks/use-local-stats';
 import { KnowledgePanel } from './KnowledgePanel';
 import { LocalDataStatsSection } from './LocalDataStatsSection';
 import { PasswordChangeForm } from './PasswordChangeForm';
 import { ROLE_LABELS } from '../lib/admin';
 import { APP_VERSION } from '../lib/app-info';
-import { DETAIL_LEVEL_OPTIONS, type DetailLevel } from '../lib/detail-level';
+import {
+  COLLAPSE_TIMING_OPTIONS,
+  DETAIL_LEVEL_OPTIONS,
+  type CollapseTiming,
+  type DetailLevel,
+} from '../lib/detail-level';
 import {
   describeMcpCapability,
   describeMcpServers,
@@ -86,10 +112,35 @@ const THEME_OPTIONS: Array<{
   },
 ];
 
-/** 「对话显示」两个档位的图标；文案与顺序来自 `lib/detail-level`（纯数据，可单测）。 */
+/**
+ * 「工作步骤展示」四档的图标。
+ *
+ * 图标的选择表达**信息密度递增**：收紧的箭头（简洁）→ 列表（标准）→ 展开的列表
+ * （详细）→ 全展开箭头（完全展开）。用文字无法一眼看出四档的差别，图标可以。
+ * 文案与顺序来自 `lib/detail-level`（纯数据，可单测）。
+ */
 const DETAIL_LEVEL_ICONS: Record<DetailLevel, typeof Sun> = {
-  concise: Rows3,
-  detailed: AlignLeft,
+  compact: FoldVertical,
+  standard: Rows3,
+  detailed: ListTree,
+  verbose: UnfoldVertical,
+};
+
+/** 「工作步骤收起时机」两档的图标。 */
+const COLLAPSE_TIMING_ICONS: Record<CollapseTiming, typeof Sun> = {
+  completion: AlignLeft,
+  'next-input': ChevronsUpDown,
+};
+
+/**
+ * 「性能与用量」两档的图标。
+ *
+ * 与「工作步骤展示」是两件事，图标也要能一眼分开：那一组换的是过程行的形态，
+ * 这一组换的是统计读数的详细程度。
+ */
+const PERFORMANCE_USAGE_ICONS: Record<PerformanceUsage, typeof Sun> = {
+  compact: AlignLeft,
+  detailed: Activity,
 };
 
 /**
@@ -105,7 +156,13 @@ export function SettingsPanel({
   onRefreshCapabilities,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
-  const { level: detailLevel, setLevel: setDetailLevel } = useDetailLevel();
+  const {
+    level: detailLevel,
+    setLevel: setDetailLevel,
+    collapseTiming,
+    setCollapseTiming,
+  } = useDetailLevel();
+  const performanceUsage = usePerformanceUsageState();
   const localStats = useLocalDataStats(open);
 
   // 从邮箱派生昵称与头像首字母
@@ -191,14 +248,16 @@ export function SettingsPanel({
         </div>
       </div>
 
-      {/* 对话显示：思考与工具调用的默认折叠方式。放在外观之后，因为它同样是
-          「界面长什么样」的偏好，但改的是对话区，不是配色。 */}
+      {/* 工作步骤展示 + 收起时机：思考与工具调用露多少细节。放在外观之后，因为它同样是
+          「界面长什么样」的偏好，但改的是对话区，不是配色。
+          两块共用「工作步骤」这个说法：它们改的是同一件事的两个维度
+          （露多少 / 什么时候收），分成两个不相干的标题会让人以为要配两遍。 */}
       <div className="space-y-2">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
           <AlignLeft className="size-3.5" />
-          <span>对话显示</span>
+          <span>工作步骤展示</span>
         </h3>
-        <div role="group" aria-label="对话显示" className="grid grid-cols-2 gap-2">
+        <div role="group" aria-label="工作步骤展示" className="grid grid-cols-2 gap-2">
           {DETAIL_LEVEL_OPTIONS.map(({ value, label, description }) => {
             const Icon = DETAIL_LEVEL_ICONS[value];
             const isActive = detailLevel === value;
@@ -232,7 +291,97 @@ export function SettingsPanel({
           })}
         </div>
         <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          两种模式都能展开看细节；这里只决定思考与工具调用默认是否展开。
+          四档都能点开看细节；这里只决定默认露多少。改动立即生效，不影响已有对话的内容。
+        </p>
+      </div>
+
+      {/* 收起时机：与上面四档**正交**（所以是独立一块而不是第五档）。默认「回答结束后」，
+          长回答里想回看刚跑完的过程才需要改成「下次有新消息时」。 */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <ChevronsUpDown className="size-3.5" />
+          <span>工作步骤收起时机</span>
+        </h3>
+        <div role="group" aria-label="工作步骤收起时机" className="grid grid-cols-2 gap-2">
+          {COLLAPSE_TIMING_OPTIONS.map(({ value, label, description }) => {
+            const Icon = COLLAPSE_TIMING_ICONS[value];
+            const isActive = collapseTiming === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setCollapseTiming(value)}
+                aria-pressed={isActive}
+                className={`relative flex flex-col items-center justify-center p-3 rounded-xl border text-center transition cursor-pointer select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 ${
+                  isActive
+                    ? 'border-primary bg-primary/5 text-foreground shadow-xs ring-1 ring-primary/40'
+                    : 'border-border/70 hover:border-border hover:bg-muted/50 text-muted-foreground'
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute top-2 right-2 text-primary">
+                    <Check className="size-3.5" aria-hidden="true" />
+                  </span>
+                )}
+                <Icon
+                  className={`size-5 mb-1.5 ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-xs font-medium text-foreground">{label}</span>
+                <span className="text-[10px] text-muted-foreground mt-0.5 leading-tight">
+                  {description}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          只影响刚结束的那一轮何时收起；选「下次有新消息时」可以在提问前回看它刚才做了什么。
+        </p>
+      </div>
+
+      {/* 性能与用量：只影响输入框下方那排统计读数显示多少，不改任何记账与落库。
+          放在「工作步骤」两组之后：先决定过程怎么显示，再决定读数显示多少。 */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <Activity className="size-3.5" />
+          <span>性能与用量</span>
+        </h3>
+        <div role="group" aria-label="性能与用量" className="grid grid-cols-2 gap-2">
+          {PERFORMANCE_USAGE_OPTIONS.map(({ value, label, description }) => {
+            const Icon = PERFORMANCE_USAGE_ICONS[value];
+            const isActive = performanceUsage.mode === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => performanceUsage.setMode(value)}
+                aria-pressed={isActive}
+                className={`relative flex flex-col items-center justify-center p-3 rounded-xl border text-center transition cursor-pointer select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/60 ${
+                  isActive
+                    ? 'border-primary bg-primary/5 text-foreground shadow-xs ring-1 ring-primary/40'
+                    : 'border-border/70 hover:border-border hover:bg-muted/50 text-muted-foreground'
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute top-2 right-2 text-primary">
+                    <Check className="size-3.5" aria-hidden="true" />
+                  </span>
+                )}
+                <Icon
+                  className={`size-5 mb-1.5 ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-xs font-medium text-foreground">{label}</span>
+                <span className="text-[10px] text-muted-foreground mt-0.5 leading-tight">
+                  {description}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          只影响输入框下方读数显示多少；上下文占用环始终显示，记账与落库也不受影响。
         </p>
       </div>
 

@@ -20,6 +20,9 @@ const usage = (overrides: Partial<UsageState> = {}): UsageState => ({
   costTotal: null,
   costCurrency: null,
   costCacheSavings: null,
+  // 计时块是后加的可选字段：默认没有（老记录 / 旧服务端），读出来是 null 而不是缺键，
+  // 这样组件里 `usage.timing` 的类型始终是 `UsageTiming | null | undefined` 之外的两态。
+  timing: null,
   ...overrides,
 });
 
@@ -64,6 +67,21 @@ describe('readUsage', () => {
     expect(readUsage(usage())).toEqual(usage());
   });
 
+  it('计时块原样透传（药丸要按会话聚合它，不能在这里被丢掉）', () => {
+    const timing = {
+      steps: 3,
+      turnMs: 8_000,
+      llmMs: 5_000,
+      toolMs: 1_000,
+      ttftMs: 420,
+      decodeMs: 2_000,
+      decodeTokens: 400,
+    };
+    expect(readUsage(usage({ timing }))?.timing).toEqual(timing);
+    // 写坏的计时块整块算没有：药丸少一项，而不是显示一个假的 0
+    expect(readUsage(usage({ timing: { steps: 'x' } as never }))?.timing).toBeNull();
+  });
+
   it('缺少 contextTokens 或不是对象时当作没有（老记录 / 写坏的数据）', () => {
     expect(readUsage(null)).toBeNull();
     expect(readUsage(undefined)).toBeNull();
@@ -82,6 +100,7 @@ describe('readUsage', () => {
       costTotal: null,
       costCurrency: null,
       costCacheSavings: null,
+      timing: null,
     });
   });
 });

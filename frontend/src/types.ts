@@ -262,6 +262,70 @@ export interface UsageEvent {
   cost_currency?: string | null;
   /** 缓存命中省下的钱（相对「全部按普通输入价」）。用于说明缓存到底有没有起作用。 */
   cost_cache_savings?: number | null;
+  /**
+   * 计时块：输入框下方「1 轮 3 步 · 208 tok/s」与统计弹层里的用时/首字。
+   *
+   * 线上是 **snake_case**（`turn_ms` 等），由 `lib/chat-store.ts` 在事件入口一次性
+   * 改名成 camelCase 的 `UsageTiming`。让每个消费端各自兼容两套命名，每加一个字段
+   * 就要各兼容一遍，漏掉一处就是静默返回 null——药丸不出现，却没有报错指向原因。
+   */
+  timing?: UsageTimingWire | null;
+}
+
+/**
+ * 计时块的**线上**形状（snake_case）。
+ *
+ * 与 `UsageTiming` 逐字段一一对应，只是命名跟着协议走。分成两个类型而不是让
+ * `UsageEvent` 直接引用 `UsageTiming`：`applyEvent` 的入参就是服务端真的发来的那个
+ * 形状，标错会让测试与实现都说不清真值长什么样（此前 `turn_ms` 字面量就是这样
+ * 撞上类型检查的）。
+ */
+export interface UsageTimingWire {
+  /** 本轮模型请求次数。 */
+  steps: number;
+  /** 整轮墙钟时间，含排队、工具执行与重试退避。 */
+  turn_ms: number;
+  /** 模型请求占用累计。 */
+  llm_ms: number;
+  /** 工具执行占用累计。 */
+  tool_ms: number;
+  /**
+   * 首 token 延迟（各步平均）；量不到时为 null 或缺席。
+   *
+   * 这三个可选项刻意都是 optional 而不只是 `| null`：pydantic 的默认值会序列化成
+   * `null`，但老服务端 / 中间代理裁剪字段时可能整个键都不在。两种缺席在语义上相同
+   * （「没量到」），类型上就该同时接受。
+   */
+  ttft_ms?: number | null;
+  /** 解码阶段累计耗时；与 `decode_tokens` 成对。 */
+  decode_ms?: number | null;
+  /** 解码阶段产出 token 数；与 `decode_ms` 成对。 */
+  decode_tokens?: number | null;
+}
+
+/**
+ * 一轮的计时明细（服务端实测，不是估算）。
+ *
+ * 口径说明：
+ * - `turnMs` 是整轮墙钟时间，含排队与工具执行；
+ * - `llmMs` 是模型请求占用（轮次时间减去工具执行与首字等待以外的部分），用于
+ *   分辨「慢在模型」还是「慢在工具」；
+ * - `ttftMs` 是**首 token 延迟的平均值**，按步（每次模型请求）取平均；
+ * - `decodeMs` / `decodeTokens` 只统计真正的解码阶段，两者相除才是输出速度，
+ *   拿整轮时间当分母会把工具执行与排队也算成「生成速度」。
+ */
+export interface UsageTiming {
+  /** 本轮发生过几次模型请求（有工具调用时一步一轮不止一次）。 */
+  steps: number;
+  turnMs: number;
+  llmMs: number;
+  toolMs: number;
+  /** 首 token 延迟（各步平均）；没有可测样本时为 null。 */
+  ttftMs: number | null;
+  /** 解码阶段的累计耗时；没有可测样本时为 null。 */
+  decodeMs: number | null;
+  /** 解码阶段产出的 token 数；与 `decodeMs` 成对出现。 */
+  decodeTokens: number | null;
 }
 
 /**
@@ -346,6 +410,10 @@ export type ChatRole = 'user' | 'assistant';
  * 定义放在这里而不是 `chat-message.ts`：写入方是 `chat-store.applyEvent`（某类内容
  * 首次出现时追加自己的种类），读取方是 `chat-message.buildParts`（按它排布部件）。
  * 两边都依赖 types.ts，放在其中一边会把依赖方向弄反。
+ *
+ * 注意 `text` 只占**一个**位置，记的是第一个正文增量的到达时间；渲染时正文整块排在
+ * 最后（见 `buildParts` 的注释），不按这个位置走——否则「先吐半句开场白再调工具」会把
+ * 最终答案画到过程组上面。
  */
 export type PartKind = 'tool-call' | 'reasoning' | 'text';
 
@@ -471,6 +539,8 @@ export interface UsageState {
   costTotal?: number | null;
   costCurrency?: string | null;
   costCacheSavings?: number | null;
+  /** 计时明细；老记录与不报时的轮次为缺失/undefined。 */
+  timing?: UsageTiming | null;
 }
 
 /** 本轮失败的结构化记录；`retryable` 决定消息下方是否显示「重试」按钮。 */
