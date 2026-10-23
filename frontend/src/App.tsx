@@ -189,8 +189,8 @@ function useMobileDrawerA11y(isMobile: boolean, isOpen: boolean, onClose: () => 
 
     const drawer = document.querySelector<HTMLElement>(SIDEBAR_DRAWER_SELECTOR);
     const previouslyFocused = document.activeElement;
-    // 焦点已经在抽屉里就不动它：搜索框的 autoFocus 比本 effect 先执行，胶囊工具栏的
-    // 「搜索」就是靠它把光标直接放进入口；无条件聚焦第一个控件会把这个位置抢回去。
+    // 焦点已经在抽屉里就不动它：搜索框的 autoFocus 比本 effect 先执行，⌘K 打开抽屉
+    // 就是靠它把光标直接放进入口；无条件聚焦第一个控件会把这个位置抢回去。
     const active = document.activeElement;
     const focusInside = drawer !== null && active !== null && drawer.contains(active);
     if (!focusInside) {
@@ -286,7 +286,7 @@ function AuthenticatedShell({
   // 管理后台是覆盖层。状态放在 shell 里（而不是 App）：关闭时要能就地刷新模型列表，
   // 而 `/api/models` 的 state 就在这个组件的 `useModels` 里。
   const [adminOpen, setAdminOpen] = useState(false);
-  // 设置页挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口在顶栏胶囊工具栏
+  // 设置页挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口留在侧边栏 / 抽屉里
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleOpenAdmin = useCallback(() => setAdminOpen(true), []);
@@ -322,7 +322,8 @@ function AuthenticatedShell({
   const handleToggleSettings = useCallback(() => setSettingsOpen((open) => !open), []);
 
   /**
-   * 「搜索」请求：收起态没有搜索框，所以由顶栏胶囊工具栏发起「展开侧边栏 + 打开搜索」。
+   * 「搜索」请求：⌘K 与侧边栏的搜索按钮都走这里——展开侧边栏（移动端即打开抽屉）
+   * 并把光标放进搜索框。
    *
    * 用递增计数器而不是布尔值：布尔值重复置 true 不会触发重渲染，用户关掉搜索后
    * 再点一次就打不开了。计数器的每次变化都是一次独立请求。
@@ -339,7 +340,7 @@ function AuthenticatedShell({
     setSearchRequest((request) => request + 1);
   }, []);
 
-  // ⌘K / Ctrl+K 打开搜索；⌘, / Ctrl+, 打开设置（与胶囊工具栏的两个入口共用动作）。
+  // ⌘K / Ctrl+K 打开搜索；⌘, / Ctrl+, 打开设置。
   // 设置页占据整屏时不接搜索键：抽屉在设置页背后展开，用户看不见也回不去。
   useGlobalShortcuts({
     onOpenSearch: handleOpenSearch,
@@ -483,15 +484,6 @@ function AuthenticatedShell({
                     await refreshModels();
                   }}
                   onToggleSidebar={handleToggleSidebar}
-                  onOpenSearch={handleOpenSearch}
-                  onOpenSettings={handleOpenSettings}
-                  account={{
-                    email: userEmail,
-                    onLogout,
-                    onOpenSettings: handleOpenSettings,
-                    canOpenAdmin,
-                    onOpenAdmin: handleOpenAdmin,
-                  }}
                   onCreateSession={handleCreateSession}
                   isSidebarOpen={isSidebarOpen}
                 />

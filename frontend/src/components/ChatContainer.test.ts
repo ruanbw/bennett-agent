@@ -12,11 +12,6 @@ vi.mock('./ChatProvider', () => ({
   ChatSessionNotices: () => createElement('div', { 'data-testid': 'mock-notices' }),
 }));
 
-// 同步入口依赖引擎与 Dexie（node 环境没有 indexedDB），这里只验证「胶囊工具栏是否把它放了出来」。
-vi.mock('./SyncStatusButton', () => ({
-  SyncStatusButton: () => createElement('button', { 'aria-label': '已同步，查看同步详情' }),
-}));
-
 describe('ChatContainer 顶栏与可编辑标题', () => {
   it('展示传入的会话标题与可编辑提示', () => {
     const html = renderToStaticMarkup(
@@ -36,7 +31,7 @@ describe('ChatContainer 顶栏与可编辑标题', () => {
     expect(html).not.toContain('aria-label="展开侧边栏"');
   });
 
-  it('侧边栏折叠时展示悬浮胶囊工具栏', () => {
+  it('侧边栏折叠时胶囊工具栏只有「展开 + 新建」', () => {
     const html = renderToStaticMarkup(
       createElement(ChatContainer, {
         models: [],
@@ -46,44 +41,20 @@ describe('ChatContainer 顶栏与可编辑标题', () => {
         onSelectModel: vi.fn(),
         onToggleSidebar: vi.fn(),
         onCreateSession: vi.fn(),
-        onOpenSearch: vi.fn(),
-        onOpenSettings: vi.fn(),
       })
     );
 
     expect(html).toContain('aria-label="展开侧边栏"');
     expect(html).toContain('aria-label="新建对话"');
-    // 搜索框、设置页和同步面板都长在侧边栏里：收起后必须由胶囊工具栏补上入口
-    expect(html).toContain('aria-label="搜索对话"');
-    expect(html).toContain('aria-label="设置"');
-    expect(html).toContain('aria-label="已同步，查看同步详情"');
     expect(html).toContain('rounded-xl');
-    // 搜索/设置/同步/账号在移动端由抽屉承担，顶栏只留「展开 + 新建」：
-    // 这四个包在一个 md 以下隐藏的容器里
-    expect(html).toContain('hidden items-center md:flex');
-    expect(html.indexOf('hidden items-center md:flex')).toBeLessThan(
-      html.indexOf('aria-label="搜索对话"')
-    );
-    // 「展开侧边栏」「新建对话」不在这层容器里，移动端仍然可见
-    expect(html.indexOf('aria-label="新建对话"')).toBeLessThan(
-      html.indexOf('hidden items-center md:flex')
-    );
-  });
-
-  it('没传 onOpenSearch 时不渲染搜索入口（不给出点不动的按钮）', () => {
-    const html = renderToStaticMarkup(
-      createElement(ChatContainer, {
-        models: [],
-        currentModel: null,
-        isSidebarOpen: false,
-        onSelectModel: vi.fn(),
-        onToggleSidebar: vi.fn(),
-      })
-    );
-
-    expect(html).toContain('aria-label="展开侧边栏"');
+    // 搜索 / 设置 / 同步 / 账号都不进顶栏（移动端与桌面端一致）：
+    // 它们在侧边栏与抽屉里各有常驻入口，挤进胶囊只会把会话标题压没。
     expect(html).not.toContain('aria-label="搜索对话"');
     expect(html).not.toContain('aria-label="设置"');
+    expect(html).not.toContain('aria-label="已同步，查看同步详情"');
+    expect(html).not.toContain('aria-label="账号与设置菜单"');
+    // 移动端与桌面端看到的是同一组按钮，不再有「窄屏隐藏」的那层容器
+    expect(html).not.toContain('md:flex');
   });
 
   it('未提供标题时优雅回退为「新对话」', () => {
