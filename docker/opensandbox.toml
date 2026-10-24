@@ -1,0 +1,66 @@
+# OpenSandbox server —— 本地开发配置（生产用 k8s 版，见 §「生产部署」）
+#
+# 启动：
+#   uvx opensandbox-server --config docker/opensandbox.toml
+#
+# 这份配置只服务「本机开发 / CI」：docker 运行时，容器之间共享宿主内核。
+# 生产必须换成 kubernetes 运行时并显式开启 Firecracker（或 gVisor/Kata）安全运行时，
+# 否则多租户隔离就只是 cgroup 层面的自觉。见 docs/design/sandbox-vm.md §10。
+
+[server]
+host = "127.0.0.1"
+port = 8080
+# 单台沙箱最长存活。与业务侧 SANDBOX_HARD_TTL_SECONDS 同源（默认 4h），
+# 两边都设是刻意的：控制面崩了，服务端这一层还能兜住，不会留下永久占机的机器。
+max_sandbox_timeout_seconds = 14400
+
+# 本地不设 API key（server 会要求显式确认“无鉴权”）：
+#   OPENSANDBOX_INSECURE_SERVER=YES uvx opensandbox-server --config docker/opensandbox.toml
+# 生产必须配 api_key，且只在内网暴露。
+
+[proxy]
+# macOS 上从普通 shell 启动时可以路由到 bridge IP；若出现 endpoint 拉取失败，改 false。
+resolve_internal = true
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.1.0"
+
+[store]
+# 本地用 sqlite；生产用 postgresql（多实例必须共享同一个库）。
+type = "sqlite"
+path = "~/.opensandbox/opensandbox.db"
+
+[docker]
+network_mode = "bridge"
+port_range_min = 40000
+port_range_max = 60000
+publish_host = "127.0.0.1"
+# 这些是容器层面的最低要求，不是隔离边界（隔离靠 microVM）。
+drop_capabilities = [
+  "AUDIT_WRITE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_RAW",
+  "SYS_ADMIN",
+  "SYS_MODULE",
+  "SYS_PTRACE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+]
+no_new_privileges = true
+pids_limit = 4096
+seccomp_profile = ""
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.1.7"
+# dns 模式 = 按域名放行的出站策略。业务侧的 SANDBOX_EGRESS=proxy 就落到这里，
+# 不要在沙箱里再自己搞一套白名单。
+mode = "dns"
+readiness_timeout_seconds = 30.0

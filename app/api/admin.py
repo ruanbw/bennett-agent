@@ -452,6 +452,17 @@ async def ban_user(
     target.is_active = False
     await session.commit()
     removed = await delete_user_access_tokens(target.id)
+    # 封号是「立刻失效」语义：认证依赖会拒绝他，机器也必须一起失效——否则被改过的
+    # 客户端仍能拿着已存在的租约继续用算力。失败只告警：封禁本身已经生效，
+    # 剩下的机器最迟会被空闲回收带走。
+    try:
+        from app.services.sandbox.reaper import destroy_leases_for_user
+
+        destroyed = await destroy_leases_for_user(target.id)
+        if destroyed:
+            logger.info("封禁用户: id=%s 已回收执行环境=%d", target.id, destroyed)
+    except Exception:  # noqa: BLE001 - 不影响封禁结果
+        logger.warning("封禁用户后回收沙箱失败: id=%s", target.id, exc_info=True)
     logger.info("封禁用户: id=%s 已失效会话=%d", target.id, removed)
     return _user_read(target)
 

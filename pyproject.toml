@@ -29,6 +29,7 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "sse-starlette>=3.5.0",
     "uvicorn[standard]>=0.54.0",
+    "opensandbox>=1.1.1",
 ]
 
 [dependency-groups]

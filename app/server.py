@@ -19,6 +19,7 @@ from app.api.capabilities import router as capabilities_router
 from app.api.chat import router as api_router
 from app.api.knowledge import router as knowledge_router
 from app.api.ops import router as ops_router
+from app.api.sandbox import router as sandbox_router
 from app.api.sync import router as sync_router
 from app.api.uploads import router as uploads_router
 from app.config import settings
@@ -248,6 +249,13 @@ _API_TAGS = [
         "description": "用户私有知识库：上传文档（分块 + 向量化）、列表、删除、手动检索。",
     },
     {
+        "name": "sandbox",
+        "description": (
+            "隔离执行环境「我的电脑」（每个用户一台、跨会话共用）：心跳续命与状态查询。"
+            "执行类操作只经由 Agent 的工具调用，不对外暴露直接执行接口。"
+        ),
+    },
+    {
         "name": "sync",
         "description": "本机数据增量同步：push 逐行接受或拒绝，pull 用不透明游标做长轮询。",
     },
@@ -427,6 +435,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(api_router)
     app.include_router(capabilities_router)
+    app.include_router(sandbox_router)
     app.include_router(knowledge_router)
     app.include_router(admin_router)
     app.include_router(sync_router)

@@ -14,6 +14,8 @@ pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 
 
 from app.config import is_usable_api_key, settings
 from app.services.rag.embeddings import EMBEDDING_TIMEOUT_SECONDS
+from app.services.sandbox import is_sandbox_enabled
+from app.services.sandbox.base import MAX_EXEC_TIMEOUT_S
 from app.tools.ask_user_clarification import ask_user_clarification as _raw_ask_clarification
 from app.tools.current_time import get_current_time as _raw_get_current_time
 from app.tools.guard import (
@@ -35,6 +37,18 @@ from app.tools.registry import (
     ToolCategory,
     ToolRegistry,
 )
+from app.tools.sandbox import (
+    sandbox_exec as _raw_sandbox_exec,
+)
+from app.tools.sandbox import (
+    sandbox_read_file as _raw_sandbox_read_file,
+)
+from app.tools.sandbox import (
+    sandbox_reset as _raw_sandbox_reset,
+)
+from app.tools.sandbox import (
+    sandbox_write_file as _raw_sandbox_write_file,
+)
 from app.tools.tavily_search import (
     TAVILY_TOOL_TIMEOUT_SECONDS,
 )
@@ -44,6 +58,12 @@ from app.tools.tavily_search import (
 
 #: 全局工具注册中心单例
 registry = ToolRegistry()
+
+#: 沙箱工具的**外层防线**超时。必须严格大于工具内部自己能等的最长时间：
+#: 模型可以把 `timeout_s` 调到 `MAX_EXEC_TIMEOUT_S`（900s），再加建机与文件传输的余量。
+#: pydantic-ai 的超时是包在工具外层、抛成 `ModelRetry` 的，一旦先于内部收尾触发，
+#: 工具里写好的中文建议就全部不可达（与 tavily 那段注释同一个坑）。
+SANDBOX_TOOL_TIMEOUT_SECONDS = MAX_EXEC_TIMEOUT_S + 60.0
 
 #: 知识库检索的工具级超时（外层防线）。必须**严格大于** embedding 自己的
 #: `EMBEDDING_TIMEOUT_SECONDS`：pydantic-ai 的超时会抛成 `ModelRetry`，先于工具内部
@@ -103,6 +123,72 @@ knowledge_tool: ManagedTool = registry.register(
     enabled_checker=is_knowledge_base_enabled,
 )(_raw_search_knowledge_base)
 
+# ---------------------------------------------------------------------
+# 沙箱：四个工具，**签名里没有任何 id**。
+#
+# 为什么不是 DANGEROUS：审批闸门的分界线是「能不能撤销」而不是「有多危险」
+# （见 `app/tools/approval.py`）。沙箱内的命令全部可撤销——机器可弃、产物在导出后
+# 才销毁——所以逐条命令审批只会让沙箱变成不可用的点选框。真正的风险落在入口：
+# 「机器属于谁」由作用域在构造上保证（`app/tools/sandbox_scope.py`），而不是靠每条命令审批。
+#
+# 唯一需要审批的是 `sandbox_reset`（SAFE_WRITE）：它会销毁当前会话的机器。
+# 产物会先导出，但这个动作不可逆，值得打断用户一次。
+# ---------------------------------------------------------------------
+
+sandbox_exec_tool: ManagedTool = registry.register(
+    category=ToolCategory.DATA,
+    risk_level=RiskLevel.READ_ONLY,
+    tags=["sandbox", "code", "compute"],
+    description=(
+        "在用户自己的执行环境（同一用户跨会话共用一台机器）里跑一条 shell 命令，返回退出码与输出。"
+        "适用于：跑 Python/脚本、"
+        "处理数据与文件、安装依赖、运行测试、查看文件内容。"
+        "环境是持久的（同一会话内文件和已装的包都在），但没有持久 shell 会话："
+        "每次都是新进程，`cd` 与 `export` 不会留到下一次，请用绝对路径或 `命令 && 命令` 串起来。"
+    ),
+    timeout=SANDBOX_TOOL_TIMEOUT_SECONDS,
+    enabled_checker=is_sandbox_enabled,
+)(_raw_sandbox_exec)
+
+sandbox_write_file_tool: ManagedTool = registry.register(
+    category=ToolCategory.DATA,
+    risk_level=RiskLevel.READ_ONLY,
+    tags=["sandbox", "files"],
+    description=(
+        "把文本内容写入用户执行环境里的文件（父目录会自动创建；同一用户的其它会话也能看到）。"
+        "适合把脚本、配置或用户给的数据落成文件，再用 sandbox_exec 跑它。路径必须是以 "
+        "/home/sandbox/workspace 开头的绝对路径。"
+    ),
+    timeout=60.0,
+    enabled_checker=is_sandbox_enabled,
+)(_raw_sandbox_write_file)
+
+sandbox_read_file_tool: ManagedTool = registry.register(
+    category=ToolCategory.DATA,
+    risk_level=RiskLevel.READ_ONLY,
+    tags=["sandbox", "files"],
+    description=(
+        "读取用户执行环境里的文件内容（超过 max_bytes 会报错而不是截断——"
+        "截断的二进制或 JSON 会让你在坏文件上继续推理）。大文件请用 sandbox_exec 配合 "
+        "head/tail/grep 分段看。"
+    ),
+    timeout=60.0,
+    enabled_checker=is_sandbox_enabled,
+)(_raw_sandbox_read_file)
+
+sandbox_reset_tool: ManagedTool = registry.register(
+    category=ToolCategory.DATA,
+    risk_level=RiskLevel.SAFE_WRITE,
+    tags=["sandbox", "reset"],
+    description=(
+        "重置用户的执行环境：销毁现有机器，下次执行时会重新创建一个干净的。"
+        "注意这台机器是同一用户跨会话共用的，重置会影响该用户的所有会话。"
+        "只在环境已经被弄乱、或用户明确要求从头开始时使用——已安装的依赖与工作目录里的文件都会丢。"
+    ),
+    timeout=120.0,
+    enabled_checker=is_sandbox_enabled,
+)(_raw_sandbox_reset)
+
 #: **全量**工具列表（含当前配置下不可用的工具）。保留本列表供静态全量探针使用。
 ALL_TOOLS: list[ManagedTool] = registry.all_tools()
 
@@ -130,6 +216,10 @@ ask_user_clarification = _raw_ask_clarification
 get_current_time = _raw_get_current_time
 search_knowledge_base = _raw_search_knowledge_base
 tavily_search = _raw_tavily_search
+sandbox_exec = _raw_sandbox_exec
+sandbox_write_file = _raw_sandbox_write_file
+sandbox_read_file = _raw_sandbox_read_file
+sandbox_reset = _raw_sandbox_reset
 
 __all__ = [
     "ALL_TOOLS",
@@ -150,6 +240,14 @@ __all__ = [
     "is_knowledge_base_enabled",
     "knowledge_tool",
     "search_knowledge_base",
+    "sandbox_exec",
+    "sandbox_exec_tool",
+    "sandbox_read_file",
+    "sandbox_read_file_tool",
+    "sandbox_reset",
+    "sandbox_reset_tool",
+    "sandbox_write_file",
+    "sandbox_write_file_tool",
     "registry",
     "tavily_search",
     "tavily_tool",

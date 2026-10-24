@@ -23,6 +23,14 @@ class CapabilitiesResponse(BaseModel):
     """当前进程实际具备的能力。"""
 
     web_search: bool = Field(description="联网搜索工具（tavily_search）是否已装配")
+    sandbox: bool = Field(
+        default=False,
+        description=(
+            "隔离执行环境（sandbox_exec / sandbox_write_file / sandbox_read_file / sandbox_reset）"
+            "是否已装配。前端据此决定要不要提「让我帮你跑段代码/处理文件」这类起步建议——"
+            "承诺一个装不出来的能力比不给建议更糟。"
+        ),
+    )
     tools: list[str] = Field(
         default_factory=list,
         description="本轮装配给 Agent 的工具名（按注册顺序）；供前端与排障共用",

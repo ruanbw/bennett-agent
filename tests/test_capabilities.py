@@ -53,3 +53,24 @@ def test_capabilities_with_configured_key(monkeypatch):
     assert capabilities.web_search is True
     # 工具顺序即注册顺序；前端只读 web_search，列表留给排障
     assert capabilities.tools == ["ask_user_clarification", "get_current_time", "tavily_search"]
+
+
+def test_sandbox_capability_follows_the_switch(monkeypatch):
+    """沙箱开关同时决定「工具挂不挂」与「`sandbox` 报不报 true」。
+
+    这两件事必须由同一个判据派生：单独改一处会出现「前端推荐跑代码、模型却没有工具」
+    或者反过来。
+    """
+    monkeypatch.setattr(settings, "sandbox_enabled", True)
+
+    enabled = collect_capabilities()
+
+    assert enabled.sandbox is True
+    assert {"sandbox_exec", "sandbox_write_file", "sandbox_read_file", "sandbox_reset"} <= set(
+        enabled.tools
+    )
+
+    monkeypatch.setattr(settings, "sandbox_enabled", False)
+    disabled = collect_capabilities()
+    assert disabled.sandbox is False
+    assert not any(name.startswith("sandbox_") for name in disabled.tools)

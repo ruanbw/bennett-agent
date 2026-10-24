@@ -36,6 +36,8 @@ def render_system_prompt(**overrides):
         # 这里默认空列表，MCP 相关的用例显式传入。
         "mcp_servers": overrides.pop("mcp_servers", []),
         "knowledge_base": "search_knowledge_base" in tools,
+        # 沙箱四个工具同生同灭；与生产同源地由 `sandbox_exec` 派生。
+        "sandbox": "sandbox_exec" in tools,
         # 审批闸门始终挂载（`agent_factory` 的 capabilities），所以生产渲染永远传 True。
         "approval_gate": True,
     }
@@ -67,6 +69,7 @@ def test_default_filter_still_works_with_strict_undefined():
         current_time=False,
         mcp_servers=[],
         knowledge_base=False,
+        sandbox=False,
         approval_gate=True,
     )
 
@@ -145,6 +148,25 @@ def test_search_instruction_only_appears_when_search_is_mounted():
     assert "本轮**没有**联网搜索工具" in without
     assert "请调用 `tavily_search`" in with_search
     assert "本轮**没有**联网搜索工具" not in with_search
+
+
+def test_sandbox_instruction_only_appears_when_sandbox_is_mounted():
+    """没开沙箱时不能教模型「先写文件再执行」——那会烧掉一轮并换来工具不存在。
+
+    反过来说，开了却不在提示词里说清「什么时候该跑」，模型就永远只在回答里贴代码，
+    用户看到的是「它好像不会用我的环境」。
+    """
+    without = render_system_prompt()
+    with_sandbox = render_system_prompt(
+        tools=["ask_user_clarification", "get_current_time", "sandbox_exec", "sandbox_write_file"]
+    )
+
+    assert "本轮**没有**隔离执行环境" in without
+    assert "sandbox_write_file" not in without
+    assert "本轮**没有**隔离执行环境" not in with_sandbox
+    assert "sandbox_exec" in with_sandbox
+    # 没有持久 shell 这条必须讲，否则模型会写 `cd /x` 然后下一步找不到文件
+    assert "没有持久 shell" in with_sandbox
 
 
 def test_rendered_prompt_stays_free_of_template_artifacts_with_conditionals():

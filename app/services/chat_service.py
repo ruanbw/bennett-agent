@@ -93,6 +93,7 @@ from app.tools.cache_scope import cache_scope
 from app.tools.guard import collect_tool_failures
 from app.tools.knowledge_scope import knowledge_scope
 from app.tools.registry import RiskLevel
+from app.tools.sandbox_scope import sandbox_scope
 
 logger = logging.getLogger(__name__)
 
@@ -878,6 +879,7 @@ async def stream_chat_events(
     context_anchor: ContextAnchor | None = None,
     cache_scope_key: str | None = None,
     user_id: uuid.UUID | None = None,
+    session_id: str | None = None,
     approvals: dict[str, bool] | None = None,
 ) -> AsyncGenerator[ChatEvent, None]:
     """产出本轮对话的聊天事件流。
@@ -1070,6 +1072,10 @@ async def stream_chat_events(
     with (
         cache_scope(cache_scope_key),
         knowledge_scope(user_id),
+        # 沙箱作用域：与知识库同一个机制、不同用途。它决定「哪台机器属于这次请求」，
+        # 而不是「能查谁的文档」。结合起来看：user_id 定人，session_id 定机器。
+        # 两个缺失都只会让沙箱工具回一句拒绝文案，不影响本轮其他能力。
+        sandbox_scope(user_id, session_id),
         collect_fallbacks() as fallbacks,
         collect_tool_failures(),
     ):

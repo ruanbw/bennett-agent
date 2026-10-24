@@ -69,6 +69,7 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -939,3 +940,116 @@ __all__ = [
     "hash_access_token",
     "verify_schema_at_head",
 ]
+
+
+class SandboxLease(Base):
+    """一台沙箱机器的租约（用户 × 会话 × 一台机器）。
+
+    ## 为什么这张表必须有，尽管服务端「不保存会话」
+
+    会话历史仍然由客户端回放，但**机器是服务端独有的长生命周期资源**：它上面有什么文件、
+    跑了什么进程，客户端不可能知道、也不可能重建。所以这是本项目第一份「服务端唯一真相」
+    的运行时状态，落在库里而不是内存里——多 worker 部署下内存态必然对不上。
+
+    ## 为什么是「一个用户一台」
+
+    `user_id` 上的**部分唯一索引**（仅对活动状态生效）同时干两件事：它是「每用户至多
+    一台」的强制点，也是并发创建的去重机制——agent 在一轮里并发调用两个沙箱工具是
+    真实存在的，没有它就会建出两台机器而只记一条租约。
+
+    曾经按 `(user_id, session_id)` 建索引（一会话一台），后来改成按用户：切换会话不该
+    让刚才装好的依赖消失，一个人也不该同时占着两三台。`session_id` 因此只保留
+    「最后是哪个会话在用」这条归因信息，不参与寻址。
+
+    索引只覆盖活动状态（`provisioning/ready/paused`），所以历史行可以无限堆积，
+    同一用户重建环境也不会撞唯一约束。
+
+    ## 状态机
+
+        provisioning → ready → destroying → destroyed
+                   ↘ failed            ↘ destroy_failed
+
+    迁移**必须**用条件 UPDATE（`WHERE state='ready' RETURNING id`）抢占，不能先读后写：
+    回收循环和一条正在跑的长任务会同时在场，先读后写会让回收把机器从长任务下面抽走。
+    """
+
+    __tablename__ = "sandbox_lease"
+    __table_args__ = (
+        Index(
+            "ux_sandbox_lease_one_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("state IN ('provisioning', 'ready', 'paused')"),
+        ),
+        # 回收循环的索引：WHERE state='ready' AND hard_expires_at < now()
+        Index("ix_sandbox_lease_reap", "state", "hard_expires_at"),
+    )
+
+    #: `sbx_<32 hex>`。服务端生成、随机，不作为凭据使用（凭据是登录态 + 作用域）。
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: 最后使用这台机器的会话标识 `sess_<uuid>`（归因用，**不参与寻址**）。
+    #: 机器按用户分配，所以一个用户跨会话共用一台；复用时会改写这一列。
+    #: **不是身份**：身份始终来自服务端注入的作用域（`app/tools/sandbox_scope.py`）。
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: `e2b` / `docker`。换后端时旧租约要靠它找到该让谁回收。
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: provider 侧句柄（E2B sandbox id / 容器名）。**只在服务端流动**，绝不进工具参数。
+    provider_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    template: Mapped[str] = mapped_column(String(128), nullable=False)
+    template_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    #: 最后一次「服务端观察到的工作」（exec / 文件读写）。与心跳分开：
+    #: 心跳证明**客户端还在**，它在 Redis 里带 TTL；这个证明**机器还在被用**，
+    #: 于是「用户关掉页面但 agent 还在跑长任务」不会被误回收。
+    last_activity: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 绝对上限。只靠空闲回收的话，一个挂着不动的标签页可以永远付费占机。
+    hard_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: idle / hard_ttl / session_deleted / user_banned / user_reset / error
+    destroy_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: 销毁前导出的产物（对象存储键）。产物比机器重要：机器可以重建，用户的计算结果不行。
+    artifact_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    #: 最近一次失败原因（给运维看，不进模型上下文）。
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SandboxCommand(Base):
+    """沙箱内的每一条命令（审计 + 排障）。
+
+    **不参与任何金额计算**：本项目的计量只有 token（见设计文档 §8），
+    沙箱的成本只通过「exec 输出进上下文」这一条通路体现。这张表存在的理由是
+    「边界审批 + 审计」模型：既然不再逐条命令打断用户，就必须事后能查清跑过什么。
+
+    `output_head` 存的是**渲染给模型看的同一份截断文本**（不是原始输出）：
+    审计要回答的是「模型当时看到了什么」，原始输出既存不下也不该存
+    （可能是用户数据）。完整输出留在沙箱里，随机器一起销毁。
+    """
+
+    __tablename__ = "sandbox_command"
+    __table_args__ = (Index("ix_sandbox_command_lease", "lease_id", "seq"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    lease_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("sandbox_lease.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: 会话内的自增序号，让审计可以按顺序回放。
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_head: Mapped[str | None] = mapped_column(Text, nullable=True)
+    truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )

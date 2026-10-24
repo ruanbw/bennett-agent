@@ -53,6 +53,8 @@ CURRENT_TIME_TOOL_NAME = "get_current_time"
 #: 知识库检索工具名。与 `tavily_search` 同一类：没配 embedding 就不挂，提示词里
 #: 也就不该教模型去调它。
 KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
+#: 沙箱工具的代表名。四个工具（exec / write / read / reset）同生同灭，取执行那个当探针。
+SANDBOX_TOOL_NAME = "sandbox_exec"
 
 #: 标题生成的上游预算（秒）。
 #:
@@ -326,6 +328,9 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         clarification=CLARIFICATION_TOOL_NAME in names,
         current_time=CURRENT_TIME_TOOL_NAME in names,
         knowledge_base=KNOWLEDGE_TOOL_NAME in names,
+        # 沙箱：不告诉模型「什么时候该用」，它就会永远只在回答里贴代码。
+        # 与知识库/搜索同一个模式——能力开关决定提示词分支，两边不能各说各话。
+        sandbox=SANDBOX_TOOL_NAME in names,
         # MCP 工具：名字带 `server__` 前缀，与内置工具混在同一个 tools 列表里。
         # 模板单独列一段——不列的话模型只知道「有这些名字」，不知道它们是
         # **外部**工具（可能慢、可能失败、结果需要按不可信数据处理）。

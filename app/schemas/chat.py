@@ -24,6 +24,16 @@ MAX_MODEL_ID_CHARS = 300
 MAX_REASONING_EFFORT_CHARS = 32
 MAX_TITLE_PROMPT_CHARS = 8_000
 
+#: 会话标识的长度与形状。它是**客户端生成**的 `sess_<...>`（见 `frontend/src/lib/constants.ts`
+#: 的 `newId`）：安全上下文里是去掉短横的 uuid，非安全上下文（局域网 http）回退成
+#: `${时间戳}_${随机串}`——**旧格式带下划线**。
+#:
+#: 字符集必须与 `app/schemas/sync.py:ID_PATTERN` 一致（`[A-Za-z0-9_-]`）：同步接受、
+#: 聊天拒绝的 id 会让老会话的每一次对话都 422，而这不是「沙箱不可用」，是**聊天不可用**。
+#: 以后收窄这个 pattern 之前先想清楚：存量数据的 id 不会因为 schema 变严而消失。
+MAX_SESSION_ID_CHARS = 64
+SESSION_ID_PATTERN = rf"^sess_[A-Za-z0-9_-]{{1,{MAX_SESSION_ID_CHARS - 5}}}$"
+
 #: `reasoning_effort` 的字符白名单。刻意不枚举取值：网关可以声明 xhigh/max 之类
 #: 的自定义等级（见 `model_service` 的 supported_reasoning_levels），枚举会误杀
 #: 新等级。这里只挡住空白、空格、换行等不该出现在上游参数里的字符。
@@ -207,6 +217,20 @@ class ChatRequest(BaseModel):
             "可选：上一轮上游回报的真实用量锚点。提供后上下文预检只估算锚点之后的消息，"
             "精度高于纯估算；缺失或不可用时服务端自己估算（不报错，因为这是可选的精度提升）。"
         ),
+    )
+    #: 当前会话的客户端标识。
+    #:
+    #: 为什么服务端需要它：隔离执行环境是「每会话一台机器」，所以服务端必须知道
+    #: 「这是哪个会话」才能找到对应租约。它**不是身份**——身份始终来自登录态，
+    #: 作用域由服务端注入（`app/tools/sandbox_scope.py`）。即便客户端谎报别人的
+    #: 会话 id，拿到的也只是自己名下的租约：租约查询一律带 `user_id`。
+    #:
+    #: 可选：历史客户端不传时，沙箱工具会回「当前会话缺少会话标识」，其余能力不受影响。
+    session_id: str | None = Field(
+        None,
+        max_length=MAX_SESSION_ID_CHARS,
+        pattern=SESSION_ID_PATTERN,
+        description="客户端生成的会话标识（sess_<...>）；沙箱按会话分配机器时使用",
     )
     #: 审批决定：`tool_call_id` → 是否批准。**只用于续跑**被拦下的工具调用。
     #:

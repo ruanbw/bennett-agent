@@ -644,6 +644,12 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         # 提交之后再唤醒：提交前唤醒会让等待方读到旧版本，然后白等一轮。
         notify_change(user_id)
 
+    # 删除会话**不拆机器**：机器是按用户分的，同一个人的其他会话可能正在用它
+    # （刚才装好的依赖、正在跑的结果都在里面）。它会照常被空闲回收带走。
+    #
+    # 曾经这里按会话拆机器，那是「一会话一台」时代的逻辑；改成按用户之后继续拆就是
+    # 「删一个会话顺手弄丢另一个会话的工作」。隐私上的差别有限：两台机器本来就属于同一个人。
+
     logger.info(
         "同步推送 user=%s conversations=%d messages=%d rejected=%d version=%d",
         user_id,

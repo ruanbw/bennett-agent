@@ -192,6 +192,99 @@ class Settings(BaseSettings):
             "一条勉强相关的结果比没有结果糟——模型会拿它当依据编答案。"
         ),
     )
+    # ------------------------------------------------------------------
+    # 沙箱（每会话一台隔离执行环境）。设计见 docs/design/sandbox-vm.md。
+    # 默认全关：没有节点池的部署不应该凭空多出四个工具，也不该让模型
+    # 以为它能跑代码。开关只影响工具装配，不影响已有的对话与同步。
+    # ------------------------------------------------------------------
+    sandbox_enabled: bool = Field(
+        default=False,
+        description=(
+            "是否装配沙箱工具。关闭时 `capabilities.sandbox=false`，模型看不到这四个工具，"
+            "行为与之前完全一致。"
+        ),
+    )
+    sandbox_provider: Literal["opensandbox"] = Field(
+        default="opensandbox",
+        description=(
+            "沙箱后端。目前只有 `opensandbox`：本地 Docker 运行时与生产 K8s+Firecracker 运行时"
+            "共用同一套 API，所以不需要两个后端。先前自写的 docker 后端已删除——它只能在本地用，"
+            "却要单独维护一套命令拼装与超时处理。"
+        ),
+    )
+    sandbox_template: str = Field(default="bennett-sandbox", description="沙箱模板/镜像名")
+    sandbox_template_version: str = Field(
+        default="0.1",
+        description=(
+            "模板版本。落库到租约上，让「用户当时跑在哪个版本」可查——"
+            "模板升级后旧机器的行为不同，排查时必须能对上。"
+        ),
+    )
+    sandbox_cpu: float = Field(default=2.0, gt=0, description="每台沙箱的 vCPU")
+    sandbox_memory_mb: int = Field(default=4096, ge=256, description="每台沙箱的内存（MB）")
+    sandbox_workdir: str = Field(default="/home/sandbox/workspace", description="沙箱内的工作目录")
+    sandbox_idle_seconds: int = Field(
+        default=600,
+        ge=60,
+        description=(
+            "空闲回收：`max(心跳, 最近活动)` 超过它就销毁。心跳证明客户端还在，"
+            "活动证明机器还在被用（用户关页面但 agent 还在跑长任务）。"
+        ),
+    )
+    sandbox_hard_ttl_seconds: int = Field(
+        default=14_400,
+        ge=300,
+        description=(
+            "绝对上限（默认 4 小时）。只靠空闲回收的话，一个挂着不动的标签页可以永远占机。"
+            "到点无论有没有心跳都销毁，产物照样先导出。"
+        ),
+    )
+    sandbox_heartbeat_seconds: int = Field(
+        default=30,
+        ge=5,
+        description="前端心跳间隔。心跳只写 Redis 的 TTL 键，不写数据库（写放大）。",
+    )
+    sandbox_max_per_user: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "每个用户同时活着的机器数。默认 1 = 一个用户跨会话共用同一台机器；"
+            "调大只在「一人多环境」这种明确需求下有意义。这不是付费分级，是容量保护。"
+        ),
+    )
+    sandbox_max_concurrent: int = Field(
+        default=12,
+        ge=1,
+        description="全局并发上限（节点池容量）。超限返回 429，不静默排队。",
+    )
+    sandbox_egress: Literal["proxy", "open"] = Field(
+        default="proxy",
+        description=(
+            "出站策略。生产默认 `proxy`（白名单代理）；`open` 只给本地/自用，"
+            "启动时会打一条警告——多租户下自由联网等于把「上传件可能被外带」交给模型决定。"
+        ),
+    )
+    sandbox_artifact_max_bytes: int = Field(
+        default=200 * 1024 * 1024,
+        description=(
+            "销毁前导出产物的体积上限。超限只留文件清单：产物要保住，"
+            "但不能让一次 `dd` 出来的 20GB 把对象存储和回收循环一起拖死。"
+        ),
+    )
+    sandbox_server_url: str | None = Field(
+        default="http://127.0.0.1:8080",
+        description=(
+            "OpenSandbox server 地址（本地默认 8080；生产指向集群内的 ingress）。"
+            "沙箱服务不可达时工具会回「执行环境暂不可用」，不影响对话其余部分。"
+        ),
+    )
+    sandbox_server_api_key: str | None = Field(
+        default=None,
+        description=(
+            "OpenSandbox server 的 API key。为空时服务端会要求显式确认“无鉴权”"
+            "（OPENSANDBOX_INSECURE_SERVER=YES），生产必须配。"
+        ),
+    )
     metrics_enabled: bool = Field(
         default=False,
         description=(

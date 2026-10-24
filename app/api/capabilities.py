@@ -34,6 +34,10 @@ def collect_capabilities() -> CapabilitiesResponse:
 
     return CapabilitiesResponse(
         web_search="tavily_search" in tools,
+        # 沙箱是「每会话一台机器」的能力，开关在 settings。关着的时候模型看不到这四个工具，
+        # 前端也不应该提「跑代码」这类建议；开了但当前请求没带 session_id 时工具会自己拒绝，
+        # 那是请求级问题，不该把部署能力报成不可用。
+        sandbox=any(name.startswith("sandbox_") for name in tools),
         tools=tools,
         mcp_servers=[McpServerStatus(name=name, tools=names) for name, names in sorted(grouped.items())],
         mcp_error=registry.discovery_error,
