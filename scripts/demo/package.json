@@ -1,0 +1,14 @@
+{
+  "name": "bennett-demo-recorder",
+  "private": true,
+  "version": "0.1.0",
+  "description": "用真实浏览器录一段 README 用的演示（不是应用依赖，只是文档工具）",
+  "type": "module",
+  "scripts": {
+    "record": "node record.mjs",
+    "video": "python3 make-video.py"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}
