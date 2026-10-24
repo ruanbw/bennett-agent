@@ -2,32 +2,72 @@
   <img src="frontend/public/icons/icon-192.png" width="96" height="96" alt="Bennett Agent 图标（头像里的手写连笔字）">
 </p>
 
-# Bennett Agent
+<h1 align="center">Bennett Agent</h1>
 
-基于 [PydanticAI](https://ai.pydantic.dev/) 与 [LiteLLM](https://docs.litellm.ai/) 的 Agent Loop 框架，
-带一个完整的 Web 界面：FastAPI 后端（SSE 流式）+ React 19 前端，会话存在浏览器本地。
+<p align="center">
+  一个能自己动手的 Agent：调工具、联网、读你的文档，
+  还能在<b>一台属于你的隔离机器</b>上真的跑代码。
+</p>
 
-## 特性
+<p align="center">
+  Python（FastAPI + PydanticAI + LiteLLM）· React 19 · PostgreSQL / Redis / S3 协议对象存储
+</p>
 
-- PydanticAI 的 tool-calling 循环与上下文管理，LiteLLM 适配聚合网关。
-- 工具按领域独立编写、统一注册，可按需装配；支持接入 **MCP server** 扩展外部工具。
-- **工具审批（HITL）**：写入与高风险工具在执行前先由用户逐条确认。
-- **知识库（RAG）**：上传文档 → 分块 → 向量化 → 混合检索，由模型自行决定何时检索。
+## 演示
+
+![一句话让它在我的电脑上跑代码并给出结果](docs/demo/demo.gif)
+
+> 提问 → 它在一台隔离机器上写脚本、执行 → 把统计结果和字符图答回来。
+> **19 秒完整版（静音，1440×900）：[docs/demo/demo.mp4](docs/demo/demo.mp4)**
+>
+> 这段录屏没有一段是摆拍：真实后端、真实模型、真实容器。工具轨迹里那条
+> `/home/sandbox/workspace/deploy_stats.py` 和「退出码 0」，是它跑完留下的。
+
+## 它是怎么工作的
+
+一句话：**模型只提议，执行与约束都在服务端**。模型能做的事被工具边界框住，
+用户的决定能随时插进来，上游不可用时整轮有兜底。
+
+### 一、会动手：工具、环境、资料
+
+- **工具调用循环**（PydanticAI）+ **LiteLLM** 适配任意聚合网关。工具按领域独立编写、
+  统一注册、按需装配；没配的依赖（比如没有 Tavily Key）会把工具与提示词里对应的
+  那一段一起摘掉，不留「推荐了却做不到」的空头建议。
+- **隔离执行环境「我的电脑」**：每个用户一台机器、**跨会话共用**（会话 1 装好的依赖，
+  切到会话 2 就能接着用），第一次需要执行时自动创建，心跳与活动都停了自动销毁，
+  销毁前先把 workspace 打包进对象存储。模型能跑代码、读写文件、装依赖。
+  默认关闭；本地 Docker 运行时，生产 Kubernetes + Firecracker 运行时，
+  **同一套 API**，所以本地与线上行为一致。设计见
+  [`docs/design/sandbox-vm.md`](docs/design/sandbox-vm.md)。
+  工具签名里**没有任何 id**：租约由服务端按 `(登录态, 会话)` 自己解析，
+  「换个 id 用别人的机器」在构造上不可达，而不是靠一层层 `if` 拦住。
+- **知识库（RAG）**：上传文档 → 分块 → 向量化 → 混合检索，由模型自己决定何时检索。
 - **文件上传**：PDF / Word / Markdown / TXT / HTML → 原件入对象存储（S3 协议，本地 RustFS）
   → 后台 worker 解析入库；按 sha256 去重，带配额与状态查询。
-- **联网搜索**：接入 Tavily，未配置时相应工具与提示词指引一并下线。
-- **隔离执行环境（我的电脑）**：每个用户一台机器、跨会话共用（会话 1 装好的依赖，
-  切到会话 2 就能接着用），首次需要执行时自动创建，心跳断了自动销毁（销毁前先把产物
-  导出到对象存储）。模型能自己跑代码、处理文件、装依赖，
-  默认关闭；生产后端是 Firecracker microVM（E2B Runtime），本地开发用 Docker 容器。
-  设计见 [`docs/design/sandbox-vm.md`](docs/design/sandbox-vm.md)。
-- 上游兜底：同模型重试 → 备用模型（切换对用户可见）→ 面向用户的错误文案。
-- 上下文预算管理：超限时先压缩早期对话，压完仍超才拒绝；每次压缩都会告知用户。
-- 邮箱注册 + 服务端会话 cookie，三级角色（普通用户 / 管理员 / 超管）与用户封禁。
-- 会话可导出为 Markdown，支持多会话合并归档；`⌘K` 搜索对话、`⌘,` 打开设置。
-- 跨设备同步：本机优先，后台增量推拉，同步状态可见、失败可重试。
-- 成本估算：按维护的价格表换算每轮与整个会话的 token 花费。
-- 行为回归评测（`evals/`）：改提示词或换模型后跑一遍，看哪些行为变了。
+- **联网搜索**：接入 Tavily，未配置时工具与提示词指引一并下线。
+- **MCP**：接入外部 MCP server 扩展工具；外部工具默认按「需要审批」处理——
+  第三方实现有没有副作用我们不知道。
+
+### 二、每一步都看得见，也能被叫停
+
+- **流式回答（SSE）**：逐字输出、思考链可折叠、工具调用按步展开并标注耗时。
+- **工具审批（HITL）**：写入与高风险工具在执行前拦下，逐条列出工具名、风险等级与
+  **完整参数**，默认不选中任何一项；没有回应按拒绝处理。分界线是「能不能撤销」，
+  不是「有多危险」——删除是硬删除、没有回收站，所以低风险的写入也必须先问一次。
+- **上下文预算**：超限时先压缩早期对话，压完仍超才拒绝继续提问；每次压缩都会告知用户。
+- **成本估算**：按后台维护的单价换算每轮与整个会话的花费。没登记价格的模型显示
+  「未配置价格」而不是 `0`——`0` 会被读成「免费」，而这是两个完全不同的结论。
+
+### 三、工程上不省事的地方
+
+- **上游兜底**：同模型重试 → 备用模型（切换对用户可见）→ 面向用户的错误文案。
+- **启动即校验库结构**：应用只接受等于 Alembic head 的库，不等就拒绝启动
+  （`DATABASE_REQUIRE_HEAD_REVISION=true`），部署不会带着旧结构跑新代码。
+- **邮箱注册 + 服务端会话 cookie**，三级角色（普通用户 / 管理员 / 超管）与用户封禁；
+  注册接口对「邮箱已存在」与「刚创建」返回完全相同的响应，不做邮箱枚举器。
+- **跨设备同步**：本机优先，后台增量推拉，同步状态可见、失败可重试。
+- 会话可导出为 Markdown、支持多会话合并归档；`⌘K` 搜索对话、`⌘,` 打开设置。
+- **行为回归评测（`evals/`）**：改提示词或换模型后跑一遍，看哪些行为变了。
 
 ## 界面
 
@@ -35,31 +75,61 @@
 
 ![对话界面](docs/screenshots/chat.png)
 
-支持 GFM 表格、代码块与可折叠的思考链；输入框左侧是上下文用量指示器，底部选择模型与思考等级。
+支持 GFM 表格、代码块与可折叠的思考链；输入框下方是上下文用量、模型与思考等级，
+以及这一轮的步数、吐字速度与缓存命中率。
+
+### 隔离环境里的执行轨迹
+
+![工具轨迹](docs/screenshots/sandbox.png)
+
+展开「已在我的电脑上操作」后是逐步明细：思考、写入的文件路径、执行了什么命令、
+每一步花了多久。回答里引用的数字来自这份真实输出，不是模型自己算的。
 
 ### 上下文用量与成本
 
 ![上下文用量与成本](docs/screenshots/context-cost.png)
 
-用量取自上游回报的真实 token 数；成本按登记的单价换算，是估算而非账单。
+用量取自上游回报的真实 token 数（含缓存命中），成本按登记的单价换算，是估算而非账单。
 
 ### 工具审批（HITL）
 
 ![工具审批](docs/screenshots/approval.png)
 
-外部工具执行前被拦下，逐条列出工具名、风险等级与完整参数，默认不选中任何一项；无回应按拒绝处理。
+「重置执行环境」这种不可撤销的调用会停在这一张卡片上：工具名、风险等级、参数、
+逐条批准或拒绝，全部批准需要单独点一次。
 
-### 模型价格
+### 设置
+
+![设置页](docs/screenshots/settings.png)
+
+账号与安全（改密会让所有设备重新登录）、外观与主题、对话显示。
+
+### 模型价格（管理后台）
 
 ![模型价格](docs/screenshots/model-prices.png)
 
 价格在管理后台按每百万 token 维护，留空表示「未配置」，与免费的 `0` 区分。
 
-### 设置与运行时能力
+## 图表和视频是怎么来的
 
-![设置面板](docs/screenshots/settings.png)
+README 里的图和视频都是脚本生成的，不是截图工具手拍的——UI 改版后重跑一遍就行：
 
-「关于系统」报告的是实际装配结果：哪些工具可用、MCP 是否连通、知识库是否启用。
+```bash
+cd scripts/demo && npm install        # 只装 playwright（用它驱动系统里装好的 Chrome）
+
+# 录一段真实链路（会真的调用模型、真的在容器里跑代码），产出 raw.webm + timeline.json
+DEMO_EMAIL=demo@example.com DEMO_PASSWORD='...' node record.mjs --out docs/demo
+
+# 按 timeline.json 逐段变速，剪成 demo.mp4 / demo.gif / cover.png
+uv run python scripts/demo/make-video.py
+
+# 重新拍 docs/screenshots/*.png（每个场景都真的发一次请求）
+node screenshots.mjs
+```
+
+两个踩过的坑写在 `scripts/demo/README.md`：`channel: 'chrome'` 配无头模式时录到的
+画面会少 90px（底部一条灰带），以及为什么 GIF 要和 MP4 分开出（GitHub 的 Markdown
+不支持 `<video>`，只有 GIF 能自动播放）。
 
 ## 快速开始
 
@@ -202,7 +272,8 @@ evals/        行为回归评测：用例、断言与执行器
 frontend/     React 19 + Vite + Tailwind 4 + assistant-ui（详见 frontend/README.md）
 frontend/brand/  品牌图标的母版（GitHub 头像）与生成脚本，产物在 frontend/public/
 prompts/      Jinja2 提示词模板
-scripts/      seed_admin.py（播种初始超管）、run_eval.py（跑评测）
+scripts/      seed_admin.py（播种初始超管）、run_eval.py（跑评测）、smoke_sandbox.py（沙箱冒烟）
+scripts/demo/ 录屏与截图脚本（Playwright），产物在 docs/demo 与 docs/screenshots
 alembic.ini   Alembic 配置（连接串从 settings 读，不写第二份）
 main.py       CLI / --web / --worker 入口
 docker-compose.yml  postgres / redis / rustfs / migrate / app / worker
@@ -215,7 +286,6 @@ uv run alembic revision --autogenerate -m "add xxx"   # 改完模型后生成迁
 uv run alembic check                                  # 模型与迁移是否有漂移（CI 会跑）
 uv run pytest                                         # 需要 postgres/redis/rustfs（compose 起）
 ```
-
 
 配置项见 `.env.example`。
 
