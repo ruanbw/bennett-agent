@@ -144,3 +144,25 @@ export function clearComposerDrafts(storage: DraftStorage | null = getDraftStora
     console.warn('清空输入框草稿失败:', err);
   }
 }
+
+/**
+ * 发送成功之后要不要把草稿删掉——**这是「已发送的内容又回到输入框」这个 bug 的判据**。
+ *
+ * 为什么不能只靠输入框的 `onChange`：发送成功后是 assistant-ui **程序化清空**输入框的，
+ * 那条路径不一定经过一次真实的 `input` 事件，于是草稿条目还留在 localStorage 里；
+ * 用户切到别的会话再切回来，回填逻辑就把已经发出去的那句话又塞回输入框。
+ *
+ * 判据是「同一个会话内，从有内容变成空」，两条限定都不能少：
+ * - **同会话**：从 A（有内容）切到 B（空）也会呈现「非空 → 空」，但那是换了会话，
+ *   把 B 的草稿删掉等于吞掉用户写给 B 的话；
+ * - **非空 → 空**：会话刚打开时本来就是空，此时删草稿会把正要回填的那份删掉
+ *   （回填与这个判断在同一批 effect 里，顺序不可依赖）。
+ */
+export function shouldClearDraft(
+  previous: { sessionId: string | null; empty: boolean },
+  next: { sessionId: string | null; empty: boolean }
+): boolean {
+  if (!next.sessionId) return false;
+  if (previous.sessionId !== next.sessionId) return false;
+  return !previous.empty && next.empty;
+}

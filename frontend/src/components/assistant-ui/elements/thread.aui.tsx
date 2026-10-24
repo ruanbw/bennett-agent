@@ -34,6 +34,7 @@ import {
   CheckIcon,
   CopyIcon,
   FlaskConicalIcon,
+  MonitorIcon,
   GitCompareArrowsIcon,
   LightbulbIcon,
   ListChecksIcon,
@@ -67,7 +68,7 @@ import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clar
 import { useApproval } from "@/context/approval-context";
 import { useClarification } from "@/context/clarification-context";
 import { useChatSessionId } from "@/context/chat-session";
-import { getDraftStorage, readDraft, writeDraft } from "@/lib/composer-draft";
+import { getDraftStorage, readDraft, shouldClearDraft, writeDraft } from "@/lib/composer-draft";
 import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
@@ -100,6 +101,7 @@ const SUGGESTION_ICONS: Record<StartSuggestionIcon, LucideIcon> = {
   concept: LightbulbIcon,
   calendar: CalendarClockIcon,
   test: FlaskConicalIcon,
+  computer: MonitorIcon,
 };
 
 const isNewChatView = (s: AssistantState) =>
@@ -183,6 +185,8 @@ interface ThreadProps {
   modelsError?: string | null;
   /** 服务端是否装配了联网搜索；决定起步建议里是否出现搜索示例。 */
   webSearchAvailable?: boolean;
+  /** 「我的电脑」（隔离执行环境）是否可用：决定要不要展示「跑段代码」那条示例。 */
+  sandboxAvailable?: boolean;
   currentModel?: string | null;
   currentReasoningEffort?: string;
   onSelectModel?: (modelId: string) => void;
@@ -196,6 +200,7 @@ export const Thread: FC<ThreadProps> = ({
   models = [],
   modelsError = null,
   webSearchAvailable = false,
+  sandboxAvailable = false,
   currentModel = null,
   currentReasoningEffort = "medium",
   onSelectModel = () => {},
@@ -206,6 +211,7 @@ export const Thread: FC<ThreadProps> = ({
   const isEmpty = useAuiState(isNewChatView);
   // 输入框已有内容时收起建议：否则点示例会 setText 覆盖用户刚打的草稿
   const composerEmpty = useAuiState((s) => s.composer.isEmpty);
+
   const isRunning = useAuiState(isThreadRunning);
   // 上下文已满：输入框锁住并给出「新建会话」。服务端每轮都会拒绝，这里只是不让用户
   // 白点一次发送，并把他直接送到唯一的出路（推导规则见 lib/chat-message.ts）。
@@ -244,9 +250,9 @@ export const Thread: FC<ThreadProps> = ({
    * 变长，`pickStartSuggestions` 自己按当前长度取模，不需要重置。
    */
   const [suggestionOffset, setSuggestionOffset] = useState(0);
-  const suggestions = pickStartSuggestions(webSearchAvailable, suggestionOffset);
+  const suggestions = pickStartSuggestions(webSearchAvailable, suggestionOffset, 4, sandboxAvailable);
   const hasMoreSuggestions =
-    availableStartSuggestions(webSearchAvailable).length > suggestions.length;
+    availableStartSuggestions(webSearchAvailable, sandboxAvailable).length > suggestions.length;
   const cycleSuggestions = useCallback(() => {
     setSuggestionOffset((offset) => offset + suggestions.length);
   }, [suggestions.length]);
@@ -535,6 +541,22 @@ const Composer: FC<{
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
   const blockedByAttachments = attachmentCount > 0;
   const composerEmpty = useAuiState((s) => s.composer.isEmpty);
+  // 发送成功后 assistant-ui 是**程序化**清空输入框的：那条路径不一定触发一次真实的
+  // `input` 事件，于是 `onChange` 里写的草稿还留在 localStorage 里，切走再切回来就被
+  // 回填成「我已经发出去的那句话」。这里盯住「同一会话从有内容变空」来删草稿——
+  // 判据与边界写在 `shouldClearDraft` 里（含「换会话不算」这条）。
+  const lastComposer = useRef<{ sessionId: string | null; empty: boolean }>({
+    sessionId,
+    empty: composerEmpty,
+  });
+  useEffect(() => {
+    const next = { sessionId, empty: composerEmpty };
+    if (shouldClearDraft(lastComposer.current, next)) {
+      writeDraft(getDraftStorage(), sessionId, "");
+    }
+    lastComposer.current = next;
+  }, [composerEmpty, sessionId]);
+
   // 两个禁用理由共存时以上下文为准：附件可以移除，换模型/新会话不能省
   const blocked = contextLocked || blockedByAttachments;
   const inputPlaceholder = contextLocked ? "本会话上下文已满，请新建会话继续" : "问点什么吧...";
@@ -556,7 +578,13 @@ const Composer: FC<{
       onSubmit={(e) => {
         if (blocked) {
           e.preventDefault();
+          return;
         }
+        // 提交时就把草稿删掉：上面的 effect 盯的是「输入框变空」，而发送成功到状态更新
+        // 之间有一小段窗口（用户在这期间切走会话，effect 就不会跑了）。发送失败时文本
+        // 仍在输入框里，用户继续改一个字就会重新落草稿——代价远小于「已发出的内容又
+        // 回到输入框」。
+        writeDraft(getDraftStorage(), sessionId, "");
       }}
       // 附件入口已禁用，但拖拽/粘贴仍可能绕过按钮；不要静默丢弃，也不让浏览器直接
       // 打开被拖进来的文件。真正支持附件时，这里要改成交给 AttachmentDropzone。

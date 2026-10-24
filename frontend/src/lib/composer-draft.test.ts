@@ -8,6 +8,7 @@ import {
   readDraft,
   readDrafts,
   writeDraft,
+  shouldClearDraft,
 } from './composer-draft';
 
 /** 内存版 localStorage；可注入抛错。 */
@@ -124,5 +125,34 @@ describe('clearComposerDrafts（L-06）', () => {
     };
 
     expect(() => clearComposerDrafts(storage)).not.toThrow();
+  });
+});
+
+describe('shouldClearDraft', () => {
+  it('同一会话从有内容变空 → 删草稿（发送成功后程序化清空）', () => {
+    expect(
+      shouldClearDraft({ sessionId: 'sess_a', empty: false }, { sessionId: 'sess_a', empty: true }),
+    ).toBe(true);
+  });
+
+  it('换会话不算：从 A（有内容）切到 B（空）不能删 B 的草稿', () => {
+    expect(
+      shouldClearDraft({ sessionId: 'sess_a', empty: false }, { sessionId: 'sess_b', empty: true }),
+    ).toBe(false);
+  });
+
+  it('一直是空 / 从空变有内容 → 不动草稿', () => {
+    expect(
+      shouldClearDraft({ sessionId: 'sess_a', empty: true }, { sessionId: 'sess_a', empty: true }),
+    ).toBe(false);
+    expect(
+      shouldClearDraft({ sessionId: 'sess_a', empty: true }, { sessionId: 'sess_a', empty: false }),
+    ).toBe(false);
+  });
+
+  it('没有会话 id（空会话页）→ 不删', () => {
+    expect(
+      shouldClearDraft({ sessionId: null, empty: false }, { sessionId: null, empty: true }),
+    ).toBe(false);
   });
 });
