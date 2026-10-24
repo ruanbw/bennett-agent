@@ -13,6 +13,7 @@ import { apiFetch } from './api';
 /** 还没拿到（或拿不到）能力清单时的保守取值：不推荐任何依赖外部服务的能力。 */
 export const UNKNOWN_CAPABILITIES: Capabilities = {
   web_search: false,
+  sandbox: false,
   tools: [],
   mcp_servers: [],
   mcp_error: null,
@@ -30,7 +31,8 @@ export const CAPABILITIES_TIMEOUT_MS = 8_000;
  * 拉取能力清单，并把响应收窄成前端可用的形状。
  *
  * 不直接 `as Capabilities`：服务端将来增删字段、代理返回错误页时，前端不该因为一个
- * 类型断言拿到 `undefined` 再在筛选逻辑里炸掉。布尔值只认严格的 `true`。
+ * 类型断言拿到 `undefined` 再在筛选逻辑里炸掉。布尔值只认严格的 `true`——老服务端没有
+ * `sandbox` 时因此自然退化成 false（不推荐沙箱相关的起步建议）。
  */
 export async function fetchCapabilities(): Promise<Capabilities> {
   const res = await apiFetch('/api/capabilities', { timeoutMs: CAPABILITIES_TIMEOUT_MS });
@@ -40,6 +42,7 @@ export async function fetchCapabilities(): Promise<Capabilities> {
   const record = (data ?? {}) as Partial<Capabilities>;
   return {
     web_search: record.web_search === true,
+    sandbox: record.sandbox === true,
     tools: Array.isArray(record.tools)
       ? record.tools.filter((name): name is string => typeof name === 'string')
       : [],

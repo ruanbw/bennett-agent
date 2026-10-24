@@ -30,6 +30,7 @@ export type ActivityKind =
   | 'webFetch'
   | 'time'
   | 'knowledge'
+  | 'computer'
   | 'subagents'
   | 'plan'
   | 'questions'
@@ -67,6 +68,11 @@ export function classifyActivity(toolName: string): ActivityKind {
     return 'commands';
   }
   if (name === 'run_code') return 'code';
+  // 「我的电脑」= 本仓的隔离执行环境（`sandbox_exec` / `*_file` / `reset`）。
+  // 单独一类而不是塞进 commands：对用户来说「跑在他自己那台机器上」是关键信息，
+  // 和「在服务端跑一句命令」不是同一件事，文案也该让这个区别看得见。
+  if (name === 'sandbox_exec' || name.startsWith('sandbox_')) return 'computer';
+  if (name === 'computer' || name.startsWith('computer_')) return 'computer';
   if (name === 'web_search' || name === 'tavily_search') return 'webSearch';
   if (name === 'web_fetch' || name === 'fetch_url') return 'webFetch';
   // 本仓的「查时间」工具。DSH 没有这一类，但「查询了时间」比「已调用工具」有信息量，
@@ -136,6 +142,7 @@ const RUNNING_LABELS: Record<ActivityKind, string> = {
   webFetch: '正在访问网页',
   time: '正在查询时间',
   knowledge: '正在检索知识库',
+  computer: '正在操作我的电脑',
   subagents: '正在协调子智能体',
   plan: '正在更新计划',
   questions: '等待你的操作',
@@ -161,6 +168,7 @@ const PREPARING_LABELS: Record<ActivityKind, string> = {
   webFetch: '准备访问网页',
   time: '准备查询时间',
   knowledge: '准备检索知识库',
+  computer: '准备操作我的电脑',
   subagents: '准备协调子智能体',
   plan: '准备更新计划',
   questions: '准备提问',
@@ -181,6 +189,9 @@ const DONE_LABELS: Record<ActivityKind, string> = {
   webFetch: '已访问网页',
   time: '查询了时间',
   knowledge: '检索了知识库',
+  // 以「已」开头：与「已读取文件」拼接时第二项会去掉「已」，
+  // 得到「已读取文件并在我的电脑上操作」，过渡自然。
+  computer: '已在我的电脑上操作',
   subagents: '已协调子智能体',
   plan: '更新了计划',
   questions: '向用户提出了问题',
@@ -357,6 +368,12 @@ const TOOL_TITLES: Record<string, string> = {
   knowledge_search: '检索知识库',
   get_current_time: '查看时间',
   tavily_search: '网页搜索',
+  // 「我的电脑」里的三件事：工具行要说清具体做了什么（读写还是跑命令），
+  // 组头才用笼统的「操作我的电脑」。
+  sandbox_exec: '执行命令',
+  sandbox_write_file: '写入文件',
+  sandbox_read_file: '读取文件',
+  sandbox_reset: '重置电脑',
 };
 
 const ACTIVITY_TITLES: Record<ActivityKind, string> = {
@@ -372,6 +389,7 @@ const ACTIVITY_TITLES: Record<ActivityKind, string> = {
   webFetch: '网页获取',
   time: '查看时间',
   knowledge: '检索知识库',
+  computer: '我的电脑',
   subagents: '子智能体',
   plan: '更新计划',
   questions: '提问',

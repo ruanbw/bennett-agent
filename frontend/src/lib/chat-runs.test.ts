@@ -381,3 +381,14 @@ describe('429 的 Retry-After 落到错误上', () => {
     expect(getRun('a')?.error?.retryAfterAt).toBeNull()
   })
 })
+
+describe('请求参数', () => {
+  it('把会话 id 交给传输层：服务端靠它定位本会话的沙箱机器', async () => {
+    finishingStream({ type: 'done' })
+
+    start()
+    await vi.waitFor(() => expect(mocks.streamChat).toHaveBeenCalled())
+
+    expect(mocks.streamChat).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'a' }))
+  })
+})

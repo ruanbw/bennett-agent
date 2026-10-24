@@ -30,6 +30,11 @@ describe('工具名 → 动作分类', () => {
     expect(classifyActivity('write_stdin')).toBe('commands');
     expect(classifyActivity('terminal_read')).toBe('commands');
     expect(classifyActivity('run_code')).toBe('code');
+    // 「我的电脑」：本仓沙箱的四个工具必须归到一类，否则用户看到的是「已调用工具」
+    expect(classifyActivity('sandbox_exec')).toBe('computer');
+    expect(classifyActivity('sandbox_write_file')).toBe('computer');
+    expect(classifyActivity('sandbox_read_file')).toBe('computer');
+    expect(classifyActivity('sandbox_reset')).toBe('computer');
     expect(classifyActivity('web_search')).toBe('webSearch');
     expect(classifyActivity('web_fetch')).toBe('webFetch');
     expect(classifyActivity('subagent')).toBe('subagents');

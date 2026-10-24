@@ -41,6 +41,9 @@ type AssertedEvent = ChatEvent & { delta?: string; damaged?: boolean }
 /** 用例不关心取消：给一个永不 abort 的真实 signal（契约把它标成必填）。 */
 const NO_SIGNAL = new AbortController().signal
 
+/** 会话标识：形状要与服务端的 `^sess_[A-Za-z0-9_-]{1,59}$` 一致（见 `session-id.ts`）。 */
+const SESSION_ID = 'sess_frontendtest0001'
+
 interface StubFetchOptions {
   ok?: boolean
   status?: number
@@ -75,6 +78,7 @@ async function collectFrom(body: ReadableStream<Uint8Array>): Promise<AssertedEv
   stubFetch({ body })
   const events: AssertedEvent[] = []
   for await (const event of streamChat({
+    sessionId: SESSION_ID,
     model: 'm',
     reasoningEffort: null,
     messages: [],
@@ -91,6 +95,7 @@ const collectBytes = (chunks: Uint8Array[]): Promise<AssertedEvent[]> => collect
 /** 只关心「整条流跑完」的场景（错误响应、异常传播）。 */
 async function drain(): Promise<void> {
   for await (const _ of streamChat({
+    sessionId: SESSION_ID,
     model: null,
     reasoningEffort: null,
     messages: [],
@@ -114,6 +119,7 @@ describe('请求体', () => {
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
 
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: 'openai/gpt-4o',
       reasoningEffort: 'high',
       messages: [{ role: 'user', content: '你好' }],
@@ -129,6 +135,8 @@ describe('请求体', () => {
       model: 'openai/gpt-4o',
       reasoning_effort: 'high',
       messages: [{ role: 'user', content: '你好' }],
+      // 服务端靠它定位本会话的沙箱机器，漏掉的话沙箱工具会回「当前会话缺少会话标识」
+      session_id: SESSION_ID,
     })
   })
 
@@ -136,6 +144,7 @@ describe('请求体', () => {
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
 
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: 'openai/gpt-4o',
       reasoningEffort: null,
       messages: [
@@ -159,6 +168,7 @@ describe('请求体', () => {
         { role: 'user', content: '再问' },
       ],
       context_anchor: { message_index: 1, context_tokens: 1065 },
+      session_id: SESSION_ID,
     })
     void url
   })
@@ -167,6 +177,7 @@ describe('请求体', () => {
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
 
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: null,
       reasoningEffort: null,
       messages: [{ role: 'user', content: '你好' }],
@@ -179,11 +190,48 @@ describe('请求体', () => {
     expect('context_anchor' in JSON.parse(init.body)).toBe(false)
   })
 
+  it('旧格式 id（含下划线）照常发出：同步接口一直认它，聊天不能反过来拒绝', async () => {
+    const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
+
+    for await (const _ of streamChat({
+      sessionId: 'sess_1729000000000_ab12cd34',
+      model: null,
+      reasoningEffort: null,
+      messages: [],
+      signal: NO_SIGNAL,
+    })) {
+      // 消费掉
+    }
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect(JSON.parse(init.body).session_id).toBe('sess_1729000000000_ab12cd34')
+  })
+
+  it('形状不合法的会话 id 整个字段都不出现：服务端会 422，不能拿整轮对话赌', async () => {
+    const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
+
+    for await (const _ of streamChat({
+      sessionId: 'not-a-session',
+      model: null,
+      reasoningEffort: null,
+      messages: [{ role: 'user', content: '你好' }],
+      signal: NO_SIGNAL,
+    })) {
+      // 消费掉
+    }
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect('session_id' in JSON.parse(init.body)).toBe(false)
+    // 其余字段照常发出：这个会话只是用不了沙箱，聊天本身不该受影响
+    expect(JSON.parse(init.body).messages).toEqual([{ role: 'user', content: '你好' }])
+  })
+
   it('把 AbortSignal 透传给 fetch', async () => {
     const controller = new AbortController()
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
 
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: null,
       reasoningEffort: null,
       messages: [],
@@ -360,7 +408,7 @@ describe('损坏与中断', () => {
     const stream = bodyFrom([frame({ type: 'content', delta: 'ok' }), frame({ type: 'done' })])
     stubFetch({ body: stream })
 
-    for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+    for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
       // 消费掉
     }
 
@@ -375,7 +423,7 @@ describe('损坏与中断', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           throw new Error('中途打断')
         }
       })(),
@@ -390,7 +438,7 @@ describe('损坏与中断', () => {
     const cancel = vi.fn()
     stubFetch({ body: openEndedBody([frame({ type: 'content', delta: '边流边看' })], cancel) })
 
-    for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+    for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
       break
     }
 
@@ -425,7 +473,7 @@ describe('损坏与中断', () => {
 
       const events: AssertedEvent[] = []
       const pump = (async () => {
-        for await (const event of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const event of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           events.push(event)
         }
       })()
@@ -463,7 +511,7 @@ describe('损坏与中断', () => {
 
       const events: AssertedEvent[] = []
       const pump = (async () => {
-        for await (const event of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const event of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           events.push(event)
         }
       })()
@@ -502,7 +550,7 @@ describe('损坏与中断', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           // 消费掉
         }
       })(),
@@ -551,7 +599,7 @@ describe('错误响应', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           // 消费掉
         }
       })(),
@@ -565,7 +613,7 @@ describe('错误响应', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           // 消费掉
         }
       })(),
@@ -577,7 +625,7 @@ describe('错误响应', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           // 消费掉
         }
       })(),
@@ -591,7 +639,7 @@ describe('错误响应', () => {
 
     await expect(
       (async () => {
-        for await (const _ of streamChat({ model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
+        for await (const _ of streamChat({ sessionId: SESSION_ID, model: null, reasoningEffort: null, messages: [], signal: NO_SIGNAL })) {
           // 消费掉
         }
       })(),

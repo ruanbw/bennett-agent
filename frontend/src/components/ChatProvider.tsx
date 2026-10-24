@@ -37,6 +37,7 @@ import {
 import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
 import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
+import { useSandboxHeartbeat } from '../hooks/use-sandbox-heartbeat';
 import { ApprovalProvider } from '../context/approval-context';
 import { ClarificationProvider } from '../context/clarification-context';
 import { ChatSessionContext, type ChatSessionContextValue } from '../context/chat-session';
@@ -103,6 +104,11 @@ export function ChatProvider({
 
   const run = getRun(currentSessionId);
   const isRunning = Boolean(run && !run.finished);
+
+  // 会话一打开就给它名下的机器续命：服务端只按心跳与工具调用判定「这台机器还在被用」，
+  // 没有心跳的机器 10 分钟后回收。放在 ChatProvider 而不是 ChatContainer：会话 id 只有
+  // 这里有（ChatContainer 的 props 由 App 给）。
+  useSandboxHeartbeat(currentSessionId);
 
   // 单调递增的时间戳：同一毫秒内连续写入也不会让消息错序
   const nextTimestamp = useCallback(() => {

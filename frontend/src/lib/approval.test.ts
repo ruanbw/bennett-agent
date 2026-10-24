@@ -14,6 +14,9 @@ import type { ApprovalState, RuntimeMessage } from '../types';
  *    避免与「清掉 approval」形成读写竞态）。
  */
 
+/** 会话标识：形状要与服务端的 `^sess_[A-Za-z0-9_-]{1,59}$` 一致（见 `session-id.ts`）。 */
+const SESSION_ID = 'sess_frontendtest0001';
+
 const approval: ApprovalState = {
   toolCalls: [
     {
@@ -93,6 +96,7 @@ describe('请求体里的审批决定', () => {
     const controller = new AbortController();
     // 消费流：这里只关心请求体，事件内容无所谓
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: 'm',
       reasoningEffort: null,
       messages: [{ role: 'user', content: 'hi' }],
@@ -117,6 +121,7 @@ describe('请求体里的审批决定', () => {
     );
 
     for await (const _ of streamChat({
+      sessionId: SESSION_ID,
       model: 'm',
       reasoningEffort: null,
       messages: [{ role: 'user', content: 'hi' }],

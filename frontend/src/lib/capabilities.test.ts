@@ -39,12 +39,17 @@ afterEach(() => {
 describe('fetchCapabilities', () => {
   it('解析服务端能力清单', async () => {
     const calls = stubFetch({
-      json: async () => ({ web_search: true, tools: ['ask_user_clarification', 'tavily_search'] }),
+      json: async () => ({
+        web_search: true,
+        sandbox: true,
+        tools: ['ask_user_clarification', 'tavily_search', 'sandbox_exec'],
+      }),
     });
 
     await expect(fetchCapabilities()).resolves.toEqual({
       web_search: true,
-      tools: ['ask_user_clarification', 'tavily_search'],
+      sandbox: true,
+      tools: ['ask_user_clarification', 'tavily_search', 'sandbox_exec'],
       mcp_servers: [],
       mcp_error: null,
     });
@@ -59,11 +64,12 @@ describe('fetchCapabilities', () => {
 
   it('字段异常时保守降级：布尔只认 true，工具列表过滤非字符串', async () => {
     stubFetch({
-      json: async () => ({ web_search: 'yes', tools: [1, 'tavily_search', null] }),
+      json: async () => ({ web_search: 'yes', sandbox: 'yes', tools: [1, 'tavily_search', null] }),
     });
 
     await expect(fetchCapabilities()).resolves.toEqual({
       web_search: false,
+      sandbox: false,
       tools: ['tavily_search'],
       mcp_servers: [],
       mcp_error: null,
@@ -75,6 +81,8 @@ describe('fetchCapabilities', () => {
 
     await expect(fetchCapabilities()).resolves.toEqual({
       web_search: false,
+      // 老服务端不返回 sandbox：必须退化成 false，而不是 undefined 透传出去
+      sandbox: false,
       tools: [],
       mcp_servers: [],
       mcp_error: null,
@@ -89,12 +97,14 @@ describe('能力状态文案', () => {
   });
 
   it('按 web_search 布尔值给出结论', () => {
-    expect(describeWebSearchCapability({ web_search: true, tools: ['tavily_search'] })).toBe('已启用');
+    expect(
+      describeWebSearchCapability({ web_search: true, sandbox: false, tools: ['tavily_search'] }),
+    ).toBe('已启用');
     expect(describeWebSearchCapability(UNKNOWN_CAPABILITIES)).toBe('未启用');
   });
 
   it('工具数量：有则报数，清单缺席或为空说未知（不说「0 个工具」）', () => {
-    expect(describeToolCount({ web_search: false, tools: ['a', 'b'] })).toBe('2 个');
+    expect(describeToolCount({ web_search: false, sandbox: false, tools: ['a', 'b'] })).toBe('2 个');
     expect(describeToolCount(null)).toBe('未知');
     expect(describeToolCount(UNKNOWN_CAPABILITIES)).toBe('未知');
   });
@@ -145,7 +155,7 @@ describe('MCP 能力', () => {
   });
 
   it('文案：没配 / 配了但不通 / 通了几个，三者必须能区分', () => {
-    const base = { web_search: false, tools: [] };
+    const base = { web_search: false, sandbox: false, tools: [] };
 
     expect(describeMcpCapability({ ...base, mcp_servers: [], mcp_error: null })).toBe('未配置');
     expect(describeMcpCapability({ ...base, mcp_servers: [], mcp_error: 'x: 连接失败' })).toBe(
@@ -167,6 +177,7 @@ describe('MCP 能力', () => {
     expect(
       describeMcpServers({
         web_search: false,
+        sandbox: false,
         tools: [],
         mcp_servers: [
           { name: 'fs', tools: [] },

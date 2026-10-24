@@ -11,6 +11,7 @@ import { apiFetch, readErrorDetail } from './api';
 import type { ContextToolCall } from './chat-persistence';
 import { ChatRequestError } from './chat-request-error';
 import { parseRetryAfterSeconds } from './retry-after';
+import { isSessionIdSendable } from './session-id';
 
 const FRAME_SEPARATOR = /\r?\n\r?\n/;
 const LINE_SEPARATOR = /\r?\n/;
@@ -52,6 +53,16 @@ function assertEventStreamContentType(contentType: string | null): void {
 }
 
 export interface StreamChatParams {
+  /**
+   * 当前会话的客户端标识（`sess_<...>`）。
+   *
+   * 服务端靠它定位「这个会话的机器」：隔离执行环境是每会话一台，而机器是服务端独有
+   * 的资源，请求里没有它，沙箱工具就只能回「当前会话缺少会话标识」。它不是身份——
+   * 身份来自 cookie，作用域由服务端按 `(user_id, session_id)` 解析。
+   *
+   * 形状不合法的 id（见 `session-id.ts`）不会被发出去：服务端一旦拒绝它是请求级 422。
+   */
+  sessionId: string;
   model: string | null;
   reasoningEffort: string | null;
   messages: Array<{ role: string; content: string; tool_calls?: ContextToolCall[] }>;
@@ -239,6 +250,7 @@ async function requestError(response: Response): Promise<ChatRequestError> {
  * 产出服务端事件原样，外加一个客户端合成的 `transport_incomplete`（若缺少 `done`）。
  */
 export async function* streamChat({
+  sessionId,
   model,
   reasoningEffort,
   messages,
@@ -254,6 +266,8 @@ export async function* streamChat({
       model,
       reasoning_effort: reasoningEffort,
       messages,
+      // 会话标识：不合法的 id 宁可不带，也不能让整轮对话因服务端 422 失败
+      ...(isSessionIdSendable(sessionId) ? { session_id: sessionId } : {}),
       // 线上字段名用 snake_case：与 messages / reasoning_effort 保持一致
       ...(contextAnchor
         ? {

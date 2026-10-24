@@ -19,6 +19,13 @@ describe('availableStartSuggestions', () => {
     const withoutSearch = availableStartSuggestions(false);
 
     expect(withSearch.map((suggestion) => suggestion.id)).toContain('search-industry');
+    // 「我的电脑」未启用时不能推荐「跑段代码」：点开只会得到一句「没有执行环境」
+    expect(availableStartSuggestions(false, false).map((s) => s.id)).not.toContain(
+      'run-on-my-computer',
+    );
+    expect(availableStartSuggestions(false, true).map((s) => s.id)).toContain(
+      'run-on-my-computer',
+    );
     expect(withSearch.length).toBeGreaterThan(withoutSearch.length);
   });
 });

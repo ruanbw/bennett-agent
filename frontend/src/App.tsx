@@ -472,6 +472,7 @@ function AuthenticatedShell({
                   models={models}
                   modelsError={modelsError}
                   webSearchAvailable={capabilities?.web_search ?? false}
+                  sandboxAvailable={capabilities?.sandbox ?? false}
                   currentModel={currentModel}
                   currentReasoningEffort={currentReasoningEffort}
                   onSelectModel={selectModel}

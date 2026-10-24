@@ -12,7 +12,15 @@
  */
 
 /** 图标名而非图标组件：这个模块是纯逻辑，能被 vitest 直接覆盖，不拖 React 进来。 */
-export type StartSuggestionIcon = 'search' | 'compare' | 'checklist' | 'rewrite' | 'concept' | 'calendar' | 'test';
+export type StartSuggestionIcon =
+  | 'search'
+  | 'compare'
+  | 'checklist'
+  | 'rewrite'
+  | 'concept'
+  | 'calendar'
+  | 'test'
+  | 'computer';
 
 export interface StartSuggestion {
   /** 稳定 id：React key 与「换一批」的排序都靠它，不走文案。 */
@@ -21,6 +29,8 @@ export interface StartSuggestion {
   icon: StartSuggestionIcon;
   /** 只在联网搜索可用时展示；服务端能力清单是唯一判据。 */
   requiresWebSearch?: boolean;
+  /** 只在「我的电脑」（隔离执行环境）可用时展示。 */
+  requiresSandbox?: boolean;
 }
 
 /**
@@ -46,6 +56,14 @@ export const START_SUGGESTIONS: readonly StartSuggestion[] = [
   { id: 'explain-concept', text: '用一个类比解释消息队列', icon: 'concept' },
   { id: 'three-day-plan', text: '按今天的日期排三天学习计划', icon: 'calendar' },
   { id: 'unit-test-cases', text: '为这个函数补一组边界单测', icon: 'test' },
+  {
+    // 「我的电脑」的入口示例。文案刻意不提「沙箱/虚拟机」：用户关心的是
+    // 「它在我自己的机器上真的跑了一遍」，而不是我们用什么技术实现的。
+    id: 'run-on-my-computer',
+    text: '在我电脑上跑段代码验证这个结论',
+    icon: 'computer',
+    requiresSandbox: true,
+  },
 ] as const;
 
 /**
@@ -54,8 +72,11 @@ export const START_SUGGESTIONS: readonly StartSuggestion[] = [
  * `webSearch=false` 同时也覆盖「能力清单还没回来 / 请求失败」：宁可不推荐搜索，也不要
  * 推荐一条可能必然失败的示例。失败的探测不该阻塞对话，也不该被当成「已启用」。
  */
-export function availableStartSuggestions(webSearch: boolean): StartSuggestion[] {
-  return START_SUGGESTIONS.filter((suggestion) => !suggestion.requiresWebSearch || webSearch);
+export function availableStartSuggestions(webSearch: boolean, sandbox = false): StartSuggestion[] {
+  return START_SUGGESTIONS.filter(
+    (suggestion) =>
+      (!suggestion.requiresWebSearch || webSearch) && (!suggestion.requiresSandbox || sandbox),
+  );
 }
 
 /**
@@ -64,8 +85,13 @@ export function availableStartSuggestions(webSearch: boolean): StartSuggestion[]
  * 循环取而不是随机取：随机可能在两次点击间重复同一批，用户会以为按钮没生效；
  * 循环还能保证「换一批」最终能看到池子里的全部示例。同一批内不重复。
  */
-export function pickStartSuggestions(webSearch: boolean, offset = 0, count = 4): StartSuggestion[] {
-  const available = availableStartSuggestions(webSearch);
+export function pickStartSuggestions(
+  webSearch: boolean,
+  offset = 0,
+  count = 4,
+  sandbox = false,
+): StartSuggestion[] {
+  const available = availableStartSuggestions(webSearch, sandbox);
   if (available.length === 0 || count <= 0) return [];
 
   const start = ((offset % available.length) + available.length) % available.length;

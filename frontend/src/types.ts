@@ -55,6 +55,13 @@ export interface ModelListResponse {
  */
 export interface Capabilities {
   web_search: boolean;
+  /**
+   * 是否装配了隔离执行环境（`sandbox_exec` / `sandbox_write_file` 等）。
+   *
+   * 只用来决定要不要在起步建议里提「跑段代码/处理文件」：承诺一个装不出来的能力，
+   * 比不给建议更糟。老服务端不返回这个字段，`fetchCapabilities` 会按 false 收窄。
+   */
+  sandbox: boolean;
   tools: string[];
   /**
    * 已配置**且连通**的 MCP server。连不上的不在这个列表里——它们的原因在 `mcp_error`。

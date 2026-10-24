@@ -299,6 +299,8 @@ async function executeRun(
         : loaded;
 
     for await (const event of streamChat({
+      // 会话标识：服务端靠它把这一轮里发生的沙箱调用落到「本会话的那台机器」上
+      sessionId,
       model,
       reasoningEffort,
       messages: contextMessages,

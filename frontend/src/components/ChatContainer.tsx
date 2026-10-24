@@ -14,6 +14,7 @@ export interface ChatContainerProps {
   modelsError?: string | null;
   /** 服务端是否装配了联网搜索（`/api/capabilities`）；用于裁剪空对话页的起步建议。 */
   webSearchAvailable?: boolean;
+  sandboxAvailable?: boolean;
   currentModel: string | null;
   currentReasoningEffort?: string;
   onSelectModel: (modelId: string) => void;
@@ -46,6 +47,7 @@ export function ChatContainer({
   models,
   modelsError,
   webSearchAvailable,
+  sandboxAvailable,
   currentModel,
   currentReasoningEffort,
   onSelectModel,
@@ -289,6 +291,7 @@ export function ChatContainer({
           models={models}
           modelsError={modelsError}
           webSearchAvailable={webSearchAvailable}
+          sandboxAvailable={sandboxAvailable}
           currentModel={currentModel}
           currentReasoningEffort={currentReasoningEffort}
           onSelectModel={onSelectModel}
