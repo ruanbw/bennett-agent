@@ -146,14 +146,25 @@ def test_declared_scope_matches_import_paths():
 # 子进程命令
 # ---------------------------------------------------------------------
 def test_child_command_uses_full_main_entrypoint():
-    """子进程必须走 main.py --web，而不是 uvicorn —— 后者会丢掉 main() 里的启动动作。"""
+    """子进程必须走 main.py，而不是 uvicorn —— 后者会丢掉 main() 里的启动动作。
+
+    默认不带模式参数：`main.py` 的默认行为就是「全套」（API + 上传解析 + 沙箱回收）。
+    热重启若丢了后台循环，症状是「改完代码后上传不再被解析」，比启动失败更难查。
+    """
     command = build_child_command("127.0.0.1", 8000)
 
     assert command[0] == sys.executable
     assert any(part.endswith("main.py") for part in command)
-    assert "--web" in command
+    assert "--web" not in command and "--worker" not in command
     assert "--host" in command and "127.0.0.1" in command
     assert "--port" in command and "8000" in command
+
+
+def test_child_command_can_be_web_only():
+    """生产型的 `--web` 拓扑：热重启子进程也必须只起 API（不能顺带跑 worker 循环）。"""
+    command = build_child_command("127.0.0.1", 8000, run_all=False)
+
+    assert "--web" in command
 
 
 def test_child_command_never_passes_reload():
@@ -190,13 +201,30 @@ def test_reload_delegates_to_supervisor_without_starting_uvicorn(monkeypatch, st
     monkeypatch.setattr(
         main_module,
         "_run_dev_reload",
-        lambda host, port: recorded.append({"host": host, "port": port}) or 0,
+        lambda host, port, **kwargs: (recorded.append({"host": host, "port": port, **kwargs}) or 0),
     )
 
     main_module.main()
 
-    assert recorded == [{"host": "127.0.0.1", "port": 8123}]
+    # 不带模式参数 = 全套：本地开发正是这个意图。
+    assert recorded == [{"host": "127.0.0.1", "port": 8123, "run_all": True}]
     assert stub_uvicorn_run == [], "热重启模式下不应直接起 uvicorn（会丢掉启动动作）"
+
+
+def test_reload_keeps_web_topology_when_web_is_explicit(monkeypatch, stub_uvicorn_run):
+    """`--reload --web` 是生产型拓扑：子进程也只能起 API。"""
+    monkeypatch.setattr(sys, "argv", ["main.py", "--reload", "--web", "--port", "8123"])
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_run_dev_reload",
+        lambda host, port, **kwargs: (recorded.append({"host": host, "port": port, **kwargs}) or 0),
+    )
+
+    main_module.main()
+
+    assert recorded == [{"host": "127.0.0.1", "port": 8123, "run_all": False}]
 
 
 def test_reload_is_rejected_in_production(monkeypatch, stub_uvicorn_run):

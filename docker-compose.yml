@@ -15,8 +15,9 @@
 #
 #   docker compose up -d                 # 只起 postgres / redis / rustfs
 #   uv run alembic upgrade head          # 建表 / 升级结构
-#   uv run python main.py --web          # 后端（另开终端）
-#   uv run python main.py --worker       # 上传解析 worker（另开终端）
+#   uv run python main.py                # 后端 + 上传解析 + 沙箱回收（一条命令）
+#
+# 生产里拆成两个容器（见下面的 app / worker 服务），所以 compose 里显式传 --web / --worker。
 #   cd frontend && npm run dev           # 前端
 #
 # 生产的全部服务（含 app / worker / migrate）由 `app` profile 打开：

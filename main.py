@@ -185,7 +185,16 @@ async def run_interactive_loop(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bennett Agent 运行入口")
-    parser.add_argument("--web", action="store_true", help="启动 FastAPI Web 服务")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="终端交互模式（默认不带参数 = 起全套服务）",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="只起 API（生产型拓扑：后台循环交给 --worker 的另一个进程）",
+    )
     # 默认只监听回环：/api/chat 已要求登录，但注册入口是开放的；绑到 0.0.0.0
     # 等于把注册入口与上游模型额度开放给同网段
     parser.add_argument(
@@ -284,12 +293,21 @@ def main() -> None:
                 "--reload 是开发期功能，禁止在 APP_ENV=production 下使用；"
                 "生产环境改配置请走重启/重建镜像，并接受在飞请求会被中断。"
             )
-        return _run_dev_reload(host=args.host, port=args.port)
+        return _run_dev_reload(host=args.host, port=args.port, run_all=not (args.web or args.worker or args.cli))
 
-    if args.worker:
+    # 默认（不带参数）= 全套：API + 上传解析 + 沙箱回收。
+    #
+    # 为什么默认是「全部」：本地只要少起一个循环，症状就是「上传的文件永远停在解析中」
+    # 或「沙箱机器不回收」——两者都不报错，只是看起来像功能坏了。默认全开、需要时再用
+    # `--web` / `--worker` 拆开（生产的 compose 就是那样拆的），比反过来要求人记住
+    # 两个命令正确得多。终端交互退到显式的 `--cli`。
+    if args.cli:
+        return asyncio.run(_run_cli())
+
+    if args.worker and not args.web:
         return asyncio.run(_run_upload_worker())
 
-    if args.web:
+    if args.web and not args.worker:
         import uvicorn
 
         print("=" * 60)
@@ -315,8 +333,83 @@ def main() -> None:
             # 走默认的等所有任务结束会让 Ctrl-C 看起来卡死。
             timeout_graceful_shutdown=5,
         )
-    else:
-        asyncio.run(_run_cli())
+        return
+
+    return asyncio.run(_run_all(host=args.host, port=args.port))
+
+
+async def _run_all(host: str, port: int) -> None:
+    """一条命令跑全套：API + 上传解析 + 沙箱回收。
+
+    ## 为什么是 asyncio 而不是启动子进程
+
+    三个循环必须共用**同一个事件循环**：`app/db.py` 的 engine、限流器、Redis 客户端都是
+    进程级单例，而它们内部的 asyncpg / httpx 连接绑在创建它的 loop 上。起子进程就变成
+    「两份连接池 + 两份限流计数」，正是 `docker-compose` 里 app/worker 分离时要靠 Redis
+    共享状态来解决的问题——本地没必要背这份复杂度。
+
+    ## 停机的顺序
+
+    uvicorn 收到 SIGTERM/SIGINT 后会先停止接收新请求、等新请求收尾，`serve()` 才返回。
+    这时才置 `stop`：两个后台循环各自把手上这一条处理完（见 `uploads/worker.py` 与
+    `sandbox/reaper.py` 的 `wait_for(stop.wait(), ...)`），最后统一释放连接池。
+    顺序反了的话，正在解析的上传会写一半、正在销毁的沙箱会停在 `destroying`。
+    """
+    import uvicorn
+
+    from app.db import engine, verify_schema_at_head
+    from app.services.http_client import close_http_client
+    from app.services.redis_client import close_redis
+    from app.services.sandbox.reaper import run_reaper
+    from app.services.uploads.worker import run_worker
+
+    await verify_schema_at_head()
+
+    stop = asyncio.Event()
+    loops = [
+        asyncio.create_task(run_worker(stop), name="upload-worker"),
+        asyncio.create_task(run_reaper(stop), name="sandbox-reaper"),
+    ]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            "app.server:app",
+            host=host,
+            port=port,
+            reload=False,
+            # 与 `--web` 分支保持**逐字一致**：日志、代理头、优雅关闭的取舍都在那边
+            # 解释过，这里复制而不是另发明一套。
+            log_config=None,
+            proxy_headers=False,
+            timeout_graceful_shutdown=5,
+        )
+    )
+
+    print("=" * 60)
+    print(f" Bennett Agent API: http://{host}:{port}{docs_hint()}")
+    print(f" {frontend_hint()}")
+    print(" 后台循环：上传解析 + 沙箱回收（生产请改用 --web 与 --worker 分开）")
+    print("=" * 60)
+
+    try:
+        await server.serve()
+    finally:
+        stop.set()
+        # 给它们一点时间把手上的活收尾；超时也不阻塞退出（SIGKILL 兜底）。
+        await asyncio.wait(loops, timeout=10)
+        for task in loops:
+            task.cancel()
+        try:
+            await close_redis()
+        except Exception:  # noqa: BLE001 - 收尾失败不遮蔽其他清理
+            logger.warning("关闭 Redis 连接失败", exc_info=True)
+        try:
+            await close_http_client()
+        except Exception:  # noqa: BLE001
+            logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
+        try:
+            await engine.dispose()
+        except Exception:  # noqa: BLE001
+            logger.warning("释放数据库连接失败", exc_info=True)
 
 
 async def _run_upload_worker() -> None:
@@ -332,6 +425,7 @@ async def _run_upload_worker() -> None:
     """
     import signal
 
+    from app.services.sandbox.reaper import run_reaper
     from app.services.uploads.worker import run_worker
 
     await verify_schema_at_head()
@@ -344,7 +438,10 @@ async def _run_upload_worker() -> None:
             loop.add_signal_handler(sig, stop.set)
 
     try:
-        await run_worker(stop)
+        # 两个循环共用同一个 stop 事件：一个是上传解析、一个是沙箱回收。放在一起跑是因为
+        # 它们的负载特征完全一样（时间驱动、可重启、不占 web 事件循环），而分成两个进程
+        # 只会多一份部署配置与一份「漏启动其中一个」的故障。
+        await asyncio.gather(run_worker(stop), run_reaper(stop))
     finally:
         try:
             await close_redis()
@@ -360,7 +457,7 @@ async def _run_upload_worker() -> None:
             logger.warning("释放数据库连接失败", exc_info=True)
 
 
-def _run_dev_reload(host: str, port: int) -> int:
+def _run_dev_reload(host: str, port: int, *, run_all: bool = False) -> int:
     """开发期热重启的入口：把 `--host/--port` 原样交给 supervisor。
 
     这里**不做** `configure_logging()` 之外的准备工作：真正干活的是
@@ -376,7 +473,7 @@ def _run_dev_reload(host: str, port: int) -> int:
     print(f" Bennett Agent 开发热重启: http://{host}:{port}{docs_hint()}", flush=True)
     print(f" {frontend_hint()}", flush=True)
     print("=" * 60, flush=True)
-    run_dev_reload(host=host, port=port)
+    run_dev_reload(host=host, port=port, run_all=run_all)
     return 0
 
 
