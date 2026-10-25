@@ -213,9 +213,17 @@ class HashedAccessTokenDatabase(SQLAlchemyAccessTokenDatabase):
         return row
 
     async def delete(self, access_token) -> None:  # noqa: ANN001
-        await super().delete(access_token)
+        # 缓存命中的行是 `_session_cache_get` **临时构造的实例**，不在任何会话里；
+        # 上游的 `session.delete()` 对这种实例会抛 InvalidRequestError「not persisted」，
+        # 表现为登出 500（同一次登出里认证依赖先查一次并回填缓存，destroy_token 再查
+        # 必然命中缓存）。所以统一按主键删，兼容「缓存命中」与「回源行」两种来源。
+        token = str(access_token.token)
+        await self.session.execute(
+            delete(self.access_token_table).where(self.access_token_table.token == token)
+        )
+        await self.session.commit()
         # 先库后缓存：缓存删除失败时，TTL 到期后仍会回源到已删除的行。
-        await _session_cache_delete(str(access_token.token))
+        await _session_cache_delete(token)
 
 
 async def _session_cache_get(hashed_token: str) -> AccessToken | None:

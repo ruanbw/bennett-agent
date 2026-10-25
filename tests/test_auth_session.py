@@ -187,3 +187,75 @@ async def test_new_sessions_store_only_a_token_digest():
             if user_row is not None:
                 await session.delete(user_row)
             await session.commit()
+
+
+async def test_logout_deletes_session_even_on_cache_hit(monkeypatch: pytest.MonkeyPatch):
+    """登出在「缓存命中」时也必须删得掉会话行。
+
+    回归背景：`_session_cache_get` 命中时返回的是**临时构造**的 AccessToken（不在任何
+    会话里），上游 `session.delete()` 对它抛 InvalidRequestError「not persisted」——
+    表现为登出 500。而一次登出请求里认证依赖先 `get_by_token`（miss → 回填缓存），
+    `destroy_token` 再查（必然命中），所以只要 Redis 可用，这条路径每次登出都会走到。
+    修复后的 `delete` 按主键删，不再依赖实例的会话归属。
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db import HashedAccessTokenDatabase, _session_cache_delete, hash_access_token
+    from app.services.auth import HashedDatabaseStrategy, UserManager
+
+    monkeypatch.setattr(settings, "redis_session_cache_enabled", True)
+
+    user_id = uuid.uuid4()
+    email = f"logout-{uuid.uuid4().hex[:12]}@example.com"
+    raw_token: str | None = None
+    async with async_session_maker() as session:
+        session.add(
+            User(
+                id=user_id,
+                email=email,
+                hashed_password="x",
+                is_active=True,
+                is_superuser=False,
+                is_verified=True,
+            )
+        )
+        await session.commit()
+
+    try:
+        async with async_session_maker() as session:
+            user = await session.get(User, user_id)
+            strategy = HashedDatabaseStrategy(
+                HashedAccessTokenDatabase(session, AccessToken),
+                lifetime_seconds=3600,
+            )
+            raw_token = await strategy.write_token(user)
+
+        # 第一次读：回源数据库并回填缓存（模拟同一次登出里认证依赖的那次读取）
+        async with async_session_maker() as session:
+            await HashedAccessTokenDatabase(session, AccessToken).get_by_token(raw_token)
+
+        # 第二次读：命中缓存 → 临时实例；delete 必须能按主键删掉库里的行
+        async with async_session_maker() as session:
+            db = HashedAccessTokenDatabase(session, AccessToken)
+            cached = await db.get_by_token(raw_token)
+            assert cached is not None
+            # 锁住问题前提：缓存返回的确实不是本会话的持久实例
+            assert sa_inspect(cached).transient
+            await db.delete(cached)
+
+        async with async_session_maker() as session:
+            row = await session.scalar(
+                select(AccessToken).where(AccessToken.token == hash_access_token(raw_token))
+            )
+            assert row is None, "缓存命中的登出没有删掉会话行"
+    finally:
+        async with async_session_maker() as session:
+            rows = (await session.scalars(select(AccessToken).where(AccessToken.user_id == user_id))).all()
+            for row in rows:
+                await session.delete(row)
+            user_row = await session.get(User, user_id)
+            if user_row is not None:
+                await session.delete(user_row)
+            await session.commit()
+        if raw_token is not None:
+            await _session_cache_delete(hash_access_token(raw_token))
