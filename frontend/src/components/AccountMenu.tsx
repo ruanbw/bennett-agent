@@ -3,7 +3,7 @@
  *
  * ## 触发器与内容分离的理由
  *
- * 菜单内容（账号信息 / 设置 / 管理后台 / 主题 / 登出 / 登出确认框）是一整套状态与
+ * 菜单内容（账号信息 / 设置 / 主题 / 登出 / 登出确认框）是一整套状态与
  * 交互，复制两份必然漂移（此前「设置」就在两处各自持有面板状态）。所以这里只接受一个
  * `trigger` 节点，其余全部共享；位置差异用 `collapsed` 控制（侧边/对齐方向）。
  *
@@ -19,7 +19,6 @@ import {
   LogOut,
   Moon,
   Settings,
-  ShieldCheck,
   Sun,
 } from 'lucide-react';
 
@@ -47,9 +46,6 @@ export interface AccountMenuProps {
   email: string | null;
   onLogout: () => void | Promise<unknown>;
   onOpenSettings: () => void;
-  /** 是否渲染管理后台入口：只有管理员/超管能拿到。 */
-  canOpenAdmin?: boolean;
-  onOpenAdmin?: () => void;
   /** 收起态：菜单向右侧弹出并对齐末端（侧边栏底部则向上弹出）。 */
   collapsed?: boolean;
 }
@@ -59,8 +55,6 @@ export function AccountMenu({
   email,
   onLogout,
   onOpenSettings,
-  canOpenAdmin = false,
-  onOpenAdmin,
   collapsed = false,
 }: AccountMenuProps) {
   const [confirming, setConfirming] = useState(false);
@@ -132,14 +126,6 @@ export function AccountMenu({
               {settingsShortcutLabel()}
             </span>
           </DropdownMenuItem>
-
-          {/* 入口只对管理员可见；权限本身仍由后端裁决 */}
-          {canOpenAdmin && onOpenAdmin && (
-            <DropdownMenuItem onClick={() => onOpenAdmin()}>
-              <ShieldCheck className="size-4 text-muted-foreground" />
-              <span>管理后台</span>
-            </DropdownMenuItem>
-          )}
 
           <DropdownMenuSeparator />
 

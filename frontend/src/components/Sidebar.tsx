@@ -63,9 +63,6 @@ export interface SidebarProps {
   onLogout: () => void | Promise<unknown>;
   /** 打开设置页（页面挂在 App，收起侧边栏后仍可由胶囊工具栏打开）。 */
   onOpenSettings: () => void;
-  /** 超级管理员才渲染管理后台入口；普通用户可不传。 */
-  canOpenAdmin?: boolean;
-  onOpenAdmin?: () => void;
 }
 
 /**
@@ -95,8 +92,6 @@ export function Sidebar({
   userEmail,
   onLogout,
   onOpenSettings,
-  canOpenAdmin = false,
-  onOpenAdmin,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -730,8 +725,6 @@ export function Sidebar({
         email={userEmail}
         onLogout={onLogout}
         onOpenSettings={onOpenSettings}
-        canOpenAdmin={canOpenAdmin}
-        onOpenAdmin={onOpenAdmin}
       />
 
       {confirmDialog}

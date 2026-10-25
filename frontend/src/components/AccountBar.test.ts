@@ -100,8 +100,6 @@ describe('菜单内容只有一份（AccountMenu）', () => {
           email: 'bennett@example.com',
           onLogout: vi.fn(),
           onOpenSettings: vi.fn(),
-          canOpenAdmin: true,
-          onOpenAdmin: vi.fn(),
         })
       )
     );
@@ -109,7 +107,6 @@ describe('菜单内容只有一份（AccountMenu）', () => {
     // 收起侧边栏后这些入口不该消失：它们现在由 AccountMenu 统一提供
     expect(html).toContain('bennett@example.com');
     expect(html).toContain('设置');
-    expect(html).toContain('管理后台');
     expect(html).toContain('浅色');
     expect(html).toContain('深色');
     expect(html).toContain('跟随系统');

@@ -8,7 +8,6 @@ import { LoginPage } from './components/LoginPage';
 import { SettingsPage } from './components/SettingsPage';
 import { Sidebar } from './components/Sidebar';
 import { Toaster } from './components/Toaster';
-import { AdminConsole } from './components/admin/AdminConsole';
 import { ThemeProvider } from './context/ThemeContext';
 import { DetailLevelProvider } from './context/DetailLevelContext';
 import { PerformanceUsageProvider } from './context/PerformanceUsageContext';
@@ -19,7 +18,6 @@ import { useForeignFileDropGuard } from './hooks/use-foreign-file-drop-guard';
 import { useGlobalShortcuts } from './hooks/use-global-shortcuts';
 import { useIsMobileViewport } from './hooks/use-media-query';
 import { apiFetch } from './lib/api';
-import { canAccessAdmin, isSuperadmin } from './lib/auth';
 import { describeConnectionFailure } from './lib/connection-failure';
 import { ModelListShapeError, readModelListResponse } from './lib/models-response';
 import { downloadMarkdownFile } from './lib/export-markdown';
@@ -121,8 +119,8 @@ function useModels() {
     [],
   );
 
-  // 切回这个标签页时重拉一次。模型清单可能在别处被改过（另一个标签页开着管理后台、
-  // 或管理员从另一台机器改了启停）：只在挂载时拉一次的话，用户看到的是一份可能已经
+  // 切回这个标签页时重拉一次。模型清单可能在别处被改过（管理后台是独立服务，通常
+  // 开在另一个标签页；或管理员从另一台机器改了启停）：只在挂载时拉一次的话，用户看到的是一份可能已经
   // 过期的列表，而失败的代价是「选了后台已停用的模型 → 请求报 model_unavailable」。
   // 这次拉取不展示 loading：旧列表继续可用，拿到了再替换（失败也保留旧列表）。
   useEffect(() => {
@@ -162,9 +160,6 @@ export interface AuthenticatedShellProps {
   userRole: string | null;
   /** 服务端已使本会话失效（改密）：切回未登录并说明原因。 */
   onSessionExpired: (message: string) => void;
-  canOpenAdmin: boolean;
-  /** 是否 superadmin：决定管理后台「用户管理」里能不能改角色。 */
-  canManageRoles: boolean;
   onLogout: () => void | Promise<unknown>;
 }
 
@@ -254,8 +249,6 @@ function AuthenticatedShell({
   userEmail,
   userRole,
   onSessionExpired,
-  canOpenAdmin,
-  canManageRoles,
   onLogout,
 }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
@@ -283,21 +276,8 @@ function AuthenticatedShell({
 
   const isMobile = useIsMobileViewport();
 
-  // 管理后台是覆盖层。状态放在 shell 里（而不是 App）：关闭时要能就地刷新模型列表，
-  // 而 `/api/models` 的 state 就在这个组件的 `useModels` 里。
-  const [adminOpen, setAdminOpen] = useState(false);
   // 设置页挂在 shell 层：侧边栏收起时 AccountBar 不渲染，齿轮入口留在侧边栏 / 抽屉里
   const [settingsOpen, setSettingsOpen] = useState(false);
-
-  const handleOpenAdmin = useCallback(() => setAdminOpen(true), []);
-
-  const handleCloseAdmin = useCallback(() => {
-    setAdminOpen(false);
-    // 后台刚改过什么都有可能：启停开关、新增/删除模型、换默认模型。而 `/api/models`
-    // 只在挂载与手动重试时拉取，不在这里刷的话聊天框会继续用进后台之前的那份快照
-    // （表现为「后台 5 个、聊天框 6 款」，而且停用的模型仍然可选）。
-    void refreshModels();
-  }, [refreshModels]);
 
   // 抽屉的开合是「用户手动状态 + 断点默认值」的组合。用渲染期调整而不是 effect：
   // 断点变化时清掉手动覆盖即可，不需要额外一轮渲染。
@@ -430,8 +410,6 @@ function AuthenticatedShell({
           onToggleOpen={handleToggleSidebar}
           searchRequest={searchRequest}
           userEmail={userEmail}
-          canOpenAdmin={canOpenAdmin}
-          onOpenAdmin={handleOpenAdmin}
           onOpenSettings={handleOpenSettings}
           onLogout={onLogout}
         />
@@ -502,16 +480,6 @@ function AuthenticatedShell({
           onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
         />
       )}
-
-      {adminOpen && (
-        <ErrorBoundary fallbackTitle="管理后台加载异常">
-          <AdminConsole
-            userEmail={userEmail}
-            canManageRoles={canManageRoles}
-            onClose={handleCloseAdmin}
-          />
-        </ErrorBoundary>
-      )}
     </div>
   );
 }
@@ -579,16 +547,10 @@ export function App() {
           onRetryProbe={() => void retryProbe()}
         />
       ) : (
-        /*
-          管理后台是 shell 自己的覆盖层：关闭时要刷新模型列表，而模型 state 在 shell 的
-          `useModels` 里。登录态一变整个 shell 卸载，后台的开关也跟着自然复位。
-        */
         <AuthenticatedShell
           userEmail={user?.email ?? null}
           userRole={user?.role ?? null}
           onSessionExpired={expireSession}
-          canOpenAdmin={canAccessAdmin(user)}
-          canManageRoles={isSuperadmin(user)}
           onLogout={logout}
         />
       )}

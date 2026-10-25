@@ -345,9 +345,12 @@ def test_model_upstream_timeout_zero_means_unlimited():
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize("raw", ["", "   ", ",,", " , "])
 def test_cors_origins_blank_falls_back_to_defaults(raw):
+    """默认名单覆盖两个前端 dev server：用户端 5173 与管理后台 5174。"""
     assert Settings(cors_allowed_origins=raw, _env_file=None).get_cors_origins() == [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
 
 

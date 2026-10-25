@@ -22,29 +22,24 @@ export interface AuthUser {
   is_superuser: boolean;
   is_verified: boolean;
   /**
-   * 角色：`user` / `admin` / `superadmin`（见后端 `app/roles.py`），是能否进管理后台的
-   * 唯一依据；`is_superuser` 只是它 `>= admin` 的派生镜像，后端鉴权也只读 role。
+   * 角色：`user` / `admin` / `superadmin`（见后端 `app/roles.py`），后端鉴权只读它；
+   * `is_superuser` 只是它 `>= admin` 的派生镜像。管理后台的权限判断在
+   * `admin-frontend/src/lib/auth.ts`。
    */
   role: string;
 }
 
 /**
- * 进管理后台的最低角色。与后端 `ADMIN_LEVEL` 对齐。
+ * 角色的展示名（设置页「账号」区用）。
  *
- * 用集合而不是 `role === 'admin'`：`superadmin` 权限严格包含 `admin` 的全部能力，
- * 写成等号会把最高一档漏掉（表现为「超管看不到后台入口」）。
+ * 角色的**判断**逻辑在管理后台（`admin-frontend/src/lib/auth.ts`）；用户端只需要
+ * 把自己的角色念出来，所以这里只有一张标签表，没有权限判断。
  */
-const ADMIN_ROLES = new Set(['admin', 'superadmin']);
-
-/** 能否显示管理后台入口。权限的最终裁决在后端（403），这里只决定入口可见性。 */
-export function canAccessAdmin(user: AuthUser | null): boolean {
-  return user !== null && ADMIN_ROLES.has(user.role);
-}
-
-/** 是否是最高一档（只有它能看到角色设置按钮）。 */
-export function isSuperadmin(user: AuthUser | null): boolean {
-  return user?.role === 'superadmin';
-}
+export const ROLE_LABELS: Record<string, string> = {
+  user: '普通用户',
+  admin: '管理员',
+  superadmin: '超级管理员',
+};
 
 export type AuthResult = { ok: true } | { ok: false; message: string };
 

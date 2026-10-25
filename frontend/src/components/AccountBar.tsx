@@ -1,7 +1,7 @@
 /**
  * 侧边栏底部账号区，参照 DeepSeek 官方 UI：与上方列表之间没有分割线，视觉上融为一体。
  *
- * 菜单内容（设置 / 管理后台 / 主题 / 登出）在 `AccountMenu` 里与「收起侧边栏后的胶囊
+ * 菜单内容（设置 / 主题 / 登出）在 `AccountMenu` 里与「收起侧边栏后的胶囊
  * 工具栏头像」共用——两处各写一份必然漂移，而登出入口少一处就是功能缺失。
  */
 
@@ -14,9 +14,6 @@ export interface AccountBarProps {
   email: string | null;
   onLogout: () => void | Promise<unknown>;
   collapsed?: boolean;
-  /** 是否渲染管理后台入口：只有管理员/超管能拿到。 */
-  canOpenAdmin?: boolean;
-  onOpenAdmin?: () => void;
   /**
    * 打开设置页。
    *
@@ -30,8 +27,6 @@ export function AccountBar({
   email,
   onLogout,
   collapsed = false,
-  canOpenAdmin = false,
-  onOpenAdmin,
   onOpenSettings,
 }: AccountBarProps) {
   const nickname = email ? email.split('@')[0] : '未登录';
@@ -44,8 +39,6 @@ export function AccountBar({
         email={email}
         onLogout={onLogout}
         onOpenSettings={onOpenSettings}
-        canOpenAdmin={canOpenAdmin}
-        onOpenAdmin={onOpenAdmin}
         trigger={
           <button
             type="button"

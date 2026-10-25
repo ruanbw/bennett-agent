@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 移动端浏览器工具栏颜色：与 index.css 的 --background、src/context/theme-context.ts
+         的 THEME_COLORS 保持一致，并由下面的首屏脚本与 ThemeProvider 动态更新 -->
+    <meta name="theme-color" content="#ffffff" />
+    <title>Bennett 管理后台</title>
+    <!--
+      首屏主题引导：在 React 挂载前决定 dark class 与 color-scheme，避免首帧闪白。
+
+      与 src/context/theme-context.ts 的 normalizeThemePreference 是**两份副本**
+      （内联脚本不能 import TS 模块）：白名单（'light' | 'dark' | 'system'）、脏值 →
+      'system'、以及 colorScheme 的同步都必须与那边一致，否则会出现「首帧按 A 渲染、
+      挂载后按 B 渲染」的闪变。改这里时请同步修改 theme-context.ts。
+
+      存储与 matchMedia 都可能抛（Safari 阻止 Cookie、sandbox iframe 下访问
+      localStorage 抛 SecurityError），任何一处裸抛都会让应用白屏，所以分开包 try/catch。
+    -->
+    <script>
+      (function () {
+        var preference = 'system';
+        try {
+          var stored = window.localStorage.getItem('theme_preference');
+          if (stored === 'light' || stored === 'dark' || stored === 'system') preference = stored;
+        } catch (error) {
+          // 存储不可用：按 system 处理，与 ThemeProvider 的兜底一致
+        }
+
+        var isDark = false;
+        try {
+          isDark =
+            preference === 'dark' ||
+            (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        } catch (error) {
+          // matchMedia 不可用：只有显式 dark 才进暗色
+          isDark = preference === 'dark';
+        }
+
+        if (isDark) document.documentElement.classList.add('dark');
+        document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+
+        // 移动端工具栏颜色（theme-context.ts 的 THEME_COLORS 是同一份取值的另一处副本）
+        var themeColor = isDark ? '#09090b' : '#ffffff';
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', themeColor);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

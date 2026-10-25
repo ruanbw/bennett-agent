@@ -34,7 +34,7 @@ describe('ErrorBoundary 崩溃页', () => {
 
   it('保留标题，让用户知道是哪一块坏了', () => {
     expect(renderCrashed(new Error('boom'))).toContain('对话区域加载异常');
-    expect(renderCrashed(new Error('boom'), '管理后台加载异常')).toContain('管理后台加载异常');
+    expect(renderCrashed(new Error('boom'), '模型列表加载异常')).toContain('模型列表加载异常');
   });
 
   it('详情默认收起：折叠区未展开时页面里没有技术原文', () => {

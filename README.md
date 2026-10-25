@@ -159,12 +159,16 @@ uv run python main.py --worker               # 只跑后台循环（生产：另
 > Linux 用网关的服务名。提供商是首次启动时从环境变量**引导**出来的；已经引导过之后再改
 > 环境变量不会生效，请在管理后台修改（或改库后重启）。
 
-前端：
+前端（用户端与管理后台是两个独立的前端服务，代码互不依赖）：
 
 ```bash
-cd frontend
+cd frontend                        # 用户端：对话、知识库、文件上传
 npm install
 npm run dev                        # http://127.0.0.1:5173
+
+cd ../admin-frontend               # 管理后台：提供商 / 价格 / 用户管理
+npm install
+npm run dev                        # http://127.0.0.1:5174
 ```
 
 首次使用点「去注册」：邮箱 + 至少 8 位密码即可，新账号是普通用户。初始超管用播种脚本创建（幂等）：
@@ -173,7 +177,8 @@ npm run dev                        # http://127.0.0.1:5173
 uv run python scripts/seed_admin.py --email admin@example.com --password '改成你的密码'
 ```
 
-之后由超管在管理后台把其他账号设为管理员。
+之后由超管在**管理后台**（`admin-frontend/`，管理员账号登录）把其他账号设为管理员；
+用户端界面上没有后台入口，后台与用户端共享会话，登录过且角色够即可直接打开。
 
 ### 隔离执行环境（默认关闭）
 
@@ -237,8 +242,10 @@ compose 编排六个服务：`postgres` / `redis` / `rustfs` 三个依赖，`mig
 `alembic upgrade head`）、`app`（API）与 `worker`（上传解析）。`app` 通过
 `service_completed_successfully` 等待迁移成功——迁移失败时应用不会带着旧结构启动。
 
-镜像只提供 `/api/*`，**不托管前端**：前后端是分离部署的。前端 `npm run build` 的产物
-交给任意静态服务器或 CDN，再把 `/api` 反代到本服务（同一个域名下最省事，见下）。
+镜像只提供 `/api/*`，**不托管前端**：前后端是分离部署的。用户端与管理后台两个前端
+`npm run build` 的产物交给任意静态服务器或 CDN，再把 `/api` 反代到本服务（同一个域名下
+最省事，见下）。管理后台的两种部署形态（同域子路径 / 独立子域）见
+[`admin-frontend/README.md`](admin-frontend/README.md)。
 
 数据落在命名卷里（`bennett-postgres-data` / `bennett-redis-data` / `bennett-rustfs-data`），
 `docker compose down` 不会删除；`down -v` 会**永久**删掉数据库、会话与上传的原件。
@@ -270,6 +277,7 @@ app/          FastAPI：api / config / prompts / schemas / services / tools / db
 migrations/   Alembic 迁移（结构变更的唯一入口；初始 revision 即完整基线）
 evals/        行为回归评测：用例、断言与执行器
 frontend/     React 19 + Vite + Tailwind 4 + assistant-ui（详见 frontend/README.md）
+admin-frontend/  管理后台（独立 React 19 + Vite 服务，详见 admin-frontend/README.md）
 frontend/brand/  品牌图标的母版（GitHub 头像）与生成脚本，产物在 frontend/public/
 prompts/      Jinja2 提示词模板
 scripts/      seed_admin.py（播种初始超管）、run_eval.py（跑评测）、smoke_sandbox.py（沙箱冒烟）

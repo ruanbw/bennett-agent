@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2, Search, ShieldCheck, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
+import { PageShell, Badge, TableStatusRow, TableWrap, TD_CLASS, TH_CLASS, Toolbar } from './table-parts';
 import {
   ROLE_LABELS,
   banUser,
@@ -45,7 +46,7 @@ function isSelf(user: AdminUser, currentUserEmail: string | null): boolean {
   return user.email.toLowerCase() === currentUserEmail.toLowerCase();
 }
 
-/** 角色 → 徒标颜色。`superadmin` 用主色，`admin` 用中性，普通用户不显示徒标。 */
+/** 角色 → 徽标颜色。`superadmin` 用主色，`admin` 用中性，普通用户不显示徽标。 */
 const ROLE_TONE: Record<string, 'primary' | 'muted'> = {
   superadmin: 'primary',
   admin: 'muted',
@@ -192,80 +193,77 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
   const controlsDisabled = isBusy || loading;
 
   return (
-    <section className="space-y-3" aria-labelledby="admin-users-heading">
-      <div>
-        <h2 id="admin-users-heading" className="text-sm font-semibold text-foreground">
-          用户管理
-        </h2>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          按邮箱检索账号。封禁会立即断开该用户的所有会话；
+    <PageShell
+      title="用户管理"
+      description={
+        <>
+          按邮箱检索账号，封禁会立即断开该用户的所有会话。
           {canManageRoles
             ? '修改角色同样会立即生效（对方需重新登录）。'
             : '角色设置仅超级管理员可用。'}
-        </p>
-      </div>
-
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          handleSearch();
-        }}
-        className="flex flex-wrap items-center gap-1.5"
-      >
-        <div className="relative min-w-[12rem] flex-1">
-          <Search
-            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="按邮箱搜索"
-            aria-label="按邮箱搜索用户"
-            autoComplete="off"
-            className="h-8 pl-8 md:text-xs"
-          />
-        </div>
-        <Button type="submit" size="sm" disabled={isBusy} className="cursor-pointer">
-          搜索
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={handleClearSearch}
-          disabled={isBusy || (!query && !appliedQuery)}
-          className="cursor-pointer gap-1"
+        </>
+      }
+    >
+      <Toolbar aria-label="用户筛选">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            handleSearch();
+          }}
+          className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"
         >
-          <X className="size-3.5" aria-hidden="true" />
-          清空
-        </Button>
-      </form>
+          <div className="relative w-full max-w-xs min-w-[12rem] flex-1">
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="按邮箱搜索"
+              aria-label="按邮箱搜索用户"
+              autoComplete="off"
+              className="h-8 pl-8 md:text-xs"
+            />
+          </div>
+          <Button type="submit" size="sm" disabled={isBusy} className="cursor-pointer">
+            搜索
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleClearSearch}
+            disabled={isBusy || (!query && !appliedQuery && statusFilter === 'all')}
+            className="cursor-pointer gap-1"
+          >
+            <X className="size-3.5" aria-hidden="true" />
+            重置
+          </Button>
+        </form>
 
-      {/* 状态筛选：账号一多，「有哪些被封了」不能靠翻页找人。用 role=group + aria-pressed
-          而不是 select：三档选项一眼看全，也省一次展开。 */}
-      <div role="group" aria-label="按账号状态筛选" className="flex flex-wrap items-center gap-1.5">
-        {STATUS_OPTIONS.map(({ value, label }) => {
-          const active = statusFilter === value;
-          return (
-            <Button
-              key={value}
-              type="button"
-              size="xs"
-              variant={active ? 'default' : 'outline'}
-              aria-pressed={active}
-              disabled={isBusy}
-              onClick={() => handleStatusChange(value)}
-              className="cursor-pointer"
-            >
-              {label}
-            </Button>
-          );
-        })}
-        {statusFilter !== 'all' && page !== null && (
-          <span className="text-[11px] text-muted-foreground">共 {page.total} 个</span>
-        )}
-      </div>
+        {/* 状态筛选：账号一多，「有哪些被封了」不能靠翻页找人。用 role=group + aria-pressed
+            而不是 select：三档选项一眼看全，也省一次展开。 */}
+        <div role="group" aria-label="按账号状态筛选" className="flex items-center gap-1">
+          {STATUS_OPTIONS.map(({ value, label }) => {
+            const active = statusFilter === value;
+            return (
+              <Button
+                key={value}
+                type="button"
+                size="xs"
+                variant={active ? 'default' : 'outline'}
+                aria-pressed={active}
+                disabled={isBusy}
+                onClick={() => handleStatusChange(value)}
+                className="cursor-pointer"
+              >
+                {label}
+              </Button>
+            );
+          })}
+        </div>
+      </Toolbar>
 
       {actionError && (
         <div
@@ -296,140 +294,137 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         </div>
       )}
 
-      {page === null ? (
-        !loadError && (
-          <div
-            role="status"
-            className="flex items-center justify-center gap-2 rounded-xl border border-border/70 bg-card/50 py-10 text-xs text-muted-foreground"
-          >
-            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            正在加载用户…
-          </div>
-        )
-      ) : page.items.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 rounded-xl border border-border/70 bg-card/50 px-4 py-10 text-center text-xs text-muted-foreground">
-          <span>
-            {appliedQuery
-              ? `没有匹配「${appliedQuery}」的用户`
-              : statusFilter === 'banned'
-                ? '没有被封禁的账号'
-                : statusFilter === 'active'
-                  ? '没有正常状态的账号'
-                  : '暂无用户'}
-          </span>
-          {appliedQuery && (
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={handleClearSearch}
-              className="cursor-pointer"
-            >
-              清除搜索
-            </Button>
-          )}
-        </div>
-      ) : (
-        <ul
-          aria-busy={loading}
-          className={`divide-y divide-border/70 overflow-hidden rounded-xl border border-border/70 bg-card/50 transition-opacity ${
-            loading ? 'opacity-60' : ''
-          }`}
-        >
-          {page.items.map((user) => {
-            const self = isSelf(user, currentUserEmail);
-            // 封禁：不能封自己，也不能封同级或更高等级（这里只是提前禁用，后端也会拦）
-            const banBlocked = self || (canManageRoles ? false : user.role !== 'user');
-            const blockedReason = self
-              ? '不能封禁当前登录的账号'
-              : canManageRoles
-                ? undefined
-                : // admin 只能动普通用户：同级之间互封会让后台失去可预期性
-                  user.role === 'superadmin' || user.role === 'admin'
-                  ? '只有超级管理员可以管理管理员账号'
-                  : undefined;
-
-            // 角色按钮：只有 superadmin 能看到；自己、超管、已封禁账号不可改
-            const roleEditable = canManageRoles && !self && user.is_active && user.role !== 'superadmin';
-            const roleBlockedReason = !canManageRoles
-              ? '只有超级管理员可以调整角色'
-              : self
-                ? '不能修改自己的角色'
-                : user.role === 'superadmin'
-                  ? '超级管理员只能经运维通道（seed_admin.py）调整'
-                  : !user.is_active
-                    ? '该账号已被封禁，请先解封再修改角色'
+      <TableWrap minWidth="44rem">
+        <thead>
+          <tr>
+            <th className={TH_CLASS}>邮箱</th>
+            <th className={TH_CLASS}>状态</th>
+            <th className={TH_CLASS}>角色</th>
+            <th className={`${TH_CLASS} text-right`}>操作</th>
+          </tr>
+        </thead>
+        <tbody aria-busy={loading} className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+          {page === null ? (
+            !loadError && <TableStatusRow colSpan={4} loading text="正在加载用户…" />
+          ) : page.items.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="px-3 py-10 text-center text-xs text-muted-foreground">
+                <span className="flex flex-col items-center gap-2">
+                  <span>
+                    {appliedQuery
+                      ? `没有匹配「${appliedQuery}」的用户`
+                      : statusFilter === 'banned'
+                        ? '没有被封禁的账号'
+                        : statusFilter === 'active'
+                          ? '没有正常状态的账号'
+                          : '暂无用户'}
+                  </span>
+                  {appliedQuery && (
+                    <Button variant="outline" size="xs" onClick={handleClearSearch} className="cursor-pointer">
+                      清除搜索
+                    </Button>
+                  )}
+                </span>
+              </td>
+            </tr>
+          ) : (
+            page.items.map((user) => {
+              const self = isSelf(user, currentUserEmail);
+              // 封禁：不能封自己，也不能封同级或更高等级（这里只是提前禁用，后端也会拦）
+              const banBlocked = self || (canManageRoles ? false : user.role !== 'user');
+              const blockedReason = self
+                ? '不能封禁当前登录的账号'
+                : canManageRoles
+                  ? undefined
+                  : // admin 只能动普通用户：同级之间互封会让后台失去可预期性
+                    user.role === 'superadmin' || user.role === 'admin'
+                    ? '只有超级管理员可以管理管理员账号'
                     : undefined;
-            const nextRole: SettableRole = user.role === 'admin' ? 'user' : 'admin';
 
-            return (
-              <li
-                key={user.id}
-                className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5"
-              >
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="break-all text-xs text-foreground">{user.email}</span>
+              // 角色按钮：只有 superadmin 能看到；自己、超管、已封禁账号不可改
+              const roleEditable = canManageRoles && !self && user.is_active && user.role !== 'superadmin';
+              const roleBlockedReason = !canManageRoles
+                ? '只有超级管理员可以调整角色'
+                : self
+                  ? '不能修改自己的角色'
+                  : user.role === 'superadmin'
+                    ? '超级管理员只能经运维通道（seed_admin.py）调整'
+                    : !user.is_active
+                      ? '该账号已被封禁，请先解封再修改角色'
+                      : undefined;
+              const nextRole: SettableRole = user.role === 'admin' ? 'user' : 'admin';
+
+              return (
+                <tr key={user.id} className="hover:bg-accent/30">
+                  <td className={TD_CLASS}>
+                    <div className="break-all text-xs">{user.email}</div>
+                    {!user.is_verified && (
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">邮箱未验证</div>
+                    )}
+                  </td>
+                  <td className={TD_CLASS}>
                     <Badge tone={user.is_active ? 'ok' : 'danger'}>
                       {user.is_active ? '正常' : '已封禁'}
                     </Badge>
-                    {/* 普通用户不戴角色徒标：徒标太多时“正常”两个字才是重点 */}
-                    {user.role !== 'user' && (
+                  </td>
+                  <td className={TD_CLASS}>
+                    {user.role !== 'user' ? (
                       <Badge tone={ROLE_TONE[user.role] ?? 'muted'}>
                         {ROLE_LABELS[user.role] ?? user.role}
                       </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">普通用户</span>
                     )}
-                  </div>
-                  {!user.is_verified && (
-                    <p className="text-[11px] text-muted-foreground">邮箱未验证</p>
-                  )}
-                </div>
+                  </td>
+                  <td className={`${TD_CLASS} text-right`}>
+                    <div className="inline-flex items-center gap-1.5">
+                      {canManageRoles && user.role !== 'superadmin' && (
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={controlsDisabled || !roleEditable}
+                          title={roleBlockedReason}
+                          onClick={() => setPendingRole({ user, role: nextRole })}
+                          aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
+                          className="cursor-pointer gap-1"
+                        >
+                          <ShieldCheck className="size-3.5" aria-hidden="true" />
+                          {nextRole === 'admin' ? '设为管理员' : '取消管理员'}
+                        </Button>
+                      )}
 
-                <div className="flex items-center gap-1.5">
-                  {canManageRoles && user.role !== 'superadmin' && (
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      disabled={controlsDisabled || !roleEditable}
-                      title={roleBlockedReason}
-                      onClick={() => setPendingRole({ user, role: nextRole })}
-                      aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
-                      className="cursor-pointer gap-1"
-                    >
-                      <ShieldCheck className="size-3.5" aria-hidden="true" />
-                      {nextRole === 'admin' ? '设为管理员' : '取消管理员'}
-                    </Button>
-                  )}
-
-                  {user.is_active ? (
-                    <Button
-                      variant="destructive"
-                      size="xs"
-                      disabled={controlsDisabled || banBlocked}
-                      title={blockedReason}
-                      onClick={() => setPendingBan(user)}
-                      aria-label={`封禁 ${user.email}`}
-                      className="cursor-pointer"
-                    >
-                      封禁
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      disabled={controlsDisabled}
-                      onClick={() => handleUnban(user)}
-                      aria-label={`解封 ${user.email}`}
-                      className="cursor-pointer"
-                    >
-                      解封
-                    </Button>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                      {user.is_active ? (
+                        <Button
+                          variant="destructive"
+                          size="xs"
+                          disabled={controlsDisabled || banBlocked}
+                          title={blockedReason}
+                          onClick={() => setPendingBan(user)}
+                          aria-label={`封禁 ${user.email}`}
+                          className="cursor-pointer"
+                        >
+                          封禁
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={controlsDisabled}
+                          onClick={() => handleUnban(user)}
+                          aria-label={`解封 ${user.email}`}
+                          className="cursor-pointer"
+                        >
+                          解封
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </TableWrap>
 
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
@@ -513,28 +508,6 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
           if (pendingRole) handleSetRole(pendingRole.user, pendingRole.role);
         }}
       />
-    </section>
-  );
-}
-
-interface BadgeProps {
-  tone: 'ok' | 'danger' | 'primary' | 'muted';
-  children: ReactNode;
-}
-
-const badgeToneClass: Record<BadgeProps['tone'], string> = {
-  ok: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-  danger: 'bg-destructive/10 text-destructive',
-  primary: 'bg-primary/10 text-primary',
-  muted: 'bg-muted text-muted-foreground',
-};
-
-function Badge({ tone, children }: BadgeProps) {
-  return (
-    <span
-      className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${badgeToneClass[tone]}`}
-    >
-      {children}
-    </span>
+    </PageShell>
   );
 }

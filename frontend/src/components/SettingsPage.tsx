@@ -50,7 +50,7 @@ import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useDetailLevel } from '../context/detail-level-context';
 import { usePerformanceUsageState } from '../context/performance-usage-context';
 import { useIsMobileViewport } from '../hooks/use-media-query';
-import { ROLE_LABELS } from '../lib/admin';
+import { ROLE_LABELS } from '../lib/auth';
 import {
   COLLAPSE_TIMING_OPTIONS,
   DETAIL_LEVEL_OPTIONS,

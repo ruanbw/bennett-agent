@@ -1033,10 +1033,19 @@ class Settings(BaseSettings):
         localhost，生产环境忘了配置就会允许本地页面带凭据读生产 API；同源部署不需要
         CORS，让 production 留空返回空列表更安全。
 
+        默认名单覆盖用户端（5173）与管理后台（5174）两个前端 dev server——它们是
+        同源代理方案下仅有的两个需要跨源放行的本地来源。生产环境用
+        `CORS_ALLOWED_ORIGINS` 显式配置，不依赖这份默认值。
+
         同时把常见的配置笔误收掉：尾斜杠（浏览器 Origin 从不带斜杠）、重复项、
         `http://` 这种只剩协议的坏值；保留 `*`。
         """
-        default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+        default_origins = [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
+        ]
         raw = (self.cors_allowed_origins or "").strip()
         if not raw:
             return default_origins if self.app_env != "production" else []
