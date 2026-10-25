@@ -11,13 +11,24 @@
 
 import asyncio
 import logging
+import re
 import time
+from urllib.parse import urlsplit
 
 from app.config import settings
 from app.schemas.chat import ModelItem, ModelListResponse
 from app.services.http_client import get_http_client
+from app.services.model_service.upstream import (
+    _parse_int_field,
+    _parse_reasoning_flag,
+    _parse_reasoning_levels,
+    parse_upstream_models,
+)
 
 logger = logging.getLogger(__name__)
+
+#: 路径里形如 `v1` / `v3` / `v1beta` 的段。见 `_build_models_url`。
+_VERSION_SEGMENT = re.compile(r"^v\d+")
 
 #: 拉取模型列表是页面加载路径上的一步，3 秒没结果就该走兜底。
 MODELS_TIMEOUT_SECONDS = 3.0
@@ -43,67 +54,24 @@ _lock_loop: asyncio.AbstractEventLoop | None = None
 def _build_models_url(base_url: str) -> str:
     """根据提供商的 base_url 拼出模型列表地址。
 
-    兼容两种常见写法：`http://host:4000`（OpenAI SDK 的 base_url 习惯）与
-    `http://host:4000/v1`（很多自建网关/官方文档直接给到 /v1）。重复拼 `/v1`
-    会让提供商返回 404，而 404 又很容易被误读成「提供商不可用」。
+    兼容两大类写法：
+
+    - **已带版本段**：`http://host:4000/v1`、`https://host/api/paas/v4`（智谱）、
+      `https://host/api/v3`（火山方舟）、`https://host/v1beta/openai`（Gemini 兼容层）。
+      路径里任何一段形如 `v<数字>` 就认为版本已经在地址里，直接拼 `/models`；
+    - **裸主机**：`http://host:4000`（OpenAI SDK 的 base_url 习惯），补上 `/v1/models`。
+
+    重复拼 `/v1` 会让提供商返回 404，而 404 又很容易被误读成「提供商不可用」。
     """
     base = base_url.strip().rstrip("/")
-    return f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    path = urlsplit(base).path
+    if any(_VERSION_SEGMENT.match(segment) for segment in path.split("/") if segment):
+        return f"{base}/models"
+    return f"{base}/v1/models"
 
 
 def _build_url() -> str:
     return _build_models_url(settings.litellm_api_base)
-
-
-def _parse_int_field(value: object) -> int | None:
-    """宽松解析 int 型字段：int 或数字串；其它（None、'128k'、浮点……）一律 None。
-
-    刻意不做单位换算：把 '128k' 猜成 128000 是伪造数据，前端会拿着编出来的上下文
-    窗口做判断。
-    """
-    if isinstance(value, bool):
-        # bool 是 int 的子类，但 True/False 在这两个字段上没有语义
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_reasoning_flag(item: dict[str, object]) -> bool | None:
-    """reasoning 三态：只有网关给出的 bool 才算表态，其余（缺字段、类型不符）为 None。
-
-    None 与 False 必须分开：False 是「网关明确说不支持」，前端据此隐藏思考等级选择器；
-    None 是「网关没说」，按未知处理。此前 `bool(item.get("reasoning", False))` 把两者
-    压成了同一个 False。
-    """
-    value = item.get("reasoning")
-    return value if isinstance(value, bool) else None
-
-
-def _parse_reasoning_levels(raw: object) -> list[str]:
-    """解析模型支持的思考等级。
-
-    网关的返回有两种形状：`[{"effort": "high"}]` 或 `["high"]`。两种都接受，其它
-    形状忽略——伪造等级会让用户选了之后请求失败（`{"effort": null}` 经 `str()` 会
-    变成等级 "None"）。空白串不是等级，照样丢掉。
-    """
-    if not isinstance(raw, list):
-        return []
-
-    levels: list[str] = []
-    for item in raw:
-        value = item.get("effort") if isinstance(item, dict) else item
-        if not isinstance(value, str):
-            continue
-        cleaned = value.strip()
-        if cleaned and cleaned not in levels:
-            levels.append(cleaned)
-    return levels
 
 
 def _parse_models(
@@ -115,58 +83,36 @@ def _parse_models(
 ) -> ModelListResponse | None:
     """把上游响应转成 `ModelListResponse`；无可用模型时返回 None。
 
-    `description_field` 由配置传入：上游网关可以提供一个比 'provider name' 更友好
-    的展示标签，但字段名属于网关细节，不该硬编码在这里。
+    信封与字段别名解析统一走 `upstream.parse_upstream_models`（与同步路径共用一份，
+    避免两套解析各自漂移）；这里只保留网关路径自己的两件事：
 
-    `mark_default=False` 用于管理后台的同步：默认模型由数据库行决定，这里不该把
-    上游列表的第一项强行标成默认（也不该为「配置的默认模型」打一条误导性日志）。
-
-    容错做在**条目级**：某个模型的字段类型不符（`id` 是数字、`display_name` 是数字……）
-    只跳过那一条。此前任何一条抛 ValidationError 都会被外层 except 捕获、整份作废，
-    列表于是只剩兜底的那一个模型。
+    - `mark_default=False` 用于管理后台的同步：默认模型由数据库行决定，这里不该把
+      上游列表的第一项强行标成默认（也不该为「配置的默认模型」打一条误导性日志）。
+    - 没匹配到配置的默认模型时回退为列表第一项，让前端始终有一个可选项。
     """
-    if not isinstance(payload, dict):
-        return None
-
-    data = payload.get("data")
-    if not isinstance(data, list):
+    entries = parse_upstream_models(payload, description_field)
+    if not entries:
         return None
 
     models: list[ModelItem] = []
     found_default = False
 
-    for index, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
-
-        try:
-            model_id = item.get("id")
-            if not model_id:
-                continue
-
-            display_name = item.get("display_name") or model_id
-            owned_by = item.get("owned_by") or (model_id.split("/")[0] if "/" in model_id else "Custom")
-            is_default = model_id == default_model_id
-            found_default = found_default or is_default
-
-            models.append(
-                ModelItem(
-                    id=model_id,
-                    name=display_name,
-                    provider=owned_by,
-                    description=item.get(description_field) or f"{owned_by} {display_name}",
-                    reasoning=_parse_reasoning_flag(item),
-                    supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
-                    context_window=_parse_int_field(item.get("context_window")),
-                    max_output_tokens=_parse_int_field(item.get("max_output_tokens")),
-                    is_default=is_default,
-                )
+    for entry in entries:
+        is_default = entry.model_id == default_model_id
+        found_default = found_default or is_default
+        models.append(
+            ModelItem(
+                id=entry.model_id,
+                name=entry.display_name or entry.model_id,
+                provider=entry.owned_by,
+                description=entry.description,
+                reasoning=entry.reasoning,
+                supported_reasoning_levels=entry.supported_reasoning_levels,
+                context_window=entry.context_window,
+                max_output_tokens=entry.max_output_tokens,
+                is_default=is_default,
             )
-        except Exception as exc:  # noqa: BLE001 - 单条坏数据不能作废整份列表
-            logger.warning("跳过无法解析的模型条目 (index=%d, id=%r): %s", index, item.get("id"), exc)
-
-    if not models:
-        return None
+        )
 
     if not found_default and mark_default:
         # 没有匹配到配置的默认模型时，把第一个标为默认，避免前端没有可选项

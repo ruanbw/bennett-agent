@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.roles import ALL_ROLES, ROLE_USER
 
@@ -48,17 +48,49 @@ class ProviderRead(BaseModel):
     enabled: bool
     model_count: int
     created_at: datetime
+    #: 认证方式（API Key 放进哪个头），见 `model_service.presets.AUTH_STYLES`。
+    auth_style: str = "bearer"
+    #: 创建时使用的内置预设 key；自定义添加为 None。
+    preset_key: str | None = None
+
+
+class ProviderPresetRead(BaseModel):
+    """内置厂商预设（`GET /api/admin/provider-presets`）。
+
+    `note` 说明该厂商模型列表能同步到哪些元数据——大多数 OpenAI 系厂商的
+    `/v1/models` 只给 id，管理员不该对「同步完窗口还是未知」感到意外。
+    """
+
+    key: str
+    name: str
+    base_url: str
+    auth_style: str
+    api_key_url: str
+    needs_api_key: bool
+    note: str = ""
+    #: 选择界面的分组：overseas=海外厂商 / cn=国内厂商 / local=本机网关。
+    group: str = "overseas"
 
 
 class ProviderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=MAX_NAME_CHARS)
-    base_url: str = Field(..., min_length=1, max_length=MAX_URL_CHARS)
+    #: 选了厂商预设时可省略（用预设地址）；自定义添加必填。
+    base_url: str | None = Field(None, max_length=MAX_URL_CHARS)
+    preset_key: str | None = Field(None, max_length=40)
     api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
     enabled: bool = True
 
+    @model_validator(mode="after")
+    def _require_base_url_or_preset(self) -> "ProviderCreate":
+        if not self.preset_key and not self.base_url:
+            raise ValueError("自定义提供商必须填写接口地址（或选择一个厂商预设）")
+        return self
+
     @field_validator("name", "base_url")
     @classmethod
-    def _strip(cls, value: str) -> str:
+    def _strip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("不能为空白")
@@ -66,7 +98,9 @@ class ProviderCreate(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _require_http_url(cls, value: str) -> str:
+    def _require_http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.startswith(("http://", "https://")):
             raise ValueError("必须是以 http:// 或 https:// 开头的地址")
         return value.rstrip("/")
@@ -121,6 +155,8 @@ class ModelRead(BaseModel):
     max_output_tokens: int | None
     enabled: bool
     is_default: bool
+    #: 最近一次同步的上游原始条目；手动添加或从未同步过为 None。
+    raw: dict | None = None
 
 
 class ModelCreate(BaseModel):

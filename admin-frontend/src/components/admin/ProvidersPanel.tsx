@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Info,
   KeyRound,
   Loader2,
   Pencil,
@@ -19,6 +20,7 @@ import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
 import { ProviderDialog } from './ProviderDialog';
 import { ModelDialog } from './ModelDialog';
+import { ModelDetailDialog } from './ModelDetailDialog';
 import { ToggleSwitch } from './ToggleSwitch';
 import { Badge } from './table-parts';
 import {
@@ -102,6 +104,7 @@ export function ProvidersPanel() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<AdminProvider | null>(null);
   const [editingModel, setEditingModel] = useState<AdminModel | null>(null);
+  const [detailModel, setDetailModel] = useState<AdminModel | null>(null);
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<AdminProvider | null>(null);
   const [pendingDeleteModel, setPendingDeleteModel] = useState<AdminModel | null>(null);
 
@@ -427,6 +430,7 @@ export function ProvidersPanel() {
                   onToggleModel={handleToggleModel}
                   onSetDefault={handleSetDefault}
                   onEditModel={setEditingModel}
+                  onShowModelDetail={setDetailModel}
                   onRequestDeleteModel={setPendingDeleteModel}
                   onAddModel={() => handleAddModel(provider.id)}
                   onDismissNotice={() => setNotice(provider.id, null)}
@@ -454,6 +458,17 @@ export function ProvidersPanel() {
           providers?.find((provider) => provider.id === editingModel?.provider_id)?.name ?? ''
         }
         onSaved={reload}
+      />
+
+      <ModelDetailDialog
+        open={detailModel !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailModel(null);
+        }}
+        model={detailModel}
+        providerName={
+          providers?.find((provider) => provider.id === detailModel?.provider_id)?.name ?? ''
+        }
       />
 
       <ConfirmDialog
@@ -513,6 +528,7 @@ interface ProviderRowGroupProps {
   onToggleModel: (model: AdminModel) => void;
   onSetDefault: (model: AdminModel) => void;
   onEditModel: (model: AdminModel) => void;
+  onShowModelDetail: (model: AdminModel) => void;
   onRequestDeleteModel: (model: AdminModel) => void;
   onAddModel: () => void;
   onDismissNotice: () => void;
@@ -537,6 +553,7 @@ function ProviderRowGroup({
   onToggleModel,
   onSetDefault,
   onEditModel,
+  onShowModelDetail,
   onRequestDeleteModel,
   onAddModel,
   onDismissNotice,
@@ -569,7 +586,14 @@ function ProviderRowGroup({
           </button>
         </td>
         <td className={TD_CLASS}>
-          <div className="text-sm font-medium">{provider.name}</div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-medium">{provider.name}</span>
+            {provider.preset_key && (
+              <Badge tone="muted">
+                <span title="由内置厂商预设创建">预设</span>
+              </Badge>
+            )}
+          </div>
           <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{provider.slug}</div>
           <div className="mt-0.5 max-w-72 truncate text-[11px] text-muted-foreground" title={provider.base_url}>
             {provider.base_url}
@@ -680,6 +704,7 @@ function ProviderRowGroup({
               onToggleModel={onToggleModel}
               onSetDefault={onSetDefault}
               onEditModel={onEditModel}
+              onShowModelDetail={onShowModelDetail}
               onRequestDeleteModel={onRequestDeleteModel}
               onAddModel={onAddModel}
             />
@@ -699,6 +724,7 @@ interface ModelsAreaProps {
   onToggleModel: (model: AdminModel) => void;
   onSetDefault: (model: AdminModel) => void;
   onEditModel: (model: AdminModel) => void;
+  onShowModelDetail: (model: AdminModel) => void;
   onRequestDeleteModel: (model: AdminModel) => void;
   onAddModel: () => void;
 }
@@ -713,6 +739,7 @@ function ModelsArea({
   onToggleModel,
   onSetDefault,
   onEditModel,
+  onShowModelDetail,
   onRequestDeleteModel,
   onAddModel,
 }: ModelsAreaProps) {
@@ -784,7 +811,12 @@ function ModelsArea({
                     <tr key={model.id} className="hover:bg-accent/30">
                       <td className={TD_CLASS}>
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-xs font-medium">{model.display_name}</span>
+                          <span
+                            className="text-xs font-medium"
+                            title={model.description ?? model.display_name}
+                          >
+                            {model.display_name}
+                          </span>
                           {model.reasoning && <Badge tone="primary">推理</Badge>}
                           {model.is_default && (
                             <Badge tone="muted">
@@ -799,7 +831,10 @@ function ModelsArea({
                           {model.model_id}
                         </code>
                       </td>
-                      <td className={`${TD_CLASS} text-xs text-muted-foreground`}>
+                      <td
+                        className={`${TD_CLASS} text-xs text-muted-foreground`}
+                        title={model.max_output_tokens ? `最大输出 ${model.max_output_tokens} tokens` : undefined}
+                      >
                         {formatContextWindow(model.context_window)}
                       </td>
                       <td className={TD_CLASS}>
@@ -812,6 +847,16 @@ function ModelsArea({
                       </td>
                       <td className={`${TD_CLASS} text-right`}>
                         <div className="inline-flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            onClick={() => onShowModelDetail(model)}
+                            disabled={isBusy}
+                            aria-label={`查看模型 ${model.display_name}（${model.model_id}）的详情与原始数据`}
+                            className="cursor-pointer"
+                          >
+                            <Info className="size-3" aria-hidden="true" />
+                          </Button>
                           {model.enabled && !model.is_default && (
                             <Button
                               variant="ghost"

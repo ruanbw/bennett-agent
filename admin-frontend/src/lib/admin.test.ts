@@ -5,6 +5,7 @@ import {
   buildModelPayload,
   buildProviderPayload,
   clampUsersOffset,
+  CUSTOM_PRESET_KEY,
   describeAdminError,
   describeFailure,
   describeProviderSync,
@@ -21,6 +22,7 @@ function draft(overrides: Partial<ProviderDraft> = {}): ProviderDraft {
   return {
     name: '  DeepSeek  ',
     baseUrl: '  https://api.deepseek.com  ',
+    presetKey: CUSTOM_PRESET_KEY,
     apiKey: '',
     enabled: true,
     clearApiKey: false,
@@ -43,7 +45,7 @@ describe('validateProviderDraft', () => {
   it('接口地址不能为空', () => {
     expect(validateProviderDraft(draft({ baseUrl: '  ' }))).toEqual({
       field: 'baseUrl',
-      message: '请填写接口地址',
+      message: '请填写接口地址，或选择一个厂商预设',
     });
   });
 
@@ -58,6 +60,21 @@ describe('validateProviderDraft', () => {
 
   it('校验顺序：先名称、再地址（一次只提示第一条）', () => {
     expect(validateProviderDraft(draft({ name: '', baseUrl: '' }))?.field).toBe('name');
+  });
+
+  it('选了预设时地址可留空（后端用预设地址），填了仍要检查协议', () => {
+    const presetDraft = draft({ presetKey: 'deepseek', baseUrl: '' });
+    expect(validateProviderDraft(presetDraft)).toBeNull();
+    expect(
+      validateProviderDraft(draft({ presetKey: 'deepseek', baseUrl: 'ftp://mirror.example.com' }))?.field,
+    ).toBe('baseUrl');
+  });
+
+  it('厂商下拉还没选（空串）等同于自定义：地址必填', () => {
+    expect(validateProviderDraft(draft({ presetKey: '', baseUrl: '' }))).toEqual({
+      field: 'baseUrl',
+      message: '请填写接口地址，或选择一个厂商预设',
+    });
   });
 });
 
@@ -197,6 +214,47 @@ describe('buildProviderPayload', () => {
     const payload = buildProviderPayload(draft({ enabled: false }), 'edit');
 
     expect(payload.enabled).toBe(false);
+  });
+
+  it('创建时选了预设就带 preset_key；地址留空则整个字段不发', () => {
+    const payload = buildProviderPayload(
+      draft({ presetKey: 'deepseek', name: '  DeepSeek  ', baseUrl: '  ' }),
+      'create',
+    );
+
+    expect(payload.preset_key).toBe('deepseek');
+    expect(payload).not.toHaveProperty('base_url');
+    expect(payload.name).toBe('DeepSeek');
+  });
+
+  it('创建时选了预设但改了地址，两个都发（代理/镜像场景）', () => {
+    const payload = buildProviderPayload(
+      draft({ presetKey: 'deepseek', baseUrl: ' https://mirror.example.com/v1 ' }),
+      'create',
+    );
+
+    expect(payload.preset_key).toBe('deepseek');
+    expect(payload.base_url).toBe('https://mirror.example.com/v1');
+  });
+
+  it('自定义提供商不带 preset_key，地址必发', () => {
+    const payload = buildProviderPayload(draft(), 'create');
+
+    expect(payload).not.toHaveProperty('preset_key');
+    expect(payload.base_url).toBe('https://api.deepseek.com');
+  });
+
+  it('厂商下拉还没选（空串）不带 preset_key：空串不能原样发给后端', () => {
+    const payload = buildProviderPayload(draft({ presetKey: '' }), 'create');
+
+    expect(payload).not.toHaveProperty('preset_key');
+  });
+
+  it('编辑时不发 preset_key（预设只在创建时生效）', () => {
+    const payload = buildProviderPayload(draft({ presetKey: 'deepseek' }), 'edit');
+
+    expect(payload).not.toHaveProperty('preset_key');
+    expect(payload.base_url).toBe('https://api.deepseek.com');
   });
 });
 

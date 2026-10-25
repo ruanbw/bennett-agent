@@ -21,7 +21,9 @@
 - `registry`：管理后台的注册表 CRUD 与同步，以及对话请求的模型解析；
 - `gateway`：旧版环境变量网关的拉取 / 解析 / 缓存 / single-flight；
 - `outbound_guard`：出站地址守卫（元数据/内网拒绝，以及 http + 公网 key 的告警）；
-- `errors`：服务层能给出的确定结论，供上面三块共用而不互相导入。
+- `upstream`：上游「列出模型」响应的统一解析（信封形状、字段别名、原始条目）；
+- `presets`：内置厂商预设目录（一键创建提供商的地址与鉴权方式）；
+- `errors`：服务层能给出的确定结论，供上面几块共用而不互相导入。
 
 本模块**原样 re-export** 拆分前的全部公开 API 与测试引用的私有名，
 `from app.services import model_service` 之后的 `model_service.XXX` 访问方式不变。
@@ -43,7 +45,7 @@
 
 import socket
 
-from app.services.model_service import gateway, outbound_guard, registry
+from app.services.model_service import gateway, outbound_guard, presets, registry
 from app.services.model_service.errors import (
     ApiKeyRequiredError,
     DuplicateModelError,
@@ -70,14 +72,23 @@ from app.services.model_service.outbound_guard import (
     _reject_private_target,
     _warn_plaintext_key_over_public_http,
 )
+from app.services.model_service.presets import (
+    AUTH_STYLES,
+    ProviderPreset,
+    get_preset,
+    list_presets,
+)
 from app.services.model_service.registry import (
     DEFAULT_PROVIDER_NAME,
     PROVIDER_SYNC_TIMEOUT_SECONDS,
     REGISTRY_MARKER_KEY,
+    SYNC_MAX_PAGES,
     ChatModelSnapshot,
+    _auth_headers,
     _build_target,
     _default_display_name,
     _enabled_rows,
+    _fetch_remote_models,
     _find_duplicate_model_id,
     _load_provider,
     _mark_registry_initialized,
@@ -105,6 +116,11 @@ from app.services.model_service.registry import (
     update_provider,
     update_provider_model,
 )
+from app.services.model_service.upstream import (
+    UpstreamModel,
+    next_page_cursor,
+    parse_upstream_models,
+)
 
 #: 列在 `__all__` 里才算「有意导出」：这些私有名被 `token_budget` 与 tests/ 直接
 #: 引用，拆分后必须仍然可达，否则调用方要跟着改导入路径（而 `token_budget` 不归
@@ -118,17 +134,22 @@ __all__ = [
     "MODELS_TIMEOUT_SECONDS",
     "PROVIDER_SYNC_TIMEOUT_SECONDS",
     "REGISTRY_MARKER_KEY",
+    "SYNC_MAX_PAGES",
+    "AUTH_STYLES",
     "ApiKeyRequiredError",
     "ChatModelSnapshot",
     "DuplicateModelError",
     "InvalidModelStateError",
     "ProviderFetchError",
     "ProviderNotFoundError",
+    "UpstreamModel",
+    "_auth_headers",
     "_build_models_url",
     "_build_target",
     "_build_url",
     "_default_display_name",
     "_enabled_rows",
+    "_fetch_remote_models",
     "_find_duplicate_model_id",
     "_fallback",
     "_is_internal_address",
@@ -152,11 +173,16 @@ __all__ = [
     "get_default_model_key",
     "get_known_model_ids",
     "get_model_limits",
+    "get_preset",
     "get_provider",
+    "list_presets",
     "list_provider_models",
     "list_providers",
     "make_model_key",
+    "next_page_cursor",
     "outbound_guard",
+    "parse_upstream_models",
+    "presets",
     "provider_config_exists",
     "registry",
     "reset_models_cache",

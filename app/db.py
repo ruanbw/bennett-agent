@@ -325,6 +325,21 @@ class ModelProvider(Base):
     slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True, index=True)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     api_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    #: 认证方式：API Key 放进哪个请求头。`bearer`（OpenAI 系，默认）、
+    #: `x-api-key`（Anthropic）、`x-goog-api-key`（Gemini）、`none`（免鉴权的本机网关）。
+    #: 由预设（`app/services/model_service/presets.py`）在创建时写入，之后基本不变。
+    #: server_default 与迁移保持一致：autogenerate 比对的是它，只写 Python 侧 default
+    #: 会被 `alembic check` 判成漂移。
+    auth_style: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="bearer", server_default="bearer"
+    )
+    #: 随请求固定携带的头（如 Anthropic 的 `anthropic-version`）。运行时行为据此变化，
+    #: 所以不能只存在预设目录里——预设目录会更新，库里的行不能悄悄跟着变。
+    extra_headers: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    #: 创建时使用的预设 key；自定义添加为 None。仅供后台展示与排查。
+    preset_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
@@ -398,6 +413,10 @@ class ProviderModel(Base):
     supported_reasoning_levels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 上游最近一次同步返回的**原始条目**（`/v1/models` 的 data 元素原样保存）。
+    #: 解析白名单之外的字段（owned_by、created、pricing……）都在这里，后台据此回答
+    #: 「上游到底报了什么」。手动添加的模型为 NULL；只在同步时被覆盖。
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -21,6 +21,12 @@
 只用 `model_id` 做键会互相覆盖；`slug` 生成后不随改名变化，用户已保存的选择不会
 因为管理员改个名字就指向另一个模型。
 
+## 预设只管创建，运行时只读库
+
+添加提供商时可以从内置厂商预设（`presets`）一键创建：地址与鉴权头在创建那一刻从
+预设**抄进库**（`auth_style` / `extra_headers` / `preset_key`）。运行时（对话、同步、
+测试连接）只读库，不回查预设目录——目录随代码更新，已创建的提供商不能悄悄改行为。
+
 ## 为什么数据库路径不缓存
 
 模型启停是管理员刚点完就要生效的操作。管理后台的写操作与对话请求不在同一个进程
@@ -59,12 +65,22 @@ from app.services.model_service.errors import (
     ProviderFetchError,
     ProviderNotFoundError,
 )
+from app.services.model_service.presets import AUTH_STYLES, get_preset
+from app.services.model_service.upstream import (
+    UpstreamModel,
+    next_page_cursor,
+    parse_upstream_models,
+)
 from app.services.model_target import ModelTarget
 
 logger = logging.getLogger(__name__)
 
 #: 管理后台的「测试连接 / 同步模型」是显式动作，可以等久一点；但也不能无限挂住。
 PROVIDER_SYNC_TIMEOUT_SECONDS = 15.0
+
+#: 同步翻页上限。正常厂商几页就到头；到顶说明上游把 `has_more` 恒置 true（实现有
+#: 问题），宁可截断留日志也不无限打下去。
+SYNC_MAX_PAGES = 20
 
 DEFAULT_PROVIDER_NAME = "默认网关"
 
@@ -480,11 +496,19 @@ async def get_provider(provider_id: uuid.UUID) -> ModelProvider | None:
 async def create_provider(
     *,
     name: str,
-    base_url: str,
+    base_url: str | None = None,
     api_key: str | None = None,
     enabled: bool = True,
+    preset_key: str | None = None,
+    auth_style: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> ModelProvider:
-    """新建提供商。slug 由名称生成并保证唯一。
+    """新建提供商；`preset_key` 指向内置厂商预设时，地址与鉴权细节可省略。
+
+    预设只提供**创建时的默认值**：显式传 `base_url` 可以覆盖预设地址（代理/镜像
+    场景），认证方式与固定头从预设抄进库（`auth_style` / `extra_headers` / 
+    `preset_key` 三个字段都落库）。之后运行时只读库——预设目录随代码更新不会
+    悄悄改变已创建提供商的行为。
 
     地址在这里就校验（而非等到第一次「测试连接」）：管理员填错内网/元数据地址时
     应当当场看到 400 与原因，而不是存进去之后某次对话才静默失败。
@@ -493,13 +517,33 @@ async def create_provider(
     撞 `slug` 唯一约束。裸 `IntegrityError` 是 500，管理员只会看到「服务器错误」；
     这里翻译成可读的重试提示（路由层映射为 400）。
     """
-    await outbound_guard._reject_private_target(base_url.strip())
+    preset = get_preset(preset_key) if preset_key else None
+    if preset_key and preset is None:
+        raise ProviderFetchError(f"未知的提供商预设：{preset_key}")
+
+    resolved_base_url = (base_url or "").strip().rstrip("/") or (preset.base_url if preset else "")
+    if not resolved_base_url:
+        raise ProviderFetchError("必须填写 Base URL，或选择一个厂商预设")
+
+    resolved_auth = auth_style or (preset.auth_style if preset else "bearer")
+    if resolved_auth not in AUTH_STYLES:
+        raise ProviderFetchError(f"未知的认证方式：{resolved_auth}")
+    resolved_headers = (
+        {str(k): str(v) for k, v in extra_headers.items() if v is not None}
+        if extra_headers is not None
+        else dict(preset.extra_headers if preset else {})
+    )
+
+    await outbound_guard._reject_private_target(resolved_base_url)
     async with async_session_maker() as session:
         provider = ModelProvider(
             name=name.strip(),
             slug=await _unique_provider_slug(session, name),
-            base_url=base_url.strip().rstrip("/"),
+            base_url=resolved_base_url,
             api_key=(api_key or None),
+            auth_style=resolved_auth,
+            extra_headers=resolved_headers,
+            preset_key=preset.key if preset else None,
             enabled=enabled,
         )
         session.add(provider)
@@ -744,56 +788,93 @@ async def delete_provider_model(model_uuid: uuid.UUID) -> bool:
         return True
 
 
-async def _fetch_remote_models(provider: ModelProvider) -> list[ModelItem]:
+def _auth_headers(provider: ModelProvider) -> dict[str, str]:
+    """组装一次出站请求的头：固定头在前，API Key 按 `auth_style` 放进对应位置。
+
+    认证方式读的是**库里的配置**而不是预设目录：预设目录会随代码更新，已创建的
+    提供商不能悄悄改变出站行为（与 `auth_style` 落库的理由一致）。
+    """
+    headers = {str(key): str(value) for key, value in (provider.extra_headers or {}).items()}
+    if provider.api_key and provider.auth_style != "none":
+        if provider.auth_style == "x-api-key":
+            headers["x-api-key"] = provider.api_key
+        elif provider.auth_style == "x-goog-api-key":
+            headers["x-goog-api-key"] = provider.api_key
+        else:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
+    return headers
+
+
+async def _fetch_remote_models(provider: ModelProvider) -> list[UpstreamModel]:
     """向单个提供商请求模型列表并解析。失败抛 `ProviderFetchError`。
 
-    错误文案只给管理员看，因此不包含上游响应体（可能含有内部信息），只保留状态码
-    与异常类型；完整异常写日志。
+    信封与字段别名由 `upstream.parse_upstream_models` 统一兼容：OpenAI 系的
+    `{"data": [...]}`、Gemini/Ollama 原生的 `{"models": [...]}`、Together 的裸数组；
+    条目**原样**保留在 `UpstreamModel.raw`，同步时落库供后台查看。错误文案只给
+    管理员看，不包含上游响应体（可能含有内部信息），只保留状态码与异常类型；
+    完整异常写日志。
+
+    分页只认 Anthropic 形状（`has_more` + `last_id`，见 `upstream.next_page_cursor`）：
+    其余厂商一次给全量，认错游标等于对不分页的上游反复重打第一页。
     """
-    # 先检查目标地址，再组装 Authorization 头——这个请求带着明文 API Key
+    # 先检查目标地址，再组装认证头——这些请求带着明文 API Key
     await outbound_guard._reject_private_target(provider.base_url)
 
-    headers: dict[str, str] = {}
-    if provider.api_key:
-        headers["Authorization"] = f"Bearer {provider.api_key}"
+    headers = _auth_headers(provider)
+    models_url = gateway._build_models_url(provider.base_url)
+    client = get_http_client()
 
-    try:
-        response = await get_http_client().get(
-            gateway._build_models_url(provider.base_url),
-            headers=headers,
-            timeout=PROVIDER_SYNC_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:  # noqa: BLE001 - 任何网络/超时/URL 错误都归为「连不上」
-        logger.warning("拉取提供商模型列表失败 (provider=%s): %s", provider.name, exc, exc_info=True)
-        raise ProviderFetchError(f"无法连接提供商（{type(exc).__name__}）") from exc
+    entries: list[UpstreamModel] = []
+    cursor: str | None = None
+    for page in range(SYNC_MAX_PAGES):
+        try:
+            response = await client.get(
+                models_url,
+                headers=headers,
+                params={"after_id": cursor} if cursor else None,
+                timeout=PROVIDER_SYNC_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - 任何网络/超时/URL 错误都归为「连不上」
+            logger.warning("拉取提供商模型列表失败 (provider=%s): %s", provider.name, exc, exc_info=True)
+            raise ProviderFetchError(f"无法连接提供商（{type(exc).__name__}）") from exc
 
-    if response.status_code in (401, 403):
-        raise ProviderFetchError("认证失败，请检查 API Key")
-    if response.status_code == 404:
-        raise ProviderFetchError("模型列表地址不存在，请检查 Base URL 是否需要包含 /v1")
-    if response.status_code != 200:
-        raise ProviderFetchError(f"提供商返回 HTTP {response.status_code}")
+        if response.status_code in (401, 403):
+            raise ProviderFetchError("认证失败，请检查 API Key")
+        if response.status_code == 404:
+            raise ProviderFetchError("模型列表地址不存在，请检查 Base URL 是否需要包含 /v1")
+        if response.status_code != 200:
+            raise ProviderFetchError(f"提供商返回 HTTP {response.status_code}")
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ProviderFetchError("提供商返回的不是 JSON") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderFetchError("提供商返回的不是 JSON") from exc
 
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-        raise ProviderFetchError("提供商响应格式不是 OpenAI /v1/models 结构")
-    if not payload["data"]:
-        return []
+        if isinstance(payload, list):
+            remote_entries: list[object] = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            remote_entries = payload["data"]
+        elif isinstance(payload, dict) and isinstance(payload.get("models"), list):
+            remote_entries = payload["models"]
+        else:
+            raise ProviderFetchError("提供商响应格式不是 OpenAI /v1/models 结构")
 
-    parsed = gateway._parse_models(payload, "", settings.model_description_field, mark_default=False)
-    if parsed is None:
-        return []
+        if not remote_entries and page == 0:
+            return []
+
+        entries.extend(parse_upstream_models(payload, settings.model_description_field))
+        cursor = next_page_cursor(payload)
+        if cursor is None:
+            break
+    else:
+        logger.warning("提供商 %s 的模型列表分页超过 %d 页，结果已截断", provider.name, SYNC_MAX_PAGES)
 
     # 列宽是 200：SQLite 不强制，Postgres 会直接报错；超长 id 也无法放进 ChatRequest
     # 的 300 字符上限（slug + '/' + id）。跳过并留日志，不静默截断一个真实模型名。
-    too_long = [item.id for item in parsed.models if len(item.id) > 200]
+    too_long = [entry.model_id for entry in entries if len(entry.model_id) > 200]
     if too_long:
         logger.warning("跳过上游返回的超长模型 id: %s", too_long[:5])
-    return [item for item in parsed.models if len(item.id) <= 200]
+    return [entry for entry in entries if len(entry.model_id) <= 200]
 
 
 async def test_provider_connection(provider_id: uuid.UUID) -> int:
@@ -843,35 +924,37 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
         duplicated = 0
 
         for item in remote:
-            if item.id in seen:
+            if item.model_id in seen:
                 duplicated += 1
                 continue
-            seen.add(item.id)
+            seen.add(item.model_id)
 
-            row = existing.get(item.id)
+            row = existing.get(item.model_id)
             if row is None:
                 session.add(
                     ProviderModel(
                         provider_id=provider_id,
-                        model_id=item.id,
-                        display_name=(item.name or _default_display_name(item.id))[:200],
+                        model_id=item.model_id,
+                        display_name=(item.display_name or _default_display_name(item.model_id))[:200],
                         description=item.description,
                         reasoning=item.reasoning,
                         supported_reasoning_levels=list(item.supported_reasoning_levels),
                         context_window=item.context_window,
                         max_output_tokens=item.max_output_tokens,
+                        raw=dict(item.raw) if item.raw else None,
                         enabled=True,
                     )
                 )
                 created += 1
                 continue
 
-            row.display_name = (item.name or _default_display_name(item.id))[:200]
+            row.display_name = (item.display_name or _default_display_name(item.model_id))[:200]
             row.description = item.description
             row.reasoning = item.reasoning
             row.supported_reasoning_levels = list(item.supported_reasoning_levels)
             row.context_window = item.context_window
             row.max_output_tokens = item.max_output_tokens
+            row.raw = dict(item.raw) if item.raw else None
             updated += 1
 
         if duplicated:

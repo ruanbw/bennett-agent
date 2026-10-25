@@ -39,6 +39,7 @@ from app.schemas.admin import (
     ModelRead,
     ModelUpdate,
     ProviderCreate,
+    ProviderPresetRead,
     ProviderRead,
     ProviderSyncResult,
     ProviderTestResult,
@@ -57,6 +58,7 @@ from app.services.model_service import (
     ProviderFetchError,
     ProviderNotFoundError,
 )
+from app.services.model_service.presets import list_presets
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,8 @@ def _provider_read(provider) -> ProviderRead:  # noqa: ANN001 - ORM 对象，避
         enabled=provider.enabled,
         model_count=len(provider.models or []),
         created_at=provider.created_at,
+        auth_style=provider.auth_style,
+        preset_key=provider.preset_key,
     )
 
 
@@ -94,6 +98,7 @@ def _model_read(model, provider) -> ModelRead:  # noqa: ANN001
         max_output_tokens=model.max_output_tokens,
         enabled=model.enabled,
         is_default=model.is_default,
+        raw=model.raw,
     )
 
 
@@ -113,6 +118,24 @@ async def list_providers():
     return [_provider_read(provider) for provider in providers]
 
 
+@router.get("/provider-presets", response_model=list[ProviderPresetRead], summary="列出内置厂商预设")
+async def list_provider_presets():
+    """新增提供商弹窗的预设清单。纯静态目录，无需查询数据库。"""
+    return [
+        ProviderPresetRead(
+            key=preset.key,
+            name=preset.name,
+            base_url=preset.base_url,
+            auth_style=preset.auth_style,
+            api_key_url=preset.api_key_url,
+            needs_api_key=preset.needs_api_key,
+            note=preset.note,
+            group=preset.group,
+        )
+        for preset in list_presets()
+    ]
+
+
 @router.post(
     "/providers",
     response_model=ProviderRead,
@@ -126,10 +149,11 @@ async def create_provider(payload: ProviderCreate):
             base_url=payload.base_url,
             api_key=payload.api_key,
             enabled=payload.enabled,
+            preset_key=payload.preset_key,
         )
     except ProviderFetchError as exc:
-        # 地址不合法是**输入问题**（400），不是上游故障（502）：管理员改一下地址就能
-        # 通过，用 502 会让他以为网关挂了。与 test/sync 的 502 刻意不同。
+        # 地址不合法/预设未知是**输入问题**（400），不是上游故障（502）：管理员改一下
+        # 输入就能通过，用 502 会让他以为网关挂了。与 test/sync 的 502 刻意不同。
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return _provider_read(provider)
 

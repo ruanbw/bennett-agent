@@ -22,6 +22,10 @@ export interface AdminProvider {
   enabled: boolean;
   model_count: number;
   created_at: string;
+  /** 认证方式：API Key 放进哪个请求头（bearer / x-api-key / x-goog-api-key / none）。 */
+  auth_style: string;
+  /** 创建时使用的内置预设 key；自定义添加为 null。 */
+  preset_key: string | null;
 }
 
 export interface AdminModel {
@@ -38,6 +42,21 @@ export interface AdminModel {
   max_output_tokens: number | null;
   enabled: boolean;
   is_default: boolean;
+  /** 最近一次同步的上游原始条目；手动添加或从未同步过为 null。 */
+  raw: Record<string, unknown> | null;
+}
+
+/** 内置厂商预设（`GET /api/admin/provider-presets`）。 */
+export interface ProviderPreset {
+  key: string;
+  name: string;
+  base_url: string;
+  auth_style: string;
+  api_key_url: string;
+  needs_api_key: boolean;
+  note: string;
+  /** 选择界面的分组：overseas=海外厂商 / cn=国内厂商 / local=本机网关。 */
+  group: string;
 }
 
 export interface AdminUser {
@@ -120,11 +139,21 @@ export interface ProviderPayload {
   base_url?: string;
   api_key?: string;
   enabled?: boolean;
+  /** 仅创建时有意义：从内置厂商预设一键创建，后端据此带入认证方式与固定头。 */
+  preset_key?: string;
 }
+
+/** 草稿里表示「不使用预设、手动填写地址」的哨兵值。 */
+export const CUSTOM_PRESET_KEY = 'custom';
 
 export interface ProviderDraft {
   name: string;
   baseUrl: string;
+  /**
+   * 选中的预设 key；`custom` 表示手动填写地址。空串只在新增表单里出现，
+   * 是「厂商下拉还没选」的占位，语义与 `custom` 相同（校验与请求体都按无预设处理）。
+   */
+  presetKey: string;
   /** 创建时为空 = 不配置密钥；编辑时为空 = 保持不变。 */
   apiKey: string;
   enabled: boolean;
@@ -139,6 +168,11 @@ export interface ProviderDraftIssue {
   message: string;
 }
 
+/** 是否走厂商预设：`custom` 与「还没选」的空串都算自定义地址。 */
+export function isPresetKey(presetKey: string): boolean {
+  return presetKey !== CUSTOM_PRESET_KEY && presetKey !== '';
+}
+
 /**
  * 表单草稿的本地校验。
  *
@@ -148,13 +182,19 @@ export interface ProviderDraftIssue {
  *
  * base_url 的协议判断与后端一样区分大小写（`http://` / `https://`），不要写成
  * 正则忽略大小写——否则 `HTTP://…` 本地放行、服务端再拒一次英文错误。
+ * 选了厂商预设时地址可留空（后端用预设地址），但填了仍要检查协议。
  */
 export function validateProviderDraft(draft: ProviderDraft): ProviderDraftIssue | null {
   if (!draft.name.trim()) return { field: 'name', message: '请填写名称' };
 
+  const usingPreset = isPresetKey(draft.presetKey);
   const baseUrl = draft.baseUrl.trim();
-  if (!baseUrl) return { field: 'baseUrl', message: '请填写接口地址' };
-  if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+  if (!baseUrl && !usingPreset) return { field: 'baseUrl', message: '请填写接口地址，或选择一个厂商预设' };
+  if (
+    baseUrl &&
+    !baseUrl.startsWith('http://') &&
+    !baseUrl.startsWith('https://')
+  ) {
     return { field: 'baseUrl', message: '接口地址必须以 http:// 或 https:// 开头' };
   }
   return null;
@@ -165,6 +205,9 @@ export function validateProviderDraft(draft: ProviderDraft): ProviderDraftIssue 
  *
  * 关键约定：编辑时**不带** `api_key` 字段表示「不修改」。后端用 `exclude_unset`
  * 区分「没传」与「显式传空串」，所以这里不能把空串当成「清空」偷偷发出去。
+ *
+ * 创建时选了预设就带上 `preset_key`（认证方式与固定头由后端从预设带入）；地址
+ * 留空则整个字段不发，由后端取预设地址。
  */
 export function buildProviderPayload(
   draft: ProviderDraft,
@@ -172,16 +215,19 @@ export function buildProviderPayload(
 ): ProviderPayload {
   const payload: ProviderPayload = {
     name: draft.name.trim(),
-    base_url: draft.baseUrl.trim(),
     enabled: draft.enabled,
   };
 
   const apiKey = draft.apiKey.trim();
   if (mode === 'create') {
+    const baseUrl = draft.baseUrl.trim();
+    if (baseUrl) payload.base_url = baseUrl;
+    if (isPresetKey(draft.presetKey)) payload.preset_key = draft.presetKey;
     if (apiKey) payload.api_key = apiKey;
     return payload;
   }
 
+  payload.base_url = draft.baseUrl.trim();
   if (draft.clearApiKey) {
     payload.api_key = '';
   } else if (apiKey) {
@@ -192,6 +238,10 @@ export function buildProviderPayload(
 
 export function listProviders(): Promise<AdminProvider[]> {
   return request<AdminProvider[]>('/api/admin/providers');
+}
+
+export function listProviderPresets(): Promise<ProviderPreset[]> {
+  return request<ProviderPreset[]>('/api/admin/provider-presets');
 }
 
 export function createProvider(payload: ProviderPayload): Promise<AdminProvider> {

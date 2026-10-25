@@ -17,6 +17,7 @@
 """
 
 import socket
+import uuid
 
 import pytest
 from sqlalchemy import event
@@ -128,10 +129,19 @@ def queries(registry_db):
     return statements
 
 
-async def _seed_provider(registry_db, *, name="网关", api_key="sk-test", base_url="http://127.0.0.1:4000/v1"):
+async def _seed_provider(
+    registry_db,
+    *,
+    name="网关",
+    api_key="sk-test",
+    base_url="http://127.0.0.1:4000/v1",
+    slug="gw",
+):
     """直接写库造一条提供商；`enabled` 之类的默认值由 ORM 补。"""
     async with async_session_maker() as session:
-        provider = ModelProvider(name=name, slug="gw", base_url=base_url, api_key=api_key, enabled=True)
+        provider = ModelProvider(
+            name=name, slug=slug, base_url=base_url, api_key=api_key, enabled=True
+        )
         session.add(provider)
         await session.commit()
         return provider.id
@@ -606,6 +616,188 @@ async def test_valid_bootstrap_url_still_seeds_a_provider(registry_db, monkeypat
 
     providers = await reg.list_providers()
     assert providers[0].base_url == "http://127.0.0.1:4000"
+
+
+# ---------------------------------------------------------------------
+# 认证头 / 同步落库 raw / 分页 / 厂商预设
+# ---------------------------------------------------------------------
+def test_auth_headers_follow_auth_style():
+    """API Key 放进哪个头由库里的 auth_style 决定；固定头原样合并。"""
+    from app.db import ModelProvider
+
+    def provider(**fields):
+        fields.setdefault("name", "p")
+        fields.setdefault("slug", "p")
+        fields.setdefault("base_url", "http://127.0.0.1:4000/v1")
+        return ModelProvider(**fields)
+
+    bearer = provider(api_key="sk-1", auth_style="bearer")
+    assert model_service._auth_headers(bearer) == {"Authorization": "Bearer sk-1"}
+
+    anthropic = provider(api_key="sk-2", auth_style="x-api-key", extra_headers={"anthropic-version": "2023-06-01"})
+    assert model_service._auth_headers(anthropic) == {"anthropic-version": "2023-06-01", "x-api-key": "sk-2"}
+
+    goog = provider(api_key="sk-3", auth_style="x-goog-api-key")
+    assert model_service._auth_headers(goog) == {"x-goog-api-key": "sk-3"}
+
+    keyless = provider(api_key="sk-4", auth_style="none")
+    # none 是「这个网关不收凭据」：即使误存了 key 也不能发出去
+    assert model_service._auth_headers(keyless) == {}
+
+    no_key = provider(api_key=None, auth_style="bearer", extra_headers={"x-flag": "1"})
+    assert model_service._auth_headers(no_key) == {"x-flag": "1"}
+
+
+class _FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """记录请求并按序回放响应；`registry.get_http_client` 被替换成返回它。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def get(self, url, headers=None, params=None, timeout=None):  # noqa: ANN001
+        self.calls.append({"url": url, "headers": headers, "params": params})
+        return self.responses.pop(0)
+
+
+async def _run_sync(registry_db, monkeypatch, responses):
+    provider_id = await _seed_provider(
+        registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"sync-{uuid.uuid4().hex[:8]}"
+    )
+    client = _FakeClient(responses)
+    monkeypatch.setattr(registry, "get_http_client", lambda: client)
+    result = await model_service.sync_provider_models(provider_id)
+    return result, client
+
+
+async def _load_model_row(registry_db, provider_id, model_id):
+    from sqlalchemy import select
+
+    async with async_session_maker() as session:
+        row = await session.scalar(
+            select(ProviderModel).where(
+                ProviderModel.provider_id == provider_id,
+                ProviderModel.model_id == model_id,
+            )
+        )
+        assert row is not None
+        await session.refresh(row)
+        return row
+
+
+async def test_sync_stores_raw_upstream_entry(registry_db, monkeypatch):
+    """同步把上游条目**原样**存进 raw：解析白名单之外的字段（owned_by/created）也留底。"""
+    entry = {"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 128000, "created": 1700000000}
+    (fetched, created, updated), _ = await _run_sync(
+        registry_db, monkeypatch, [_FakeResponse({"data": [entry]})]
+    )
+
+    assert (fetched, created, updated) == (1, 1, 0)
+    provider_id = (await model_service.list_providers())[0].id
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    assert row.raw == entry
+    assert row.context_window == 128000
+
+
+async def test_sync_refreshes_raw_without_touching_enabled(registry_db, monkeypatch):
+    """再次同步刷新 raw 与元数据，但管理员调过的 enabled / 默认标记保持不变。"""
+    provider_id = await _seed_provider(
+        registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"sync-{uuid.uuid4().hex[:8]}"
+    )
+
+    first = _FakeClient(
+        [_FakeResponse({"data": [{"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 1}]})]
+    )
+    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    assert await model_service.sync_provider_models(provider_id) == (1, 1, 0)
+
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    await model_service.update_provider_model(row.id, enabled=False)
+
+    new_entry = {"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 999, "note": "changed"}
+    second = _FakeClient([_FakeResponse({"data": [new_entry]})])
+    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    assert await model_service.sync_provider_models(provider_id) == (1, 0, 1)
+
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    assert row.raw == new_entry
+    assert row.context_window == 999
+    assert row.enabled is False
+
+
+async def test_sync_follows_anthropic_pagination(registry_db, monkeypatch):
+    """has_more + last_id 驱动翻页；第二页请求要带上游标。"""
+    page1 = {"data": [{"id": "claude-a"}], "has_more": True, "last_id": "claude-a"}
+    page2 = {"data": [{"id": "claude-b"}], "has_more": False, "last_id": "claude-b"}
+
+    (fetched, created, _), client = await _run_sync(
+        registry_db, monkeypatch, [_FakeResponse(page1), _FakeResponse(page2)]
+    )
+
+    assert fetched == 2
+    assert created == 2
+    assert len(client.calls) == 2
+    assert client.calls[0]["params"] is None
+    assert client.calls[1]["params"] == {"after_id": "claude-a"}
+
+
+async def test_sync_rejects_unrecognized_envelope(registry_db, monkeypatch):
+    """非 OpenAI/原生/裸数组的信封要给出可读错误，而不是静默同步出 0 个模型。"""
+    with pytest.raises(model_service.ProviderFetchError, match="响应格式"):
+        await _run_sync(registry_db, monkeypatch, [_FakeResponse({"models_count": 5})])
+
+
+async def test_create_provider_with_preset_applies_auth(registry_db, monkeypatch):
+    """预设创建：地址与认证方式从预设**抄进库**，preset_key 留痕。
+
+    断言对齐目录条目而不是硬编码值：这里要验证的是「复制」这个行为，目录内容
+    （bearer 还是 x-api-key）本身由文档调研决定，改目录不该连带改这个用例。
+    """
+    from app.services.model_service.presets import get_preset
+
+    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+
+    provider = await model_service.create_provider(name="Claude", api_key="sk-x", preset_key="anthropic")
+    preset = get_preset("anthropic")
+
+    assert provider.base_url == preset.base_url
+    assert provider.auth_style == preset.auth_style
+    assert provider.extra_headers == preset.extra_headers
+    assert provider.preset_key == "anthropic"
+
+
+async def test_create_provider_with_preset_base_url_override(registry_db, monkeypatch):
+    """预设 + 显式地址：地址用管理员给的（代理/镜像），认证方式仍按预设。"""
+    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+
+    provider = await model_service.create_provider(
+        name="OpenAI 代理",
+        base_url="http://127.0.0.1:9000/v1",
+        preset_key="openai",
+    )
+
+    assert provider.base_url == "http://127.0.0.1:9000/v1"
+    assert provider.auth_style == "bearer"
+    assert provider.preset_key == "openai"
+
+
+async def test_create_provider_unknown_preset_is_rejected(registry_db):
+    with pytest.raises(model_service.ProviderFetchError, match="未知的提供商预设"):
+        await model_service.create_provider(name="x", preset_key="does-not-exist")
+
+
+async def test_create_provider_without_preset_or_url_is_rejected(registry_db):
+    with pytest.raises(model_service.ProviderFetchError, match="Base URL"):
+        await model_service.create_provider(name="x")
 
 
 # ---------------------------------------------------------------------
