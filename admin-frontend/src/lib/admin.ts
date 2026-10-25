@@ -40,37 +40,6 @@ export interface AdminModel {
   is_default: boolean;
 }
 
-/** 一个模型的价格配置（管理界面用）。三个价格字段为 null = 未配置（≠ 免费）。 */
-export interface AdminModelPrice {
-  model_id: string;
-  input_per_mtok: number | null;
-  output_per_mtok: number | null;
-  cached_input_per_mtok: number | null;
-  currency: string;
-  updated_at: string | null;
-}
-
-/** 价格表单草稿：全部是字符串（输入框的天然形态），空串 = 未配置。 */
-export interface PriceDraft {
-  inputPerMtok: string;
-  outputPerMtok: string;
-  cachedInputPerMtok: string;
-  currency: string;
-}
-
-export interface PriceDraftIssue {
-  field: keyof PriceDraft;
-  message: string;
-}
-
-/** 价格请求体。null 表示清空（未知），与 0（免费）是两件事。 */
-export interface PricePayload {
-  input_per_mtok: number | null;
-  output_per_mtok: number | null;
-  cached_input_per_mtok: number | null;
-  currency: string;
-}
-
 export interface AdminUser {
   id: string;
   email: string;
@@ -322,83 +291,6 @@ export function buildModelPayload(draft: ModelDraft): ModelPayload {
     max_output_tokens: parseOptionalTokenLimit(draft.maxOutputTokens),
     reasoning: draft.reasoning,
   };
-}
-
-/**
- * 价格草稿的本地校验。
- *
- * 与 token 上限那套的关键差别：**空串是合法值**，表示「我不知道这个价格」。所以这里
- * 不能照抄 `parseOptionalTokenLimit` 的「空 = null 可以」再顺手拒绝负数——负数要单独
- * 拦下并给中文提示，因为后端的 422 是 Pydantic 的英文，对管理员没有帮助。
- *
- * 允许 0：免费模型真实存在（本地推理、内部额度）。0 与「未配置」在语义上完全不同，
- * 前者会算出 $0.00，后者显示「未配置价格」。
- */
-export function validatePriceDraft(draft: PriceDraft): PriceDraftIssue | null {
-  for (const [field, raw, label] of [
-    ['inputPerMtok', draft.inputPerMtok, '输入价格'],
-    ['outputPerMtok', draft.outputPerMtok, '输出价格'],
-    ['cachedInputPerMtok', draft.cachedInputPerMtok, '缓存输入价格'],
-  ] as const) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    if (!/^\d+(\.\d+)?$/.test(trimmed)) {
-      return { field, message: `${label}必须是非负数，或留空表示未配置` };
-    }
-  }
-  if (!draft.currency.trim()) return { field: 'currency', message: '请填写货币代码' };
-  if (draft.currency.trim().length > 8) {
-    return { field: 'currency', message: '货币代码最多 8 个字符' };
-  }
-  return null;
-}
-
-/** 草稿 → 请求体。空串转 null（未配置），数字转 number。 */
-export function buildPricePayload(draft: PriceDraft): PricePayload {
-  const parse = (raw: string): number | null => {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  };
-  return {
-    input_per_mtok: parse(draft.inputPerMtok),
-    output_per_mtok: parse(draft.outputPerMtok),
-    cached_input_per_mtok: parse(draft.cachedInputPerMtok),
-    currency: draft.currency.trim().toUpperCase() || 'USD',
-  };
-}
-
-export function draftFromPrice(price: AdminModelPrice | null): PriceDraft {
-  const text = (value: number | null): string => (value === null ? '' : String(value));
-  return {
-    inputPerMtok: text(price?.input_per_mtok ?? null),
-    outputPerMtok: text(price?.output_per_mtok ?? null),
-    cachedInputPerMtok: text(price?.cached_input_per_mtok ?? null),
-    currency: price?.currency ?? 'USD',
-  };
-}
-
-export function listPrices(): Promise<AdminModelPrice[]> {
-  return request<AdminModelPrice[]>('/api/admin/prices');
-}
-
-/**
- * 写入价格。
- *
- * 模型键里带斜杠是常态（`{slug}/{model_id}`，而 `model_id` 自己也常带斜杠），所以整条
- * 键必须 `encodeURIComponent` 后再拼路径——否则 `my-gw/openai/gpt-4o` 会被服务端当成
- * 不存在的子路由。后端用 `{model_key:path}` 接住编码后的斜杠，但 `%2F` 需要前端自己编。
- */
-export function setPrice(modelKey: string, payload: PricePayload): Promise<AdminModelPrice> {
-  return request<AdminModelPrice>(`/api/admin/prices/${encodeURIComponent(modelKey)}`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  });
-}
-
-export function deletePrice(modelKey: string): Promise<void> {
-  return request<void>(`/api/admin/prices/${encodeURIComponent(modelKey)}`, { method: 'DELETE' });
 }
 
 export function createProviderModel(providerId: string, payload: ModelPayload): Promise<AdminModel> {

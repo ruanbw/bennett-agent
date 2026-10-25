@@ -284,7 +284,7 @@ describe('ComposerStats：上下文分段条', () => {
   });
 });
 
-describe('ComposerStats：锁定态与成本直通上下文指示器', () => {
+describe('ComposerStats：锁定态', () => {
   it('锁定态显示「已满」并给出发不出去的解释', () => {
     const html = render({
       messages: [assistant({ usage: usage() })],
@@ -293,33 +293,6 @@ describe('ComposerStats：锁定态与成本直通上下文指示器', () => {
 
     expect(html).toContain('已满');
     expect(html).toContain('上下文已满，查看说明');
-  });
-
-  it('会话累计成本从整个会话聚合后传给面板', () => {
-    const html = render({
-      messages: [
-        assistant({ usage: usage({ costTotal: 0.05, costCurrency: 'USD' }) }),
-        assistant({ usage: usage({ costTotal: 0.1, costCurrency: 'USD' }) }),
-      ],
-      initialContextOpen: true,
-    });
-
-    expect(html).toContain('会话累计');
-    expect(html).toContain('$0.15');
-    expect(html).toContain('2 轮');
-  });
-
-  it('有轮次没配价格时不给残缺的合计', () => {
-    const html = render({
-      messages: [
-        assistant({ usage: usage({ costTotal: 0.05, costCurrency: 'USD' }) }),
-        assistant({ usage: usage({ costTotal: null, costCurrency: null }) }),
-      ],
-      initialContextOpen: true,
-    });
-
-    expect(html).toContain('无法合计');
-    expect(html).toContain('1 轮未计价');
   });
 });
 

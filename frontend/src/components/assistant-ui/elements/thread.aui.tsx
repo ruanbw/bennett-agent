@@ -532,7 +532,7 @@ const Composer: FC<{
   //
   // selector 只返回 `s.thread.messages` 本身：它是 state 里的原始数组，引用稳定。**不能**
   // 在这里 `.map` / `.filter`——那会每次返回一个新数组，selector 的相等判断永远失败，
-  // 组件会在同一轮里无限重渲染。用量、成本、轮次/步数/速度的聚合都交给
+  // 组件会在同一轮里无限重渲染。用量、轮次/步数/速度的聚合都交给
   // `ComposerStats` 内部做一次遍历（它拿到的也是这个原数组）。
   const messages = useAuiState((s) => s.thread.messages);
 

@@ -1,6 +1,6 @@
 # Bennett 管理后台（admin-frontend）
 
-独立的**管理后台**前端服务：模型提供商 / 模型价格 / 用户管理。与用户端
+独立的**管理后台**前端服务：模型提供商 / 用户管理。与用户端
 [`frontend/`](../frontend/) 是两个互不依赖的工程——没有共享包、没有共享构建，
 UI 基件与主题 token 是**刻意的复制**（各自演进，改一边不牵动另一边）。两侧唯一
 的交集是后端下发的**会话 cookie**：在用户端登录过且角色够，打开这里就是已登录状态。
@@ -106,7 +106,6 @@ AUTH_COOKIE_SECURE=true                          # SameSite=None 的前置条件
 | 路由 | 页面 | 菜单项 |
 | --- | --- | --- |
 | `/providers` | 提供商与模型维护 | 模型提供商 |
-| `/prices` | 模型价格表 | 模型价格 |
 | `/users` | 账号封禁与角色 | 用户管理 |
 
 `/` 重定向到 `/providers`；未登录访问任意页面会跳 `/login` 并在登录后回跳原路径。
@@ -116,7 +115,7 @@ AUTH_COOKIE_SECURE=true                          # SameSite=None 的前置条件
 - **左侧菜单可折叠**：折叠成图标栏，状态存 localStorage；md 以下折化为顶部横向菜单。
 - **顶栏**放账号级操作（主题切换、当前账号、登出），菜单栏只管导航。
 - **内容区通栏**，每个页面是「筛选表单 + 数据表格 + 行内操作」的经典形态：
-  提供商页可展开行管理模型子表，价格页支持行内编辑，用户页带服务端搜索与分页。
+  提供商页可展开行管理模型子表，用户页带服务端搜索与分页。
 
 ## 目录结构
 
@@ -124,7 +123,7 @@ AUTH_COOKIE_SECURE=true                          # SameSite=None 的前置条件
 admin-frontend/
 ├── src/
 │   ├── components/
-│   │   ├── admin/          # 三个面板 + 两个编辑弹窗 + 开关（自 frontend/ 平移）
+│   │   ├── admin/          # 两个面板 + 两个编辑弹窗 + 开关（自 frontend/ 平移）
 │   │   ├── ui/             # button / input / dialog / confirm-dialog（自 frontend/ 复制）
 │   │   ├── ErrorBoundary.tsx
 │   │   ├── LoginPage.tsx   # 后台自己的登录页（无注册，登录后回跳原路径）

@@ -73,7 +73,6 @@ from app.services.metrics import (
 )
 from app.services.model_service import ChatModelSnapshot
 from app.services.model_target import ModelTarget
-from app.services.pricing import compute_cost, get_price
 from app.services.title_text import fallback_title, normalize_title
 from app.services.token_budget import (
     ContextBudget,
@@ -168,39 +167,6 @@ def _turn_timing(
         logger.warning("取本轮响应序列失败，不报计时", exc_info=True)
         return None
     return timer.finish(responses)
-
-
-async def _turn_cost_fields(
-    model_key: str,
-    usage: Any,  # noqa: ANN401 - TurnUsage
-) -> dict[str, Any]:
-    """把 token 用量换算成成本字段；没有价格时三个字段全为 None。
-
-    **查不到价格不是错误**：绝大多数自建网关没有计价信息，那时前端显示「未配置价格」。
-    返回 None 而不是 0——0 会被读成「免费」，是一个明确的错误结论。
-
-    计价查库失败同样降级为 None（`get_price` 内部已兜住），不让它影响这一轮对话：
-    成本是增强信息，不该成为新的失败点。
-    """
-    price = await get_price(model_key)
-    if price is None:
-        return {"cost_total": None, "cost_currency": None, "cost_cache_savings": None}
-
-    cost = compute_cost(
-        price,
-        input_tokens=usage.context_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read_tokens=usage.cache_read_tokens,
-    )
-    if cost is None:
-        return {"cost_total": None, "cost_currency": None, "cost_cache_savings": None}
-    return {
-        # 协议层用 float：JSON 没有 Decimal，而前端只做展示（后端的精确计算在
-        # `pricing.compute_cost` 里已经完成，这里只是传输）
-        "cost_total": float(cost.total),
-        "cost_currency": cost.currency,
-        "cost_cache_savings": float(cost.cache_savings),
-    }
 
 
 def _record_rejected_stream(outcome: str) -> None:
@@ -1150,7 +1116,6 @@ async def stream_chat_events(
                             context_window=snapshot.context_window_for(answered_by),
                             output_tokens=usage.output_tokens,
                             cache_read_tokens=usage.cache_read_tokens,
-                            **await _turn_cost_fields(answered_by, usage),
                             # 审批拦下也要给计时：用户在这一轮里同样等了几秒、
                             # 同样看到了首字。缺了它，需要审批的轮次会永远显示
                             # 「没有用时」——而这类轮次恰恰是最需要判断慢在哪的。
@@ -1181,9 +1146,6 @@ async def stream_chat_events(
                         ),
                         output_tokens=usage.output_tokens,
                         cache_read_tokens=usage.cache_read_tokens,
-                        # 成本按**真正回答的模型**计价：备用模型接手的轮次必须用备用
-                        # 模型的单价，否则成本会按主模型（可能贵十倍）算错。
-                        **await _turn_cost_fields(answered_by, usage),
                         # 计时同理属于**本轮**而不是某个模型：备用模型接手的轮次
                         # 照常下发，那正是用户想知道「换模型之后是快了还是慢了」的时刻。
                         timing=_turn_timing(timer, run_result),

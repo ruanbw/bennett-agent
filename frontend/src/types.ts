@@ -259,17 +259,6 @@ export interface UsageEvent {
   output_tokens: number;
   cache_read_tokens: number;
   /**
-   * 本轮估算成本。三者都缺失表示**当前模型没有配置价格**——不是「免费」。
-   *
-   * 后端按「真正回答的那个模型」的单价算（备用模型接手的轮次不能按主模型单价算），
-   * 并在没有价格时整体缺席。前端据此显示「未配置价格」而不是 `$0.00`：把 0 展示给
-   * 用户会被读成「免费」，那是一个明确的错误结论。
-   */
-  cost_total?: number | null;
-  cost_currency?: string | null;
-  /** 缓存命中省下的钱（相对「全部按普通输入价」）。用于说明缓存到底有没有起作用。 */
-  cost_cache_savings?: number | null;
-  /**
    * 计时块：输入框下方「1 轮 3 步 · 208 tok/s」与统计弹层里的用时/首字。
    *
    * 线上是 **snake_case**（`turn_ms` 等），由 `lib/chat-store.ts` 在事件入口一次性
@@ -533,19 +522,6 @@ export interface UsageState {
   outputTokens: number;
   /** 上下文里命中上游提示缓存的部分（`contextTokens` 的子集）。 */
   cacheReadTokens: number;
-  /**
-   * 本轮估算成本（按当前登记的模型价格换算）。
-   *
-   * `null` = 该模型没有配置价格，**不是免费**。界面必须显示「未配置价格」而不是
-   * `$0.00`——后者会被读成「这个模型不花钱」，而实际可能只是没人填价格。
-   *
-   * 这里刻意只存金额本身，不存单价：单价会随上游调价与管理员改配置而变化，把它快照
-   * 进历史消息里会让旧记录显示一个「当时的」单价，与账目口径冲突。会话累计金额由
-   * 各轮金额相加得到，那才是稳定的。
-   */
-  costTotal?: number | null;
-  costCurrency?: string | null;
-  costCacheSavings?: number | null;
   /** 计时明细；老记录与不报时的轮次为缺失/undefined。 */
   timing?: UsageTiming | null;
 }

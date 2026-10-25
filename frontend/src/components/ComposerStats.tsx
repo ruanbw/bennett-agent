@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { Database, Gauge } from 'lucide-react';
 
 import { ContextUsageIndicator, type ContextBreakdown } from './ContextUsageIndicator';
-import { readUsage, sumCosts, type CumulativeCost } from '@/lib/context-usage';
+import { readUsage } from '@/lib/context-usage';
 import {
   cacheHitPercent,
   formatCacheHitPercent,
@@ -46,7 +46,7 @@ export interface ComposerStatsProps {
   /**
    * 整个会话的消息数组（assistant-ui 的 `thread.messages`，引用稳定）。
    *
-   * 刻意只收这一个数据入口：轮次/步数/计时/token 账单/最近一轮用量/累计成本都从这里
+   * 刻意只收这一个数据入口：轮次/步数/计时/token 账单/最近一轮用量都从这里
    * 聚合。让调用方分别传会逼它在本组件之外再做一遍全量扫描，而**遍历不能进
    * `useAuiState` 的 selector**——每次返回新数组会让快照永远不相等，组件无限重渲染
    * （`thread.aui.tsx` 里那条注释说的就是这件事）。
@@ -80,7 +80,6 @@ interface DerivedStats {
   latestUsage: UsageState | null;
   /** 产生那份用量的模型 id。 */
   latestUsageModel: string | null;
-  sessionCost: CumulativeCost;
 }
 
 /**
@@ -105,13 +104,7 @@ function deriveStats(messages: readonly StatsMessageLike[]): DerivedStats {
     break;
   }
 
-  const sessionCost = sumCosts(
-    messages
-      .filter((message) => message.role === 'assistant')
-      .map((message) => readUsage(message.metadata?.custom?.usage)),
-  );
-
-  return { stats, tokens, latestUsage, latestUsageModel, sessionCost };
+  return { stats, tokens, latestUsage, latestUsageModel };
 }
 
 /**
@@ -259,7 +252,6 @@ export const ComposerStats: FC<ComposerStatsProps> = ({
         currentModel={currentModel}
         modelContextWindow={modelContextWindow}
         locked={locked}
-        sessionCost={derived.sessionCost}
         breakdown={breakdown}
         open={contextOpen}
         onOpenChange={setContextOpen}

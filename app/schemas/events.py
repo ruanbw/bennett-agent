@@ -171,15 +171,6 @@ class Usage(BaseModel):
     context_limit_tokens: int | None = None
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    #: 本轮成本（**估算**，按管理后台登记的单价算）。三个字段都是 null/缺失表示
-    #: 「没有价格」——前端必须显示「未配置价格」，**不能显示 0**：0 会被读成免费。
-    #:
-    #: 为什么是估算而不是账单：上游按自己的周期与规则结算（阶梯价、折扣、最低消费），
-    #: 这里的数只用于预算感知（「这个会话花了几毛」），不能用来对账。
-    cost_total: float | None = None
-    cost_currency: str | None = None
-    #: 缓存命中省下的钱（相对全部按普通输入价）。0 表示没有缓存收益。
-    cost_cache_savings: float | None = None
     #: 本轮计时明细。**整块给或整块缺席**：`None` 表示服务端没量到（老服务端、
     #: 或流式链路拿不到分片时序），前端此时不显示步数/速度/首字，**不要补 0**。
     #: 口径见 `UsageTiming` 的 docstring。

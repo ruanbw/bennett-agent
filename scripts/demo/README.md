@@ -50,10 +50,10 @@ uv run python ../../scripts/demo/make-video.py
 
 ```bash
 DEMO_EMAIL=demo@example.com DEMO_PASSWORD='...' node screenshots.mjs          # 全部
-node screenshots.mjs --only sandbox,context-cost                              # 只重拍几张
+node screenshots.mjs --only sandbox,context-usage                              # 只重拍几张
 ```
 
-`sandbox` 与 `context-cost` 取景自 `--sandbox-title`（默认「部署次数统计与柱状图」）那条会话，
+`sandbox` 与 `context-usage` 取景自 `--sandbox-title`（默认「部署次数统计与柱状图」）那条会话，
 也就是录屏用的那条；没有这条会话时会跳过并打印提示。
 
 ## 四个踩过的坑

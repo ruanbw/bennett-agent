@@ -5,22 +5,12 @@ import {
   CONTEXT_WARN_PERCENT,
   describeContextUsage,
   estimateRemainingChars,
-  formatCost,
   formatPercent,
   formatTokens,
   type ContextUsageView,
-  type CumulativeCost,
 } from '@/lib/context-usage';
 import { formatCompactTokens } from '@/lib/session-stats';
 import type { UsageState } from '@/types';
-
-/**
- * 没有价格时的展示文案。
- *
- * **不显示 `$0.00`**：0 会被读成「免费」，而实际情况往往是「没人填价格」——这两件事
- * 对使用者的意义完全不同（前者可以随便用，后者意味着看不到真实成本）。
- */
-export const UNPRICED_COST_LABEL = '未配置价格';
 
 /**
  * 圆环几何（与 DSH 的 ContextMeter 逐值对齐）：
@@ -67,16 +57,6 @@ export interface ContextUsageIndicatorProps {
    */
   locked?: boolean;
   /**
-   * 本会话的**累计**成本（各轮相加）。
-   *
-   * 与 `usage.costTotal`（本轮）分开两个 prop 而不是让组件自己遍历消息：累计需要整个
-   * 会话的用量数组，而这个组件只该关心「显示什么」。汇总逻辑在 `sumCosts` 里。
-   *
-   * 未提供时那一行不渲染。`total` 为 null 表示「不能给合计」（有轮次没配价格，或货币
-   * 混用），此时显示未计价的轮数而不是一个残缺的金额。
-   */
-  sessionCost?: CumulativeCost | null;
-  /**
    * 上下文分段（系统提示词 / 工具 / 对话）。后端目前不提供，缺失时整条单色。
    * 传进来但三段都是 0 时同样退化成单色。
    */
@@ -121,7 +101,6 @@ export function ContextUsageIndicator({
   currentModel = null,
   modelContextWindow = null,
   locked = false,
-  sessionCost = null,
   breakdown = null,
   initialOpen = false,
   open: openProp,
@@ -312,34 +291,6 @@ export function ContextUsageIndicator({
                     value={`${formatTokens(view.outputTokens)} tokens`}
                     hint=""
                   />
-                  <UsageRow
-                    label="本轮成本"
-                    value={
-                      typeof usage?.costTotal === 'number'
-                        ? formatCost(usage.costTotal, usage.costCurrency)
-                        : UNPRICED_COST_LABEL
-                    }
-                    hint={
-                      typeof usage?.costCacheSavings === 'number' && usage.costCacheSavings > 0
-                        ? `缓存节省 ${formatCost(usage.costCacheSavings, usage.costCurrency)}`
-                        : ''
-                    }
-                  />
-                  {sessionCost !== null && sessionCost.pricedTurns > 0 && (
-                    <UsageRow
-                      label="会话累计"
-                      value={
-                        sessionCost.total === null
-                          ? '无法合计'
-                          : formatCost(sessionCost.total, sessionCost.currency)
-                      }
-                      hint={
-                        sessionCost.unpricedTurns > 0
-                          ? `${sessionCost.unpricedTurns} 轮未计价`
-                          : `${sessionCost.pricedTurns} 轮`
-                      }
-                    />
-                  )}
                 </dl>
 
                 {estimateRemainingChars(view.remainingTokens) && (
@@ -357,12 +308,6 @@ export function ContextUsageIndicator({
                     已用过七成：还能继续聊，但长对话建议尽快新建会话，或换个窗口更大的模型——历史只会越来越长。
                   </p>
                 )}
-
-                <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
-                  {typeof usage?.costTotal === 'number'
-                    ? '成本按当前登记的模型单价换算，是**估算**不是账单：上游有阶梯价与折扣，实际以供应商结算为准。'
-                    : '这个模型没有登记价格，因此不显示金额。显示 0 会被误读成「免费」，所以宁可留空——可在管理后台的「模型价格」里补上。'}
-                </p>
 
                 <p className="mt-2.5 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
                   已用是上一轮请求的真实 prompt token（含系统提示词与整份历史），不含还没发送的草稿。

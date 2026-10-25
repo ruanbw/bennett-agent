@@ -16,7 +16,6 @@
 import { useCallback, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 import {
-  Coins,
   Loader2,
   LogOut,
   PanelLeftClose,
@@ -38,7 +37,6 @@ interface MenuItem {
 
 const MENU: MenuItem[] = [
   { to: '/providers', label: '模型提供商', Icon: Server },
-  { to: '/prices', label: '模型价格', Icon: Coins },
   { to: '/users', label: '用户管理', Icon: Users },
 ];
 

@@ -541,10 +541,6 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
         contextLimitTokens: event.context_limit_tokens ?? null,
         outputTokens: event.output_tokens,
         cacheReadTokens: event.cache_read_tokens,
-        // 三个成本字段一起存或一起缺席：只存其中一个会让界面显示「$0.00 US?」
-        costTotal: event.cost_total ?? null,
-        costCurrency: event.cost_currency ?? null,
-        costCacheSavings: event.cost_cache_savings ?? null,
         // 计时明细：线上是 snake_case，这里是**唯一**一次改名（转成 camelCase）。
         // 之后所有消费端（`lib/usage-timing.ts`、统计药丸）都只见 camelCase——
         // 让「读取时兼容两种命名」散到各个消费点，每加一个字段就要各兼容一遍，

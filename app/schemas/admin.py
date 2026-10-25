@@ -154,50 +154,6 @@ class ModelUpdate(BaseModel):
     is_default: bool | None = None
 
 
-class PriceRead(BaseModel):
-    """一个模型的价格配置（管理界面用）。
-
-    **对外用 float 而不是 Decimal**：这条路径只做「配置回显」，管理员要看的是 `3.00`
-    这种人类可读的值，不是 18 位小数。真正的金额计算在服务端用 `Decimal` 直接读库完成
-    （`app/services/pricing.py`），从不经过这个 schema——所以这里丢精度不会影响任何账单
-    数字，只是展示层的一个便利。
-
-    三个价格字段为 `None` 表示**未配置**，与「配成 0」是两件事：前者前端显示「未配置
-    价格」，后者会显示 `$0.00`。它们在数据库里也是不同的值（NULL vs 0）。
-    """
-
-    model_id: str
-    input_per_mtok: float | None = None
-    output_per_mtok: float | None = None
-    cached_input_per_mtok: float | None = None
-    currency: str = "USD"
-    updated_at: datetime | None = None
-
-
-class PriceUpdate(BaseModel):
-    """写入/更新价格。
-
-    用 PATCH 语义的「缺省不修改」在这里**不适用**：价格是三条独立数字，管理员清空某个
-    输入框的意图就是「不知道这个价格了」。所以三个字段都显式接受 `None`（清空），
-    而请求体本身必须给出完整的三元组——避免「只想改输出价，结果输入价被顺手清空」。
-
-    实际上前端总是提交全部三个字段，这里要求完整是为了让 API 用起来不会有歧义。
-    """
-
-    input_per_mtok: float | None = Field(None, ge=0)
-    output_per_mtok: float | None = Field(None, ge=0)
-    cached_input_per_mtok: float | None = Field(None, ge=0)
-    currency: str = Field("USD", min_length=1, max_length=8)
-
-    @field_validator("currency")
-    @classmethod
-    def _normalize_currency(cls, value: str) -> str:
-        cleaned = value.strip().upper()
-        if not cleaned:
-            raise ValueError("不能为空白")
-        return cleaned
-
-
 class ProviderSyncResult(BaseModel):
     fetched: int
     created: int

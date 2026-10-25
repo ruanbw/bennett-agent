@@ -5,7 +5,7 @@
  *
  * `/login` 之外的整棵树都包在 `RequireAdmin` 里（登录守卫），页面由
  * `AdminLayout`（左侧菜单 + 右侧内容）通过 `<Outlet>` 渲染；每个菜单项是一个
- * 真实的 URL 路由（/providers、/prices、/users），刷新与直达都不丢状态。
+ * 真实的 URL 路由（/providers、/users），刷新与直达都不丢状态。
  *
  * ## 四态而不是三态
  *
@@ -29,7 +29,6 @@ import { LoginPage } from './components/LoginPage';
 import { ThemeProvider } from './context/ThemeContext';
 import { Button } from './components/ui/button';
 import { AdminLayout } from './layouts/AdminLayout';
-import { PricePanel } from './components/admin/PricePanel';
 import { ProvidersPanel } from './components/admin/ProvidersPanel';
 import { UsersPanel } from './components/admin/UsersPanel';
 import {
@@ -186,7 +185,6 @@ export function App() {
             >
               <Route index element={<Navigate to="/providers" replace />} />
               <Route path="providers" element={<ProvidersPanel />} />
-              <Route path="prices" element={<PricePanel />} />
               <Route
                 path="users"
                 // canManageRoles 决定「用户管理」里能否改角色：admin 能进后台、能封

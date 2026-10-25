@@ -403,10 +403,6 @@ describe('事件折叠', () => {
       contextLimitTokens: 648000,
       outputTokens: 2,
       cacheReadTokens: 896,
-      // 事件里没有成本字段 → 三个都落成 null（=「这个模型没配价格」，不是免费）
-      costTotal: null,
-      costCurrency: null,
-      costCacheSavings: null,
       // 事件里没有计时块 → null（=「没量到」），不是补一个 0 步的空块
       timing: null,
     })
@@ -467,41 +463,6 @@ describe('事件折叠', () => {
     applyEvent('a', { type: 'usage', context_tokens: 100, output_tokens: 1, cache_read_tokens: 0 })
 
     expect(getRun('a')!.usage?.timing).toBeNull()
-  })
-
-  it('usage 事件里的成本字段原样记录（有价格时才有值）', () => {
-    start('a')
-    applyEvent('a', {
-      type: 'usage',
-      context_tokens: 10_000,
-      context_window: 128_000,
-      context_limit_tokens: 96_000,
-      output_tokens: 2_000,
-      cache_read_tokens: 4_000,
-      cost_total: 0.0492,
-      cost_currency: 'USD',
-      cost_cache_savings: 0.0108,
-    })
-
-    expect(getRun('a')!.usage).toMatchObject({
-      costTotal: 0.0492,
-      costCurrency: 'USD',
-      costCacheSavings: 0.0108,
-    })
-  })
-
-  it('没配价格的轮次成本是 null，不是 0', () => {
-    // 0 会被界面显示成「免费」，而实际是「不知道价格」——这两件事不能合并
-    start('a')
-    applyEvent('a', {
-      type: 'usage',
-      context_tokens: 100,
-      output_tokens: 10,
-      cache_read_tokens: 0,
-      cost_total: null,
-    })
-
-    expect(getRun('a')!.usage?.costTotal).toBeNull()
   })
 
   it('用量里的窗口与预算上限缺失时按 null 记，而不是编一个数', () => {

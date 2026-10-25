@@ -49,7 +49,7 @@ const PASSWORD = args.get('password') || process.env.DEMO_PASSWORD;
 const SANDBOX_TITLE = args.get('sandbox-title') || '部署次数统计与柱状图';
 
 const VIEWPORT = { width: 1440, height: 900 };
-/** 只拍某几张（`--only sandbox,context-cost`）：改一张图不该重跑两轮真实模型。 */
+/** 只拍某几张（`--only sandbox,context-usage`）：改一张图不该重跑两轮真实模型。 */
 const ONLY = new Set((args.get('only') || '').split(',').filter(Boolean));
 const want = (name) => ONLY.size === 0 || ONLY.has(name);
 
@@ -160,22 +160,21 @@ async function main() {
     }
 
     // ---- 2. 普通问答：表格与结构化输出是它最常被用到的一面 ----
-    if (want('chat') || want('context-cost')) {
+    if (want('chat') || want('context-usage')) {
       await newConversation(page);
       await ask(page, '请对比 SSE 与 WebSocket 在服务端单向推送场景下的取舍，给出一张表。');
       if (want('chat')) await shot(page, 'chat');
     }
 
-    // ---- 3. 上下文用量与成本 ----
-    // 成本是**每轮**在上游回报 token 时算好并落库的，所以必须有一轮「价格表已就位」
-    // 的请求才有金额可看；拿一条历史会话拍，只会拍到「未配置价格」。
-    if (want('context-cost')) {
+    // ---- 3. 上下文用量 ----
+    // 用量事件在一轮结束时才发，所以要再问一轮、等它结束，弹层里才有「最新一轮」的数字。
+    if (want('context-usage')) {
       await ask(page, '这张表里最容易被忽略的是哪一条？用三句话说完。');
       // 这个按钮的 aria-label 是动态的（`上下文用量：…`），弹层本身才叫「上下文用量详情」
       const usage = page.getByRole('button', { name: /^上下文用量/ }).first();
       await usage.click();
       await page.waitForTimeout(700);
-      await shot(page, 'context-cost');
+      await shot(page, 'context-usage');
       await page.keyboard.press('Escape');
       await page.waitForTimeout(400);
     }
