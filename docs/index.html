@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bennett Agent — 演示</title>
+    <meta
+      name="description"
+      content="Bennett Agent 的演示录像：用户端对话与沙箱执行、管理端与后端接口。"
+    />
+    <!-- 演示站，不该被搜到正文（仓库 README 才是入口） -->
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="demo/cover.png" />
+    <style>
+      /* 为什么需要这一页：GitHub 的 README 会过滤掉用户写的 <video>，仓库里的 mp4
+         在 blob 页也只给「View raw」。这一页用原生 <video>，1080p、可拖进度、可全屏。 */
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --chip: #f3f4f6;
+        --chip-fg: #374151;
+        --accent: #10b981;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0d10;
+          --fg: #e8eaed;
+          --muted: #9aa0a6;
+          --line: #24282e;
+          --chip: #171a1f;
+          --chip-fg: #c8ccd2;
+          --accent: #34d399;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 40px 20px 72px;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.65 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          'PingFang SC',
+          'Hiragino Sans GB',
+          'Microsoft YaHei',
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        max-width: 1040px;
+        margin: 0 auto;
+      }
+      header {
+        margin-bottom: 34px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        letter-spacing: -0.01em;
+      }
+      header p {
+        margin: 0;
+        color: var(--muted);
+      }
+      header a {
+        color: inherit;
+      }
+      section {
+        margin: 0 0 44px;
+      }
+      h2 {
+        margin: 0 0 4px;
+        font-size: 17px;
+        font-weight: 600;
+      }
+      .meta {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .player {
+        position: relative;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: #000;
+        aspect-ratio: 16 / 9;
+      }
+      video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #000;
+      }
+      .chapters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .chapters button {
+        font: inherit;
+        font-size: 13px;
+        color: var(--chip-fg);
+        background: var(--chip);
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 5px 12px;
+        cursor: pointer;
+        transition: border-color 0.12s ease;
+      }
+      .chapters button:hover {
+        border-color: var(--accent);
+      }
+      .chapters button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .chapters button time {
+        color: var(--muted);
+        margin-left: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      footer {
+        margin-top: 8px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 13px;
+      }
+      footer code {
+        font-size: 12px;
+        background: var(--chip);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Bennett Agent 演示</h1>
+        <p>
+          两段录像都是真实链路：真实后端、真实模型、真实沙箱执行，没有摆拍。
+          源码与文档见
+          <a href="https://github.com/ruanbw/bennett-agent">github.com/ruanbw/bennett-agent</a>。
+        </p>
+      </header>
+
+      <section>
+        <h2>用户端：对话 + 沙箱真跑代码</h2>
+        <p class="meta">
+          1920×1080 · 63 秒 · 无声 · 模型 DeepSeek V4.1 Flash（低思考档）
+        </p>
+        <div class="player">
+          <video
+            id="v-user"
+            controls
+            playsinline
+            preload="metadata"
+            poster="demo/cover.png"
+          >
+            <source src="demo/demo.mp4" type="video/mp4" />
+            你的浏览器不支持 <code>&lt;video&gt;</code>，可以直接下载
+            <a href="demo/demo.mp4">demo.mp4</a>。
+          </video>
+        </div>
+        <div class="chapters" data-for="v-user">
+          <button data-seek="0">开场空态<time>0:00</time></button>
+          <button data-seek="3">换模型<time>0:03</time></button>
+          <button data-seek="18">沙箱执行<time>0:18</time></button>
+          <button data-seek="33">展开工具轨迹<time>0:34</time></button>
+          <button data-seek="39">上下文预算<time>0:40</time></button>
+          <button data-seek="52">第二轮追问<time>0:52</time></button>
+        </div>
+      </section>
+
+      <section>
+        <h2>管理端 + 后端</h2>
+        <p class="meta">1920×1080 · 43 秒 · 无声 · 提供商与模型 / 用户与角色 / OpenAPI / 探针 / 指标</p>
+        <div class="player">
+          <video
+            id="v-admin"
+            controls
+            playsinline
+            preload="metadata"
+            poster="demo-admin/cover.png"
+          >
+            <source src="demo-admin/demo.mp4" type="video/mp4" />
+            你的浏览器不支持 <code>&lt;video&gt;</code>，可以直接下载
+            <a href="demo-admin/demo.mp4">demo.mp4</a>。
+          </video>
+        </div>
+        <div class="chapters" data-for="v-admin">
+          <button data-seek="0">模型提供商<time>0:00</time></button>
+          <button data-seek="3">模型清单<time>0:03</time></button>
+          <button data-seek="8">用户与角色<time>0:09</time></button>
+          <button data-seek="19">OpenAPI 文档<time>0:19</time></button>
+          <button data-seek="29">就绪探针<time>0:29</time></button>
+          <button data-seek="34">Prometheus 指标<time>0:35</time></button>
+        </div>
+      </section>
+
+      <footer>
+        素材由 <code>scripts/demo/</code> 下的脚本生成（Playwright 录真实浏览器 + ffmpeg 按时间轴变速），
+        重录步骤见 <code>scripts/demo/README.md</code>。两段视频都没有音轨。
+      </footer>
+    </main>
+
+    <script>
+      // 章节按钮只做两件事：跳到那一秒、开始播。不接管原生控件——
+      // 一旦自己画进度条，键盘、画中画、全屏、投屏这些就全要重写一遍。
+      for (const bar of document.querySelectorAll('.chapters')) {
+        const video = document.getElementById(bar.dataset.for);
+        if (!video) continue;
+        bar.addEventListener('click', (event) => {
+          const button = event.target.closest('button[data-seek]');
+          if (!button) return;
+          video.currentTime = Number(button.dataset.seek);
+          video.play().catch(() => {
+            /* 自动播放被拦时停在那一帧即可，用户自己点播放键 */
+          });
+          video.focus();
+        });
+      }
+
+      // 同一时刻只播一条：两段视频并列，同时出声/同时跑进度没有意义
+      for (const video of document.querySelectorAll('video')) {
+        video.addEventListener('play', () => {
+          for (const other of document.querySelectorAll('video')) {
+            if (other !== video) other.pause();
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

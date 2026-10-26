@@ -299,6 +299,14 @@ def main() -> None:
         path = out / name
         print(f"  {path}  {path.stat().st_size / 1024 / 1024:.2f} MB")
 
+    # 成片时间轴：每段在**成片里**的起始秒。docs/index.html 的章节按钮就照这个写，
+    # 手算一遍相加必然算错一格（段数与变速档位都改过）。
+    print("成片章节（秒）：")
+    cursor = 0.0
+    for name, start, end, speed in spans:
+        print(f"  {cursor:6.2f}  {name}")
+        cursor += (end - start) / speed
+
 
 if __name__ == "__main__":
     main()
