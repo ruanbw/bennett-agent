@@ -7,6 +7,8 @@ README 开头的两段视频都由这里的脚本产出：
 | `docs/demo/demo.mp4` / `demo.gif` / `cover.png` | 用户端：对话 + 沙箱真跑代码 + 上下文预算 | `record.mjs` + `make-video.py` |
 | `docs/demo-admin/demo.mp4` / `cover.png` | 管理端：提供商/模型、用户与角色；后端：`/docs`、探针、指标 | `record-admin.mjs` + `make-video.py` |
 
+两组产物都由 `docs/index.html`（GitHub Pages 播放页）引用，README 的封面图链到那一页。
+
 **这些不是应用的依赖**：只有想重做物料时才需要 `npm install`。
 
 ```
@@ -113,16 +115,50 @@ GitHub 的 Markdown 不支持 `<video>`，只有 GIF 能内联自动播放；而
 - `docs/demo/demo.mp4`、`demo.gif`、`cover.png`、`docs/demo-admin/demo.mp4`、`cover.png` 入库（README 要引用）；
 - `raw.webm`、`.raw/`、`timeline.json`、`scripts/demo/node_modules/` 不入库（见根目录 `.gitignore`）——它们随时能重录，且只对当次录屏有意义。
 
+## 播放页（GitHub Pages）
+
+README 的封面图链到 **https://ruanbw.github.io/bennett-agent/**，那一页是 `docs/index.html`：
+零依赖单页，两段视频都是原生 `<video>` + 章节按钮，浅色/深色自适应。
+
+仓库设置：Pages 走 `master` 分支的 `/docs` 目录（`gh api -X POST repos/<owner>/<repo>/pages`;
+换成本仓库时记得改）。**不需要构建**：`docs/` 目录里就是要发布的静态文件，仓库里的
+mp4 与封面同时也是 Pages 的资源，一份文件两处用。
+
+### 为什么不能直接链仓库里的 mp4
+
+实测（2026-10，本仓库 `master`）：
+
+| 地址 | 浏览器行为 |
+| --- | --- |
+| `github.com/…/blob/master/docs/demo/demo.mp4` | 只有「View raw」，**不播放** |
+| `raw.githubusercontent.com/…/demo.mp4` | `content-type: application/octet-stream` + `nosniff`，`<video>` 解不出来 |
+| `github.com/…/raw/refs/heads/master/docs/demo/demo.mp4` | 302 到上面那条，同样 octet-stream |
+| `ruanbw.github.io/bennett-agent/demo/demo.mp4` | `content-type: video/mp4`，**能播** |
+
+另外 GitHub 的 README 会过滤用户写的 `<video>` 标签，所以「写个 video 标签指 raw 链接」
+这条路两头都堵死。唯一能内联出播放器的是 **user-attachments**（把文件拖进编辑器上传，
+README 里裸链接即可），但它需要网页登录态——`gh` 2.89 还没有 `--attach`。
+
+### 章节秒数从哪来
+
+`make-video.py` 结尾会打印「成片章节（秒）」，`docs/index.html` 里按钮上的
+`data-seek` 就照它抄。变速档位一改，这些秒数就变，而手算「几段各多少秒相加」
+必然错一格——所以让脚本自己报，别自己算。
+
 ## 要不要另传一个视频平台
 
-仓库里的 MP4 已经够用：点开就是 GitHub 自带的播放器，1080p 原画、可暂停拖动、零外部依赖。如果还需要「不用跳出页面就能播」，各家的实际边界是：
+当前方案（仓库 mp4 + GIF 内联 + Pages 播放页）已经覆盖「先扫一眼」与「看原画」两种意图。
+其余选项的实际边界：
 
-| 方式 | 能否 README 内联播放 | 代价 |
+| 方式 | 能否页面内播放 | 代价 |
 | --- | --- | --- |
-| 仓库内 MP4 + 封面链接（当前方案） | 否，点击后跳 GitHub 播放器 | 仓库多 1.2 MB |
-| 仓库内 GIF | **是**，自动循环 | 只有 880 宽、2 MB |
-| Release 附件 / issue 附件 | 否（同样是点击进播放器） | 免费账号附件上限 10 MB，超了要传两段 |
-| B 站 | 否（只能放链接或封面） | 需要账号与过审，但国内访问最快、有清晰度切换 |
-| Cloudflare R2 + Pages | 是（自己写 `<video>`） | 要注册、绑域名/开公开桶；播放器只在 Pages 站上生效 |
+| **Pages 播放页（当前）** | **是**（原生 `<video>`） | 站点公开；需在仓库设置里启用 Pages |
+| 仓库内 GIF | 是（README 内联、自动循环） | 只有 880 宽、9fps，2 MB |
+| 仓库内 MP4 直链 | 否（blob 页只给 View raw） | — |
+| user-attachments | 是（README 内联播放器） | 要网页登录上传；免费账号单文件 10 MB |
+| Release 附件 | 否（点击下载） | 同为外链，但没有任何播放收益 |
+| jsDelivr 镜仓 | 是（返回 `video/mp4`） | 依赖第三方 CDN，且仍然是「跳出去播」 |
+| B 站 | 否（只能放链接/封面） | 要账号与过审；国内访问最快、可切清晰度 |
 
-结论：README 用「封面图 + MP4 链接 + GIF 内联」这一组，覆盖了「先扫一眼」和「看原画」两种意图，不需要第三个平台。
+结论：**Pages 播放页 + GIF 内联 + 仓库 mp4 原件**三件套足够，不需要第四个平台。
+B 站只在「国内访问速度」成为问题时才值得加，届时把两段 mp4 传上去、在 README 补两个链接即可。
