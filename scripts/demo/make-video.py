@@ -15,9 +15,14 @@
 
 产出：
 
-    demo.mp4    1440×900 H.264，静音，README 里链过去的完整版
-    demo.gif    1000 宽的短循环，README 里内联自动播放（GitHub 不支持 <video>）
-    cover.png   MP4 链接的封面（工具轨迹展开后的那一帧）
+    demo.mp4    1920×1080 H.264（crf 20），静音，README 里链过去的完整版
+    demo.gif    聊天栏取景的短循环，README 里内联自动播放（GitHub 吞掉 <video>）
+    cover.png   MP4 链接的封面（工具轨迹展开后的那一帧，1920 宽）
+
+同一份脚本也用来剪管理端 + 接口那段（`record-admin.mjs` 的产物）：
+
+    uv run python scripts/demo/make-video.py --dir docs/demo-admin \
+        --cover-at users --gif-from users --gif-to docs --skip-gif
 
 用法：
 
@@ -39,33 +44,48 @@ from pathlib import Path
 #: 每段默认速度。键是 `timeline.json` 里的 mark 名，值是「这个 mark 到下个 mark」的速度。
 DEFAULT_SPEEDS: dict[str, float] = {
     "ready": 1.0,
-    "typing": 1.3,
-    "submitted": 4.0,
+    "typing": 1.15,
+    "submitted": 2.5,
     "tool": 1.0,
     "answered": 1.0,
     "expanded": 1.0,
+    "usage": 1.0,
+    "typing2": 1.5,
+    "submitted2": 3.0,
+    "tool2": 1.4,
+    "wait2": 6.0,
+    "health": 1.8,
+    "metrics": 1.3,
+    "answered2": 1.0,
 }
 
 #: 默认整段剪掉的 span：加载与登录属于「怎么进来」，不属于「它能做什么」。
 DEFAULT_CUT: set[str] = {"blank"}
 
 #: GIF 的取景：从「刚发出」到结尾。前面空态与打字的 5 秒不值得让 GIF 变大一倍。
-GIF_FROM = "submitted"
+GIF_FROM = "tool"
+#: GIF 的收尾：默认停在「展开过程组」结束，第二轮的等待与长回答不塞进 GIF。
+GIF_TO = "typing2"
 GIF_SPEED = 1.5
 #: GIF 内部再按段给一次速度：等待那段（GIF 里占时最多、信息量最少）抽得比其他段更狠，
 #: 而回答和证据画面只是略快。GIF 的单位成本是「体积」，不是「时长」。
 GIF_SPEEDS: dict[str, float] = {
     "submitted": 6.0,
-    "tool": 1.2,
+    "tool": 1.35,
     "answered": 1.0,
     "expanded": 1.0,
 }
-GIF_WIDTH = 900
-GIF_FPS = 10
-GIF_COLORS = 160
+GIF_WIDTH = 880
+GIF_FPS = 9
+GIF_COLORS = 128
 
-MP4_WIDTH = 1440
+#: GIF 的取景框（源是 1920×1080）：只留会话栏。整帧缩到 900 宽时正文只有 7px 高，
+#: 字全糊；原生裁切再轻微缩放，正文才有 10px 左右。
+GIF_CROP = "920:1080:600:0"
+
+MP4_WIDTH = 1920
 MP4_FPS = 25
+MP4_CRF = 18
 
 
 def run(cmd: list[str]) -> None:
@@ -119,36 +139,47 @@ def spans_from_marks(
     return spans
 
 
-def trim_chain(spans: list[tuple[str, float, float, float]], *, width: int, fps: int) -> str:
-    """生成 `trim,setpts,scale,concat` 的 filter graph：每段独立变速后再拼起来。"""
+def trim_chain(
+    spans: list[tuple[str, float, float, float]],
+    *,
+    width: int,
+    fps: int,
+    crop: str | None = None,
+) -> str:
+    """生成 `trim,setpts[,crop],scale,concat` 的 filter graph：每段独立变速后再拼起来。
+
+    `crop` 是 ffmpeg 的 `w:h:x:y` 取值。GIF 用它取会话栏：整帧缩到 900 宽时正文
+    只剩 7px 高，字会糊成灰带；裁到原生分辨率附近再缩，字才是字。
+    """
     parts: list[str] = []
     for index, (_name, start, end, speed) in enumerate(spans):
         # 先 trim 再 setpts：顺序反了会把时间戳改成负值，ffmpeg 会静默丢帧
+        cut = f"crop={crop}," if crop else ""
         parts.append(
             f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=(PTS-STARTPTS)/{speed},"
-            f"scale={width}:-2:flags=lanczos,fps={fps},format=yuv420p[v{index}]"
+            f"{cut}scale={width}:-2:flags=lanczos,fps={fps},format=yuv420p[v{index}]"
         )
     labels = "".join(f"[v{index}]" for index in range(len(spans)))
     parts.append(f"{labels}concat=n={len(spans)}:v=1:a=0[out]")
     return ";".join(parts)
 
 
-def encode_mp4(src: Path, dst: Path, spans) -> None:
-    chain = trim_chain(spans, width=MP4_WIDTH, fps=MP4_FPS)
+def encode_mp4(src: Path, dst: Path, spans, *, width: int = MP4_WIDTH) -> None:
+    chain = trim_chain(spans, width=width, fps=MP4_FPS)
     # 命令行参数按「一组一个」排更接近它跑起来的样子；fmt 下面几块保持原样
     # fmt: off
     run(
         [
             "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
             "-filter_complex", chain, "-map", "[out]",
-            "-c:v", "libx264", "-profile:v", "high", "-crf", "24",
+            "-c:v", "libx264", "-profile:v", "high", "-preset", "slow", "-crf", str(MP4_CRF),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", str(dst),
         ]
     )
     # fmt: on
 
 
-def encode_gif(src: Path, dst: Path, spans, *, start_mark: str, speed: float) -> None:
+def encode_gif(src: Path, dst: Path, spans, *, start_mark: str, end_mark: str, speed: float) -> None:
     """GIF 两遍法：先 palettegen 再 paletteuse。
 
     不这么做的话 256 色调色板由 ffmpeg 默认的通用表给出，浅色 UI 上会出现明显的
@@ -156,15 +187,21 @@ def encode_gif(src: Path, dst: Path, spans, *, start_mark: str, speed: float) ->
     """
     if not any(name == start_mark for name, *_ in spans):
         raise SystemExit(f"GIF 起点 {start_mark!r} 不在时间轴里，可用：{[s[0] for s in spans]}")
-    # 从起点那个 mark 开始截取尾段（GIF 只承担「一眼看懂发生了什么」，不承担全过程）
+    # 从起点那个 mark 开始截取（GIF 只承担「一眼看懂发生了什么」，不承担全过程）
     window = []
     seen = False
     for name, start, end, _speed in spans:
+        if name == end_mark:
+            break
         seen = seen or name == start_mark
         if seen:
             window.append((name, start, end, GIF_SPEEDS.get(name, speed)))
+    if not window:
+        raise SystemExit(f"GIF 区间 {start_mark!r} → {end_mark!r} 是空的")
+    if not any(name == end_mark for name, *_ in spans):
+        raise SystemExit(f"GIF 收尾 {end_mark!r} 不在时间轴里，可用：{[s[0] for s in spans]}")
 
-    chain = trim_chain(window, width=GIF_WIDTH, fps=GIF_FPS)
+    chain = trim_chain(window, width=GIF_WIDTH, fps=GIF_FPS, crop=GIF_CROP)
     with tempfile.TemporaryDirectory() as tmp:
         palette = Path(tmp) / "palette.png"
         # fmt: off
@@ -188,12 +225,12 @@ def encode_gif(src: Path, dst: Path, spans, *, start_mark: str, speed: float) ->
         # fmt: on
 
 
-def export_poster(src: Path, dst: Path, spans, *, at_mark: str) -> None:
+def export_poster(src: Path, dst: Path, spans, *, at_mark: str, width: int = MP4_WIDTH) -> None:
     for name, start, _end, _speed in spans:
         if name == at_mark:
             # fmt: off
             run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start + 0.6:.3f}", "-i", str(src),
-                 "-frames:v", "1", "-vf", f"scale={MP4_WIDTH}:-2", str(dst)])
+                 "-frames:v", "1", "-vf", f"scale={width}:-2", str(dst)])
             # fmt: on
             return
     raise SystemExit(f"封面时间点 {at_mark!r} 不在剪辑后的时间轴里")
@@ -205,6 +242,11 @@ def main() -> None:
     parser.add_argument("--speed", action="append", default=[], metavar="段=倍速", help="覆盖某段速度")
     parser.add_argument("--cut", action="append", default=[], metavar="段", help="整段丢掉（默认已丢 blank）")
     parser.add_argument("--gif-from", default=GIF_FROM, help="GIF 从哪个 mark 开始")
+    parser.add_argument("--gif-to", default=GIF_TO, help="GIF 到哪个 mark 结束（不含）")
+    parser.add_argument("--cover-at", default="expanded", help="封面取哪个 mark 之后的那一帧")
+    parser.add_argument("--width", type=int, default=MP4_WIDTH, help="成片宽度（高度按 16:9 推）")
+    parser.add_argument("--skip-gif", action="store_true", help="不出 GIF（管理端那段不需要内联预览）")
+    parser.add_argument("--skip-cover", action="store_true", help="不出封面")
     parser.add_argument("--gif-speed", type=float, default=GIF_SPEED)
     args = parser.parse_args()
 
@@ -237,11 +279,23 @@ def main() -> None:
     for name, start, end, speed in spans:
         print(f"  {name:10s} {start:6.1f}s → {end:6.1f}s  {speed:>4.1f}×  成片 {(end - start) / speed:5.1f}s")
 
-    encode_mp4(raw, out / "demo.mp4", spans)
-    encode_gif(raw, out / "demo.gif", spans, start_mark=args.gif_from, speed=args.gif_speed)
-    export_poster(raw, out / "cover.png", spans, at_mark="expanded")
+    encode_mp4(raw, out / "demo.mp4", spans, width=args.width)
+    produced = ["demo.mp4"]
+    if not args.skip_gif:
+        encode_gif(
+            raw,
+            out / "demo.gif",
+            spans,
+            start_mark=args.gif_from,
+            end_mark=args.gif_to,
+            speed=args.gif_speed,
+        )
+        produced.append("demo.gif")
+    if not args.skip_cover:
+        export_poster(raw, out / "cover.png", spans, at_mark=args.cover_at, width=args.width)
+        produced.append("cover.png")
 
-    for name in ("demo.mp4", "demo.gif", "cover.png"):
+    for name in produced:
         path = out / name
         print(f"  {path}  {path.stat().st_size / 1024 / 1024:.2f} MB")
 

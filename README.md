@@ -2,6 +2,24 @@
 
 自托管的多租户 AI 对话助手平台：基于 [PydanticAI](https://ai.pydantic.dev/) + [LiteLLM](https://docs.litellm.ai/) 的 Agent 框架，FastAPI SSE 流式后端，React 19 前端，配独立管理后台。
 
+## 演示
+
+**用户端**（63 秒，1920×1080，无声）：换模型 → 提问 → 模型在自己的沙箱里写脚本、执行、贴回真实输出 → 展开工具轨迹看路径/退出码/每步耗时 → 查上下文预算 → 追问确认工作区还在。全程真实链路，没有一幕是剪辑出来的。
+
+[![用户端演示：模型在自己的机器上跑代码](docs/demo/cover.png)](docs/demo/demo.mp4)
+
+上面是 **封面图**（`cover.png`，点击进 MP4 原画，用 GitHub 自带的播放器看 1080p、可暂停拖动）。
+
+下面这段是 **GIF 自动播放预览**：GitHub 的 README 会过滤掉用户写的 `<video>` 标签，只有 GIF 能内联自动播放（代价是只有 880 宽、10fps，正文文字能读但不如 MP4 锐）。
+
+![用户端演示](docs/demo/demo.gif)
+
+**管理端 + 后端**（43 秒，1920×1080，无声）：提供商与模型清单（同步、启停、设默认）→ 用户与角色 → `/docs` 的 OpenAPI 接口面 → 就绪探针逐项依赖状态 → Prometheus 指标。
+
+[![管理端与后端演示](docs/demo-admin/cover.png)](docs/demo-admin/demo.mp4)
+
+物料由 `scripts/demo/` 下的脚本产出（Playwright 录真实浏览器 + ffmpeg 按时间轴变速剪辑），重录步骤见 [scripts/demo/README.md](scripts/demo/README.md)。
+
 ## 功能特性
 
 - **多提供商模型接入**：所有提供商统一走 OpenAI 兼容端点 + LiteLLM 路由格式（如 `openai/gpt-4o`）。管理后台内置主流厂商预设（OpenAI、Anthropic、Google、DeepSeek、Kimi、通义千问、智谱、OpenRouter、Groq、xAI、硅基流动、火山方舟等），也支持 Ollama / LM Studio 本地模型；API Key 加密落库，首次启动可由环境变量引导。
