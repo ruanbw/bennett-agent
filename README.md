@@ -6,19 +6,21 @@
 
 **用户端**（63 秒，1920×1080，无声）：换模型 → 提问 → 模型在自己的沙箱里写脚本、执行、贴回真实输出 → 展开工具轨迹看路径/退出码/每步耗时 → 查上下文预算 → 追问确认工作区还在。全程真实链路，没有一幕是剪辑出来的。
 
-[![用户端演示：模型在自己的机器上跑代码](docs/demo/cover.png)](docs/demo/demo.mp4)
+[![用户端演示：模型在自己的机器上跑代码](docs/demo/cover.png)](https://ruanbw.github.io/bennett-agent/)
 
-上面是 **封面图**（`cover.png`，点击进 MP4 原画，用 GitHub 自带的播放器看 1080p、可暂停拖动）。
+点封面进 **[播放页](https://ruanbw.github.io/bennett-agent/)**（GitHub Pages）：原生 `<video>`、1080p 原画、可拖进度条与全屏，两段片子都带章节按钮。
 
-下面这段是 **GIF 自动播放预览**：GitHub 的 README 会过滤掉用户写的 `<video>` 标签，只有 GIF 能内联自动播放（代价是只有 880 宽、10fps，正文文字能读但不如 MP4 锐）。
+为什么不直接链仓库里的 mp4：GitHub 的 blob 页对它只给「View raw」（不播放），而 `raw.githubusercontent.com` 返回 `application/octet-stream` + `nosniff`，README 里的 `<video>` 也解不出来。Pages 返回的是 `video/mp4`，所以能播。
+
+下面这段是 **GIF 自动播放预览**，不点任何东西就能看个大概（代价是 880 宽、9fps，正文文字能读但不如 MP4 锐）：
 
 ![用户端演示](docs/demo/demo.gif)
 
 **管理端 + 后端**（43 秒，1920×1080，无声）：提供商与模型清单（同步、启停、设默认）→ 用户与角色 → `/docs` 的 OpenAPI 接口面 → 就绪探针逐项依赖状态 → Prometheus 指标。
 
-[![管理端与后端演示](docs/demo-admin/cover.png)](docs/demo-admin/demo.mp4)
+[![管理端与后端演示](docs/demo-admin/cover.png)](https://ruanbw.github.io/bennett-agent/#admin)
 
-物料由 `scripts/demo/` 下的脚本产出（Playwright 录真实浏览器 + ffmpeg 按时间轴变速剪辑），重录步骤见 [scripts/demo/README.md](scripts/demo/README.md)。
+物料由 `scripts/demo/` 下的脚本产出（Playwright 录真实浏览器 + ffmpeg 按时间轴变速剪辑），重录步骤见 [scripts/demo/README.md](scripts/demo/README.md)。仓库里的 `docs/demo/*.mp4` 是同一份文件的可下载原件。
 
 ## 功能特性
 

@@ -129,6 +129,10 @@
         margin-left: 6px;
         font-variant-numeric: tabular-nums;
       }
+      section[id] {
+        /* README 里链到 #admin 时，标题别顶在视口最上沿 */
+        scroll-margin-top: 24px;
+      }
       footer {
         margin-top: 8px;
         padding-top: 22px;
@@ -155,7 +159,7 @@
         </p>
       </header>
 
-      <section>
+      <section id="user">
         <h2>用户端：对话 + 沙箱真跑代码</h2>
         <p class="meta">
           1920×1080 · 63 秒 · 无声 · 模型 DeepSeek V4.1 Flash（低思考档）
@@ -183,7 +187,7 @@
         </div>
       </section>
 
-      <section>
+      <section id="admin">
         <h2>管理端 + 后端</h2>
         <p class="meta">1920×1080 · 43 秒 · 无声 · 提供商与模型 / 用户与角色 / OpenAPI / 探针 / 指标</p>
         <div class="player">
@@ -231,6 +235,15 @@
           video.focus();
         });
       }
+
+      // 深链（README 里的 #admin）：浏览器默认会滚，但如果 hash 在加载后才变，
+      // 或者用户点的是同页链接，就得我们自己滚一次。
+      const jump = () => {
+        const target = document.querySelector(location.hash);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      window.addEventListener('hashchange', jump);
+      if (location.hash) setTimeout(jump, 0);
 
       // 同一时刻只播一条：两段视频并列，同时出声/同时跑进度没有意义
       for (const video of document.querySelectorAll('video')) {
