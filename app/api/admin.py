@@ -316,7 +316,7 @@ def escape_like_pattern(term: str) -> str:
 
     不转义时管理员搜一个 `%` 会列出**全部**账号（看起来像搜索坏了），搜 `a_b` 还会
     命中 `axb`——邮箱里出现下划线并不罕见。反斜杠作转义符，调用处必须同时传
-    `escape="\\"`，否则 SQLite 不认这个转义（反斜杠会变成普通字符）。
+    `escape="\\"`，否则 PG 会把它当成普通字符。
     """
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -464,7 +464,7 @@ async def set_user_role(
 
     这里用**一条带子查询的 UPDATE** 消除窗口：`WHERE role = 'superadmin' AND
     (SELECT COUNT(*) FROM user WHERE role = 'superadmin') > 1` 与写入在同一条语句里，
-    SQLite 串行化写，后执行的那条会看到先提交的结果、rowcount=0，于是返回 400。
+    PG 的行锁会把并发写串行化，后执行的那条会看到先提交的结果、rowcount=0，于是返回 400。
 
     成功后会**删掉该用户的全部会话**：角色变了但旧 token 还能用，等于权限变更要等到
     对方重新登录才生效，而那时谁也不会记得去验一下。删完对方下一次请求就是 401，

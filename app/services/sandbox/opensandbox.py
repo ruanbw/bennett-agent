@@ -114,7 +114,7 @@ class OpenSandboxProvider:
         """连接并核对归属。拿不到机器 → `SandboxNotFound`；归属不符同样 → `SandboxNotFound`。
 
         归属不符故意**不**区分于不存在：对外文案必须一致，否则就成了「这个 id 存在吗」
-        的探测器（见设计文档 §7）。
+        的探测器。
         """
         try:
             sandbox = await Sandbox.connect(ref, connection_config=self._config(), skip_health_check=True)

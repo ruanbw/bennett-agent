@@ -2,7 +2,7 @@
 
 这里验的是**线上花了钱才会暴露**的那几条性质，不是函数返回值长什么样：
 
-1. 同会话只建一台机器——agent 一轮里并发调两个工具是真实存在的（设计 §11.7）；
+1. 同会话只建一台机器——agent 一轮里并发调两个工具是真实存在的；
 2. 容量超限要**明确拒绝**，不能「先建了再说」（§8：不静默排队）；
 3. 销毁权只能被抢一次——先 SELECT 再 UPDATE 会让回收把机器从长任务下面抽走（§11.6）；
 4. 建机失败留一行 `failed`，不是删掉，也不是卡在 `provisioning`；
@@ -232,12 +232,12 @@ async def test_destroy_failed_can_be_reclaimed(user_id):
     变成终态——机器还在跑、还在占内存，却没有任何人会再去关它（永久泄漏）。
     """
     provider = FakeProvider()
-    lease, _ = await _ensure(user_id, 'sess_retry', provider)
+    lease, _ = await _ensure(user_id, "sess_retry", provider)
 
     async with async_session_maker() as session:
         assert await mark_destroying(session, lease.id) is True
     async with async_session_maker() as session:
-        await mark_destroy_failed(session, lease.id, error='provider timeout')
+        await mark_destroy_failed(session, lease.id, error="provider timeout")
     row = await _lease_row(lease.id)
     assert row.state == STATE_DESTROY_FAILED
 
@@ -347,9 +347,7 @@ async def test_find_destroyable_covers_idle_and_hard_ttl(user_id, monkeypatch):
     fresh, _ = await _ensure(await _create_user(), "sess_fresh", provider, now=base)
     paused, _ = await _ensure(await _create_user(), "sess_paused", provider, now=base - timedelta(hours=1))
     async with async_session_maker() as session:
-        await session.execute(
-            update(SandboxLease).where(SandboxLease.id == paused.id).values(state=STATE_PAUSED)
-        )
+        await session.execute(update(SandboxLease).where(SandboxLease.id == paused.id).values(state=STATE_PAUSED))
         await session.commit()
     # 已经销毁的租约不该再进候选（否则回收循环会对一台不存在的机器反复告警）
     dead, _ = await _ensure(await _create_user(), "sess_dead", provider, now=base - timedelta(hours=5))
@@ -361,9 +359,7 @@ async def test_find_destroyable_covers_idle_and_hard_ttl(user_id, monkeypatch):
     # 只让 hard_ttl 生效：把 idle 阈值放大到不可能触发
     async with async_session_maker() as session:
         hard_only = await find_destroyable(session, now=base, idle_seconds=10_000_000)
-    assert {candidate.lease.id: candidate.reason for candidate in hard_only} == {
-        hard.id: DESTROY_HARD_TTL
-    }
+    assert {candidate.lease.id: candidate.reason for candidate in hard_only} == {hard.id: DESTROY_HARD_TTL}
 
     async with async_session_maker() as session:
         candidates = await find_destroyable(session, now=base, idle_seconds=idle_seconds)

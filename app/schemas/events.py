@@ -7,7 +7,7 @@
 1. `chat_service` 产出 `"data: {json}\\n\\n"` 字符串；
 2. `api/chat.py::_collect_chat_response` 把 `"data:"` 剥掉，取回自己需要的 JSON；
 3. `api/chat.py::event_generator` 再剥一次，交给 `EventSourceResponse` 又加回去；
-4. `frontend/src/lib/chat-runs.js` 第四次解析同一套分帧。
+4. `frontend/src/lib/chat-runs.ts` 第四次解析同一套分帧。
 
 第 2、3 步是纯仪式：往返后字节完全一致。现在服务端只产类型对象，且只在
 `app/api/chat.py` 一处序列化；客户端拿到的是有 `type` 判别键的结构，而不是

@@ -203,9 +203,7 @@ class HashedAccessTokenDatabase(SQLAlchemyAccessTokenDatabase):
         # 表现为登出 500（同一次登出里认证依赖先查一次并回填缓存，destroy_token 再查
         # 必然命中缓存）。所以统一按主键删，兼容「缓存命中」与「回源行」两种来源。
         token = str(access_token.token)
-        await self.session.execute(
-            delete(self.access_token_table).where(self.access_token_table.token == token)
-        )
+        await self.session.execute(delete(self.access_token_table).where(self.access_token_table.token == token))
         await self.session.commit()
         # 先库后缓存：缓存删除失败时，TTL 到期后仍会回源到已删除的行。
         await _session_cache_delete(token)
@@ -317,9 +315,7 @@ class ModelProvider(Base):
     #: 由预设（`app/services/model_service/presets.py`）在创建时写入，之后基本不变。
     #: server_default 必须与 sql/init.sql 一致：只写 Python 侧 default 会让
     #: `metadata.create_all` 与建库脚本分叉。
-    auth_style: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="bearer", server_default="bearer"
-    )
+    auth_style: Mapped[str] = mapped_column(String(16), nullable=False, default="bearer", server_default="bearer")
     #: 随请求固定携带的头（如 Anthropic 的 `anthropic-version`）。运行时行为据此变化，
     #: 所以不能只存在预设目录里——预设目录会更新，库里的行不能悄悄跟着变。
     extra_headers: Mapped[dict[str, str]] = mapped_column(
@@ -947,7 +943,7 @@ class SandboxLease(Base):
 class SandboxCommand(Base):
     """沙箱内的每一条命令（审计 + 排障）。
 
-    **不参与任何金额计算**：本项目的计量只有 token（见设计文档 §8），
+    **不参与任何金额计算**：本项目的计量只有 token，
     沙箱的成本只通过「exec 输出进上下文」这一条通路体现。这张表存在的理由是
     「边界审批 + 审计」模型：既然不再逐条命令打断用户，就必须事后能查清跑过什么。
 

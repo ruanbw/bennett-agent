@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 25
     # 后端已经**不依赖本地文件**：数据库、限流/缓存、上传原件都是真实服务。
     # 因此 CI 必须把这三个服务跑起来——这正是「测试基座与生产同构」的代价与收益：
-    # 迁移、外键、`FOR UPDATE SKIP LOCKED`、Lua 限流脚本都会在 CI 里真跑一次。
+    # 建表脚本、外键、`FOR UPDATE SKIP LOCKED`、Lua 限流脚本都会在 CI 里真跑一次。
     services:
       postgres:
         image: postgres:17-alpine

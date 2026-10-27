@@ -5,7 +5,7 @@
 #
 # 这份配置只服务「本机开发 / CI」：docker 运行时，容器之间共享宿主内核。
 # 生产必须换成 kubernetes 运行时并显式开启 Firecracker（或 gVisor/Kata）安全运行时，
-# 否则多租户隔离就只是 cgroup 层面的自觉。见 docs/design/sandbox-vm.md §10。
+# 否则多租户隔离就只是 cgroup 层面的自觉。
 
 [server]
 host = "127.0.0.1"

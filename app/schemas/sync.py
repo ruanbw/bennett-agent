@@ -27,11 +27,11 @@ CURSOR_PREFIX = "v1"
 ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 #: 客户端修订号上限。只用来拒绝「旧内容覆盖新内容」，不需要真正到 64 位；
-#: 但没有上限时 `10**20` 会让 SQLite 的 INTEGER 绑定溢出，最终变成 500。
+#: 但没有上限时 `10**20` 会让 PG 的 INTEGER 绑定溢出，最终变成 500。
 MAX_CLIENT_REV = 2**31 - 1
 
 #: 客户端毫秒时间戳上限（9999-12-31T23:59:59.999Z）。同样是为了把
-#: 「超出 SQLite 64 位范围 → 运行期 OverflowError → 500」变成入口处的 422。
+#: 「超出 BIGINT 范围 → 运行期 OverflowError → 500」变成入口处的 422。
 MAX_CLIENT_TIMESTAMP_MS = 253_402_300_799_999
 
 

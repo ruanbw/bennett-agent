@@ -30,7 +30,7 @@ export const NAV_ITEMS: NavItem[] = [
 export const HOME_PATH = '/overview';
 
 /** 按路径找菜单项；用于面包屑与页面标题，找不到返回 null。 */
-export function findNavItem(pathname: string): NavItem | null {
+function findNavItem(pathname: string): NavItem | null {
   return NAV_ITEMS.find((item) => item.to === pathname) ?? null;
 }
 

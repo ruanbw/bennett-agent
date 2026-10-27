@@ -21,8 +21,7 @@
 
 ## 为什么身份不能来自模型参数
 
-工具签名里没有 `sandbox_id`、没有 `user_id`、也没有 `session_id`
-（见 `docs/design/sandbox-vm.md` §6/§7）。模型可以填任何 uuid 与任何会话标识：
+工具签名里没有 `sandbox_id`、没有 `user_id`、也没有 `session_id`。模型可以填任何 uuid 与任何会话标识：
 
 - 填别人的 `user_id` → 用自己的会话去驱动别人的机器；
 - 填别人的 `session_id` → 读别人 workspace 里的文件；

@@ -66,9 +66,7 @@ def test_sandbox_capability_follows_the_switch(monkeypatch):
     enabled = collect_capabilities()
 
     assert enabled.sandbox is True
-    assert {"sandbox_exec", "sandbox_write_file", "sandbox_read_file", "sandbox_reset"} <= set(
-        enabled.tools
-    )
+    assert {"sandbox_exec", "sandbox_write_file", "sandbox_read_file", "sandbox_reset"} <= set(enabled.tools)
 
     monkeypatch.setattr(settings, "sandbox_enabled", False)
     disabled = collect_capabilities()

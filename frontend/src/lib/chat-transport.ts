@@ -3,7 +3,7 @@
  *
  * 变化理由：wire protocol。这里不碰内存状态、不碰 IndexedDB，只负责
  * 「把一轮对话发出去，把事件流读回来」。改动前这些与 run 状态机、持久化、
- * 会话列表通知全挤在 `chat-runs.js` 一个 368 行文件里。
+ * 会话列表通知全挤在 `chat-runs.ts` 一个 368 行文件里。
  */
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent, type TransportIncompleteEvent } from '../types';

@@ -138,9 +138,7 @@ async def _seed_provider(
 ):
     """直接写库造一条提供商；`enabled` 之类的默认值由 ORM 补。"""
     async with async_session_maker() as session:
-        provider = ModelProvider(
-            name=name, slug=slug, base_url=base_url, api_key=api_key, enabled=True
-        )
+        provider = ModelProvider(name=name, slug=slug, base_url=base_url, api_key=api_key, enabled=True)
         session.add(provider)
         await session.commit()
         return provider.id
@@ -696,9 +694,7 @@ async def _load_model_row(registry_db, provider_id, model_id):
 async def test_sync_stores_raw_upstream_entry(registry_db, monkeypatch):
     """同步把上游条目**原样**存进 raw：解析白名单之外的字段（owned_by/created）也留底。"""
     entry = {"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 128000, "created": 1700000000}
-    (fetched, created, updated), _ = await _run_sync(
-        registry_db, monkeypatch, [_FakeResponse({"data": [entry]})]
-    )
+    (fetched, created, updated), _ = await _run_sync(registry_db, monkeypatch, [_FakeResponse({"data": [entry]})])
 
     assert (fetched, created, updated) == (1, 1, 0)
     provider_id = (await model_service.list_providers())[0].id
@@ -713,9 +709,7 @@ async def test_sync_refreshes_raw_without_touching_enabled(registry_db, monkeypa
         registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"sync-{uuid.uuid4().hex[:8]}"
     )
 
-    first = _FakeClient(
-        [_FakeResponse({"data": [{"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 1}]})]
-    )
+    first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 1}]})])
     monkeypatch.setattr(registry, "get_http_client", lambda: first)
     assert await model_service.sync_provider_models(provider_id) == (1, 1, 0)
 

@@ -78,6 +78,8 @@ uv run python ../../scripts/demo/make-video.py --dir docs/demo-admin \
 
 ## 拍界面截图
 
+产物默认写到 `docs/screenshots/`，不进版本库——按需重拍即可。
+
 ```bash
 DEMO_EMAIL=demo@example.com DEMO_PASSWORD='...' node screenshots.mjs          # 全部
 node screenshots.mjs --only sandbox,context-usage                              # 只重拍几张

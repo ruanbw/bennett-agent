@@ -11,7 +11,7 @@ wheels/
 .ruff_cache/
 # 评测产物：报告里有完整回答与 token 用量，属于运行数据不是源码
 evals/runs/
-# 品牌图标生成脚本的中间文件（见 frontend/brand/README.md）
+# 品牌图标生成脚本（frontend/brand/build-icons.py）的中间文件
 frontend/brand/.*.png
 
 # 本地数据库文件。

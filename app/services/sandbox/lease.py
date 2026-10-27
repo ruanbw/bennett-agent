@@ -11,7 +11,7 @@
 
 `UPDATE ... WHERE id=:id AND state='ready' RETURNING id`，rowcount=0 说明有人抢先了。
 **绝不能先 SELECT 再 UPDATE**：回收循环和一条正在跑的长任务会同时在场，先读后写会让
-回收把机器从长任务下面抽走（设计文档 §4.1、§11.6）。这个文件里凡是改状态的地方都只有
+回收把机器从长任务下面抽走。这个文件里凡是改状态的地方都只有
 一条语句，就是为了让这件事在代码形状上无法退化。
 
 ## 两个时钟，一个在库里一个在 Redis
@@ -19,13 +19,13 @@
 - `last_activity`（本文件，DB）：服务端观察到的工作（exec / 文件读写）。它证明**机器还在被用**；
 - 心跳（本文件末尾三个函数，Redis）：客户端页面可见时每 30s 刷一次 TTL。它证明**用户还在看**。
 
-心跳不写 Postgres：每用户每 30s 一次写库是自伤（设计 §2、§11.10）。代价是回收判定必须
+心跳不写 Postgres：每用户每 30s 一次写库是自伤。代价是回收判定必须
 跨两个存储，所以 `find_destroyable` 只给**候选集**，最终判定留给调用方结合
 `heartbeat_alive` 完成——见该函数的 docstring。
 
 ## `sandbox_command` 不参与计费
 
-本项目的计量只有 token（设计 §8）。这张表存在的理由是「不再逐条命令打断用户」之后，
+本项目的计量只有 token。这张表存在的理由是「不再逐条命令打断用户」之后，
 审计与排障还能回答「它当时到底跑了什么」。
 """
 
@@ -87,7 +87,7 @@ LIVE_STATES = (STATE_PROVISIONING, STATE_READY, STATE_PAUSED)
 #: 按它不占容量去放行会让节点池被打爆。
 OPEN_STATES = (*LIVE_STATES, STATE_DESTROYING)
 
-#: 心跳键前缀。设计文档 §2 定的形状，**不带** `settings.redis_key_prefix`：
+#: 心跳键前缀。**不带** `settings.redis_key_prefix`：
 #: 它是跨部署共享的约定（运维脚本、面板都按这个前缀捞），而 Redis 库本身已经按环境分开了。
 HEARTBEAT_KEY_PREFIX = "sbx:hb:"
 
@@ -187,10 +187,7 @@ async def get_latest_lease(session: AsyncSession, *, user_id: uuid.UUID) -> Leas
     自己从来没建过，或者以为我们弄丢了他的东西。
     """
     row = await session.scalar(
-        select(SandboxLease)
-        .where(SandboxLease.user_id == user_id)
-        .order_by(SandboxLease.created_at.desc())
-        .limit(1)
+        select(SandboxLease).where(SandboxLease.user_id == user_id).order_by(SandboxLease.created_at.desc()).limit(1)
     )
     return None if row is None else _view(row)
 
@@ -271,9 +268,7 @@ async def find_destroyable(
 # ---------------------------------------------------------------------
 # 创建
 # ---------------------------------------------------------------------
-async def find_stale_provisioning(
-    session: AsyncSession, *, older_than: datetime
-) -> list[LeaseView]:
+async def find_stale_provisioning(session: AsyncSession, *, older_than: datetime) -> list[LeaseView]:
     """找「卡在 provisioning」的租约（控制面在建机过程中被硬杀）。
 
     这类行的特征是没有 `provider_ref`：机器可能建出来了也可能没有，只有 provider 侧
@@ -296,7 +291,7 @@ async def find_stale_provisioning(
 async def _reject_if_at_capacity(session: AsyncSession, user_id: uuid.UUID) -> None:
     """容量保护：先看该用户，再看全局。
 
-    这是**容量保护而不是付费分级**（设计 §8）：超限直接抛错、不静默排队，因为排队的
+    这是**容量保护而不是付费分级**：超限直接抛错、不静默排队，因为排队的
     表现是「点了运行之后界面转了一分钟」，比明确说「已满」更难解释。
 
     并发下可能少量超发（两路同时通过检查）。这里刻意不加全局锁：代价是多一台机器，
@@ -390,9 +385,7 @@ async def ensure_lease(
             # 复用别人的会话留下的机器时，把「最后使用者」改成当前会话。
             # 纯归因用途（排障时看「这台机器最后给哪个会话用了」），不参与寻址。
             await session.execute(
-                update(SandboxLease)
-                .where(SandboxLease.id == existing.id)
-                .values(session_id=session_id)
+                update(SandboxLease).where(SandboxLease.id == existing.id).values(session_id=session_id)
             )
             await session.commit()
             existing = replace(existing, session_id=session_id)
@@ -493,7 +486,7 @@ async def touch_activity(session: AsyncSession, lease_id: str, *, now: datetime 
     """记一次「服务端观察到的工作」（exec / 文件读写的开始与结束）。
 
     刻意不带 `user_id`：`lease_id` 必须是调用方**先用** `get_active_lease(user_id=...,
-    session_id=...)` 解析出来的。设计 §7 的构造性授权就落在「工具参数里没有 id」这一步，
+    session_id=...)` 解析出来的。构造性授权就落在「工具参数里没有 id」这一步，
     这是那之后的第二步——把用户输入直接喂给这个函数才是缺陷。
 
     只对 `LIVE_STATES` 生效：给一台 `destroying` 的机器续命会让回收循环与使用方互相拉扯。
@@ -511,7 +504,7 @@ async def mark_destroying(session: AsyncSession, lease_id: str) -> bool:
 
     整条语义就靠这一条语句：`UPDATE ... WHERE state IN ('ready','paused','destroy_failed')`。条件是
     **原子**的一部分，所以「检查」与「改」之间不存在窗口——这正是回收循环不会把机器
-    从一条长 `exec` 下面抽走的原因（设计 §4.1）。
+    从一条长 `exec` 下面抽走的原因。
 
     `destroy_failed` 也在允许的源状态里，且**只能从它重入**：销毁失败（provider 报错、
     导出超时）的机器仍然在跑、仍然占着内存，不重试就等于永久泄漏。把它排除在外会让
@@ -570,7 +563,7 @@ async def mark_destroy_failed(
 ) -> None:
     """`destroying | provisioning → destroy_failed`。provider 销毁失败、或建机过程卡死时走这里。
 
-    **不允许静默**（设计 §4.3）：失败必须落成一个能被查询到的状态，而不是让那行留在
+    **不允许静默**：失败必须落成一个能被查询到的状态，而不是让那行留在
     `destroying` 里——停在 `destroying` 的租约既不会被回收循环重试，也不会被当成活动租约，
     是最容易永久泄漏机器的一种中间态。
 
@@ -606,7 +599,7 @@ async def record_command(
     output_head: str | None,
     truncated: bool,
 ) -> None:
-    """写一条命令审计。**不参与任何金额计算**：计量只有 token（设计 §8）。
+    """写一条命令审计。**不参与任何金额计算**：计量只有 token。
 
     `seq` 在同一个租约内递增，让审计可以按顺序回放「模型一步步做了什么」。取
     `max(seq)+1` 之前先锁住租约行：同一台机器上并发两条 `exec` 是真实存在的（agent

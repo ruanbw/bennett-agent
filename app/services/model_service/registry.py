@@ -506,7 +506,7 @@ async def create_provider(
     """新建提供商；`preset_key` 指向内置厂商预设时，地址与鉴权细节可省略。
 
     预设只提供**创建时的默认值**：显式传 `base_url` 可以覆盖预设地址（代理/镜像
-    场景），认证方式与固定头从预设抄进库（`auth_style` / `extra_headers` / 
+    场景），认证方式与固定头从预设抄进库（`auth_style` / `extra_headers` /
     `preset_key` 三个字段都落库）。之后运行时只读库——预设目录随代码更新不会
     悄悄改变已创建提供商的行为。
 

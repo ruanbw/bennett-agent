@@ -46,7 +46,7 @@ from weakref import WeakValueDictionary
 from sqlalchemy import delete, func, select, update
 
 # PostgreSQL 的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。
-# 必须用 PG 方言的 insert：SQLite 方言的同名对象在 PG 上编译期就抛
+# 必须用 PG 方言的 insert：通用 insert 在 PG 上编译期就抛
 # `AttributeError: 'OnConflictDoUpdate' object has no attribute 'constraint_target'`。
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError

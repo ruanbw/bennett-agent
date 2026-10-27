@@ -254,7 +254,7 @@ async def _run_cli() -> None:
     第一个 prompt 就会炸。
 
     退出时补上 `close_http_client` 与 `engine.dispose`：Web 那边由 lifespan 的
-    finally 做，CLI 不走 lifespan，不补就会留下未折叠的 SQLite WAL。
+    finally 做，CLI 不走 lifespan，不补就会留下一批未关闭的 PG 连接。
     """
     try:
         agent, snapshot = await build_cli_agent()

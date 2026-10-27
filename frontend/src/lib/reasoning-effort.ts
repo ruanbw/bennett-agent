@@ -63,7 +63,7 @@ function normalizeLevelList(raw: unknown): string[] {
  *
  * 三条规则，顺序重要：
  * 1. 模型明确声明「不支持思考」（`reasoning === false`）→ 返回空数组。
- *    `app/services/model_service.py` 的兜底模型正是 `reasoning: false` + 空等级，
+ *    `app/services/model_service/gateway._fallback` 的兜底模型正是 `reasoning: false` + 空等级，
  *    它的注释写明这是为了「避免用户选择后请求失败」——这里必须尊重它。
  * 2. 网关**枚举过**等级（原始数组非空）→ 只认它给的。全部被过滤时（例如只声明关闭
  *    别名 `["none"]`/`["off"]`）只剩「关闭」，不回退默认集：那会让用户选到网关没

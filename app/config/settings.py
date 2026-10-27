@@ -193,15 +193,14 @@ class Settings(BaseSettings):
         ),
     )
     # ------------------------------------------------------------------
-    # 沙箱（每会话一台隔离执行环境）。设计见 docs/design/sandbox-vm.md。
+    # 沙箱（每会话一台隔离执行环境）。
     # 默认全关：没有节点池的部署不应该凭空多出四个工具，也不该让模型
     # 以为它能跑代码。开关只影响工具装配，不影响已有的对话与同步。
     # ------------------------------------------------------------------
     sandbox_enabled: bool = Field(
         default=False,
         description=(
-            "是否装配沙箱工具。关闭时 `capabilities.sandbox=false`，模型看不到这四个工具，"
-            "行为与之前完全一致。"
+            "是否装配沙箱工具。关闭时 `capabilities.sandbox=false`，模型看不到这四个工具，行为与之前完全一致。"
         ),
     )
     sandbox_provider: Literal["opensandbox"] = Field(
@@ -216,8 +215,7 @@ class Settings(BaseSettings):
     sandbox_template_version: str = Field(
         default="0.1",
         description=(
-            "模板版本。落库到租约上，让「用户当时跑在哪个版本」可查——"
-            "模板升级后旧机器的行为不同，排查时必须能对上。"
+            "模板版本。落库到租约上，让「用户当时跑在哪个版本」可查——模板升级后旧机器的行为不同，排查时必须能对上。"
         ),
     )
     sandbox_cpu: float = Field(default=2.0, gt=0, description="每台沙箱的 vCPU")

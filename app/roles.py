@@ -53,10 +53,9 @@ class Role(IntEnum):
     def parse(cls, raw: str | None) -> Role:
         """解析字符串；无法识别时**降级为 USER**，而不是抛错。
 
-        为什么宽容：`user.role` 是开放存储（SQLite 里是 TEXT，手工改库不会报错）。
+        为什么宽容：`user.role` 是开放存储（VARCHAR，手工改库不会报错）。
         一个拼错的 'admn' 若让整个鉴权依赖抛 500，结果是「这个账号连同站点一起不可用」，
-        比「他退回普通用户」严重得多。启动时另有一次回填（见 `app/db.py`）保证正常
-        路径上不会出现非法值。
+        比「他退回普通用户」严重得多。
         """
         if not raw:
             return cls.USER

@@ -19,9 +19,6 @@ from app.config import settings
 from app.schemas.chat import ModelItem, ModelListResponse
 from app.services.http_client import get_http_client
 from app.services.model_service.upstream import (
-    _parse_int_field,
-    _parse_reasoning_flag,
-    _parse_reasoning_levels,
     parse_upstream_models,
 )
 

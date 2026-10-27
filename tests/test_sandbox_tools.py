@@ -2,12 +2,12 @@
 
 这一层是模型可以直接调用的外部边界，所以验收点不是「功能跑通」，而是四件在别处无法验证的事：
 
-1. **越权在构造上不可达**——工具签名里没有 id；没有作用域时连 provider 一次都不碰
-   （`docs/design/sandbox-vm.md` §6/§7）。这条一旦退化，后面所有检查都只是在兜底。
+1. **越权在构造上不可达**——工具签名里没有 id；没有作用域时连 provider 一次都不碰。
+   这条一旦退化，后面所有检查都只是在兜底。
 2. **失败文案不给存在性 oracle**——`SandboxNotFound` 的文案与「不属于你」必须无法区分，
    否则模型可以拿响应差异探测别人有没有环境。
-3. **截断是成本控制点**——沙箱的花费只通过「exec 输出进上下文」这一条通路变成 token
-   （设计 §8），所以头尾保留与省略字符数标注都要钉住。
+3. **截断是成本控制点**——沙箱的花费只通过「exec 输出进上下文」这一条通路变成 token，
+   所以头尾保留与省略字符数标注都要钉住。
 4. **重置之后是新机器**——旧机器必须真的被 destroy，而不是换个 ref 继续用。
 
 provider 用 `FakeProvider`：上面四条与 Docker/KVM 无关，用真后端跑反而会把「工具层的
@@ -169,9 +169,7 @@ async def _count(model: Any) -> int:  # noqa: ANN401 - SQLAlchemy 模型类
 
 async def _lease_rows() -> list[SandboxLease]:
     async with async_session_maker() as session:
-        return list(
-            await session.scalars(select(SandboxLease).order_by(SandboxLease.created_at, SandboxLease.id))
-        )
+        return list(await session.scalars(select(SandboxLease).order_by(SandboxLease.created_at, SandboxLease.id)))
 
 
 # ---------------------------------------------------------------------
@@ -367,7 +365,7 @@ async def test_reset_without_environment_does_not_create_one(env: Env):
 # 授权：租约按 (user_id, session_id) 解析，模型侧没有任何句柄
 # ---------------------------------------------------------------------
 async def test_provider_always_receives_owner_tag(env: Env):
-    """归属标记是第二道证人（设计 §7）：每次调用都必须带上它。"""
+    """归属标记是第二道证人：每次调用都必须带上它。"""
     env.provider.file_content = b"hello"
     path = f"{WORKDIR}/note.txt"
 

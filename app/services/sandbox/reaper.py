@@ -167,9 +167,7 @@ async def destroy_leases_for_user(
     return await _destroy_many(leases, reason=reason, provider=provider)
 
 
-async def _destroy_many(
-    leases: list[LeaseView], *, reason: str, provider: SandboxProvider | None = None
-) -> int:
+async def _destroy_many(leases: list[LeaseView], *, reason: str, provider: SandboxProvider | None = None) -> int:
     destroyed = 0
     for lease in leases:
         async with async_session_maker() as session:

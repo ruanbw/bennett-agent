@@ -881,8 +881,8 @@ async def stream_chat_events(
     # 抛异常只会把连接掐断，客户端看到「HTTP 200 + 断流」，既没有 `done` 也没有
     # `error`，服务端连一个可回查的 error_id 都没留下。
     #
-    # 预算仍然要碰 SQLite 与 Jinja（`token_budget` 按名字取窗口、算 system prompt
-    # 开销），不是边角分支：数据库锁超时抛 `OperationalError`、模板缺失抛
+    # 预算仍然要碰数据库与 Jinja（`token_budget` 按名字取窗口、算 system prompt
+    # 开销），不是边角分支：数据库连接超时抛 `OperationalError`、模板缺失抛
     # `TemplateError` 都会走到这里。
     try:
         # 数据库配置生效时，模型必须先解析成「提供商 + 上游模型名」。解析失败（解析与

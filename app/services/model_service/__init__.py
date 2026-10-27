@@ -60,10 +60,7 @@ from app.services.model_service.gateway import (
     _build_models_url,
     _build_url,
     _fallback,
-    _parse_int_field,
     _parse_models,
-    _parse_reasoning_flag,
-    _parse_reasoning_levels,
     reset_models_cache,
 )
 from app.services.model_service.outbound_guard import (
@@ -74,7 +71,6 @@ from app.services.model_service.outbound_guard import (
 )
 from app.services.model_service.presets import (
     AUTH_STYLES,
-    ProviderPreset,
     get_preset,
     list_presets,
 )
@@ -118,6 +114,9 @@ from app.services.model_service.registry import (
 )
 from app.services.model_service.upstream import (
     UpstreamModel,
+    _parse_int_field,
+    _parse_reasoning_flag,
+    _parse_reasoning_levels,
     next_page_cursor,
     parse_upstream_models,
 )

@@ -33,7 +33,7 @@
 #
 # `sql/init.sql` 整段幂等、在单个事务里执行，多实例同时启动也安全：并发 DDL 由
 # Postgres 自己的锁串行化，`CREATE ... IF NOT EXISTS` 重复执行无副作用。
-# 直接用改脚本 + 重建库的流程，不维护增量迁移（见 README「数据库迁移」）。
+# 直接用改脚本 + 重建库的流程，不维护增量迁移（见 README「数据库结构」）。
 #
 # ## 用法
 #
@@ -85,7 +85,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       # pg_isready 只证明「接受连接」，不证明库已经初始化完成——但
-      # `service_healthy` 要的就是这个程度：迁移会自己重试建表。
+      # `service_healthy` 要的就是这个程度：建表脚本会在应用启动时再跑一遍。
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bennett} -d ${POSTGRES_DB:-bennett}"]
       interval: 5s
       timeout: 5s
@@ -209,8 +209,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       rustfs:
@@ -265,8 +263,6 @@ services:
     healthcheck:
       disable: true
     depends_on:
-      postgres:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       rustfs:

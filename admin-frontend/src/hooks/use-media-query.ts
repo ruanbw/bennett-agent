@@ -1,8 +1,5 @@
 import { useMemo, useSyncExternalStore } from 'react';
 
-/** 侧边栏在移动端是抽屉、在桌面端是常驻栏。 */
-export const MOBILE_QUERY = '(max-width: 767px)';
-
 /** SSR / 单测环境没有 window；个别内嵌 WebView 还缺 matchMedia。 */
 function getMediaQueryList(query: string): MediaQueryList | null {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return null;
@@ -46,8 +43,4 @@ export function mediaQueryStore(query: string) {
 export function useMediaQuery(query: string): boolean {
   const store = useMemo(() => mediaQueryStore(query), [query]);
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot);
-}
-
-export function useIsMobileViewport(): boolean {
-  return useMediaQuery(MOBILE_QUERY);
 }

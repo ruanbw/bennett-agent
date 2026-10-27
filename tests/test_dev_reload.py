@@ -201,7 +201,7 @@ def test_reload_delegates_to_supervisor_without_starting_uvicorn(monkeypatch, st
     monkeypatch.setattr(
         main_module,
         "_run_dev_reload",
-        lambda host, port, **kwargs: (recorded.append({"host": host, "port": port, **kwargs}) or 0),
+        lambda host, port, **kwargs: recorded.append({"host": host, "port": port, **kwargs}) or 0,
     )
 
     main_module.main()
@@ -219,7 +219,7 @@ def test_reload_keeps_web_topology_when_web_is_explicit(monkeypatch, stub_uvicor
     monkeypatch.setattr(
         main_module,
         "_run_dev_reload",
-        lambda host, port, **kwargs: (recorded.append({"host": host, "port": port, **kwargs}) or 0),
+        lambda host, port, **kwargs: recorded.append({"host": host, "port": port, **kwargs}) or 0,
     )
 
     main_module.main()

@@ -201,7 +201,7 @@ async def test_logout_deletes_session_even_on_cache_hit(monkeypatch: pytest.Monk
     from sqlalchemy import inspect as sa_inspect
 
     from app.db import HashedAccessTokenDatabase, _session_cache_delete, hash_access_token
-    from app.services.auth import HashedDatabaseStrategy, UserManager
+    from app.services.auth import HashedDatabaseStrategy
 
     monkeypatch.setattr(settings, "redis_session_cache_enabled", True)
 
@@ -244,9 +244,7 @@ async def test_logout_deletes_session_even_on_cache_hit(monkeypatch: pytest.Monk
             await db.delete(cached)
 
         async with async_session_maker() as session:
-            row = await session.scalar(
-                select(AccessToken).where(AccessToken.token == hash_access_token(raw_token))
-            )
+            row = await session.scalar(select(AccessToken).where(AccessToken.token == hash_access_token(raw_token)))
             assert row is None, "缓存命中的登出没有删掉会话行"
     finally:
         async with async_session_maker() as session:

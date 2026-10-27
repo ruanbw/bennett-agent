@@ -36,7 +36,6 @@ evals/runs/
 
 # ---- 本地 / 交付物 ----
 deliverables/
-docs/screenshots/
 *.log
 .DS_Store
 

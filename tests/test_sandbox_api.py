@@ -81,9 +81,7 @@ def redis(monkeypatch) -> FakeRedis:
 
 async def _lease(user: User, session_id: str = "sess_x") -> str:
     async with async_session_maker() as session:
-        lease, _ = await ensure_lease(
-            session, user_id=user.id, session_id=session_id, create=FakeProvider().create
-        )
+        lease, _ = await ensure_lease(session, user_id=user.id, session_id=session_id, create=FakeProvider().create)
     return lease.id
 
 
@@ -91,9 +89,7 @@ async def test_heartbeat_touches_redis_key(user, redis):
     lease_id = await _lease(user)
 
     async with async_session_maker() as session:
-        response = await api.heartbeat(
-            SandboxHeartbeatRequest(session_id="sess_x"), user=user, session=session
-        )
+        response = await api.heartbeat(SandboxHeartbeatRequest(session_id="sess_x"), user=user, session=session)
 
     assert response.status_code == 204
     assert redis.keys[heartbeat_key(lease_id)] == settings.sandbox_idle_seconds
@@ -102,9 +98,7 @@ async def test_heartbeat_touches_redis_key(user, redis):
 async def test_heartbeat_without_lease_still_returns_204_and_writes_nothing(user, redis):
     """没有机器 ≠ 报错：客户端不该需要知道「现在有没有环境」。"""
     async with async_session_maker() as session:
-        response = await api.heartbeat(
-            SandboxHeartbeatRequest(session_id="sess_none"), user=user, session=session
-        )
+        response = await api.heartbeat(SandboxHeartbeatRequest(session_id="sess_none"), user=user, session=session)
     assert response.status_code == 204
     assert redis.keys == {}
 
@@ -125,9 +119,7 @@ async def test_heartbeat_cannot_touch_another_users_session(user, redis):
     victim_lease = await _lease(other, "sess_victim")
 
     async with async_session_maker() as session:
-        response = await api.heartbeat(
-            SandboxHeartbeatRequest(session_id="sess_victim"), user=user, session=session
-        )
+        response = await api.heartbeat(SandboxHeartbeatRequest(session_id="sess_victim"), user=user, session=session)
 
     assert response.status_code == 204
     assert heartbeat_key(victim_lease) not in redis.keys
@@ -170,9 +162,7 @@ async def test_endpoints_are_inert_when_sandbox_disabled(user, monkeypatch):
     monkeypatch.setattr(settings, "sandbox_enabled", False)
 
     async with async_session_maker() as session:
-        response = await api.heartbeat(
-            SandboxHeartbeatRequest(session_id="sess_x"), user=user, session=session
-        )
+        response = await api.heartbeat(SandboxHeartbeatRequest(session_id="sess_x"), user=user, session=session)
         assert response.status_code == 204
         with pytest.raises(HTTPException) as excinfo:
             await api.sandbox_status(session_id="sess_x", user=user, session=session)

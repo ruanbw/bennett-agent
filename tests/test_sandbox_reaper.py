@@ -139,9 +139,7 @@ def redis(monkeypatch) -> FakeRedis:
 
 async def _make_lease(user_id: uuid.UUID, provider: FakeProvider, session_id: str = "sess_a"):
     async with async_session_maker() as session:
-        lease, _ = await ensure_lease(
-            session, user_id=user_id, session_id=session_id, create=provider.create
-        )
+        lease, _ = await ensure_lease(session, user_id=user_id, session_id=session_id, create=provider.create)
     return lease
 
 
@@ -150,9 +148,7 @@ async def _age_lease(lease_id: str, *, hours: int = 2) -> None:
     old = datetime.now(timezone.utc) - timedelta(hours=hours)
     async with async_session_maker() as session:
         await session.execute(
-            update(SandboxLease)
-            .where(SandboxLease.id == lease_id)
-            .values(last_activity=old, created_at=old)
+            update(SandboxLease).where(SandboxLease.id == lease_id).values(last_activity=old, created_at=old)
         )
         await session.commit()
 

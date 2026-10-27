@@ -3,8 +3,7 @@
 ## 工具签名里为什么没有任何 id
 
 四个工具都不收 `sandbox_id`（也不收 `user_id` / `session_id`）。租约由服务端按
-`current_sandbox_scope()` 的 `(user_id, session_id)` 解析，见
-`docs/design/sandbox-vm.md` §6/§7。
+`current_sandbox_scope()` 的 `(user_id, session_id)` 解析。
 
 这不是「少了一个参数」，而是**授权形态的选择**：只要契约里有一个可以被模型填写的
 句柄，就必须在每个入口都写一遍「这个句柄属于当前用户吗」，而漏写一处就是一次越权。
@@ -69,8 +68,7 @@ logger = logging.getLogger(__name__)
 #: CLI 与未登录确实没有身份，说清楚比假装有一个默认身份好（后者会让所有匿名调用
 #: 挤到同一台机器上）。
 NO_SCOPE_MESSAGE = (
-    "当前会话没有关联用户（CLI 模式或未登录），无法使用执行环境。"
-    "请直接依据对话内容回答，并说明你没有可用的执行环境。"
+    "当前会话没有关联用户（CLI 模式或未登录），无法使用执行环境。请直接依据对话内容回答，并说明你没有可用的执行环境。"
 )
 
 #: 三种资源类失败的文案。分开写而不是共用一句，是因为模型该采取的下一步不同：
@@ -118,8 +116,8 @@ def _format_duration(duration_ms: int) -> str:
 def render_exec_result(result: ExecResult, command: str) -> str:
     """把一次执行结果渲染成给模型看的文本。
 
-    纯函数、单独导出：截断规则是本项目的**成本控制点**（`docs/design/sandbox-vm.md` §8
-    ——沙箱的花费只通过「exec 输出进上下文」这一条通路变成 token），所以它必须能被
+    纯函数、单独导出：截断规则是本项目的**成本控制点**
+    （——沙箱的花费只通过「exec 输出进上下文」这一条通路变成 token），所以它必须能被
     单独测，而不是只能靠跑一条真命令来观察。
 
     超时时明确写「命令超时（可调大 timeout_s 或缩小范围）」而不是「环境坏了」：后者会
@@ -128,9 +126,7 @@ def render_exec_result(result: ExecResult, command: str) -> str:
     stdout_text, stdout_omitted = _truncate(
         result.stdout, head_chars=MAX_OUTPUT_HEAD_CHARS, tail_chars=MAX_OUTPUT_TAIL_CHARS
     )
-    stderr_text, stderr_omitted = _truncate(
-        result.stderr, head_chars=STDERR_HEAD_CHARS, tail_chars=STDERR_TAIL_CHARS
-    )
+    stderr_text, stderr_omitted = _truncate(result.stderr, head_chars=STDERR_HEAD_CHARS, tail_chars=STDERR_TAIL_CHARS)
 
     parts: list[str] = []
     if result.timed_out:
@@ -231,6 +227,7 @@ async def _record_command(
     except Exception:  # noqa: BLE001 - 见 docstring
         logger.exception("写入沙箱命令审计失败 (lease=%s)", lease.id)
 
+
 # ---------------------------------------------------------------------
 # 输入校验
 # ---------------------------------------------------------------------
@@ -291,7 +288,7 @@ def _error_message(exc: SandboxError) -> str:
     **不透传 `str(exc)`**：provider 与租约层的消息可能带容器名、sandbox id、英文原文，
     那些既是内部细节，也会让同一种失败在不同后端下变成不同的文案（模型会以为它们
     是不同的问题）。`SandboxNotFound` 尤其不能细化——「不存在」与「不属于你」必须
-    长得一模一样，否则这个工具就是一个存在性探测器（`docs/design/sandbox-vm.md` §7）。
+    长得一模一样，否则这个工具就是一个存在性探测器。
     """
     if isinstance(exc, SandboxNotFound):
         return ERR_NOT_FOUND

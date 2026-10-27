@@ -1,9 +1,9 @@
-"""模型列表解析与兜底（`app/services/model_service.py` 的纯函数）。
+"""模型列表解析与兜底（`app/services/model_service/` 的纯函数）。
 
 这里的关键契约有三个：
 
 1. 兜底**不伪造思考能力**——它返回 `reasoning=False` + 空等级，从而让前端不展示
-   思考等级选择器。前端侧对应 `frontend/src/lib/reasoning-effort.js:levelsFor`，
+   思考等级选择器。前端侧对应 `frontend/src/lib/reasoning-effort.ts:levelsFor`，
    两边必须一致，否则又会出现「用户选了却请求失败」。
 2. `reasoning` 是三态：True/False 只来自网关的明确表态，缺字段/类型不符是 None
    （未知），不能被压成 False。

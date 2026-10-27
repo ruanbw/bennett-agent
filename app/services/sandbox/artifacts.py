@@ -17,7 +17,7 @@
 
 反过来（导出失败就不销毁）会让一台机器因为对象存储抖动而**永远**占着内存，而且没有
 任何人会再来看它。所以这里失败只告警并返回 None，销毁继续，`lease.error` 记一笔。
-代价是把「产物」降级成「尽力而为」——这个取舍写在设计文档 §4.3 里。
+代价是把「产物」降级成「尽力而为」。
 """
 
 from __future__ import annotations
@@ -69,9 +69,7 @@ async def export_workspace(provider: SandboxProvider, lease: LeaseView, *, workd
     return await _export_archive(provider, lease, workdir, owner, size=size)
 
 
-async def _workspace_size(
-    provider: SandboxProvider, ref: str, workdir: str, owner: str
-) -> int | None:
+async def _workspace_size(provider: SandboxProvider, ref: str, workdir: str, owner: str) -> int | None:
     result = await provider.exec(
         ref,
         f"du -sb --exclude={ARCHIVE_PATH} {workdir} 2>/dev/null | cut -f1",
@@ -100,8 +98,7 @@ async def _export_manifest(
     result = await provider.exec(
         ref=lease.provider_ref or "",
         command=(
-            f"find {workdir} -type f -printf '%s\\t%p\\n' 2>/dev/null | sort -rn "
-            f"| head -n {MAX_MANIFEST_ENTRIES}"
+            f"find {workdir} -type f -printf '%s\\t%p\\n' 2>/dev/null | sort -rn | head -n {MAX_MANIFEST_ENTRIES}"
         ),
         timeout_s=60,
         workdir=workdir,

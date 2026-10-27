@@ -9,7 +9,7 @@
 移除；这里只保留直接调用即可验证的判定逻辑，包括上游错误分类表
 （`upstream_error_message`）。
 
-注：`"system"` 分支目前从客户端不可达（`db/index.js` 只写 user/assistant），
+注：`"system"` 分支目前从客户端不可达（`db/index.ts` 只写 user/assistant），
 且它允许调用方往历史里注入 `SystemPromptPart`。此处锁住现状以便后续改动可见，该分支的去留尚未定论。
 """
 

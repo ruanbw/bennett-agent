@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 重新拍 README 里 `docs/screenshots/*.png`。
+ * 拍几张真实界面截图（文档 / PR / 发布说明用）。
  *
  * 截图会随着 UI 一起过期——旧图里的侧边栏标题、模型选择器、底部统计条都改过版，
  * 拿旧图配新功能说明等于对读者撒谎。所以截图也走脚本：能重跑，就不用靠记忆。
@@ -8,7 +8,7 @@
  * 拍的都是**真实后端 + 真实模型跑出来的界面**，不是静态样板：
  * 每个场景都真的发一次请求，等这一轮结束再拍。
  *
- * 用法见同目录 README.md。默认输出到 docs/screenshots/。
+ * 用法见同目录 README.md。默认输出到 docs/screenshots/（不在版本库里）。
  */
 
 import { createRequire } from 'node:module';

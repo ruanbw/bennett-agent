@@ -55,7 +55,7 @@ bennett-agent/
 
 | 层 | 技术 |
 |---|---|
-| 后端 | Python 3.10+、FastAPI、PydanticAI、LiteLLM、SQLAlchemy (asyncpg) + Alembic、uv |
+| 后端 | Python 3.10+、FastAPI、PydanticAI、LiteLLM、SQLAlchemy (asyncpg)、uv |
 | 前端 | React 19、Vite、TypeScript、Tailwind CSS 4、zustand、Dexie (IndexedDB) |
 | 数据层 | PostgreSQL 17、Redis 7（限流 / 缓存 / 会话热缓存）、S3 协议对象存储（RustFS / AWS S3 / OSS） |
 | 沙箱 | OpenSandbox（本地 Docker 运行时） |
@@ -117,7 +117,7 @@ docker compose --profile app up -d --build
 docker compose logs -f app worker
 ```
 
-`app` profile 会额外启动：`migrate`（一次性 Alembic 迁移，成功后应用才启动）、`app`（FastAPI）、`worker`（上传解析进程）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
+`app` profile 会额外启动：`app`（FastAPI，启动时执行 `sql/init.sql` 建表）、`worker`（上传解析进程）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
 
 所有服务端口只绑定回环地址；数据库与 Redis 无额外防护，远程访问请走 SSH 隧道或带 TLS 的反向代理。`docker compose down -v` 会删除全部数据（含上传原件），不可恢复。
 
