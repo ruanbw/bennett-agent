@@ -29,8 +29,12 @@ import { LoginPage } from './components/LoginPage';
 import { ThemeProvider } from './context/ThemeContext';
 import { Button } from './components/ui/button';
 import { AdminLayout } from './layouts/AdminLayout';
+import { OverviewPanel } from './components/admin/OverviewPanel';
 import { ProvidersPanel } from './components/admin/ProvidersPanel';
 import { UsersPanel } from './components/admin/UsersPanel';
+import { NotFoundPanel } from './components/admin/NotFoundPanel';
+import { QueryProvider } from './lib/query';
+import { Toaster } from './components/Toaster';
 import {
   canAccessAdmin,
   describeConnectionError,
@@ -38,8 +42,10 @@ import {
   isSuperadmin,
   login,
   logout,
+  roleLabelOf,
   type AuthUser,
 } from './lib/auth';
+import { HOME_PATH } from './lib/nav';
 
 type AuthStatus = 'loading' | 'anonymous' | 'authenticated';
 
@@ -149,59 +155,73 @@ export function App() {
 
   return (
     <ThemeProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route
-            path="/login"
-            // 已登录时的「离开登录页」由 LoginPage 自己负责（带原路径回跳）：
-            // 路由层再放一个 <Navigate to="/"> 会在登录成功的那一帧抢先跳走，
-            // 把深链回跳吃掉（表现为登录后总落在默认页）。
-            element={
-              <LoginPage
-                authenticated={status === 'authenticated'}
-                onLogin={handleLogin}
-                pending={pending}
-                error={error}
-                probeFailed={probeFailed}
-                onRetryProbe={() => void retryProbe()}
-              />
-            }
-          />
+      <QueryProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route
+              path="/login"
+              // 已登录时的「离开登录页」由 LoginPage 自己负责（带原路径回跳）：
+              // 路由层再放一个 <Navigate> 会在登录成功的那一帧抢先跳走，
+              // 把深链回跳吃掉（表现为登录后总落在默认页）。
+              element={
+                <LoginPage
+                  authenticated={status === 'authenticated'}
+                  onLogin={handleLogin}
+                  pending={pending}
+                  error={error}
+                  probeFailed={probeFailed}
+                  onRetryProbe={() => void retryProbe()}
+                />
+              }
+            />
 
-          <Route
-            element={
-              <RequireAdmin
-                status={status}
-                user={user}
-                onLogout={handleLogout}
-                loggingOut={loggingOut}
-              />
-            }
-          >
             <Route
               element={
-                <AdminLayout userEmail={user?.email ?? null} onLogout={handleLogout} loggingOut={loggingOut} />
+                <RequireAdmin
+                  status={status}
+                  user={user}
+                  onLogout={handleLogout}
+                  loggingOut={loggingOut}
+                />
               }
             >
-              <Route index element={<Navigate to="/providers" replace />} />
-              <Route path="providers" element={<ProvidersPanel />} />
               <Route
-                path="users"
-                // canManageRoles 决定「用户管理」里能否改角色：admin 能进后台、能封
-                // 普通用户，但改角色是 superadmin 的专属动作（后端同样会拦）
                 element={
-                  <UsersPanel
-                    currentUserEmail={user?.email ?? null}
-                    canManageRoles={isSuperadmin(user)}
+                  <AdminLayout
+                    userEmail={user?.email ?? null}
+                    roleLabel={roleLabelOf(user)}
+                    onLogout={handleLogout}
+                    loggingOut={loggingOut}
                   />
                 }
-              />
+              >
+                <Route index element={<Navigate to={HOME_PATH} replace />} />
+                <Route
+                  path="overview"
+                  element={<OverviewPanel canManageRoles={isSuperadmin(user)} />}
+                />
+                <Route path="providers" element={<ProvidersPanel />} />
+                <Route
+                  path="users"
+                  // canManageRoles 决定「用户管理」里能否改角色：admin 能进后台、能封
+                  // 普通用户，但改角色是 superadmin 的专属动作（后端同样会拦）
+                  element={
+                    <UsersPanel
+                      currentUserEmail={user?.email ?? null}
+                      canManageRoles={isSuperadmin(user)}
+                    />
+                  }
+                />
+                {/* 后台里的野路径给一页「找不到」，而不是静默跳回首页：手抄 URL 或
+                    旧书签出错时，重定向会让人以为「页面被改名了」，而不是「地址不对」。 */}
+                <Route path="*" element={<NotFoundPanel />} />
+              </Route>
             </Route>
-          </Route>
+          </Routes>
 
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+          <Toaster />
+        </BrowserRouter>
+      </QueryProvider>
     </ThemeProvider>
   );
 }

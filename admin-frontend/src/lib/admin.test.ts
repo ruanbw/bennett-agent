@@ -16,6 +16,8 @@ import {
   type ModelDraft,
   type ProviderDraft,
 } from './admin';
+import { pageWindow } from '../components/admin/table-parts';
+import { MAX_MODEL_DISPLAY_NAME_CHARS } from './schemas';
 
 /** 表单草稿默认带前后空白：trim 是这些用例的主要断言对象之一。 */
 function draft(overrides: Partial<ProviderDraft> = {}): ProviderDraft {
@@ -337,5 +339,54 @@ describe('filterAdminModels', () => {
 
   it('没有匹配时返回空数组，而不是原列表', () => {
     expect(filterAdminModels(models, '不存在')).toEqual([]);
+  });
+});
+
+describe('pageWindow', () => {
+  it('页数少时全列', () => {
+    expect(pageWindow(1, 1)).toEqual([1]);
+    expect(pageWindow(2, 5)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('页数多时保留首尾与当前页附近，断档由调用方渲染省略号', () => {
+    expect(pageWindow(1, 20)).toEqual([1, 2, 3, 20]);
+    expect(pageWindow(10, 20)).toEqual([1, 8, 9, 10, 11, 12, 20]);
+    expect(pageWindow(20, 20)).toEqual([1, 18, 19, 20]);
+  });
+
+  it('页数为 0 时返回空（不产生一个不存在的第 1 页）', () => {
+    expect(pageWindow(1, 0)).toEqual([]);
+  });
+});
+
+describe('providerDraftSchema（zod）', () => {
+  it('选了预设时地址可留空', () => {
+    expect(validateProviderDraft(draft({ baseUrl: '', presetKey: 'deepseek_cn' }))).toBeNull();
+  });
+
+  it('自定义地址必须 http(s)，大小写敏感', () => {
+    expect(validateProviderDraft(draft({ baseUrl: '' }))?.field).toBe('baseUrl');
+    expect(validateProviderDraft(draft({ baseUrl: 'HTTPS://x.dev' }))?.message).toContain('http://');
+  });
+});
+
+describe('modelDraftSchema（zod）', () => {
+  it('两个上限留空合法', () => {
+    expect(
+      validateModelDraft({ displayName: '模型', contextWindow: '', maxOutputTokens: '', reasoning: false }),
+    ).toBeNull();
+  });
+
+  it('非正整数被拦下，且指向具体字段', () => {
+    expect(
+      validateModelDraft({ displayName: '模型', contextWindow: '12a', maxOutputTokens: '', reasoning: false }),
+    ).toEqual({ field: 'contextWindow', message: '上下文窗口必须是正整数，或留空' });
+  });
+
+  it('名称超长按字符数（不是字节数）判断', () => {
+    const long = '模'.repeat(MAX_MODEL_DISPLAY_NAME_CHARS + 1);
+    expect(
+      validateModelDraft({ displayName: long, contextWindow: '', maxOutputTokens: '', reasoning: false })?.field,
+    ).toBe('displayName');
   });
 });

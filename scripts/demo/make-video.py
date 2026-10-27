@@ -44,6 +44,7 @@ from pathlib import Path
 #: 每段默认速度。键是 `timeline.json` 里的 mark 名，值是「这个 mark 到下个 mark」的速度。
 DEFAULT_SPEEDS: dict[str, float] = {
     "ready": 1.0,
+    "overview": 1.0,
     "typing": 1.15,
     "submitted": 2.5,
     "tool": 1.0,

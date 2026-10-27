@@ -9,6 +9,9 @@
  */
 
 import { apiFetch, readErrorDetail } from './api';
+import { firstIssue, modelDraftSchema, providerDraftSchema } from './schemas';
+
+export { MAX_MODEL_DISPLAY_NAME_CHARS } from './schemas';
 
 // ---------------------------------------------------------------------
 // 线上契约（snake_case 与后端一致）
@@ -174,41 +177,17 @@ export function isPresetKey(presetKey: string): boolean {
 }
 
 /**
- * 表单草稿的本地校验。
+ * 表单草稿的本地校验（schema 见 `lib/schemas.ts`）。
  *
- * 只拦「一定会在服务端失败」的输入，错误文案直接复用后端那句中文：
- * 服务端 422 的 detail 形如 `body.base_url: Value error, 必须是以 http:// …`，
- * 带着英文前缀和字段路径，对管理员没有帮助。
- *
- * base_url 的协议判断与后端一样区分大小写（`http://` / `https://`），不要写成
- * 正则忽略大小写——否则 `HTTP://…` 本地放行、服务端再拒一次英文错误。
- * 选了厂商预设时地址可留空（后端用预设地址），但填了仍要检查协议。
+ * 只拦「一定会在服务端失败」的输入，错误文案直接复用后端那句中文：服务端 422 的
+ * detail 形如 `body.base_url: Value error, 必须是以 http:// …`，带着英文前缀和字段
+ * 路径，对管理员没有帮助。
  */
 export function validateProviderDraft(draft: ProviderDraft): ProviderDraftIssue | null {
-  if (!draft.name.trim()) return { field: 'name', message: '请填写名称' };
-
-  const usingPreset = isPresetKey(draft.presetKey);
-  const baseUrl = draft.baseUrl.trim();
-  if (!baseUrl && !usingPreset) return { field: 'baseUrl', message: '请填写接口地址，或选择一个厂商预设' };
-  if (
-    baseUrl &&
-    !baseUrl.startsWith('http://') &&
-    !baseUrl.startsWith('https://')
-  ) {
-    return { field: 'baseUrl', message: '接口地址必须以 http:// 或 https:// 开头' };
-  }
-  return null;
+  const issue = firstIssue(providerDraftSchema, draft);
+  return issue ? { field: issue.field as ProviderDraftField, message: issue.message } : null;
 }
 
-/**
- * 表单草稿 → 请求体。
- *
- * 关键约定：编辑时**不带** `api_key` 字段表示「不修改」。后端用 `exclude_unset`
- * 区分「没传」与「显式传空串」，所以这里不能把空串当成「清空」偷偷发出去。
- *
- * 创建时选了预设就带上 `preset_key`（认证方式与固定头由后端从预设带入）；地址
- * 留空则整个字段不发，由后端取预设地址。
- */
 export function buildProviderPayload(
   draft: ProviderDraft,
   mode: 'create' | 'edit',
@@ -300,8 +279,6 @@ export interface ModelDraftIssue {
   message: string;
 }
 
-export const MAX_MODEL_DISPLAY_NAME_CHARS = 200;
-
 function parseOptionalTokenLimit(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -316,22 +293,14 @@ function parseOptionalTokenLimit(value: string): number | null {
  * 名称是必填；两个 token 上限可留空表示「清空/未知」，但只要填了就必须是正整数。
  * 后端对非法数字返回的是 Pydantic 的英文 422，对管理员没有帮助，所以先在这里拦。
  */
+/**
+ * 编辑模型元数据的本地校验（zod schema 见 `lib/schemas.ts`）。
+ *
+ * 后端对非法数字返回的是 Pydantic 的英文 422，对管理员没有帮助，所以先在这里拦。
+ */
 export function validateModelDraft(draft: ModelDraft): ModelDraftIssue | null {
-  const name = draft.displayName.trim();
-  if (!name) return { field: 'displayName', message: '请填写显示名称' };
-  if (Array.from(name).length > MAX_MODEL_DISPLAY_NAME_CHARS) {
-    return { field: 'displayName', message: `名称最多 ${MAX_MODEL_DISPLAY_NAME_CHARS} 字` };
-  }
-
-  for (const [field, value, label] of [
-    ['contextWindow', draft.contextWindow, '上下文窗口'],
-    ['maxOutputTokens', draft.maxOutputTokens, '最大输出 tokens'],
-  ] as const) {
-    if (value.trim() && parseOptionalTokenLimit(value) === null) {
-      return { field, message: `${label}必须是正整数，或留空` };
-    }
-  }
-  return null;
+  const issue = firstIssue(modelDraftSchema, draft);
+  return issue ? { field: issue.field as ModelDraftField, message: issue.message } : null;
 }
 
 export function buildModelPayload(draft: ModelDraft): ModelPayload {

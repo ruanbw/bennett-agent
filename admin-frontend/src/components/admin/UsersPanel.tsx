@@ -1,10 +1,46 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, Search, ShieldCheck, X } from 'lucide-react';
+/**
+ * 用户管理列表。
+ *
+ * ## 这一页的形状就是经典后台列表页
+ *
+ * 筛选（邮箱搜索 + 状态分段）→ 卡片表格（多选 + 行操作）→ 页脚分页。
+ * 三个通用能力交给成熟的库，页面自己只写「列怎么画」与「动作做什么」：
+ *
+ * - **表格状态**（多选、全选/半选、行模型）→ `@tanstack/react-table`；
+ * - **服务端数据**（缓存、失效、重取、错误重试）→ `@tanstack/react-query`；
+ * - **批量动作的反馈** → base-ui Toast（一次动作的结果才用 toast，
+ *   「列表加载失败」这类持续状态留在页面内联条上）。
+ *
+ * ## 分页是服务端分页
+ *
+ * 用户量可以是几万，不能一次拉全量再在前端切页。所以 `pageIndex` / `pageSize`
+ * 都是查询参数，`pageCount` 由后端返回的 `total` 推导；翻页 = 换 query key。
+ * 封掉最后一页的最后一个人时 offset 会越界，用 `clampUsersOffset` 夹回来。
+ *
+ * ## 批量封禁的顺序语义
+ *
+ * 逐个发请求而不是新加一个批量接口：后端每个封禁都要做等级校验与会话清理，
+ * 单个失败不该让整批回滚（「A 已封、B 权限不够」比「整批失败」更接近管理员的本意）。
+ * 所以按顺序串行执行并统计结果，最后一条 toast 说明「成功几个、失败几个、为什么」。
+ */
 
-import { Button } from '../ui/button';
-import { ConfirmDialog } from '../ui/confirm-dialog';
-import { Input } from '../ui/input';
-import { PageShell, Badge, TableStatusRow, TableWrap, TD_CLASS, TH_CLASS, Toolbar } from './table-parts';
+import { useCallback, useMemo, useState } from 'react';
+import {
+  type ColumnDef,
+  type RowSelectionState,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from '@tanstack/react-table';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Loader2, Search, ShieldCheck, ShieldMinus, ShieldX, UserX, X } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Input } from '@/components/ui/input';
+import { notify } from '@/lib/notify';
+import { queryKeys } from '@/lib/query-keys';
 import {
   ROLE_LABELS,
   banUser,
@@ -14,15 +50,25 @@ import {
   setUserRole,
   unbanUser,
   type AdminUser,
-  type AdminUserPage,
   type SettableRole,
   type UserStatusFilter,
-} from '../../lib/admin';
+} from '@/lib/admin';
+import {
+  Badge,
+  InlineAlert,
+  PageShell,
+  Pagination,
+  TableFooter,
+  TableStatusRow,
+  TableWrap,
+  TD_CLASS,
+  TH_CLASS,
+  TR_CLASS,
+  Toolbar,
+} from './table-parts';
 
-/** 每页条数：与后端的 limit 上限无关，纯展示选择。 */
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 20;
 
-/** 状态筛选的三个档位。`all` 是默认，不传 `status` 参数。 */
 const STATUS_OPTIONS: Array<{ value: UserStatusFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'active', label: '正常' },
@@ -32,175 +78,357 @@ const STATUS_OPTIONS: Array<{ value: UserStatusFilter; label: string }> = [
 export interface UsersPanelProps {
   /** 当前登录邮箱：自己不能被自己封禁，也不能改自己的角色。 */
   currentUserEmail: string | null;
-  /**
-   * 当前登录账号是否是 superadmin。
-   *
-   * 只有最高一档能改别人角色；后端同样会拦，这里只是不让按钮点了才报错。
-   */
+  /** 只有 superadmin 能改角色；后端同样会拦，这里只是不让按钮点了才报错。 */
   canManageRoles: boolean;
 }
 
 function isSelf(user: AdminUser, currentUserEmail: string | null): boolean {
   if (!currentUserEmail) return false;
-  // 统一小写比较：后端不会给同一邮箱的不同大小写形式，但这样不会有副作用
   return user.email.toLowerCase() === currentUserEmail.toLowerCase();
 }
 
-/** 角色 → 徽标颜色。`superadmin` 用主色，`admin` 用中性，普通用户不显示徽标。 */
-const ROLE_TONE: Record<string, 'primary' | 'muted'> = {
-  superadmin: 'primary',
-  admin: 'muted',
-};
+/**
+ * 一行能不能被「批量动作」碰到，以及不能的原因。
+ *
+ * 前端的禁用只是提前告知：真正的裁决在后端（等级校验），但让按钮可点再报错
+ * 会让管理员以为「点一下就好」，白白多一轮往返。
+ */
+function bulkBlockReason(user: AdminUser, canManageRoles: boolean): string | null {
+  if (user.role === 'superadmin') return '超级管理员只能经运维通道调整';
+  if (!canManageRoles && user.role !== 'user') return '只有超级管理员可以管理管理员账号';
+  return null;
+}
 
 export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps) {
-  const [query, setQuery] = useState('');
-  const [appliedQuery, setAppliedQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('all');
-  const [offset, setOffset] = useState(0);
-  const [page, setPage] = useState<AdminUserPage | null>(null);
-  // 请求身份：列表「是否在刷新」由它和最近一次完成的请求推导，而不是在 effect 里
-  // setState(true)——那会触发一次级联渲染，React 的 lint 规则也会报。
-  const [completedKey, setCompletedKey] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const queryClient = useQueryClient();
 
-  const [busy, setBusy] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  /** 已提交的筛选（与输入框分离：输入不触发请求，点搜索/回车才提交）。 */
+  const [filters, setFilters] = useState<{ query: string; status: UserStatusFilter }>({
+    query: '',
+    status: 'all',
+  });
+  const [draftQuery, setDraftQuery] = useState('');
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+
   const [pendingBan, setPendingBan] = useState<AdminUser | null>(null);
   const [pendingRole, setPendingRole] = useState<{ user: AdminUser; role: SettableRole } | null>(null);
-
-  const reload = useCallback(() => setReloadToken((token) => token + 1), []);
-
-  const requestKey = `${appliedQuery}\u0000${statusFilter}\u0000${offset}\u0000${reloadToken}`;
-  const loading = completedKey !== requestKey;
-
-  useEffect(() => {
-    let active = true;
-
-    void (async () => {
-      try {
-        const result = await listUsers({
-          query: appliedQuery,
-          status: statusFilter,
-          limit: PAGE_SIZE,
-          offset,
-        });
-        if (!active) return;
-
-        // 封掉最后一页的唯一用户后，offset 会越过新的最后一页：夹回去重新拉取，
-        // 不要把「永远空着的一页」展示给管理员。
-        const nextOffset = clampUsersOffset(offset, PAGE_SIZE, result.total);
-        if (nextOffset !== offset) {
-          setOffset(nextOffset);
-          return;
-        }
-
-        setPage(result);
-        setLoadError(null);
-        setCompletedKey(requestKey);
-      } catch (err) {
-        if (!active) return;
-        console.error('加载用户列表失败:', err);
-        setLoadError(describeFailure(err));
-        setCompletedKey(requestKey);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [appliedQuery, statusFilter, offset, reloadToken, requestKey]);
-
-  const run = useCallback(
-    async (key: string, action: () => Promise<void>): Promise<boolean> => {
-      setBusy(key);
-      setActionError(null);
-      try {
-        await action();
-        return true;
-      } catch (err) {
-        console.error(`用户管理操作失败 (${key}):`, err);
-        setActionError(describeFailure(err));
-        return false;
-      } finally {
-        setBusy(null);
-      }
-    },
-    [],
+  const [pendingBulk, setPendingBulk] = useState<{ action: 'ban' | 'unban'; users: AdminUser[] } | null>(
+    null,
   );
 
-  const handleSearch = useCallback(() => {
-    setOffset(0);
-    setAppliedQuery(query.trim());
-  }, [query]);
+  const params = {
+    query: filters.query,
+    status: filters.status,
+    limit: pageSize,
+    offset: pageIndex * pageSize,
+  };
 
-  const handleClearSearch = useCallback(() => {
-    setQuery('');
-    setOffset(0);
-    setAppliedQuery('');
-    setStatusFilter('all');
-  }, []);
+  const usersQuery = useQuery({
+    queryKey: queryKeys.users(params),
+    queryFn: () => listUsers(params),
+  });
 
-  /** 切换状态筛选：与搜索一样要回到第一页，否则会停在越界的 offset 上。 */
-  const handleStatusChange = useCallback((next: UserStatusFilter) => {
-    setOffset(0);
-    setStatusFilter(next);
-  }, []);
+  // 封掉最后一页的最后一个人后 offset 越界：夹回最后一页而不是把「永远空着的一页」给管理员
+  const clampedOffset = usersQuery.data
+    ? clampUsersOffset(params.offset, pageSize, usersQuery.data.total)
+    : params.offset;
+  if (usersQuery.data && clampedOffset !== params.offset) {
+    setPageIndex(Math.floor(clampedOffset / pageSize));
+  }
+
+  const page = usersQuery.data;
+  const rows = useMemo(() => page?.items ?? [], [page]);
+  const total = page?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  const mutate = useMutation({
+    mutationFn: async (input: { kind: 'ban'; user: AdminUser } | { kind: 'unban'; user: AdminUser } | { kind: 'role'; user: AdminUser; role: SettableRole }) => {
+      if (input.kind === 'ban') return banUser(input.user.id);
+      if (input.kind === 'unban') return unbanUser(input.user.id);
+      return setUserRole(input.user.id, input.role);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'users'] });
+    },
+  });
 
   const handleBan = useCallback(
-    (user: AdminUser) => {
-      void (async () => {
-        const ok = await run(`ban:${user.id}`, async () => {
-          await banUser(user.id);
-        });
-        if (ok) reload();
-      })();
+    async (user: AdminUser) => {
+      try {
+        await mutate.mutateAsync({ kind: 'ban', user });
+        notify('success', `已封禁 ${user.email}，该用户的所有会话已失效`);
+      } catch (err) {
+        console.error('封禁用户失败:', err);
+        notify('error', describeFailure(err));
+      }
     },
-    [run, reload],
+    [mutate],
   );
 
   const handleUnban = useCallback(
-    (user: AdminUser) => {
-      void (async () => {
-        const ok = await run(`unban:${user.id}`, async () => {
-          await unbanUser(user.id);
-        });
-        if (ok) reload();
-      })();
+    async (user: AdminUser) => {
+      try {
+        await mutate.mutateAsync({ kind: 'unban', user });
+        notify('success', `已解封 ${user.email}`);
+      } catch (err) {
+        console.error('解封用户失败:', err);
+        notify('error', describeFailure(err));
+      }
     },
-    [run, reload],
+    [mutate],
   );
 
-  /** 提交角色变更。角色变更是破坏性的：会踢掉对方现有会话。 */
   const handleSetRole = useCallback(
-    (user: AdminUser, role: SettableRole) => {
+    async (user: AdminUser, role: SettableRole) => {
       setPendingRole(null);
-      void (async () => {
-        const ok = await run(`role:${user.id}`, async () => {
-          await setUserRole(user.id, role);
-        });
-        if (ok) reload();
-      })();
+      try {
+        await mutate.mutateAsync({ kind: 'role', user, role });
+        notify('success', `${user.email} 已设为${ROLE_LABELS[role]}，需重新登录生效`);
+      } catch (err) {
+        console.error('修改角色失败:', err);
+        notify('error', describeFailure(err));
+      }
     },
-    [run, reload],
+    [mutate],
   );
 
-  const total = page?.total ?? 0;
-  const pageIndex = Math.floor(offset / PAGE_SIZE);
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const isBusy = busy !== null;
-  // 列表刷新中也不允许操作：行数据可能马上被替换，别让管理员对着旧行点封禁
-  const controlsDisabled = isBusy || loading;
+  /**
+   * 批量封禁 / 解封：串行逐个提交，失败不中断。
+   *
+   * 顺序执行而不是 `Promise.all`：这批动作会各自删会话、回收沙箱，并发打过去
+   * 既没有收益（人是逐个看的）又让失败归属变模糊。
+   */
+  const handleBulk = useCallback(
+    async (action: 'ban' | 'unban', users: AdminUser[]) => {
+      setPendingBulk(null);
+      let ok = 0;
+      const failures: string[] = [];
+
+      for (const user of users) {
+        try {
+          await mutate.mutateAsync({ kind: action, user });
+          ok += 1;
+        } catch (err) {
+          failures.push(`${user.email}：${describeFailure(err)}`);
+        }
+      }
+
+      const verb = action === 'ban' ? '封禁' : '解封';
+      if (failures.length === 0) {
+        notify('success', `已${verb} ${ok} 个账号`);
+      } else if (ok === 0) {
+        notify('error', `${verb}失败：${failures[0]}${failures.length > 1 ? `（共 ${failures.length} 个失败）` : ''}`);
+      } else {
+        notify('error', `已${verb} ${ok} 个，${failures.length} 个失败：${failures[0]}`);
+      }
+      setRowSelection({});
+    },
+    [mutate],
+  );
+
+  const submitSearch = useCallback(() => {
+    setPageIndex(0);
+    setRowSelection({});
+    setFilters({ query: draftQuery.trim(), status: filters.status });
+  }, [draftQuery, filters.status]);
+
+  const changeStatus = useCallback((status: UserStatusFilter) => {
+    setPageIndex(0);
+    setRowSelection({});
+    setFilters((prev) => ({ ...prev, status }));
+  }, []);
+
+  const resetFilters = useCallback(() => {
+    setDraftQuery('');
+    setPageIndex(0);
+    setRowSelection({});
+    setFilters({ query: '', status: 'all' });
+  }, []);
+
+  const selectedUsers = useMemo(
+    () => rows.filter((user) => rowSelection[user.id]),
+    [rows, rowSelection],
+  );
+
+  const columns = useMemo<ColumnDef<AdminUser>[]>(
+    () => [
+      {
+        id: 'select',
+        header: ({ table }) => (
+          <Checkbox
+            aria-label="全选本页用户"
+            checked={table.getIsAllPageRowsSelected()}
+            indeterminate={table.getIsSomePageRowsSelected()}
+            onCheckedChange={(checked) => table.toggleAllPageRowsSelected(checked === true)}
+          />
+        ),
+        cell: ({ row }) => {
+          const blocked = bulkBlockReason(row.original, canManageRoles) !== null;
+          return (
+            <Checkbox
+              aria-label={`选择 ${row.original.email}`}
+              checked={row.getIsSelected()}
+              disabled={blocked || row.original.email === currentUserEmail}
+              onCheckedChange={(checked) => row.toggleSelected(checked === true)}
+            />
+          );
+        },
+        size: 36,
+        enableSorting: false,
+      },
+      {
+        id: 'email',
+        header: '邮箱',
+        accessorFn: (user) => user.email,
+        cell: ({ row }) => {
+          const user = row.original;
+          const self = isSelf(user, currentUserEmail);
+          return (
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-xs">{user.email}</span>
+                {self && <Badge tone="muted">本人</Badge>}
+              </div>
+              {!user.is_verified && (
+                <div className="mt-0.5 text-[11px] text-muted-foreground">邮箱未验证</div>
+              )}
+            </div>
+          );
+        },
+      },
+      {
+        id: 'status',
+        header: '状态',
+        accessorFn: (user) => (user.is_active ? 'active' : 'banned'),
+        cell: ({ row }) => (
+          <Badge tone={row.original.is_active ? 'ok' : 'danger'}>
+            {row.original.is_active ? '正常' : '已封禁'}
+          </Badge>
+        ),
+      },
+      {
+        id: 'role',
+        header: '角色',
+        accessorFn: (user) => user.role,
+        cell: ({ row }) => {
+          const { role } = row.original;
+          if (role === 'user') return <span className="text-xs text-muted-foreground">普通用户</span>;
+          return (
+            <Badge tone={role === 'superadmin' ? 'primary' : 'muted'}>{ROLE_LABELS[role] ?? role}</Badge>
+          );
+        },
+      },
+      {
+        id: 'actions',
+        header: () => <span className="block text-right">操作</span>,
+        cell: ({ row }) => {
+          const user = row.original;
+          const self = isSelf(user, currentUserEmail);
+          const banBlocked = self || bulkBlockReason(user, canManageRoles) !== null;
+          const banReason = self
+            ? '不能封禁当前登录的账号'
+            : bulkBlockReason(user, canManageRoles) ?? undefined;
+          const roleEditable =
+            canManageRoles && !self && user.is_active && user.role !== 'superadmin';
+          const nextRole: SettableRole = user.role === 'admin' ? 'user' : 'admin';
+          const busy = mutate.isPending;
+
+          return (
+            <div className="flex items-center justify-end gap-1">
+              {canManageRoles && user.role !== 'superadmin' && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={busy || !roleEditable}
+                  title={
+                    !canManageRoles
+                      ? '只有超级管理员可以调整角色'
+                      : self
+                        ? '不能修改自己的角色'
+                        : !user.is_active
+                          ? '该账号已被封禁，请先解封再修改角色'
+                          : undefined
+                  }
+                  onClick={() => setPendingRole({ user, role: nextRole })}
+                  aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
+                  className="cursor-pointer gap-1"
+                >
+                  {nextRole === 'admin' ? (
+                    <ShieldCheck className="size-3.5" aria-hidden="true" />
+                  ) : (
+                    <ShieldMinus className="size-3.5" aria-hidden="true" />
+                  )}
+                  {nextRole === 'admin' ? '设为管理员' : '取消管理员'}
+                </Button>
+              )}
+
+              {user.is_active ? (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={busy || banBlocked}
+                  title={banReason}
+                  onClick={() => setPendingBan(user)}
+                  aria-label={`封禁 ${user.email}`}
+                  className="cursor-pointer gap-1 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <UserX className="size-3.5" aria-hidden="true" />
+                  封禁
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={busy}
+                  onClick={() => void handleUnban(user)}
+                  aria-label={`解封 ${user.email}`}
+                  className="cursor-pointer"
+                >
+                  解封
+                </Button>
+              )}
+            </div>
+          );
+        },
+        size: 200,
+      },
+    ],
+    [canManageRoles, currentUserEmail, handleUnban, mutate.isPending],
+  );
+
+  const table = useReactTable({
+    data: rows,
+    columns,
+    state: { rowSelection },
+    onRowSelectionChange: setRowSelection,
+    getRowId: (user) => user.id,
+    enableRowSelection: (row) =>
+      !isSelf(row.original, currentUserEmail) && bulkBlockReason(row.original, canManageRoles) === null,
+    getCoreRowModel: getCoreRowModel(),
+    // 服务端分页：不做前端分页/排序，页码由后端 total 推导
+    manualPagination: true,
+    pageCount,
+  });
+
+  const columnCount = columns.length;
+  const hasFilters = filters.query !== '' || filters.status !== 'all';
+  const emptyText = filters.query
+    ? `没有匹配「${filters.query}」的用户`
+    : filters.status === 'banned'
+      ? '没有被封禁的账号'
+      : filters.status === 'active'
+        ? '没有正常状态的账号'
+        : '还没有任何用户';
 
   return (
     <PageShell
       title="用户管理"
       description={
         <>
-          按邮箱检索账号，封禁会立即断开该用户的所有会话。
-          {canManageRoles
-            ? '修改角色同样会立即生效（对方需重新登录）。'
-            : '角色设置仅超级管理员可用。'}
+          按邮箱检索账号，封禁会立即断开该用户的所有会话，解封只恢复登录能力（不恢复旧会话）。
+          {canManageRoles ? '修改角色同样立即生效，对方需重新登录。' : '角色设置仅超级管理员可用。'}
         </>
       }
     >
@@ -208,33 +436,33 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            handleSearch();
+            submitSearch();
           }}
-          className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"
+          className="flex min-w-0 flex-wrap items-center gap-1.5"
         >
-          <div className="relative w-full max-w-xs min-w-[12rem] flex-1">
+          <div className="relative w-full max-w-xs min-w-48">
             <Search
-              className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
               aria-hidden="true"
             />
             <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              value={draftQuery}
+              onChange={(event) => setDraftQuery(event.target.value)}
               placeholder="按邮箱搜索"
               aria-label="按邮箱搜索用户"
               autoComplete="off"
               className="h-8 pl-8 md:text-xs"
             />
           </div>
-          <Button type="submit" size="sm" disabled={isBusy} className="cursor-pointer">
+          <Button type="submit" size="sm" disabled={usersQuery.isFetching} className="cursor-pointer">
             搜索
           </Button>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onClick={handleClearSearch}
-            disabled={isBusy || (!query && !appliedQuery && statusFilter === 'all')}
+            onClick={resetFilters}
+            disabled={!hasFilters && draftQuery === ''}
             className="cursor-pointer gap-1"
           >
             <X className="size-3.5" aria-hidden="true" />
@@ -242,234 +470,154 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
           </Button>
         </form>
 
-        {/* 状态筛选：账号一多，「有哪些被封了」不能靠翻页找人。用 role=group + aria-pressed
-            而不是 select：三档选项一眼看全，也省一次展开。 */}
-        <div role="group" aria-label="按账号状态筛选" className="flex items-center gap-1">
-          {STATUS_OPTIONS.map(({ value, label }) => {
-            const active = statusFilter === value;
-            return (
-              <Button
-                key={value}
-                type="button"
-                size="xs"
-                variant={active ? 'default' : 'outline'}
-                aria-pressed={active}
-                disabled={isBusy}
-                onClick={() => handleStatusChange(value)}
-                className="cursor-pointer"
-              >
-                {label}
-              </Button>
-            );
-          })}
+        {/* 状态分段：账号一多，「有哪些被封了」不能靠翻页找人 */}
+        <div role="group" aria-label="按账号状态筛选" className="ml-auto flex items-center gap-1">
+          {STATUS_OPTIONS.map(({ value, label }) => (
+            <Button
+              key={value}
+              type="button"
+              size="xs"
+              variant={filters.status === value ? 'default' : 'outline'}
+              aria-pressed={filters.status === value}
+              onClick={() => changeStatus(value)}
+              className="cursor-pointer"
+            >
+              {label}
+            </Button>
+          ))}
         </div>
       </Toolbar>
 
-      {actionError && (
-        <div
-          role="alert"
-          className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+      {usersQuery.isError && (
+        <InlineAlert
+          action={
+            <Button variant="outline" size="xs" onClick={() => void usersQuery.refetch()} className="cursor-pointer">
+              重试
+            </Button>
+          }
         >
-          <span className="flex-1 break-words">{actionError}</span>
-          <button
-            type="button"
-            onClick={() => setActionError(null)}
-            aria-label="关闭错误提示"
-            className="shrink-0 cursor-pointer hover:opacity-70"
-          >
-            <X className="size-3.5" aria-hidden="true" />
-          </button>
-        </div>
+          {describeFailure(usersQuery.error)}
+        </InlineAlert>
       )}
 
-      {loadError && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-        >
-          <span className="min-w-0 flex-1 break-words">{loadError}</span>
-          <Button variant="outline" size="xs" onClick={reload} className="cursor-pointer">
-            重试
-          </Button>
-        </div>
-      )}
-
-      <TableWrap minWidth="44rem">
+      <TableWrap
+        minWidth="52rem"
+        toolbar={
+          // 批量操作条：只在有选中项时出现，避免平时占一行空间还不知道能干什么
+          selectedUsers.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 border-b border-border/70 bg-primary/5 px-3 py-2 text-xs">
+              <span className="font-medium text-foreground">已选 {selectedUsers.length} 个</span>
+              <span className="text-muted-foreground">（仅本页）</span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => setPendingBulk({ action: 'unban', users: selectedUsers.filter((u) => !u.is_active) })}
+                  disabled={mutate.isPending || selectedUsers.every((u) => u.is_active)}
+                  className="cursor-pointer"
+                >
+                  批量解封
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="xs"
+                  onClick={() => setPendingBulk({ action: 'ban', users: selectedUsers.filter((u) => u.is_active) })}
+                  disabled={mutate.isPending || selectedUsers.every((u) => !u.is_active)}
+                  className="cursor-pointer"
+                >
+                  批量封禁
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setRowSelection({})}
+                  className="cursor-pointer gap-1"
+                >
+                  <X className="size-3" aria-hidden="true" />
+                  取消选择
+                </Button>
+              </div>
+            </div>
+          ) : null
+        }
+        footer={
+          <TableFooter>
+            <Pagination
+              page={pageIndex + 1}
+              pageCount={pageCount}
+              total={total}
+              pageSize={pageSize}
+              disabled={usersQuery.isFetching}
+              onPageChange={(next) => {
+                setPageIndex(next - 1);
+                setRowSelection({});
+              }}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setPageIndex(0);
+                setRowSelection({});
+              }}
+            />
+          </TableFooter>
+        }
+      >
         <thead>
-          <tr>
-            <th className={TH_CLASS}>邮箱</th>
-            <th className={TH_CLASS}>状态</th>
-            <th className={TH_CLASS}>角色</th>
-            <th className={`${TH_CLASS} text-right`}>操作</th>
-          </tr>
-        </thead>
-        <tbody aria-busy={loading} className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
-          {page === null ? (
-            !loadError && <TableStatusRow colSpan={4} loading text="正在加载用户…" />
-          ) : page.items.length === 0 ? (
-            <tr>
-              <td colSpan={4} className="px-3 py-10 text-center text-xs text-muted-foreground">
-                <span className="flex flex-col items-center gap-2">
-                  <span>
-                    {appliedQuery
-                      ? `没有匹配「${appliedQuery}」的用户`
-                      : statusFilter === 'banned'
-                        ? '没有被封禁的账号'
-                        : statusFilter === 'active'
-                          ? '没有正常状态的账号'
-                          : '暂无用户'}
-                  </span>
-                  {appliedQuery && (
-                    <Button variant="outline" size="xs" onClick={handleClearSearch} className="cursor-pointer">
-                      清除搜索
-                    </Button>
-                  )}
-                </span>
-              </td>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <tr key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <th
+                  key={header.id}
+                  className={TH_CLASS}
+                  style={{ width: header.getSize() === 150 ? undefined : header.getSize() }}
+                >
+                  {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+                </th>
+              ))}
             </tr>
+          ))}
+        </thead>
+        <tbody
+          aria-busy={usersQuery.isFetching}
+          className={usersQuery.isFetching ? 'opacity-60 transition-opacity' : 'transition-opacity'}
+        >
+          {usersQuery.isPending ? (
+            <TableStatusRow colSpan={columnCount} loading text="正在加载用户…" />
+          ) : rows.length === 0 ? (
+            <TableStatusRow
+              colSpan={columnCount}
+              text={emptyText}
+              action={
+                hasFilters ? (
+                  <Button variant="outline" size="xs" onClick={resetFilters} className="cursor-pointer">
+                    清除筛选
+                  </Button>
+                ) : undefined
+              }
+            />
           ) : (
-            page.items.map((user) => {
-              const self = isSelf(user, currentUserEmail);
-              // 封禁：不能封自己，也不能封同级或更高等级（这里只是提前禁用，后端也会拦）
-              const banBlocked = self || (canManageRoles ? false : user.role !== 'user');
-              const blockedReason = self
-                ? '不能封禁当前登录的账号'
-                : canManageRoles
-                  ? undefined
-                  : // admin 只能动普通用户：同级之间互封会让后台失去可预期性
-                    user.role === 'superadmin' || user.role === 'admin'
-                    ? '只有超级管理员可以管理管理员账号'
-                    : undefined;
-
-              // 角色按钮：只有 superadmin 能看到；自己、超管、已封禁账号不可改
-              const roleEditable = canManageRoles && !self && user.is_active && user.role !== 'superadmin';
-              const roleBlockedReason = !canManageRoles
-                ? '只有超级管理员可以调整角色'
-                : self
-                  ? '不能修改自己的角色'
-                  : user.role === 'superadmin'
-                    ? '超级管理员只能经运维通道（seed_admin.py）调整'
-                    : !user.is_active
-                      ? '该账号已被封禁，请先解封再修改角色'
-                      : undefined;
-              const nextRole: SettableRole = user.role === 'admin' ? 'user' : 'admin';
-
-              return (
-                <tr key={user.id} className="hover:bg-accent/30">
-                  <td className={TD_CLASS}>
-                    <div className="break-all text-xs">{user.email}</div>
-                    {!user.is_verified && (
-                      <div className="mt-0.5 text-[11px] text-muted-foreground">邮箱未验证</div>
-                    )}
+            table.getRowModel().rows.map((row) => (
+              <tr key={row.id} className={TR_CLASS} data-state={row.getIsSelected() ? 'selected' : undefined}>
+                {row.getVisibleCells().map((cell) => (
+                  <td
+                    key={cell.id}
+                    className={TD_CLASS}
+                    style={{
+                      width: cell.column.id === 'select' ? undefined : cell.column.getSize() === 150 ? undefined : cell.column.getSize(),
+                    }}
+                  >
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
-                  <td className={TD_CLASS}>
-                    <Badge tone={user.is_active ? 'ok' : 'danger'}>
-                      {user.is_active ? '正常' : '已封禁'}
-                    </Badge>
-                  </td>
-                  <td className={TD_CLASS}>
-                    {user.role !== 'user' ? (
-                      <Badge tone={ROLE_TONE[user.role] ?? 'muted'}>
-                        {ROLE_LABELS[user.role] ?? user.role}
-                      </Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">普通用户</span>
-                    )}
-                  </td>
-                  <td className={`${TD_CLASS} text-right`}>
-                    <div className="inline-flex items-center gap-1.5">
-                      {canManageRoles && user.role !== 'superadmin' && (
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          disabled={controlsDisabled || !roleEditable}
-                          title={roleBlockedReason}
-                          onClick={() => setPendingRole({ user, role: nextRole })}
-                          aria-label={`把 ${user.email} 设为 ${ROLE_LABELS[nextRole]}`}
-                          className="cursor-pointer gap-1"
-                        >
-                          <ShieldCheck className="size-3.5" aria-hidden="true" />
-                          {nextRole === 'admin' ? '设为管理员' : '取消管理员'}
-                        </Button>
-                      )}
-
-                      {user.is_active ? (
-                        <Button
-                          variant="destructive"
-                          size="xs"
-                          disabled={controlsDisabled || banBlocked}
-                          title={blockedReason}
-                          onClick={() => setPendingBan(user)}
-                          aria-label={`封禁 ${user.email}`}
-                          className="cursor-pointer"
-                        >
-                          封禁
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          disabled={controlsDisabled}
-                          onClick={() => handleUnban(user)}
-                          aria-label={`解封 ${user.email}`}
-                          className="cursor-pointer"
-                        >
-                          解封
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })
+                ))}
+              </tr>
+            ))
           )}
         </tbody>
       </TableWrap>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span className="inline-flex items-center gap-1.5">
-          {page === null
-            ? loading
-              ? '正在加载用户…'
-              : '共 0 个用户'
-            : total === 0
-              ? '共 0 个用户'
-              : `第 ${offset + 1}–${Math.min(offset + page.items.length, total)} 个，共 ${total} 个`}
-          {loading && page !== null && (
-            <span role="status" className="inline-flex items-center gap-1">
-              <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-              正在刷新…
-            </span>
-          )}
-        </span>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            disabled={controlsDisabled || offset === 0}
-            aria-label="上一页"
-            className="cursor-pointer gap-0.5"
-          >
-            <ChevronLeft className="size-3.5" aria-hidden="true" />
-            上一页
-          </Button>
-          <span>
-            第 {pageIndex + 1} / {pageCount} 页
-          </span>
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => setOffset(offset + PAGE_SIZE)}
-            disabled={controlsDisabled || offset + PAGE_SIZE >= total}
-            aria-label="下一页"
-            className="cursor-pointer gap-0.5"
-          >
-            下一页
-            <ChevronRight className="size-3.5" aria-hidden="true" />
-          </Button>
-        </div>
-      </div>
+      {/* 列头勾选与行勾选都靠工具条上的按钮；这里补一条读屏状态 */}
+      <p className="sr-only" role="status">
+        {selectedUsers.length > 0 ? `已选择 ${selectedUsers.length} 个用户` : '未选择任何用户'}
+      </p>
 
       <ConfirmDialog
         open={pendingBan !== null}
@@ -486,6 +634,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         destructive
         onConfirm={() => {
           if (pendingBan) void handleBan(pendingBan);
+          setPendingBan(null);
         }}
       />
 
@@ -505,9 +654,43 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         confirmLabel={pendingRole?.role === 'admin' ? '设为管理员' : '取消管理员'}
         destructive={pendingRole?.role === 'user'}
         onConfirm={() => {
-          if (pendingRole) handleSetRole(pendingRole.user, pendingRole.role);
+          if (pendingRole) void handleSetRole(pendingRole.user, pendingRole.role);
         }}
       />
+
+      <ConfirmDialog
+        open={pendingBulk !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingBulk(null);
+        }}
+        title={pendingBulk?.action === 'ban' ? '批量封禁' : '批量解封'}
+        description={
+          pendingBulk
+            ? pendingBulk.action === 'ban'
+              ? `将封禁 ${pendingBulk.users.length} 个账号，它们的会话会立即失效。失败的会单独提示，不会影响其他账号。`
+              : `将解封 ${pendingBulk.users.length} 个账号，恢复登录能力（旧会话不恢复）。`
+            : undefined
+        }
+        confirmLabel={pendingBulk?.action === 'ban' ? '全部封禁' : '全部解封'}
+        destructive={pendingBulk?.action === 'ban'}
+        confirmDisabled={(pendingBulk?.users.length ?? 0) === 0}
+        onConfirm={() => {
+          if (pendingBulk) void handleBulk(pendingBulk.action, pendingBulk.users);
+        }}
+      />
+
+      {/* 长任务的进度提示：批量串行时按钮已禁用，这里再把「正在做什么」说清楚 */}
+      {mutate.isPending && (
+        <p role="status" className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+          正在提交变更…
+        </p>
+      )}
+
+      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <ShieldX className="size-3" aria-hidden="true" />
+        封禁/解封都不允许跨越等级（admin 不能动 admin 与 superadmin）。
+      </p>
     </PageShell>
   );
 }

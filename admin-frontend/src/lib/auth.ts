@@ -38,6 +38,18 @@ export function canAccessAdmin(user: AuthUser | null): boolean {
   return user !== null && ADMIN_ROLES.has(user.role);
 }
 
+/** 顶栏菜单里展示的角色名。与后端 `app/roles.py` 的三档一一对应。 */
+const ROLE_LABELS: Record<string, string> = {
+  user: '普通用户',
+  admin: '管理员',
+  superadmin: '超级管理员',
+};
+
+export function roleLabelOf(user: AuthUser | null): string {
+  if (!user) return '未登录';
+  return ROLE_LABELS[user.role] ?? user.role;
+}
+
 /** 是否是最高一档（决定「用户管理」里能否改角色）。 */
 export function isSuperadmin(user: AuthUser | null): boolean {
   return user?.role === 'superadmin';

@@ -129,6 +129,12 @@ async function main() {
       await page.getByLabel('密码', { exact: true }).fill(args.password);
       await page.getByRole('button', { name: '登录' }).click();
     }
+    // 登录后落在「概览」：先让这一屏出镜（它是一次看全配置状况的地方），再进提供商
+    await page.getByRole('heading', { name: '概览' }).waitFor({ timeout: 30_000 });
+    await sleep(page, 2600);
+    timeline.mark('overview');
+
+    await page.getByRole('link', { name: '模型提供商' }).click();
     await page.getByRole('heading', { name: '模型提供商' }).waitFor({ timeout: 30_000 });
     await sleep(page, 2200);
     timeline.mark('providers');

@@ -1,44 +1,54 @@
 /**
- * 后台管理系统的标准外壳：可折叠左侧菜单 + 顶栏 + 通栏内容区。
+ * 后台外壳：经典「左侧菜单 + 顶栏 + 内容区」三段式。
  *
  * ## 布局
  *
- * - 左侧菜单即路由（react-router 的 `NavLink`）：每一项对应一个 URL，选中态由
- *   `isActive` 驱动。md 以上支持**折叠成图标栏**（状态存 localStorage），折叠后
- *   悬停可见 title 提示。
- * - 顶栏属于内容区一侧：左边是折叠开关，右边是主题切换、当前账号与登出——
- *   账号级操作放顶栏是后台管理系统的惯例，菜单栏只管导航。
- * - 内容区通栏（100% 宽），页面自己决定内部布局（筛选表单 + 数据表格）。
+ * - **左侧菜单**（`md` 以上常驻、可折叠成图标栏，折叠状态存 localStorage）：
+ *   分组标题 + 图标 + 文字。菜单即路由（`NavLink`），刷新与直达都不丢状态。
+ * - **顶栏**：移动端汉堡（打开抽屉菜单）→ 面包屑 → 右侧（主题、账号菜单）。
+ *   面包屑从 `lib/nav` 的路径表推导，不手写，加页面只改一处。
+ * - **内容区**：`PageShell` 自己决定标题与主操作；外壳只给内边距与滚动。
  *
- * 响应式做一档收敛：md 以下侧边栏变成顶部横向菜单（不参与折叠），顶栏保留。
+ * ## 为什么账号菜单而不是顶栏直接放「登出」按钮
+ *
+ * 经典后台把账号相关的一律收进右上角头像菜单（账号信息、外观、登出），
+ * 顶栏才放得下更多后续入口；也避免「登出」这个破坏性动作一直挂在显眼位置被误点。
+ *
+ * ## 移动端
+ *
+ * `md` 以下侧边栏变成抽屉（base-ui Drawer，自带焦点陷阱、Esc 关闭、滑动手势），
+ * 而不是把菜单折成一行横向滚动的标签——后者在菜单变多时会藏起一半入口。
  */
 
 import { useCallback, useState } from 'react';
-import { NavLink, Outlet } from 'react-router';
+import { NavLink, Outlet, useLocation } from 'react-router';
+import { Drawer as DrawerPrimitive } from '@base-ui/react/drawer';
 import {
+  ChevronRight,
+  Laptop,
   Loader2,
   LogOut,
+  Menu,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Server,
   ShieldCheck,
-  Users,
-  type LucideIcon,
+  Sun,
 } from 'lucide-react';
 
-import { ThemeSwitcher } from '../components/ThemeSwitcher';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { useTheme, type ThemePreference } from '@/context/theme-context';
+import { NAV_ITEMS, breadcrumbsFor } from '@/lib/nav';
 import { cn } from '@/lib/utils';
-
-interface MenuItem {
-  to: string;
-  label: string;
-  Icon: LucideIcon;
-}
-
-const MENU: MenuItem[] = [
-  { to: '/providers', label: '模型提供商', Icon: Server },
-  { to: '/users', label: '用户管理', Icon: Users },
-];
 
 const COLLAPSE_STORAGE_KEY = 'admin_sidebar_collapsed';
 
@@ -55,30 +65,30 @@ function writeCollapsed(collapsed: boolean): void {
   try {
     window.localStorage.setItem(COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
   } catch {
-    // 主题折叠偏好写不进去只影响下次打开的初始状态，不值得打扰用户
+    // 写不进去只影响下次打开的初始状态，不值得打扰用户
   }
 }
 
-/** 菜单项的选中态：底色 + 文字反色，读屏用 aria-current（NavLink 自动带）。 */
-function menuItemClass({ isActive }: { isActive: boolean }): string {
-  return cn(
-    'flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors outline-none',
-    'cursor-pointer focus-visible:ring-1 focus-visible:ring-ring',
-    isActive
-      ? 'bg-accent font-medium text-foreground'
-      : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
-  );
-}
+const THEME_OPTIONS: Array<{ value: ThemePreference; label: string; Icon: typeof Sun }> = [
+  { value: 'light', label: '浅色', Icon: Sun },
+  { value: 'system', label: '跟随系统', Icon: Laptop },
+  { value: 'dark', label: '深色', Icon: Moon },
+];
 
 export interface AdminLayoutProps {
   userEmail: string | null;
+  /** 当前账号的角色标签（顶栏菜单里展示，让人确认自己拿的是什么权限）。 */
+  roleLabel: string;
   onLogout: () => Promise<void>;
-  /** 登出请求进行中：禁用登出按钮，避免重复提交。 */
+  /** 登出请求进行中：禁用入口，避免重复提交。 */
   loggingOut: boolean;
 }
 
-export function AdminLayout({ userEmail, onLogout, loggingOut }: AdminLayoutProps) {
+export function AdminLayout({ userEmail, roleLabel, onLogout, loggingOut }: AdminLayoutProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const location = useLocation();
+  const crumbs = breadcrumbsFor(location.pathname);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -88,51 +98,42 @@ export function AdminLayout({ userEmail, onLogout, loggingOut }: AdminLayoutProp
   }, []);
 
   return (
-    <div className="app-shell flex bg-background text-foreground font-sans antialiased">
-      {/* 左侧菜单：md 以上是可折叠竖栏，md 以下折化为顶部横向条（在 header 之下渲染）。
-          用 hidden md:flex + 移动端单独一条，比让一套标记同时服务两种形态可读。 */}
-      <aside
-        className={cn(
-          'hidden shrink-0 flex-col border-r border-border/70 py-3 transition-[width] md:flex',
-          collapsed ? 'w-14 items-center px-1.5' : 'w-56 flex-col px-3',
-        )}
-      >
-        <div className={cn('flex h-9 items-center', collapsed ? 'justify-center' : 'gap-2 px-1')}>
-          <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
-          {!collapsed && <h1 className="text-sm font-semibold tracking-tight">管理后台</h1>}
-        </div>
+    <div className="app-shell flex bg-muted/30 text-foreground font-sans antialiased">
+      <Sidebar collapsed={collapsed} />
 
-        <nav aria-label="管理后台菜单" className="mt-3 flex w-full flex-1 flex-col gap-1">
-          {MENU.map(({ to, label, Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              title={collapsed ? label : undefined}
-              className={({ isActive }) =>
-                cn(menuItemClass({ isActive }), 'w-full', collapsed && 'justify-center px-0')
-              }
-            >
-              <Icon className="size-4 shrink-0" aria-hidden="true" />
-              {!collapsed && <span className="whitespace-nowrap">{label}</span>}
-            </NavLink>
-          ))}
-        </nav>
-      </aside>
-
-      {/* 右侧：顶栏 + 通栏内容 */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border/70 bg-background/95 px-3 backdrop-blur md:px-4">
-          <div className="flex items-center gap-2 md:hidden">
-            <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
-            <span className="text-sm font-semibold tracking-tight">管理后台</span>
-          </div>
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border/70 bg-background px-3 md:px-5">
+          {/* 移动端：抽屉菜单 */}
+          <DrawerPrimitive.Root open={drawerOpen} onOpenChange={setDrawerOpen} swipeDirection="left">
+            <DrawerPrimitive.Trigger
+              aria-label="打开菜单"
+              className="inline-flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none md:hidden"
+            >
+              <Menu className="size-4" aria-hidden="true" />
+            </DrawerPrimitive.Trigger>
+            <DrawerPrimitive.Portal>
+              <DrawerPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px] transition-opacity duration-200 data-ending-style:opacity-0 data-starting-style:opacity-0" />
+              <DrawerPrimitive.Viewport className="fixed inset-0 z-50 flex items-stretch justify-start">
+                <DrawerPrimitive.Popup className="flex h-full w-64 flex-col border-r border-border bg-card p-3 shadow-xl transition-transform duration-250 ease-out data-ending-style:-translate-x-full data-starting-style:-translate-x-full">
+                  <DrawerPrimitive.Title className="flex items-center gap-2 px-1 pb-3 text-sm font-semibold">
+                    <ShieldCheck className="size-4 text-primary" aria-hidden="true" />
+                    Bennett 管理后台
+                  </DrawerPrimitive.Title>
+                  <nav aria-label="管理后台菜单" className="flex flex-1 flex-col gap-1 overflow-y-auto">
+                    <MenuItems onNavigate={() => setDrawerOpen(false)} />
+                  </nav>
+                </DrawerPrimitive.Popup>
+              </DrawerPrimitive.Viewport>
+            </DrawerPrimitive.Portal>
+          </DrawerPrimitive.Root>
+
           <button
             type="button"
             onClick={toggleCollapsed}
             aria-label={collapsed ? '展开菜单栏' : '收起菜单栏'}
             aria-expanded={!collapsed}
             title={collapsed ? '展开菜单栏' : '收起菜单栏'}
-            className="hidden size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring md:inline-flex"
+            className="hidden size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none md:inline-flex"
           >
             {collapsed ? (
               <PanelLeftOpen className="size-4" aria-hidden="true" />
@@ -141,51 +142,218 @@ export function AdminLayout({ userEmail, onLogout, loggingOut }: AdminLayoutProp
             )}
           </button>
 
-          <div className="ml-auto flex items-center gap-2">
-            <ThemeSwitcher />
-            <span
-              className="hidden min-w-0 max-w-48 truncate text-xs text-muted-foreground lg:inline"
-              title={userEmail ?? undefined}
-            >
-              {userEmail ?? '未登录'}
-            </span>
-            <button
-              type="button"
-              onClick={() => void onLogout()}
-              disabled={loggingOut}
-              aria-label="登出"
-              title="登出"
-              className="flex cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:opacity-50 outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              {loggingOut ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <LogOut className="size-4" aria-hidden="true" />
-              )}
-              <span className="hidden md:inline">登出</span>
-            </button>
+          <Breadcrumbs crumbs={crumbs} />
+
+          <div className="ml-auto flex items-center gap-1">
+            <AccountMenu
+              userEmail={userEmail}
+              roleLabel={roleLabel}
+              onLogout={onLogout}
+              loggingOut={loggingOut}
+            />
           </div>
         </header>
 
-        {/* 移动端横向菜单（md 以下替代左侧栏） */}
-        <nav
-          aria-label="管理后台菜单"
-          className="flex gap-1 overflow-x-auto border-b border-border/70 px-3 py-2 md:hidden"
-        >
-          {MENU.map(({ to, label, Icon }) => (
-            <NavLink key={to} to={to} className={menuItemClass}>
-              <Icon className="size-4 shrink-0" aria-hidden="true" />
-              <span className="whitespace-nowrap">{label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
         <main className="min-w-0 flex-1 overflow-y-auto">
-          <div className="w-full px-4 py-5 md:px-6 md:py-6">
+          <div className="mx-auto w-full max-w-[1600px] px-4 py-5 md:px-6 md:py-6">
             <Outlet />
           </div>
         </main>
       </div>
     </div>
+  );
+}
+
+/** 桌面侧边栏：品牌 + 分组菜单 + 底部账号信息。 */
+function Sidebar({ collapsed }: { collapsed: boolean }) {
+  const groups = Array.from(new Set(NAV_ITEMS.map((item) => item.group)));
+
+  return (
+    <aside
+      className={cn(
+        'hidden shrink-0 flex-col border-r border-border/70 bg-background transition-[width] duration-200 md:flex',
+        collapsed ? 'w-14 items-center px-1.5 py-3' : 'w-56 px-3 py-3',
+      )}
+    >
+      <div className={cn('flex h-9 items-center', collapsed ? 'justify-center' : 'gap-2 px-1')}>
+        <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
+        {!collapsed && <h1 className="truncate text-sm font-semibold tracking-tight">Bennett 管理后台</h1>}
+      </div>
+
+      <nav aria-label="管理后台菜单" className="mt-4 flex w-full flex-1 flex-col gap-4 overflow-y-auto">
+        {groups.map((group) => (
+          <div key={group} className="flex flex-col gap-0.5">
+            {!collapsed && (
+              <div className="px-2 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground">
+                {group}
+              </div>
+            )}
+            {NAV_ITEMS.filter((item) => item.group === group).map((item) => (
+              <SidebarLink key={item.to} item={item} collapsed={collapsed} />
+            ))}
+          </div>
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
+function SidebarLink({
+  item,
+  collapsed,
+}: {
+  item: (typeof NAV_ITEMS)[number];
+  collapsed: boolean;
+}) {
+  const { to, label, Icon } = item;
+  return (
+    <NavLink
+      to={to}
+      title={collapsed ? label : undefined}
+      className={({ isActive }) =>
+        cn(
+          'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors outline-none',
+          'cursor-pointer focus-visible:ring-1 focus-visible:ring-ring',
+          collapsed && 'justify-center px-0',
+          isActive
+            ? 'bg-primary/10 font-medium text-primary'
+            : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+        )
+      }
+    >
+      <Icon className="size-4 shrink-0" aria-hidden="true" />
+      {!collapsed && <span className="truncate">{label}</span>}
+    </NavLink>
+  );
+}
+
+/** 移动端抽屉里的菜单（始终展开，带图标 + 文字）。 */
+function MenuItems({ onNavigate }: { onNavigate: () => void }) {
+  return (
+    <>
+      {NAV_ITEMS.map(({ to, label, Icon }) => (
+        <NavLink
+          key={to}
+          to={to}
+          onClick={onNavigate}
+          className={({ isActive }) =>
+            cn(
+              'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors',
+              isActive
+                ? 'bg-primary/10 font-medium text-primary'
+                : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+            )
+          }
+        >
+          <Icon className="size-4 shrink-0" aria-hidden="true" />
+          {label}
+        </NavLink>
+      ))}
+    </>
+  );
+}
+
+/** 面包屑：首页 / 当前页。最后一级不可点（就是当前页）。 */
+function Breadcrumbs({ crumbs }: { crumbs: ReturnType<typeof breadcrumbsFor> }) {
+  return (
+    <nav aria-label="面包屑" className="min-w-0">
+      <ol className="flex items-center gap-1 text-xs text-muted-foreground">
+        {crumbs.map((crumb, index) => {
+          const last = index === crumbs.length - 1;
+          return (
+            <li key={`${crumb.label}-${index}`} className="flex min-w-0 items-center gap-1">
+              {index > 0 && <ChevronRight className="size-3 shrink-0 opacity-50" aria-hidden="true" />}
+              {crumb.to && !last ? (
+                <NavLink to={crumb.to} className="truncate rounded transition-colors hover:text-foreground">
+                  {crumb.label}
+                </NavLink>
+              ) : (
+                <span
+                  className={cn('truncate', last && 'font-medium text-foreground')}
+                  aria-current={last ? 'page' : undefined}
+                >
+                  {crumb.label}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+/**
+ * 右上角账号菜单：账号信息 + 外观 + 登出。
+ *
+ * 外观三档放进菜单而不是顶栏常驻一组按钮：顶栏留给导航与账号，
+ * 主题这种「设一次就不动」的偏好不值得占一个常驻控件。
+ */
+function AccountMenu({
+  userEmail,
+  roleLabel,
+  onLogout,
+  loggingOut,
+}: {
+  userEmail: string | null;
+  roleLabel: string;
+  onLogout: () => Promise<void>;
+  loggingOut: boolean;
+}) {
+  const { theme, setTheme } = useTheme();
+  const initial = (userEmail ?? '?').slice(0, 1).toUpperCase();
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="账号菜单"
+        className="flex cursor-pointer items-center gap-2 rounded-lg py-1 pr-2 pl-1 transition-colors hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        <span
+          aria-hidden="true"
+          className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground"
+        >
+          {initial}
+        </span>
+        <span className="hidden max-w-40 min-w-0 flex-col items-start leading-tight sm:flex">
+          <span className="w-full truncate text-xs font-medium" title={userEmail ?? undefined}>
+            {userEmail ?? '未登录'}
+          </span>
+          <span className="text-[10px] text-muted-foreground">{roleLabel}</span>
+        </span>
+      </DropdownMenuTrigger>
+
+      <DropdownMenuContent side="bottom" align="end" sideOffset={6} className="w-56">
+        <DropdownMenuLabel className="flex flex-col gap-0.5 py-2">
+          <span className="truncate text-xs font-medium text-foreground">{userEmail ?? '未登录'}</span>
+          <span className="text-[11px] font-normal text-muted-foreground">{roleLabel}</span>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+
+        <DropdownMenuLabel>外观</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={theme} onValueChange={(value) => setTheme(value as ThemePreference)}>
+          {THEME_OPTIONS.map(({ value, label, Icon }) => (
+            <DropdownMenuRadioItem key={value} value={value}>
+              <Icon aria-hidden="true" />
+              {label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => void onLogout()}
+          disabled={loggingOut}
+          className="text-destructive data-highlighted:bg-destructive/10 data-highlighted:text-destructive"
+        >
+          {loggingOut ? (
+            <Loader2 className="animate-spin" aria-hidden="true" />
+          ) : (
+            <LogOut aria-hidden="true" />
+          )}
+          登出
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

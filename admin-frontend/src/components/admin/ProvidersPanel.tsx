@@ -1,4 +1,35 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+/**
+ * 模型提供商管理。
+ *
+ * ## 为什么是两个层级的表（而不是一张大表 + 筛选）
+ *
+ * 提供商是「配置单位」，模型是它的从属数据，一次管理动作只针对一个提供商（同步、测试
+ * 连接、编辑密钥）。所以主表是提供商，展开某一行才看到它下面的模型子表——与后台里
+ * 「订单 → 订单明细」「角色 → 权限」同一套心智模型。
+ *
+ * ## 库的分工
+ *
+ * - 主表的**行模型与展开状态**：`@tanstack/react-table`；
+ * - 每个提供商的**模型清单**：`@tanstack/react-query` 按 providerId 缓存，
+ *   同步 / 编辑模型后只失效那一条，不必重拉全部提供商；
+ * - 动作反馈：base-ui Toast 报「做成了什么、几个」。
+ *
+ * ## 一次只展开一行
+ *
+ * 管理动作都针对单个提供商；同时展开多行会让「测试连接」的结果条出现在视线之外。
+ * 但模型清单的查询仍然按 providerId 缓存，来回展开不会重复请求。
+ */
+
+import { Fragment, useCallback, useMemo, useState } from 'react';
+import {
+  type ColumnDef,
+  type ExpandedState,
+  flexRender,
+  getCoreRowModel,
+  getExpandedRowModel,
+  useReactTable,
+} from '@tanstack/react-table';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ChevronDown,
   ChevronRight,
@@ -15,23 +46,11 @@ import {
   X,
 } from 'lucide-react';
 
-import { Button } from '../ui/button';
-import { ConfirmDialog } from '../ui/confirm-dialog';
-import { Input } from '../ui/input';
-import { ProviderDialog } from './ProviderDialog';
-import { ModelDialog } from './ModelDialog';
-import { ModelDetailDialog } from './ModelDetailDialog';
-import { ToggleSwitch } from './ToggleSwitch';
-import { Badge } from './table-parts';
-import {
-  PageShell,
-  TableStatusRow,
-  TableWrap,
-  TD_CLASS,
-  TH_CLASS,
-  Toolbar,
-} from './table-parts';
-import { formatDateTime } from '../../lib/format';
+import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Input } from '@/components/ui/input';
+import { notify } from '@/lib/notify';
+import { queryKeys } from '@/lib/query-keys';
 import {
   createProviderModel,
   deleteModel,
@@ -39,7 +58,6 @@ import {
   describeFailure,
   describeProviderSync,
   filterAdminModels,
-  VISIBLE_MODELS_COLLAPSED,
   formatContextWindow,
   listProviderModels,
   listProviders,
@@ -48,58 +66,34 @@ import {
   updateModel,
   type AdminModel,
   type AdminProvider,
-} from '../../lib/admin';
+} from '@/lib/admin';
+import { formatDateTime } from '@/lib/format';
+import { ModelDetailDialog } from './ModelDetailDialog';
+import { ModelDialog } from './ModelDialog';
+import { ProviderDialog } from './ProviderDialog';
+import { ToggleSwitch } from './ToggleSwitch';
+import {
+  Badge,
+  InlineAlert,
+  PageShell,
+  TableStatusRow,
+  TableWrap,
+  TD_CLASS,
+  TH_CLASS,
+  TR_CLASS,
+  Toolbar,
+} from './table-parts';
 
-interface ProviderNotice {
-  tone: 'success' | 'error';
-  text: string;
-}
-
-interface ProviderSnapshot {
-  providers: AdminProvider[];
-  modelsByProvider: Record<string, AdminModel[]>;
-}
-
-/**
- * 一次取回「提供商 + 每个提供商下的模型」。
- *
- * 模型列表没有批量接口，只能按提供商逐个拉；用 `Promise.all` 并发，
- * 任何一个失败都算整体失败——半套数据配上「测试连接/同步」按钮只会让管理员
- * 对着过期的模型数做决定。
- */
-async function loadProviderSnapshot(): Promise<ProviderSnapshot> {
-  const providers = await listProviders();
-  const modelLists = await Promise.all(providers.map((provider) => listProviderModels(provider.id)));
-
-  const modelsByProvider: Record<string, AdminModel[]> = {};
-  providers.forEach((provider, index) => {
-    modelsByProvider[provider.id] = modelLists[index];
-  });
-
-  return { providers, modelsByProvider };
-}
-
-const noticeToneClass: Record<ProviderNotice['tone'], string> = {
-  success: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  error: 'border-destructive/40 bg-destructive/10 text-destructive',
-};
-
-const PROVIDER_COL_COUNT = 6;
+/** 模型清单默认平铺几行，超出折叠（一个 LiteLLM 网关常暴露上百个模型）。 */
+const VISIBLE_MODELS_COLLAPSED = 8;
 
 export function ProvidersPanel() {
-  const [providers, setProviders] = useState<AdminProvider[] | null>(null);
-  const [modelsByProvider, setModelsByProvider] = useState<Record<string, AdminModel[]>>({});
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const queryClient = useQueryClient();
 
-  /** 同一时间只允许一个异步操作，值是操作 key（`test:<id>`、`model-toggle:<id>`…）。 */
+  const [query, setQuery] = useState('');
+  const [expanded, setExpanded] = useState<ExpandedState>({});
+  /** 同一时间只挂一个动作 key（`test:<id>`、`model-default:<id>`），用于按钮 spinner。 */
   const [busy, setBusy] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [notices, setNotices] = useState<Record<string, ProviderNotice>>({});
-  const [newModelIds, setNewModelIds] = useState<Record<string, string>>({});
-
-  /** 展开模型清单的提供商；同一时间展开一行，管理动作都针对一个提供商。 */
-  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<AdminProvider | null>(null);
@@ -108,45 +102,55 @@ export function ProvidersPanel() {
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<AdminProvider | null>(null);
   const [pendingDeleteModel, setPendingDeleteModel] = useState<AdminModel | null>(null);
 
-  /** 提供商过滤（名称 / slug，客户端过滤：提供商数量级很小）。 */
-  const [providerQuery, setProviderQuery] = useState('');
+  const providersQuery = useQuery({ queryKey: queryKeys.providers, queryFn: listProviders });
+  const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
 
-  const reload = useCallback(() => setReloadToken((token) => token + 1), []);
+  // 模型清单：每个提供商一条 query，key 里带 providerId，失效时能只打掉一个
+  const modelQueries = useQueries({
+    queries: providers.map((provider) => ({
+      queryKey: queryKeys.providerModels(provider.id),
+      queryFn: () => listProviderModels(provider.id),
+    })),
+  });
 
-  useEffect(() => {
-    // 忽略过期响应：连点「重试」时先发的请求可能后到
-    let active = true;
+  const modelsByProvider = useMemo(() => {
+    const map = new Map<string, AdminModel[]>();
+    providers.forEach((provider, index) => {
+      const data = modelQueries[index]?.data;
+      if (data) map.set(provider.id, data);
+    });
+    return map;
+  }, [providers, modelQueries]);
 
-    void (async () => {
-      try {
-        const snapshot = await loadProviderSnapshot();
-        if (!active) return;
-        setProviders(snapshot.providers);
-        setModelsByProvider(snapshot.modelsByProvider);
-        setLoadError(null);
-      } catch (err) {
-        if (!active) return;
-        console.error('加载模型提供商失败:', err);
-        setLoadError(describeFailure(err));
-      }
-    })();
+  /** 让某个提供商的模型清单失效后重取（同步 / 加删模型之后）。 */
+  const refreshModels = useCallback(
+    (providerId: string) =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.providerModels(providerId) }),
+    [queryClient],
+  );
 
-    return () => {
-      active = false;
-    };
-  }, [reloadToken]);
+  const providerMutation = useMutation({
+    mutationFn: ({ id }: { id: string }) => deleteProvider(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.providers });
+    },
+  });
 
-  /** 统一挂 busy、收集失败文案；返回是否成功，调用方据此决定要不要刷新。 */
+  /**
+   * 一个统一的动作执行器：挂 busy、把失败翻译成人话、返回是否成功。
+   *
+   * 管理动作的失败原因基本上是「上游连不上 / 权限不够 / 已被别人删掉」三类，
+   * 全部走同一套翻译；调用方只决定成功后要不要刷新。
+   */
   const run = useCallback(
     async (key: string, action: () => Promise<void>): Promise<boolean> => {
       setBusy(key);
-      setActionError(null);
       try {
         await action();
         return true;
       } catch (err) {
         console.error(`管理操作失败 (${key}):`, err);
-        setActionError(describeFailure(err));
+        notify('error', describeFailure(err));
         return false;
       } finally {
         setBusy(null);
@@ -155,150 +159,286 @@ export function ProvidersPanel() {
     [],
   );
 
-  const setNotice = useCallback((providerId: string, notice: ProviderNotice | null) => {
-    setNotices((prev) => {
-      const next = { ...prev };
-      if (notice) next[providerId] = notice;
-      else delete next[providerId];
-      return next;
-    });
-  }, []);
-
-  const openCreateDialog = useCallback(() => {
-    setEditingProvider(null);
-    setDialogOpen(true);
-  }, []);
-
-  const openEditDialog = useCallback((provider: AdminProvider) => {
-    setEditingProvider(provider);
-    setDialogOpen(true);
-  }, []);
-
   const handleTest = useCallback(
     (provider: AdminProvider) => {
-      setNotice(provider.id, null);
       void run(`test:${provider.id}`, async () => {
-        try {
-          const result = await testProvider(provider.id);
-          setNotice(
-            provider.id,
-            result.ok
-              ? {
-                  tone: 'success',
-                  text: `连接成功，发现 ${result.model_count} 个模型`,
-                }
-              : { tone: 'error', text: result.error ?? '连接失败，上游未返回原因' },
-          );
-        } catch (err) {
-          // 「连不上」是测试的预期结果之一，原因留在该行下方比挂到页面顶部更贴近操作
-          setNotice(provider.id, { tone: 'error', text: describeFailure(err) });
+        // 「连不上」是测试的预期结果之一：它自己会返回 ok:false，不是异常
+        const result = await testProvider(provider.id);
+        if (result.ok) {
+          notify('success', `${provider.name} 连接正常，上游返回 ${result.model_count} 个模型`);
+        } else {
+          notify('error', result.error ?? `${provider.name} 连接失败，上游未返回原因`);
         }
       });
     },
-    [run, setNotice],
+    [run],
   );
 
   const handleSync = useCallback(
     (provider: AdminProvider) => {
-      setNotice(provider.id, null);
       void (async () => {
         const ok = await run(`sync:${provider.id}`, async () => {
-          try {
-            const result = await syncProvider(provider.id);
-            setNotice(provider.id, { tone: 'success', text: describeProviderSync(result) });
-          } catch (err) {
-            // 与「测试连接」一致：失败原因贴着该行显示；页面顶部只留给
-            // 不属于任何一行的问题（例如列表加载失败）。
-            setNotice(provider.id, { tone: 'error', text: describeFailure(err) });
-          }
+          const result = await syncProvider(provider.id);
+          notify('success', describeProviderSync(result));
         });
-        if (ok) reload();
+        if (ok) void refreshModels(provider.id);
       })();
     },
-    [run, reload, setNotice],
-  );
-
-  const handleDeleteProvider = useCallback(
-    (provider: AdminProvider) => {
-      void (async () => {
-        const ok = await run(`provider-delete:${provider.id}`, () => deleteProvider(provider.id));
-        if (ok) reload();
-      })();
-    },
-    [run, reload],
+    [run, refreshModels],
   );
 
   const handleToggleModel = useCallback(
     (model: AdminModel) => {
       void (async () => {
-        // 停用默认模型时后端会自动取消默认，局部点改会让星标残留，所以统一重载
+        // 停用默认模型时后端会自动取消默认，局部点改会让星标残留 → 统一重取
         const ok = await run(`model-toggle:${model.id}`, async () => {
           await updateModel(model.id, { enabled: !model.enabled });
         });
-        if (ok) reload();
+        if (ok) void refreshModels(model.provider_id);
       })();
     },
-    [run, reload],
+    [run, refreshModels],
   );
 
   const handleSetDefault = useCallback(
     (model: AdminModel) => {
       void (async () => {
-        // 默认只能有一个：重载后其他行的星标才会消失
         const ok = await run(`model-default:${model.id}`, async () => {
           await updateModel(model.id, { is_default: true });
+          notify('success', `已把 ${model.display_name} 设为默认模型`);
         });
-        if (ok) reload();
+        if (ok) void refreshModels(model.provider_id);
       })();
     },
-    [run, reload],
+    [run, refreshModels],
   );
 
   const handleDeleteModel = useCallback(
     (model: AdminModel) => {
       void (async () => {
-        const ok = await run(`model-delete:${model.id}`, () => deleteModel(model.id));
-        if (ok) reload();
+        const ok = await run(`model-delete:${model.id}`, async () => {
+          await deleteModel(model.id);
+          notify('success', `已删除模型 ${model.model_id}`);
+        });
+        if (ok) void refreshModels(model.provider_id);
       })();
     },
-    [run, reload],
+    [run, refreshModels],
   );
 
   const handleAddModel = useCallback(
-    (providerId: string) => {
-      const modelId = (newModelIds[providerId] ?? '').trim();
-      if (!modelId) {
-        setActionError('请先填写上游模型 ID');
-        return;
+    async (providerId: string, modelId: string): Promise<boolean> => {
+      const trimmed = modelId.trim();
+      if (!trimmed) {
+        notify('error', '请先填写上游模型 ID');
+        return false;
       }
-
-      void (async () => {
-        const ok = await run(`model-create:${providerId}`, async () => {
-          await createProviderModel(providerId, { model_id: modelId });
-        });
-        if (ok) {
-          setNewModelIds((prev) => ({ ...prev, [providerId]: '' }));
-          reload();
-        }
-      })();
+      const ok = await run(`model-create:${providerId}`, async () => {
+        await createProviderModel(providerId, { model_id: trimmed });
+        notify('success', `已添加模型 ${trimmed}`);
+      });
+      if (ok) void refreshModels(providerId);
+      return ok;
     },
-    [newModelIds, run, reload],
+    [run, refreshModels],
   );
 
-  const isBusy = busy !== null;
-  // 展示用的模型数与模型行来自同一次快照，避免「模型数 5、列表 3 行」的自相矛盾
-  const modelCountOf = (provider: AdminProvider) =>
-    modelsByProvider[provider.id]?.length ?? provider.model_count;
-
   const filteredProviders = useMemo(() => {
-    if (providers === null) return null;
-    const needle = providerQuery.trim().toLowerCase();
+    const needle = query.trim().toLowerCase();
     if (!needle) return providers;
     return providers.filter(
       (provider) =>
-        provider.name.toLowerCase().includes(needle) || provider.slug.toLowerCase().includes(needle),
+        provider.name.toLowerCase().includes(needle) ||
+        provider.slug.toLowerCase().includes(needle) ||
+        provider.base_url.toLowerCase().includes(needle),
     );
-  }, [providers, providerQuery]);
+  }, [providers, query]);
+
+  const columns = useMemo<ColumnDef<AdminProvider>[]>(
+    () => [
+      {
+        id: 'expander',
+        header: () => <span className="sr-only">展开</span>,
+        cell: ({ row }) => (
+          <button
+            type="button"
+            onClick={row.getToggleExpandedHandler()}
+            aria-expanded={row.getIsExpanded()}
+            aria-label={`${row.getIsExpanded() ? '收起' : '展开'} ${row.original.name} 的模型清单`}
+            className="flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            {row.getIsExpanded() ? (
+              <ChevronDown className="size-4" aria-hidden="true" />
+            ) : (
+              <ChevronRight className="size-4" aria-hidden="true" />
+            )}
+          </button>
+        ),
+        size: 36,
+      },
+      {
+        id: 'provider',
+        header: '提供商',
+        accessorFn: (provider) => provider.name,
+        cell: ({ row }) => {
+          const provider = row.original;
+          return (
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm font-medium">{provider.name}</span>
+                {provider.preset_key && <Badge tone="muted">预设</Badge>}
+              </div>
+              <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{provider.slug}</div>
+              <div
+                className="mt-0.5 max-w-72 truncate text-[11px] text-muted-foreground"
+                title={provider.base_url}
+              >
+                {provider.base_url}
+              </div>
+            </div>
+          );
+        },
+        size: 260,
+      },
+      {
+        id: 'status',
+        header: '状态',
+        accessorFn: (provider) => (provider.enabled ? 'enabled' : 'disabled'),
+        cell: ({ row }) => {
+          const list = modelsByProvider.get(row.original.id);
+          const enabledCount = list?.filter((model) => model.enabled).length ?? 0;
+          if (!row.original.enabled) return <Badge tone="muted">已停用</Badge>;
+          if (list && enabledCount === 0) return <Badge tone="warn">无可用模型</Badge>;
+          return <Badge tone="ok">已启用</Badge>;
+        },
+        size: 100,
+      },
+      {
+        id: 'models',
+        header: '模型',
+        cell: ({ row }) => {
+          const provider = row.original;
+          const list = modelsByProvider.get(provider.id);
+          if (!list) return <span className="text-xs text-muted-foreground">统计中…</span>;
+          const enabledCount = list.filter((model) => model.enabled).length;
+          // 对话侧只列「提供商启用 + 模型启用」的行；后台要能管停用项，所以两个数一起写
+          return (
+            <span
+              className="text-xs tabular-nums"
+              title="只有已启用的模型才会出现在对话的模型选择器里"
+            >
+              {provider.enabled ? enabledCount : <span className="text-muted-foreground">—</span>}
+              <span className="text-muted-foreground"> / {list.length}</span>
+            </span>
+          );
+        },
+        size: 90,
+      },
+      {
+        id: 'key',
+        header: '密钥',
+        cell: ({ row }) => (
+          <span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+            <KeyRound className="size-3" aria-hidden="true" />
+            {row.original.api_key_hint ?? '未设置'}
+          </span>
+        ),
+        size: 120,
+      },
+      {
+        id: 'created',
+        header: '创建时间',
+        accessorFn: (provider) => provider.created_at,
+        cell: ({ row }) => (
+          <span className="text-xs whitespace-nowrap text-muted-foreground">
+            {formatDateTime(row.original.created_at)}
+          </span>
+        ),
+        size: 120,
+      },
+      {
+        id: 'actions',
+        header: () => <span className="block text-right">操作</span>,
+        cell: ({ row }) => {
+          const provider = row.original;
+          const isTesting = busy === `test:${provider.id}`;
+          const isSyncing = busy === `sync:${provider.id}`;
+          return (
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => handleTest(provider)}
+                disabled={busy !== null}
+                aria-label={`测试 ${provider.name} 的连接`}
+                className="cursor-pointer gap-1"
+              >
+                {isTesting ? (
+                  <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                ) : (
+                  <PlugZap className="size-3" aria-hidden="true" />
+                )}
+                测试
+              </Button>
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => handleSync(provider)}
+                disabled={busy !== null}
+                aria-label={`同步 ${provider.name} 的模型`}
+                className="cursor-pointer gap-1"
+              >
+                {isSyncing ? (
+                  <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw className="size-3" aria-hidden="true" />
+                )}
+                同步
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => {
+                  setEditingProvider(provider);
+                  setDialogOpen(true);
+                }}
+                disabled={busy !== null}
+                aria-label={`编辑 ${provider.name}`}
+                className="cursor-pointer"
+              >
+                <Pencil className="size-3" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => setPendingDeleteProvider(provider)}
+                disabled={busy !== null}
+                aria-label={`删除 ${provider.name}`}
+                className="cursor-pointer text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 className="size-3" aria-hidden="true" />
+              </Button>
+            </div>
+          );
+        },
+        size: 220,
+      },
+    ],
+    [busy, handleSync, handleTest, modelsByProvider],
+  );
+
+  const table = useReactTable({
+    data: filteredProviders,
+    columns,
+    state: { expanded },
+    onExpandedChange: setExpanded,
+    getRowId: (provider) => provider.id,
+    getRowCanExpand: () => true,
+    getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+  });
+
+  const columnCount = columns.length;
 
   return (
     <PageShell
@@ -307,8 +447,11 @@ export function ProvidersPanel() {
       actions={
         <Button
           size="sm"
-          onClick={openCreateDialog}
-          disabled={isBusy}
+          onClick={() => {
+            setEditingProvider(null);
+            setDialogOpen(true);
+          }}
+          disabled={busy !== null}
           className="cursor-pointer gap-1.5"
         >
           <Plus className="size-3.5" aria-hidden="true" />
@@ -316,125 +459,128 @@ export function ProvidersPanel() {
         </Button>
       }
     >
-      {actionError && (
-        <div
-          role="alert"
-          className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+      {providersQuery.isError && (
+        <InlineAlert
+          action={
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => void providersQuery.refetch()}
+              className="cursor-pointer"
+            >
+              重试
+            </Button>
+          }
         >
-          <span className="flex-1 break-words">{actionError}</span>
-          <button
-            type="button"
-            onClick={() => setActionError(null)}
-            aria-label="关闭错误提示"
-            className="shrink-0 cursor-pointer hover:opacity-70"
-          >
-            <X className="size-3.5" aria-hidden="true" />
-          </button>
-        </div>
-      )}
-
-      {loadError && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-        >
-          <span className="min-w-0 flex-1 break-words">{loadError}</span>
-          <Button variant="outline" size="xs" onClick={reload} className="cursor-pointer">
-            重试
-          </Button>
-        </div>
+          {describeFailure(providersQuery.error)}
+        </InlineAlert>
       )}
 
       <Toolbar aria-label="提供商筛选">
-        <div className="relative w-full max-w-xs min-w-[12rem] flex-1">
+        <div className="relative w-full max-w-xs min-w-48">
           <Search
-            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
             aria-hidden="true"
           />
           <Input
-            value={providerQuery}
-            onChange={(event) => setProviderQuery(event.target.value)}
-            placeholder="按名称或 slug 过滤"
-            aria-label="按名称或 slug 过滤提供商"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="按名称 / slug / 地址过滤"
+            aria-label="按名称、slug 或接口地址过滤提供商"
             autoComplete="off"
             className="h-8 pl-8 md:text-xs"
           />
-          {providerQuery && (
+          {query && (
             <button
               type="button"
-              onClick={() => setProviderQuery('')}
+              onClick={() => setQuery('')}
               aria-label="清除过滤"
-              className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
+              className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
             >
               <X className="size-3.5" aria-hidden="true" />
             </button>
           )}
         </div>
-        {filteredProviders !== null && (
-          <span className="text-[11px] text-muted-foreground">
-            共 {filteredProviders.length} 个{providerQuery.trim() ? `（总 ${providers?.length ?? 0} 个）` : ''}
+        <span className="text-[11px] text-muted-foreground">
+          {providersQuery.isPending
+            ? '正在加载…'
+            : query.trim()
+              ? `匹配 ${filteredProviders.length} / ${providers.length} 个`
+              : `共 ${providers.length} 个提供商`}
+        </span>
+        {busy !== null && (
+          <span role="status" className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+            正在执行操作…
           </span>
         )}
       </Toolbar>
 
-      <TableWrap minWidth="62rem">
+      <TableWrap minWidth="68rem">
         <thead>
-          <tr>
-            <th className={`${TH_CLASS} w-10`} aria-label="展开" />
-            <th className={TH_CLASS}>提供商</th>
-            <th className={TH_CLASS}>状态</th>
-            <th className={TH_CLASS}>模型</th>
-            <th className={TH_CLASS}>密钥指纹</th>
-            <th className={TH_CLASS}>创建时间</th>
-            <th className={`${TH_CLASS} text-right`}>操作</th>
-          </tr>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <tr key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <th key={header.id} className={TH_CLASS} style={{ width: header.column.getSize() }}>
+                  {header.isPlaceholder
+                    ? null
+                    : flexRender(header.column.columnDef.header, header.getContext())}
+                </th>
+              ))}
+            </tr>
+          ))}
         </thead>
         <tbody>
-          {filteredProviders === null ? (
-            !loadError && <TableStatusRow colSpan={PROVIDER_COL_COUNT + 1} loading text="正在加载提供商…" />
+          {providersQuery.isPending ? (
+            <TableStatusRow colSpan={columnCount} loading text="正在加载提供商…" />
           ) : filteredProviders.length === 0 ? (
             <TableStatusRow
-              colSpan={PROVIDER_COL_COUNT + 1}
+              colSpan={columnCount}
               text={
-                providerQuery.trim()
-                  ? `没有匹配「${providerQuery.trim()}」的提供商`
+                query.trim()
+                  ? `没有匹配「${query.trim()}」的提供商`
                   : '还没有配置任何提供商，点右上角「新增提供商」开始。'
+              }
+              action={
+                query.trim() ? (
+                  <Button variant="outline" size="xs" onClick={() => setQuery('')} className="cursor-pointer">
+                    清除过滤
+                  </Button>
+                ) : undefined
               }
             />
           ) : (
-            filteredProviders.map((provider) => {
-              const models = modelsByProvider[provider.id] ?? [];
-              const enabledCount = models.filter((model) => model.enabled).length;
-              const expanded = expandedId === provider.id;
-              const notice = notices[provider.id];
-
+            table.getRowModel().rows.map((row) => {
+              const provider = row.original;
               return (
-                <ProviderRowGroup
-                  key={provider.id}
-                  provider={provider}
-                  models={models}
-                  modelCount={modelCountOf(provider)}
-                  enabledCount={enabledCount}
-                  expanded={expanded}
-                  notice={notice}
-                  busy={busy}
-                  newModelId={newModelIds[provider.id] ?? ''}
-                  onToggleExpand={() => setExpandedId(expanded ? null : provider.id)}
-                  onNewModelIdChange={(value) =>
-                    setNewModelIds((prev) => ({ ...prev, [provider.id]: value }))
-                  }
-                  onTest={() => handleTest(provider)}
-                  onSync={() => handleSync(provider)}
-                  onEdit={() => openEditDialog(provider)}
-                  onRequestDelete={() => setPendingDeleteProvider(provider)}
-                  onToggleModel={handleToggleModel}
-                  onSetDefault={handleSetDefault}
-                  onEditModel={setEditingModel}
-                  onShowModelDetail={setDetailModel}
-                  onRequestDeleteModel={setPendingDeleteModel}
-                  onAddModel={() => handleAddModel(provider.id)}
-                  onDismissNotice={() => setNotice(provider.id, null)}
-                />
+                // Fragment 必须带 key：兄弟行与展开行是同一对，缺 key 会在切换展开时复用错行
+                <Fragment key={row.id}>
+                  <tr className={TR_CLASS}>
+                    {row.getVisibleCells().map((cell) => (
+                      <td key={cell.id} className={TD_CLASS}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                  {row.getIsExpanded() && (
+                    <tr>
+                      <td colSpan={columnCount} className="border-b border-border/60 bg-muted/20 px-3 py-3">
+                        <ModelsArea
+                          provider={provider}
+                          models={modelsByProvider.get(provider.id) ?? []}
+                          loading={!modelsByProvider.has(provider.id)}
+                          busy={busy}
+                          onToggleModel={handleToggleModel}
+                          onSetDefault={handleSetDefault}
+                          onEditModel={setEditingModel}
+                          onShowModelDetail={setDetailModel}
+                          onRequestDeleteModel={setPendingDeleteModel}
+                          onAddModel={(modelId) => handleAddModel(provider.id, modelId)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })
           )}
@@ -445,7 +591,7 @@ export function ProvidersPanel() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         provider={editingProvider}
-        onSaved={reload}
+        onSaved={() => void queryClient.invalidateQueries({ queryKey: queryKeys.providers })}
       />
 
       <ModelDialog
@@ -454,10 +600,10 @@ export function ProvidersPanel() {
           if (!open) setEditingModel(null);
         }}
         model={editingModel}
-        providerName={
-          providers?.find((provider) => provider.id === editingModel?.provider_id)?.name ?? ''
-        }
-        onSaved={reload}
+        providerName={providers.find((p) => p.id === editingModel?.provider_id)?.name ?? ''}
+        onSaved={() => {
+          if (editingModel) void refreshModels(editingModel.provider_id);
+        }}
       />
 
       <ModelDetailDialog
@@ -466,9 +612,7 @@ export function ProvidersPanel() {
           if (!open) setDetailModel(null);
         }}
         model={detailModel}
-        providerName={
-          providers?.find((provider) => provider.id === detailModel?.provider_id)?.name ?? ''
-        }
+        providerName={providers.find((p) => p.id === detailModel?.provider_id)?.name ?? ''}
       />
 
       <ConfirmDialog
@@ -485,7 +629,18 @@ export function ProvidersPanel() {
         confirmLabel="删除"
         destructive
         onConfirm={() => {
-          if (pendingDeleteProvider) void handleDeleteProvider(pendingDeleteProvider);
+          const target = pendingDeleteProvider;
+          setPendingDeleteProvider(null);
+          if (!target) return;
+          void (async () => {
+            try {
+              await providerMutation.mutateAsync({ id: target.id });
+              notify('success', `已删除提供商 ${target.name}`);
+            } catch (err) {
+              console.error('删除提供商失败:', err);
+              notify('error', describeFailure(err));
+            }
+          })();
         }}
       />
 
@@ -504,446 +659,292 @@ export function ProvidersPanel() {
         destructive
         onConfirm={() => {
           if (pendingDeleteModel) void handleDeleteModel(pendingDeleteModel);
+          setPendingDeleteModel(null);
         }}
       />
     </PageShell>
   );
 }
 
-interface ProviderRowGroupProps {
-  provider: AdminProvider;
-  models: AdminModel[];
-  modelCount: number;
-  enabledCount: number;
-  expanded: boolean;
-  notice: ProviderNotice | undefined;
-  busy: string | null;
-  newModelId: string;
-  onToggleExpand: () => void;
-  onNewModelIdChange: (value: string) => void;
-  onTest: () => void;
-  onSync: () => void;
-  onEdit: () => void;
-  onRequestDelete: () => void;
-  onToggleModel: (model: AdminModel) => void;
-  onSetDefault: (model: AdminModel) => void;
-  onEditModel: (model: AdminModel) => void;
-  onShowModelDetail: (model: AdminModel) => void;
-  onRequestDeleteModel: (model: AdminModel) => void;
-  onAddModel: () => void;
-  onDismissNotice: () => void;
-}
-
-/** 一个提供商 = 主行 + 可选提示行 + 展开行（模型子表）。 */
-function ProviderRowGroup({
-  provider,
-  models,
-  modelCount,
-  enabledCount,
-  expanded,
-  notice,
-  busy,
-  newModelId,
-  onToggleExpand,
-  onNewModelIdChange,
-  onTest,
-  onSync,
-  onEdit,
-  onRequestDelete,
-  onToggleModel,
-  onSetDefault,
-  onEditModel,
-  onShowModelDetail,
-  onRequestDeleteModel,
-  onAddModel,
-  onDismissNotice,
-}: ProviderRowGroupProps) {
-  const isBusy = busy !== null;
-  const isTesting = busy === `test:${provider.id}`;
-  const isSyncing = busy === `sync:${provider.id}`;
-  // 对话侧的模型列表只包含「提供商启用 + 模型启用」的行。后台展示全部（要能管理停用项），
-  // 所以这里把两个数一起写出来，否则「后台 6 个 / 聊天框 5 款」看起来就像两个列表不同步。
-  const modelSummary = provider.enabled
-    ? `${enabledCount} / ${modelCount}`
-    : `${modelCount}（提供商已停用）`;
-
-  return (
-    <>
-      <tr className="hover:bg-accent/30">
-        <td className={TD_CLASS}>
-          <button
-            type="button"
-            onClick={onToggleExpand}
-            aria-expanded={expanded}
-            aria-label={expanded ? `收起 ${provider.name} 的模型清单` : `展开 ${provider.name} 的模型清单`}
-            className="flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {expanded ? (
-              <ChevronDown className="size-4" aria-hidden="true" />
-            ) : (
-              <ChevronRight className="size-4" aria-hidden="true" />
-            )}
-          </button>
-        </td>
-        <td className={TD_CLASS}>
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium">{provider.name}</span>
-            {provider.preset_key && (
-              <Badge tone="muted">
-                <span title="由内置厂商预设创建">预设</span>
-              </Badge>
-            )}
-          </div>
-          <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{provider.slug}</div>
-          <div className="mt-0.5 max-w-72 truncate text-[11px] text-muted-foreground" title={provider.base_url}>
-            {provider.base_url}
-          </div>
-        </td>
-        <td className={TD_CLASS}>
-          <Badge tone={provider.enabled ? 'ok' : 'muted'}>{provider.enabled ? '已启用' : '已停用'}</Badge>
-        </td>
-        <td className={TD_CLASS}>
-          <span title="只有已启用的模型才会出现在对话的模型选择器里">{modelSummary}</span>
-        </td>
-        <td className={TD_CLASS}>
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
-            <KeyRound className="size-3" aria-hidden="true" />
-            {provider.api_key_hint ?? '未设置'}
-          </span>
-        </td>
-        <td className={`${TD_CLASS} whitespace-nowrap text-xs text-muted-foreground`}>
-          {formatDateTime(provider.created_at)}
-        </td>
-        <td className={`${TD_CLASS} text-right`}>
-          <div className="inline-flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={onTest}
-              disabled={isBusy}
-              aria-label={`测试 ${provider.name} 的连接`}
-              className="cursor-pointer gap-1"
-            >
-              {isTesting ? (
-                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-              ) : (
-                <PlugZap className="size-3" aria-hidden="true" />
-              )}
-              测试连接
-            </Button>
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={onSync}
-              disabled={isBusy}
-              aria-label={`同步 ${provider.name} 的模型`}
-              className="cursor-pointer gap-1"
-            >
-              {isSyncing ? (
-                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-              ) : (
-                <RefreshCw className="size-3" aria-hidden="true" />
-              )}
-              同步模型
-            </Button>
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={onEdit}
-              disabled={isBusy}
-              aria-label={`编辑 ${provider.name}`}
-              className="cursor-pointer gap-1"
-            >
-              <Pencil className="size-3" aria-hidden="true" />
-              编辑
-            </Button>
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={onRequestDelete}
-              disabled={isBusy}
-              aria-label={`删除 ${provider.name}`}
-              className="cursor-pointer text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              <Trash2 className="size-3" aria-hidden="true" />
-            </Button>
-          </div>
-        </td>
-      </tr>
-
-      {notice && (
-        <tr>
-          <td colSpan={PROVIDER_COL_COUNT + 1} className="px-3 py-1.5">
-            <div
-              role={notice.tone === 'error' ? 'alert' : 'status'}
-              className={`flex items-start gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] ${noticeToneClass[notice.tone]}`}
-            >
-              <span className="min-w-0 flex-1 break-words">{notice.text}</span>
-              <button
-                type="button"
-                onClick={onDismissNotice}
-                aria-label="关闭提示"
-                className="shrink-0 cursor-pointer hover:opacity-70"
-              >
-                <X className="size-3" aria-hidden="true" />
-              </button>
-            </div>
-          </td>
-        </tr>
-      )}
-
-      {expanded && (
-        <tr>
-          <td colSpan={PROVIDER_COL_COUNT + 1} className="bg-muted/20 px-3 py-3 md:pl-14">
-            <ModelsArea
-              provider={provider}
-              models={models}
-              busy={busy}
-              newModelId={newModelId}
-              onNewModelIdChange={onNewModelIdChange}
-              onToggleModel={onToggleModel}
-              onSetDefault={onSetDefault}
-              onEditModel={onEditModel}
-              onShowModelDetail={onShowModelDetail}
-              onRequestDeleteModel={onRequestDeleteModel}
-              onAddModel={onAddModel}
-            />
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-interface ModelsAreaProps {
-  provider: AdminProvider;
-  models: AdminModel[];
-  busy: string | null;
-  newModelId: string;
-  onNewModelIdChange: (value: string) => void;
-  onToggleModel: (model: AdminModel) => void;
-  onSetDefault: (model: AdminModel) => void;
-  onEditModel: (model: AdminModel) => void;
-  onShowModelDetail: (model: AdminModel) => void;
-  onRequestDeleteModel: (model: AdminModel) => void;
-  onAddModel: () => void;
-}
-
-/** 展开行里的模型子表：过滤、折叠上限与手动添加都在这里。 */
+/**
+ * 展开行里的模型子表。
+ *
+ * 自己持有过滤与折叠状态（每次展开都是「我要看这一个提供商的模型」），
+ * 数据来自父级的 query 缓存。过滤是纯前端：模型清单本来就整份在手里。
+ */
 function ModelsArea({
   provider,
   models,
+  loading,
   busy,
-  newModelId,
-  onNewModelIdChange,
   onToggleModel,
   onSetDefault,
   onEditModel,
   onShowModelDetail,
   onRequestDeleteModel,
   onAddModel,
-}: ModelsAreaProps) {
-  const isBusy = busy !== null;
-  const [modelFilter, setModelFilter] = useState('');
-  const [modelsExpanded, setModelsExpanded] = useState(false);
-  const visibleModels = filterAdminModels(models, modelFilter);
-  // 默认折叠：一个 LiteLLM 网关常常暴露几十上百个模型，全部平铺会把页面变成一堵墙，
-  // 而管理动作（启停 / 设默认 / 编辑）都是针对某一个模型的。过滤优先，其次才是展开。
-  const collapsed =
-    modelFilter.trim() === '' && !modelsExpanded && visibleModels.length > VISIBLE_MODELS_COLLAPSED;
-  const shownModels = collapsed ? visibleModels.slice(0, VISIBLE_MODELS_COLLAPSED) : visibleModels;
+}: {
+  provider: AdminProvider;
+  models: AdminModel[];
+  loading: boolean;
+  busy: string | null;
+  onToggleModel: (model: AdminModel) => void;
+  onSetDefault: (model: AdminModel) => void;
+  onEditModel: (model: AdminModel) => void;
+  onShowModelDetail: (model: AdminModel) => void;
+  onRequestDeleteModel: (model: AdminModel) => void;
+  onAddModel: (modelId: string) => Promise<boolean>;
+}) {
+  const [filter, setFilter] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [newModelId, setNewModelId] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  const visible: AdminModel[] = [...filterAdminModels(models, filter)];
+  // 过滤优先，其次才是展开：一百多个模型全平铺会把页面变成一堵墙
+  const collapsed = filter.trim() === '' && !showAll && visible.length > VISIBLE_MODELS_COLLAPSED;
+  const shown = collapsed ? visible.slice(0, VISIBLE_MODELS_COLLAPSED) : visible;
+  const busyAny = busy !== null || adding;
+
+  const modelColumns = useMemo<ColumnDef<AdminModel>[]>(
+    () => [
+      {
+        id: 'model',
+        header: '模型',
+        cell: ({ row }) => {
+          const model = row.original;
+          return (
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-medium" title={model.description ?? model.display_name}>
+                  {model.display_name}
+                </span>
+                {model.reasoning && <Badge tone="primary">推理</Badge>}
+                {model.is_default && (
+                  <Badge tone="muted">
+                    <Star className="size-2.5 fill-current" aria-hidden="true" />
+                    默认
+                  </Badge>
+                )}
+                {!model.enabled && <Badge tone="muted">已停用</Badge>}
+              </div>
+              <code className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">
+                {model.model_id}
+              </code>
+            </div>
+          );
+        },
+      },
+      {
+        id: 'context',
+        header: '上下文',
+        cell: ({ row }) => (
+          <span
+            className="text-xs text-muted-foreground"
+            title={
+              row.original.max_output_tokens
+                ? `最大输出 ${row.original.max_output_tokens} tokens`
+                : undefined
+            }
+          >
+            {formatContextWindow(row.original.context_window)}
+          </span>
+        ),
+        size: 120,
+      },
+      {
+        id: 'enabled',
+        header: '启用',
+        cell: ({ row }) => (
+          <ToggleSwitch
+            checked={row.original.enabled}
+            onCheckedChange={() => onToggleModel(row.original)}
+            label={`${row.original.enabled ? '停用' : '启用'}模型 ${row.original.display_name}（${row.original.model_id}）`}
+            disabled={busyAny}
+          />
+        ),
+        size: 64,
+      },
+      {
+        id: 'actions',
+        header: () => <span className="block text-right">操作</span>,
+        cell: ({ row }) => {
+          const model = row.original;
+          return (
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => onShowModelDetail(model)}
+                disabled={busyAny}
+                aria-label={`查看 ${model.display_name} 的详情与原始数据`}
+                className="cursor-pointer"
+              >
+                <Info className="size-3" aria-hidden="true" />
+              </Button>
+              {model.enabled && !model.is_default && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => onSetDefault(model)}
+                  disabled={busyAny}
+                  aria-label={`将 ${model.display_name} 设为默认模型`}
+                  className="cursor-pointer"
+                >
+                  设为默认
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => onEditModel(model)}
+                disabled={busyAny}
+                aria-label={`编辑模型 ${model.display_name}`}
+                className="cursor-pointer"
+              >
+                <Pencil className="size-3" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => onRequestDeleteModel(model)}
+                disabled={busyAny}
+                aria-label={`删除模型 ${model.display_name}`}
+                className="cursor-pointer text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 className="size-3" aria-hidden="true" />
+              </Button>
+            </div>
+          );
+        },
+        size: 190,
+      },
+    ],
+    [busyAny, onEditModel, onRequestDeleteModel, onSetDefault, onShowModelDetail, onToggleModel],
+  );
+
+  const subTable = useReactTable({
+    data: shown,
+    columns: modelColumns,
+    getRowId: (model) => model.id,
+    getCoreRowModel: getCoreRowModel(),
+  });
 
   return (
     <div className="space-y-2">
-      {models.length === 0 ? (
-        <p className="px-1 py-2 text-xs text-muted-foreground">
-          暂无模型：点「同步模型」从上游拉取，或在下方手动添加。
-        </p>
-      ) : (
-        <>
-          {/* 模型过滤：模型一多，找某个具体型号只能靠滚动与肉眼扫描 */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-full max-w-xs min-w-[12rem] flex-1 sm:flex-none">
-              <Search
-                className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                value={modelFilter}
-                onChange={(event) => setModelFilter(event.target.value)}
-                placeholder="过滤模型（ID 或名称）"
-                aria-label={`过滤 ${provider.name} 的模型`}
-                className="h-8 pl-8 md:text-xs"
-              />
-              {modelFilter && (
-                <button
-                  type="button"
-                  onClick={() => setModelFilter('')}
-                  aria-label="清除模型过滤"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
-                >
-                  <X className="size-3.5" aria-hidden="true" />
-                </button>
-              )}
-            </div>
-            {modelFilter.trim() !== '' && (
-              <p role="status" className="text-[11px] text-muted-foreground">
-                匹配 {visibleModels.length} / {models.length} 个模型
-              </p>
-            )}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium">{provider.name} 的模型</span>
+        <span className="text-[11px] text-muted-foreground">
+          {models.length === 0 ? '暂无' : `共 ${models.length} 个，已启用 ${models.filter((m) => m.enabled).length} 个`}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <div className="relative w-full max-w-56 min-w-40">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="过滤模型（ID 或名称）"
+              aria-label={`过滤 ${provider.name} 的模型`}
+              className="h-7 pl-8 md:text-xs"
+            />
           </div>
+        </div>
+      </div>
 
-          <div className="overflow-hidden rounded-lg border border-border/70 bg-background">
-            <table className="w-full border-collapse text-left" style={{ minWidth: '40rem' }}>
-              <thead>
-                <tr>
-                  <th className={TH_CLASS}>模型</th>
-                  <th className={TH_CLASS}>上下文窗口</th>
-                  <th className={TH_CLASS}>启用</th>
-                  <th className={`${TH_CLASS} text-right`}>操作</th>
+      <div className="overflow-hidden rounded-lg border border-border/70 bg-background">
+        <table className="w-full border-collapse text-left" style={{ minWidth: '40rem' }}>
+          <thead>
+            {subTable.getHeaderGroups().map((headerGroup) => (
+              <tr key={headerGroup.id}>
+                {headerGroup.headers.map((header) => (
+                  <th key={header.id} className={TH_CLASS} style={{ width: header.column.getSize() }}>
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(header.column.columnDef.header, header.getContext())}
+                  </th>
+                ))}
+              </tr>
+            ))}
+          </thead>
+          <tbody>
+            {loading ? (
+              <TableStatusRow colSpan={modelColumns.length} loading text="正在加载模型…" />
+            ) : visible.length === 0 ? (
+              <TableStatusRow
+                colSpan={modelColumns.length}
+                text={
+                  filter.trim()
+                    ? `没有匹配「${filter.trim()}」的模型`
+                    : '暂无模型：点「同步模型」从上游拉取，或在下方手动添加。'
+                }
+                icon={false}
+              />
+            ) : (
+              subTable.getRowModel().rows.map((row) => (
+                <tr key={row.id} className={TR_CLASS}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id} className={TD_CLASS}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
                 </tr>
-              </thead>
-              <tbody>
-                {visibleModels.length === 0 ? (
-                  <TableStatusRow colSpan={4} text={`没有匹配「${modelFilter.trim()}」的模型。`} />
-                ) : (
-                  shownModels.map((model) => (
-                    <tr key={model.id} className="hover:bg-accent/30">
-                      <td className={TD_CLASS}>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span
-                            className="text-xs font-medium"
-                            title={model.description ?? model.display_name}
-                          >
-                            {model.display_name}
-                          </span>
-                          {model.reasoning && <Badge tone="primary">推理</Badge>}
-                          {model.is_default && (
-                            <Badge tone="muted">
-                              <span className="inline-flex items-center gap-0.5">
-                                <Star className="size-2.5 fill-current" aria-hidden="true" />
-                                默认
-                              </span>
-                            </Badge>
-                          )}
-                        </div>
-                        <code className="mt-0.5 block break-all font-mono text-[11px] text-muted-foreground">
-                          {model.model_id}
-                        </code>
-                      </td>
-                      <td
-                        className={`${TD_CLASS} text-xs text-muted-foreground`}
-                        title={model.max_output_tokens ? `最大输出 ${model.max_output_tokens} tokens` : undefined}
-                      >
-                        {formatContextWindow(model.context_window)}
-                      </td>
-                      <td className={TD_CLASS}>
-                        <ToggleSwitch
-                          checked={model.enabled}
-                          onCheckedChange={() => onToggleModel(model)}
-                          label={`${model.enabled ? '停用' : '启用'}模型 ${model.display_name}（${model.model_id}）`}
-                          disabled={isBusy}
-                        />
-                      </td>
-                      <td className={`${TD_CLASS} text-right`}>
-                        <div className="inline-flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="xs"
-                            onClick={() => onShowModelDetail(model)}
-                            disabled={isBusy}
-                            aria-label={`查看模型 ${model.display_name}（${model.model_id}）的详情与原始数据`}
-                            className="cursor-pointer"
-                          >
-                            <Info className="size-3" aria-hidden="true" />
-                          </Button>
-                          {model.enabled && !model.is_default && (
-                            <Button
-                              variant="ghost"
-                              size="xs"
-                              onClick={() => onSetDefault(model)}
-                              disabled={isBusy}
-                              aria-label={`将 ${model.display_name}（${model.model_id}）设为默认模型`}
-                              className="cursor-pointer"
-                            >
-                              设为默认
-                            </Button>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="xs"
-                            onClick={() => onEditModel(model)}
-                            disabled={isBusy}
-                            aria-label={`编辑模型 ${model.display_name}（${model.model_id}）`}
-                            className="cursor-pointer"
-                          >
-                            <Pencil className="size-3" aria-hidden="true" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="xs"
-                            onClick={() => onRequestDeleteModel(model)}
-                            disabled={isBusy}
-                            aria-label={`删除模型 ${model.display_name}（${model.model_id}）`}
-                            className="cursor-pointer text-destructive hover:bg-destructive/10 hover:text-destructive"
-                          >
-                            <Trash2 className="size-3" aria-hidden="true" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {collapsed && (
-            <button
-              type="button"
-              onClick={() => setModelsExpanded(true)}
-              className="w-full cursor-pointer rounded-lg border border-dashed border-border/70 px-2 py-1.5 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground"
-            >
-              展开全部（还有 {visibleModels.length - VISIBLE_MODELS_COLLAPSED} 个）
-            </button>
-          )}
-          {!collapsed &&
-            modelsExpanded &&
-            modelFilter.trim() === '' &&
-            models.length > VISIBLE_MODELS_COLLAPSED && (
-              <button
-                type="button"
-                onClick={() => setModelsExpanded(false)}
-                className="w-full cursor-pointer rounded-lg border border-dashed border-border/70 px-2 py-1.5 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground"
-              >
-                收起，只看前 {VISIBLE_MODELS_COLLAPSED} 个
-              </button>
+              ))
             )}
-        </>
+          </tbody>
+        </table>
+      </div>
+
+      {collapsed && (
+        <Button
+          variant="ghost"
+          size="xs"
+          onClick={() => setShowAll(true)}
+          className="w-full cursor-pointer border border-dashed border-border/70 text-muted-foreground"
+        >
+          展开全部（还有 {visible.length - VISIBLE_MODELS_COLLAPSED} 个）
+        </Button>
+      )}
+      {!collapsed && showAll && filter.trim() === '' && models.length > VISIBLE_MODELS_COLLAPSED && (
+        <Button
+          variant="ghost"
+          size="xs"
+          onClick={() => setShowAll(false)}
+          className="w-full cursor-pointer border border-dashed border-border/70 text-muted-foreground"
+        >
+          收起，只看前 {VISIBLE_MODELS_COLLAPSED} 个
+        </Button>
       )}
 
-      {/* 用 form 而不是裸按钮：输入框里按回车也能添加，符合表单直觉 */}
+      {/* 用 form 而不是裸按钮：输入框里按回车也能添加 */}
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          onAddModel();
+          setAdding(true);
+          void onAddModel(newModelId).then((ok) => {
+            setAdding(false);
+            if (ok) setNewModelId('');
+          });
         }}
         className="flex flex-wrap items-center gap-1.5"
       >
         <Input
           value={newModelId}
-          onChange={(event) => onNewModelIdChange(event.target.value)}
+          onChange={(event) => setNewModelId(event.target.value)}
           placeholder="上游模型 ID，如 deepseek-chat"
           aria-label={`要添加到 ${provider.name} 的上游模型 ID`}
           spellCheck={false}
           autoComplete="off"
-          className="h-8 min-w-[12rem] max-w-sm flex-1 md:text-xs"
+          disabled={loading}
+          className="h-7 max-w-sm min-w-48 flex-1 md:text-xs"
         />
         <Button
           type="submit"
           variant="outline"
           size="xs"
-          disabled={isBusy}
+          disabled={busyAny}
           aria-label={`添加模型到 ${provider.name}`}
           className="cursor-pointer gap-1"
         >

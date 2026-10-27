@@ -55,5 +55,6 @@ function Button({
   );
 }
 
-// buttonVariants 只在本文件的 Button 里用；没有外部消费者，故不再导出
-export { Button };
+// 导出 buttonVariants：`<Link>` 之类**有自己语义**的元素不能用 Button 的 render 替换
+// （会把链接变成 role="button"，键盘与读屏行为都变），需要按钮外观时给它套这组类名。
+export { Button, buttonVariants };
