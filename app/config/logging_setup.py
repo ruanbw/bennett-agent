@@ -43,10 +43,6 @@ NOISY_THIRD_PARTY: tuple[str, ...] = (
     "urllib3",
     "asyncio",
     "multipart",
-    # 应用启动时只读一次迁移版本（app/db.py:verify_schema_at_head），但 alembic 会
-    # 在导入插件时打一串 INFO——每次重启都刷一屏“setup plugin ...”，而重启正是
-    # 排障时最需要看日志干净的时刻。真正的迁移输出在 `alembic upgrade` 进程里。
-    "alembic",
 )
 
 _VALID_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")

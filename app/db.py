@@ -1,23 +1,14 @@
 """数据库基础设施：异步引擎、ORM 基类，以及业务表定义。
 
-## 为什么是 Postgres（而不是 SQLite）
+## 为什么是 Postgres
 
-早期版本用 SQLite：单进程、写入压力低，WAL 模式足够。换库的触发点不是性能，而是
-**部署形态**——一旦要多实例（水平扩容、滚动发布、worker 与服务分离），本地文件库就
-不再成立：每个实例各写各的，会话、限流、同步游标全都对不上。
+因为部署形态是多实例（水平扩容、滚动发布、worker 与服务分离）。本地文件库在这种
+形态下不成立：每个实例各写各的，会话、限流、同步游标全都对不上。PG 还免费带来
+强制外键、`FOR UPDATE SKIP LOCKED`、JSONB 这些这里到处在用的东西。
 
-换到 Postgres 之后，那些为 SQLite 打的补丁也一并撤掉了：`PRAGMA foreign_keys`
-（PG 默认强制外键）、`journal_mode` 检查、文件权限收紧、手写 `ALTER TABLE` 迁移。
-后者的替代品是 Alembic：**结构变更有版本、可回滚、可在部署流水线里先于应用执行**。
+## 结构定义只有 sql/init.sql
 
-## 结构变更的唯一入口是 Alembic
-
-`migrations/versions/` 是权威历史，应用启动时**不建表、不改表**。它只做一件事：
-校验库里的 revision 是否等于 head（`verify_schema_at_head`），不等就拒绝启动。
-
-为什么不在启动时自动 `upgrade head`：滚动发布时，先起来的实例会把结构升到新版本，
-而其他实例还在跑旧代码。那个窗口里的错误是随机的（旧查询撞新列、新列还没回填），
-比「明确拒绝启动」难查一个数量级。
+整段幂等，启动时执行（`verify_schema_at_head`）。改表直接改脚本、重建开发库。
 
 ## 各组表的职责
 
@@ -33,7 +24,7 @@
 
 ## 关于 user 表名
 
-`user` 是 SQL 保留字。SQLAlchemy 与 Alembic 都会给它加双引号，因此可用；但手写 SQL
+`user` 是 SQL 保留字。SQLAlchemy 与 Postgres 都会给它加双引号，因此可用；但手写 SQL
 （运维排查时）必须写 `"user"`，否则 Postgres 会把它解析成 `current_user`——那是个函数，
 报错信息（`syntax error at or near "user"`）不会提示你少了一对引号。
 """
@@ -80,9 +71,8 @@ from app.roles import ROLE_USER, Role
 
 logger = logging.getLogger(__name__)
 
-#: 项目根目录。alembic.ini 与 migrations/ 都锚在这里，**不能用当前工作目录**：
-#: 从别的目录启动（IDE、systemd、容器 WORKDIR 变化）会找不到迁移脚本，而报错是
-#: 「Can't find script directory」，与真正的原因（路径不对）毫无关系。
+#: 项目根目录。sql/init.sql 锚在这里，**不能用当前工作目录**：从别的目录启动
+#: （IDE、systemd、容器 WORKDIR 变化）会找不到建库脚本。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -127,9 +117,8 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
       否则同一个问题会有两个答案，而它们迟早不一致。
     """
 
-    #: 存储成小写字符串而不是 Enum：加档位只需一次迁移，不必在 PG 里维护类型。
-    #: 取值与等级见 `app/roles.py`。列的默认值由迁移显式声明（`server_default='user'`），
-    #: 因为历史行需要一个确定的落点。
+    #: 存储成小写字符串而不是 Enum：加档位只需改 sql/init.sql，不必在 PG 里维护类型。
+    #: 取值与等级见 `app/roles.py`。
     role: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -146,9 +135,7 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
 class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
     """会话表：`token` / `user_id` / `created_at`。
 
-    `user_id` 带 `ondelete="cascade"`，Postgres 默认强制外键，因此删用户会自动清掉
-    会话行——这一点比 SQLite 省心（那边要显式 `PRAGMA foreign_keys=ON`，且**测试里
-    忘了开就会漏掉整条级联路径**）。
+    `user_id` 带 `ondelete="cascade"`，Postgres 强制外键，因此删用户会自动清掉会话行。
 
     **`token` 列存的是 SHA-256 的 base64url 摘要，不是 cookie 里的原文**：
     数据库文件泄露/被读时，攻击者拿不到可直接回放的会话令牌（I-10）。
@@ -328,8 +315,8 @@ class ModelProvider(Base):
     #: 认证方式：API Key 放进哪个请求头。`bearer`（OpenAI 系，默认）、
     #: `x-api-key`（Anthropic）、`x-goog-api-key`（Gemini）、`none`（免鉴权的本机网关）。
     #: 由预设（`app/services/model_service/presets.py`）在创建时写入，之后基本不变。
-    #: server_default 与迁移保持一致：autogenerate 比对的是它，只写 Python 侧 default
-    #: 会被 `alembic check` 判成漂移。
+    #: server_default 必须与 sql/init.sql 一致：只写 Python 侧 default 会让
+    #: `metadata.create_all` 与建库脚本分叉。
     auth_style: Mapped[str] = mapped_column(
         String(16), nullable=False, default="bearer", server_default="bearer"
     )
@@ -441,7 +428,7 @@ class SyncCounter(Base):
     1. 单调：`version` 只增不减，任何一行发生变化都取一个新号；
     2. 单调的来源可原子化：`INSERT ... ON CONFLICT DO UPDATE SET version = version + 1
        RETURNING version` 是一条语句。Postgres 会在该行上加行锁，因此并发的两次 push
-       不会拿到同一个号（SQLite 靠「只允许一个写者」达到同样效果，代价是整个库串行）；
+       不会拿到同一个号；
     3. 与业务写入同事务：发号与写行必须一起提交，否则客户端可能拉到
        「版本号已前进、行还没写」的空洞。
 
@@ -503,7 +490,7 @@ class Message(Base):
 
     前端消息形状里 `toolCalls / clarification / fallback / usage / error / partOrder`
     都是前端私有结构。**整包存 JSONB** 而不是逐列建模：拆成列等于以后前端每改一次
-    结构就要一次数据库迁移。服务端只需要能校验的东西（归属、顺序、大小），
+    结构都要改建库脚本。服务端只需要能校验的东西（归属、顺序、大小），
     不需要理解聊天语义。
 
     `seq` 在**插入时**由服务端赋值并且之后不再变（改内容只前进 `version`，不动 seq），
@@ -756,62 +743,25 @@ def build_engine(url: str | None = None):  # noqa: ANN201 - 返回值是 AsyncEn
     return create_async_engine(url or DATABASE_URL, **_engine_kwargs())  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------
-# Alembic：版本校验（不做自动迁移）
-# ---------------------------------------------------------------------
-def _alembic_config():  # noqa: ANN202 - alembic.config.Config
-    """加载 alembic.ini。路径锚定项目根，不依赖当前工作目录。"""
-    from alembic.config import Config
-
-    return Config(str(PROJECT_ROOT / "alembic.ini"))
+#: schema 唯一事实来源：整段幂等，可直接重复执行。
+INIT_SQL_PATH = PROJECT_ROOT / "sql" / "init.sql"
 
 
-def expected_head_revision() -> str:
-    """迁移脚本里的 head revision（纯文件读取，不连库）。"""
-    from alembic.script import ScriptDirectory
-
-    script = ScriptDirectory.from_config(_alembic_config())
-    head = script.get_current_head()
-    if head is None:
-        raise RuntimeError("migrations/versions 里没有任何迁移脚本：数据库结构无从建立。")
-    return head
-
-
-async def current_revision() -> str | None:
-    """库里的当前 revision；`alembic_version` 表不存在时返回 None。"""
-    from alembic.runtime.migration import MigrationContext
-
-    def read(connection) -> str | None:  # noqa: ANN001 - run_sync 要求同步函数
-        return MigrationContext.configure(connection).get_current_revision()
-
-    async with engine.connect() as connection:
-        return await connection.run_sync(read)
+def init_sql_text() -> str:
+    return INIT_SQL_PATH.read_text(encoding="utf-8")
 
 
 async def verify_schema_at_head() -> None:
-    """启动自检：库结构必须与迁移脚本的 head 一致，否则拒绝启动。
-
-    为什么不自动升级、也不只是打个警告：
-
-    - 自动升级：滚动发布时先起来的实例会把结构推到新版本，而旧代码还在跑。错误
-      变成随机的（旧查询撞新列），最难排查的那一类。
-    - 只警告：结构不匹配的表现是运行期某条查询报 `UndefinedColumn`，用户先发现。
-      这里是纯配置/部署问题，启动时拒绝比线上猜快得多。
-
-    本地开发想省一步可以设 `DATABASE_REQUIRE_HEAD_REVISION=false`——那等于承认
-    「我在拿旧结构跑新代码」，仅限本机。
-    """
-    head = expected_head_revision()
-    current = await current_revision()
-    if current == head:
-        logger.info("数据库结构已是最新: revision=%s", head)
+    """执行 sql/init.sql 建表（幂等）。名字沿用旧调用点。"""
+    if not settings.database_apply_schema:
+        logger.warning("已跳过建库脚本（DATABASE_APPLY_SCHEMA=false）")
         return
-
-    detail = f"数据库结构不是最新：当前 revision={current or '（无，未执行过迁移）'}，代码期望 {head}。"
-    hint = "请先执行迁移：docker compose run --rm migrate（或 alembic upgrade head）。"
-    if settings.database_require_head_revision:
-        raise RuntimeError(f"{detail} {hint}")
-    logger.warning("%s 已按配置继续启动（DATABASE_REQUIRE_HEAD_REVISION=false）。", detail)
+    # SQLAlchemy 的 text() 走预处理语句，一次只能一条命令；这里逐句执行。
+    statements = [s.strip() for s in init_sql_text().split(";") if s.strip()]
+    async with engine.begin() as connection:
+        for statement in statements:
+            await connection.execute(text(statement))
+    logger.info("数据库结构已就绪")
 
 
 # ---------------------------------------------------------------------
@@ -906,10 +856,8 @@ __all__ = [
     "async_session_maker",
     "build_engine",
     "cleanup_expired_access_tokens",
-    "current_revision",
     "delete_user_access_tokens",
     "engine",
-    "expected_head_revision",
     "get_access_token_db",
     "get_async_session",
     "get_user_db",
@@ -933,9 +881,8 @@ class SandboxLease(Base):
     一台」的强制点，也是并发创建的去重机制——agent 在一轮里并发调用两个沙箱工具是
     真实存在的，没有它就会建出两台机器而只记一条租约。
 
-    曾经按 `(user_id, session_id)` 建索引（一会话一台），后来改成按用户：切换会话不该
-    让刚才装好的依赖消失，一个人也不该同时占着两三台。`session_id` 因此只保留
-    「最后是哪个会话在用」这条归因信息，不参与寻址。
+    一个用户跨会话共用一台：切换会话不该让装好的依赖消失，一个人也不该同时占两三台。
+    `session_id` 只保留「最后是哪个会话在用」这条归因信息，不参与寻址。
 
     索引只覆盖活动状态（`provisioning/ready/paused`），所以历史行可以无限堆积，
     同一用户重建环境也不会撞唯一约束。

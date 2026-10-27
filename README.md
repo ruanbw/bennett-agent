@@ -39,7 +39,7 @@
 bennett-agent/
 ├── main.py             # 运行入口（--web / --worker / --cli / --reload）
 ├── app/                # 后端源码（api/ services/ tools/ config/ db.py）
-├── migrations/         # Alembic 数据库迁移
+├── sql/                # 建库脚本 init.sql（唯一事实来源）
 ├── prompts/            # 系统提示词模板（Jinja2）
 ├── frontend/           # 用户端（React 19 + Vite，dev 端口 5173）
 ├── admin-frontend/     # 管理后台（React 19 + Vite + react-router，dev 端口 5174）
@@ -71,7 +71,6 @@ docker compose up -d
 # 2. 后端
 cp .env.example .env        # 至少填 AUTH_SECRET / LITELLM_API_BASE / LITELLM_API_KEY
 uv sync
-uv run alembic upgrade head
 uv run python main.py --reload   # http://127.0.0.1:8000（开发模式下 /docs 可用）
 
 # 3. 用户端前端
@@ -88,6 +87,17 @@ uv run python scripts/seed_admin.py --email admin@example.com
 ```
 
 默认监听 `127.0.0.1`：注册入口开放，需局域网访问时用 `--host 0.0.0.0` 显式放开。
+
+## 数据库结构
+
+结构只有一处真相：`sql/init.sql`。整段幂等，应用启动时执行一次（多实例并发启动也安全）。
+不维护增量迁移——改表就直接改脚本，然后重建开发库：
+
+```bash
+docker compose down -v && docker compose up -d postgres
+```
+
+改完跑 `uv run pytest tests/test_db_schema.py`，它会检查模型与脚本是否漂移。
 
 ### 启用沙箱（可选）
 
@@ -144,7 +154,7 @@ uv run ruff format --check .
 cd frontend && npm run lint && npm run test && npm run build
 ```
 
-CI（GitHub Actions）：后端跑 ruff、迁移与漂移检测（`alembic check`）、pytest；前端跑 lint、类型检查、测试与构建。
+CI（GitHub Actions）：后端跑 ruff、结构漂移检测、pytest；前端跑 lint、类型检查、测试与构建。
 
 ## 行为回归评测
 

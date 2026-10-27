@@ -70,9 +70,8 @@ jobs:
       S3_BUCKET: bennett-test-uploads
       S3_PREFIX: test-uploads
       S3_USE_PATH_STYLE: "true"
-      # 生产用 `DATABASE_REQUIRE_HEAD_REVISION=true`；测试由 conftest 自己 upgrade，
-      # 这里保持默认即可（默认就是 true，写出来是为了让「为什么能过」可读）
-      DATABASE_REQUIRE_HEAD_REVISION: "true"
+      # 建库脚本在应用启动时执行；测试由 conftest 自己跑一遍
+      DATABASE_APPLY_SCHEMA: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -91,15 +90,6 @@ jobs:
         # ruff format 负责行长，因此 lint 里 E501 是开启的（没有 ignore）。
         # 这条检查保证「行长合规」不是靠人手维护。
         run: uv run ruff format --check .
-
-      - name: 迁移到 head
-        # 与部署同一条路径：先跑迁移，再启动/测试。conftest 也会跑一次（幂等），
-        # 这里单独一步是为了让「迁移本身失败」在 CI 里显示成独立的一步。
-        run: uv run alembic upgrade head
-
-      - name: 模型与迁移无漂移
-        # 等价于 `alembic check`：加了模型列却忘了写迁移时，这一条会红
-        run: uv run alembic check
 
       - name: 测试
         # 不需要真实模型网关：涉及上游的用例都替换掉了客户端或生成器。

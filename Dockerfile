@@ -72,10 +72,8 @@ COPY --chown=app:app app/ ./app/
 COPY --chown=app:app prompts/ ./prompts/
 COPY --chown=app:app evals/ ./evals/
 COPY --chown=app:app scripts/ ./scripts/
-# 迁移脚本与 alembic 配置必须进镜像：`migrate` 服务用同一个镜像执行
-# `alembic upgrade head`，镜像里缺 migrations/ 会让部署在第一步就失败。
-COPY --chown=app:app migrations/ ./migrations/
-COPY --chown=app:app alembic.ini ./
+# 建库脚本必须进镜像：启动时执行 sql/init.sql，缺了它服务起不来。
+COPY --chown=app:app sql/ ./sql/
 COPY --chown=app:app main.py pyproject.toml ./
 
 USER app

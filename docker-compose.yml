@@ -5,8 +5,7 @@
 #   postgres  业务库（用户 / 会话 / 会话同步 / 知识库 / 上传记录）
 #   redis     限流计数、搜索缓存、会话 token 热缓存
 #   rustfs    对象存储（S3 协议），存上传文件的原件
-#   migrate   **一次性**执行 Alembic 迁移，成功退出后 app 才启动   [profile: app]
-#   app       FastAPI 后端（只提供 /api/*）                     [profile: app]
+#   app       FastAPI 后端（只提供 /api/*，启动时执行 sql/init.sql 建表）  [profile: app]
 #   worker    解析上传文件的常驻进程（Postgres 当队列，SKIP LOCKED）  [profile: app]
 #
 # ## 开发与生产的区别：靠 profile 表达
@@ -14,13 +13,13 @@
 # 开发时**只跑依赖**，前后端由开发者自己用命令起（改一行代码立刻生效，不走镜像重建）：
 #
 #   docker compose up -d                 # 只起 postgres / redis / rustfs
-#   uv run alembic upgrade head          # 建表 / 升级结构
+#   uv run python main.py --web         # 启动即建表（sql/init.sql 幂等）
 #   uv run python main.py                # 后端 + 上传解析 + 沙箱回收（一条命令）
 #
 # 生产里拆成两个容器（见下面的 app / worker 服务），所以 compose 里显式传 --web / --worker。
 #   cd frontend && npm run dev           # 前端
 #
-# 生产的全部服务（含 app / worker / migrate）由 `app` profile 打开：
+# 生产的全部服务（含 app / worker）由 `app` profile 打开：
 #
 #   docker compose --profile app up -d --build
 #
@@ -30,14 +29,11 @@
 #
 # 前端仍是独立的静态产物，不在这里（见 Dockerfile 顶部关于前后端分离的说明）。
 #
-# ## 为什么迁移是单独的 service，而不是应用启动时自动 upgrade
+# ## 建表在应用启动时做
 #
-# 多实例滚动发布时，任何实例先起来都可能把结构升到新版本，而**其他实例还在跑旧代码**。
-# 那个窗口里的错误是随机的（旧查询撞新列、新列还没回填），排查成本极高。
-# 把迁移固定成一个「先跑完、再放流量」的步骤，代价只是 compose 里多一个服务。
-#
-# `migrate` 用 `restart: "no"` + `condition: service_completed_successfully`：
-# 迁移失败时 app 不会启动，而不是带着旧结构跑起来。
+# `sql/init.sql` 整段幂等、在单个事务里执行，多实例同时启动也安全：并发 DDL 由
+# Postgres 自己的锁串行化，`CREATE ... IF NOT EXISTS` 重复执行无副作用。
+# 直接用改脚本 + 重建库的流程，不维护增量迁移（见 README「数据库迁移」）。
 #
 # ## 用法
 #
@@ -45,7 +41,6 @@
 #   docker compose --profile app up -d --build      # 生产：全部服务
 #   docker compose up -d                            # 开发：只起依赖
 #   docker compose logs -f app worker
-#   docker compose --profile app run --rm migrate   # 手动重跑迁移（代码更新后）
 #
 # 数据库/Redis/对象存储的数据都在命名卷里，`docker compose down` 不会删（加 `-v` 才会）。
 # 注意 `down -v` 会同时删掉上传的原件与全部会话——那是不可恢复的。
@@ -76,7 +71,7 @@ services:
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     command:
       # max_connections 必须 >= (POOL_SIZE + MAX_OVERFLOW) × worker 数，再加上
-      # migrate/worker/psql 的零头。默认 100 在 4 worker 下正好打满，是
+      # worker/psql 的零头。默认 100 在 4 worker 下正好打满，是
       # 「本地没事、一上生产就 QueuePool Timeout」的常见成因。
       - postgres
       - -c
@@ -178,30 +173,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  migrate:
-    # 只有 `--profile app` 时才启动：开发期应用跑在宿主机上，不需要迁移容器
-    profiles: ["app"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: bennett-agent:local
-    container_name: bennett-migrate
-    # 迁移必须能重跑：`docker compose run --rm migrate`，所以不能 restart。
-    restart: "no"
-    env_file:
-      - .env
-    environment:
-      # 容器内必须用服务名，不能用 127.0.0.1（那是容器自己）。
-      # 这三个 URL 是**唯一**写进 compose 的配置项：它们必须与「宿主机直跑」不同，
-      # 无法共用 .env 里的一份值。密码来自上面的 POSTGRES_PASSWORD，仍然只有一处定义。
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bennett}:${POSTGRES_PASSWORD:-bennett}@postgres:5432/${POSTGRES_DB:-bennett}
-    command: ["alembic", "upgrade", "head"]
-    # 一次性任务：镜像级 HEALTHCHECK 不适用（迁移跑完就退出）
-    healthcheck:
-      disable: true
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   app:
     profiles: ["app"]
@@ -220,7 +191,7 @@ services:
       # 值会出现在 docker inspect 里，而 env_file 的内容不会被打进容器元数据。
       - .env
     environment:
-      # 服务地址与宿主机直跑不同，只能在这里覆盖（见 migrate 的说明）。
+      # 服务地址与宿主机直跑不同，只能在这里覆盖。
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bennett}:${POSTGRES_PASSWORD:-bennett}@postgres:5432/${POSTGRES_DB:-bennett}
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT_URL: http://rustfs:9000
@@ -236,8 +207,8 @@ services:
       # 容器内必须监听 0.0.0.0，否则宿主映射的端口进不来
       APP_ENV: ${APP_ENV:-production}
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -294,8 +265,8 @@ services:
     healthcheck:
       disable: true
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       rustfs:

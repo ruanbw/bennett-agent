@@ -363,8 +363,8 @@ def test_joined_content_still_respects_the_length_limit():
 # ---------------------------------------------------------------------
 # 同步行的整数边界（L-04）
 #
-# `ge=0` 只挡住负数；`10**20` 在 SQLite INTEGER（64 位）绑定时会溢出，
-# 最终变成未捕获的 500。入口处 422 才是可解释的错误。
+# `ge=0` 只挡住负数；`10**20` 超出 BIGINT 范围，绑定时会溢出成未捕获的 500。
+# 入口处 422 才是可解释的错误。
 # ---------------------------------------------------------------------
 def test_sync_timestamps_are_bounded():
     from app.schemas.sync import MAX_CLIENT_TIMESTAMP_MS, ConversationIn

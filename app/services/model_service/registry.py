@@ -642,7 +642,7 @@ async def delete_provider(provider_id: uuid.UUID) -> bool:
         provider = await session.get(ModelProvider, provider_id)
         if provider is None:
             return False
-        # 显式删子表：SQLite 的 FK 级联依赖连接级 PRAGMA，这里不把数据完整性压在它上面
+        # 显式删子表：不把数据完整性压在外键级联上
         await session.execute(delete(ProviderModel).where(ProviderModel.provider_id == provider_id))
         await session.delete(provider)
         await _mark_registry_initialized(session)
@@ -869,7 +869,7 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[UpstreamModel]:
     else:
         logger.warning("提供商 %s 的模型列表分页超过 %d 页，结果已截断", provider.name, SYNC_MAX_PAGES)
 
-    # 列宽是 200：SQLite 不强制，Postgres 会直接报错；超长 id 也无法放进 ChatRequest
+    # 列宽是 200：Postgres 会直接报错；超长 id 也无法放进 ChatRequest
     # 的 300 字符上限（slug + '/' + id）。跳过并留日志，不静默截断一个真实模型名。
     too_long = [entry.model_id for entry in entries if len(entry.model_id) > 200]
     if too_long:

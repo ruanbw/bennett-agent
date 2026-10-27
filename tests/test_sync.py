@@ -11,9 +11,8 @@
 6. 有界 —— 行数/大小/配额超限时**逐行拒绝**，同批其余行照常成功。
 
 数据库用 conftest 的共享测试库：每个用例开始前 `TRUNCATE ... RESTART IDENTITY`，
-版本号因此总是从 1 开始、可精确断言。**不用临时 SQLite 文件**，因为 Postgres 上
-`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 的行锁语义是这套发号器的核心，
-SQLite 的「全局写锁」只是碰巧等价。
+版本号因此总是从 1 开始、可精确断言。必须是真 Postgres：
+`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 的行锁语义是这套发号器的核心。
 """
 
 import asyncio

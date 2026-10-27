@@ -1,8 +1,8 @@
 """API Key 落库加密与会话摘要（I-06/I-10）。
 
 加密发生在 SQLAlchemy 的 bind/result 边界：**库里是密文、ORM 读出来是明文**。
-这个性质必须在真实数据库上验证——SQLite 时代它碰巧也成立，但那时测不到
-`TEXT` 列在 PG 上的实际存储形态（以及 `EncryptedText` 与 `Text` 的渲染一致性）。
+这个性质在真实数据库上验证，才能覆盖 `TEXT` 列的实际存储形态，以及 `EncryptedText`
+与 `Text` 的渲染一致性。
 """
 
 from cryptography.fernet import Fernet

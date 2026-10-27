@@ -516,13 +516,11 @@ class Settings(BaseSettings):
             "`Future attached to a different loop`，报错点与真正原因毫无关系。"
         ),
     )
-    database_require_head_revision: bool = Field(
+    database_apply_schema: bool = Field(
         default=True,
         description=(
-            "启动时校验库结构是否已到 Alembic 的 head，未到则拒绝启动。"
-            "迁移交给部署步骤（compose 的 migrate 服务 / CI），**不在应用启动时自动升级**："
-            "多实例滚动发布时，自动升级会让「旧代码 + 新结构」的窗口无法避免。"
-            "本地开发想省一步可以设 false，但要清楚它意味着可能带着旧结构跑新代码。"
+            "启动时执行 sql/init.sql 建表。脚本整段幂等，可重复执行，多实例并发启动也安全。"
+            "设 false 则跳过（本地想在旧结构上调试时用），代价是结构可能与代码不符。"
         ),
     )
     # ------------------------------------------------------------------

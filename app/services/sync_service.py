@@ -26,7 +26,7 @@ Discord 的 Snowflake + 分区。差别只在规模组件，不在协议形状�
 
 ## 并发
 
-SQLite 只允许一个写者，`UPDATE ... RETURNING` 是单条语句，因此发号不会撞号。
+`UPDATE ... RETURNING` 是单条语句，PG 在那一行上加行锁，因此并发发号不会撞号。
 同一批 id 被并发推送（首次推送与重试同时在飞）会撞主键，此时整批重放一次即可：
 upsert 本身幂等。更复杂的并发控制在这个部署形态下没有必要。
 """
@@ -46,9 +46,8 @@ from weakref import WeakValueDictionary
 from sqlalchemy import delete, func, select, update
 
 # PostgreSQL 的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。
-# 曾经误用的是 SQLite 方言的同名构造：它在 SQLite 上工作，在 PG 上编译期就抛
-# `AttributeError: 'OnConflictDoUpdate' object has no attribute 'constraint_target'`
-# ——方言对象不可跨库混用，测试基座换库时这类耦合必须一起拔掉。
+# 必须用 PG 方言的 insert：SQLite 方言的同名对象在 PG 上编译期就抛
+# `AttributeError: 'OnConflictDoUpdate' object has no attribute 'constraint_target'`。
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,7 +70,7 @@ from app.schemas.sync import (
 
 logger = logging.getLogger(__name__)
 
-#: `WHERE id IN (...)` 的单批大小。SQLite 默认最多 999 个绑定参数，留足余量。
+#: `WHERE id IN (...)` 的单批大小。PG 绑定参数上限 65535，留足余量。
 _IN_CHUNK = 400
 
 
@@ -364,11 +363,9 @@ async def _next_seq(session: AsyncSession, conversation_id: str) -> int:
 #: 单进程内的 push 串行锁。
 #:
 #: 配额（会话数 / 单会话消息数）是「先 COUNT 再 INSERT」，两个并发请求各自在
-#: 自己的事务里读到同一个旧计数，就会同时突破上限（SQLite 单写者只保证写入
-#: 串行，不保证「读到的计数在写时仍然有效」）。把整个 push 串起来之后，计数与
-#: 插入之间不再有第二个写者。多 worker 部署下这把锁只覆盖单进程，但 SQLite
-#: 文件本身就是单机部署形态（见 app/db.py 的说明）；需要多实例时应换库并用
-#: 数据库约束/行锁实现配额。
+#: 自己的事务里读到同一个旧计数，就会同时突破上限。把整个 push 串起来之后，计数与
+#: 插入之间不再有第二个写者。这把锁只覆盖单进程：多 worker 下真正的约束要靠数据库
+#: 行锁或唯一索引实现。
 _push_lock: asyncio.Lock | None = None
 _push_lock_loop: asyncio.AbstractEventLoop | None = None
 

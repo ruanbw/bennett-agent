@@ -1,13 +1,9 @@
 """测试全局配置：真实 Postgres + 真实 Redis，测试库与开发库物理隔离。
 
-## 为什么不再用临时 SQLite 文件
+用真库而不是 SQLite：外键是否强制、`FOR UPDATE SKIP LOCKED` 存不存在、`JSONB` 的行为
+都是被测逻辑的一部分，换成另一套语义的库，用例会全绿而生产上的锁与约束一次都没跑到。
 
-**数据库层已经不支持 SQLite**（见 `app/db.py` 的模块说明）。测试如果继续跑 SQLite，
-它们验证的是「另一套数据库语义」：外键默认不强制、`FOR UPDATE SKIP LOCKED` 不存在、
-`JSONB` 退化成 TEXT、并发发号靠全局写锁而不是行锁。那些用例会全绿，而生产上的锁、
-约束、迁移全都没被执行过一次。
-
-现在的测试基座是：
+测试基座是：
 
     Postgres   `bennett_test` 库（可用 TEST_DATABASE_URL 覆盖）
     Redis      第 15 号库（`REDIS_URL` 默认指向它，键前缀带 `bennett-test`）
@@ -23,14 +19,12 @@
 在导入时就实例化 `Settings`。所有重定向必须在**任何 app 模块被导入之前**完成，因此
 写在 conftest 的模块级（pytest 保证 conftest 先于测试模块导入），而不是 fixture 里。
 
-## 结构怎么来：跑真实的 Alembic
+## 结构怎么来：执行真实的 sql/init.sql
 
-测试库的结构由 `alembic upgrade head` 建立，**不用 `metadata.create_all`**。二者
-在多数据库上会分叉（server_default、索引名、列序），而分叉的代价是「迁移里写错的
-DDL 在测试里永远不会被发现」——那正是迁移最需要被测的部分。
+**不用 `metadata.create_all`**：二者会分叉（server_default、索引名、列序），而分叉的
+代价是「脚本里写错的 DDL 在测试里永远不会被发现」。
 
-每个用例开始前 TRUNCATE 所有表（保留 `alembic_version`），因此用例之间互不影响，
-也不需要在用例里自己清表。
+每个用例开始前 TRUNCATE 所有表，因此用例之间互不影响，也不需要在用例里自己清表。
 """
 
 from __future__ import annotations
@@ -114,18 +108,18 @@ async def _ensure_database_exists() -> None:
 
 
 def _upgrade_to_head() -> None:
-    """在测试库上执行迁移（同步入口，Alembic 自己会起事件循环）。"""
-    from alembic import command
-    from alembic.config import Config
+    """在测试库上执行 sql/init.sql（幂等，可重复调用）。"""
+    from app.db import engine, verify_schema_at_head
 
-    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
+    asyncio.run(verify_schema_at_head())
+    asyncio.run(engine.dispose())
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _prepare_test_database() -> None:
-    """会话级：建库（如缺失）→ 迁移到 head → 清空 Redis 测试库。
+    """会话级：建库（如缺失）→ 建表 → 清空 Redis 测试库。
 
-    这三件事都必须是**会话级**：每个用例重跑一遍迁移会让套件慢到没人愿意跑，
+    这三件事都必须是**会话级**：每个用例重跑一遍建表会让套件慢到没人愿意跑，
     而 Redis 不先清空会让上一次运行残留的键影响限流用例（窗口计数在 60 秒内有效）。
     """
     asyncio.run(_ensure_database_exists())
@@ -154,7 +148,7 @@ async def _reset_state_between_tests():
     用 TRUNCATE 而不是逐个 DELETE：
     - 一条语句清掉所有表，`CASCADE` 自动处理外键顺序，不需要维护删除顺序；
     - `RESTART IDENTITY` 让自增序列归零（本项目的序列只用于 sync 版本号，但仍要确定）；
-    - **保留 `alembic_version`**：它不在 Base.metadata 里，TRUNCATE 只列业务表。
+    - 只列 `Base.metadata` 里的表，库里没有别的业务表。
 
     为什么是「之前」而不是「之后」：用例失败时残留数据会让后续用例莫名其妙地红，
     而在失败现场再清一次会把报错堆栈弄乱。之前清一次就够。

@@ -11,8 +11,7 @@
 - 并发写撞唯一约束必须翻译成可读的服务层错误，而不是 500。
 
 数据库用 conftest 的共享测试库：每个用例前 `TRUNCATE ... RESTART IDENTITY`，因此
-「库里有没有提供商 / 有没有 marker」不会随用例顺序漂移（以前靠每用例一个临时 SQLite
-文件达到同样的隔离）。这里仍然替换 `registry.async_session_maker` 指向同一个 maker，
+「库里有没有提供商 / 有没有 marker」不会随用例顺序漂移。这里仍然替换 `registry.async_session_maker` 指向同一个 maker，
 因为注册表在导入时按名字绑定了它——这正是「测试通过但线上没生效」的经典形态。
 """
 

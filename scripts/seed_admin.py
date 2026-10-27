@@ -175,7 +175,7 @@ async def run(args: argparse.Namespace) -> int:
         print("错误：请用 --email 指定一个合法邮箱（或设置 SEED_ADMIN_EMAIL）。", file=sys.stderr)
         return EXIT_FAILED
 
-    # 不建表：结构由 Alembic 管理（`alembic upgrade head` / compose 的 migrate 服务）。
+    # 建表：执行 sql/init.sql（幂等）。
     # 这里只校验「库结构已到 head」——拿着旧结构写管理员账号的后果是登录时才报
     # UndefinedColumn，而那时运维已经在排查「为什么密码不对」了。
     await verify_schema_at_head()

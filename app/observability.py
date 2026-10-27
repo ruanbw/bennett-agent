@@ -15,8 +15,8 @@ ID 回给前端，但它**只覆盖异常分支**——正常请求、慢请求�
 
 ## 为什么不引入 OpenTelemetry
 
-本项目的部署形态是单机 SQLite + 单进程，没有 trace 后端可接；引入 SDK 只会增加启动
-依赖与配置面，而拿到的东西（span 树）在这里没有消费者。一个请求 ID 加结构化日志已经
+没有 trace 后端可接；引入 SDK 只会增加启动依赖与配置面，而拿到的东西（span 树）
+在这里没有消费者。一个请求 ID 加结构化日志已经
 能回答「这次失败发生在哪一步」，代价是三行代码和一个 ContextVar。
 
 真要接 OTel 时的落点就在这里：`request_id` 作为 trace id 的来源，`RequestContextMiddleware`

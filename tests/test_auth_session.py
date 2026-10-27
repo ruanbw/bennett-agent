@@ -82,7 +82,7 @@ async def test_read_user_from_token_roundtrip_and_guards():
         )
         await session.commit()
     # 先提交用户再插 token：两张表之间没有 ORM relationship，同一次 flush 不保证
-    # 父行先写，SQLite 开着外键时会直接 FOREIGN KEY constraint failed。
+    # 父行先写，会撞外键约束。
     async with async_session_maker() as session:
         session.add(AccessToken(token=token, user_id=user_id, created_at=datetime.now(timezone.utc)))
         await session.commit()

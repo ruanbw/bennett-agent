@@ -61,7 +61,7 @@ async def _tables():
     （`create_db_and_tables`）才做的事。本模块直接调服务层，所以这里自己建一次
     （幂等）。
     """
-    # 结构由 conftest 的 `alembic upgrade head` 建立；用例之间由 TRUNCATE 隔离。
+    # 结构由 conftest 执行 sql/init.sql 建立；用例之间由 TRUNCATE 隔离。
     yield
 
 

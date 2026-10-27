@@ -115,9 +115,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.error("提示词自检失败，服务不会启动: %s", exc)
         raise
 
-    # 结构校验必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
-    # **不在启动时自动迁移**：结构升级是部署步骤（migrate 服务 / alembic upgrade head），
-    # 这里的职责是「结构不对就拒绝启动」，理由见 app/db.py:verify_schema_at_head。
+    # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
+    # 脚本幂等，多实例同时启动也安全（见 app/db.py:verify_schema_at_head）。
     await verify_schema_at_head()
 
     # 首次启动（或库里一条提供商都没有）时，用环境变量引导出一条「默认网关」，
@@ -137,7 +136,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # try/finally：yield 点收到异常（例如上层取消）时也要走到关闭，
-        # 否则共享 httpx 客户端泄漏、SQLite 的 WAL 文件不会合并回主库。
+        # 否则共享 httpx 客户端与数据库连接池都会漏。
         try:
             await close_http_client()
         except Exception:  # noqa: BLE001 - 单个资源关闭失败不能遮蔽另一个资源

@@ -5,8 +5,7 @@ description = "基于 PydanticAI + LiteLLM 的 Agent 框架，含 FastAPI SSE �
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # 数据库：异步驱动 + 迁移工具。SQLite 已从支持矩阵里移除，见 app/db.py
-    "alembic>=1.14",
+    # 数据库：异步驱动。SQLite 已从支持矩阵里移除，见 app/db.py
     "asyncpg>=0.30",
     # 共享状态：限流计数、业务缓存、会话热缓存
     "redis>=5.2",
