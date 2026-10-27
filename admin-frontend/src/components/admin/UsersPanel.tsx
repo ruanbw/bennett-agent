@@ -24,7 +24,7 @@
  * 所以按顺序串行执行并统计结果，最后一条 toast 说明「成功几个、失败几个、为什么」。
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type ColumnDef,
   type RowSelectionState,
@@ -32,7 +32,7 @@ import {
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { Loader2, Search, ShieldCheck, ShieldMinus, ShieldX, UserX, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -118,25 +118,36 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
     null,
   );
 
+  const requestedOffset = pageIndex * pageSize;
   const params = {
     query: filters.query,
     status: filters.status,
     limit: pageSize,
-    offset: pageIndex * pageSize,
+    offset: requestedOffset,
   };
 
   const usersQuery = useQuery({
     queryKey: queryKeys.users(params),
     queryFn: () => listUsers(params),
+    // 翻页时保留上一页的行：否则每翻一页都会闪一下空表（isFetching 期间没有数据）
+    placeholderData: keepPreviousData,
   });
 
-  // 封掉最后一页的最后一个人后 offset 越界：夹回最后一页而不是把「永远空着的一页」给管理员
+  /**
+   * 越界纠正：例如第 2 页只剩 1 人，封掉后 total 从 21 降到 20，offset=20 就空了。
+   *
+   * 夹回最后一页。**不能写在渲染期**——渲染中 setState 会被 React 丢弃或引发重渲染循环；
+   * 放 effect 里改一次 pageIndex，页面编号用 `shownPageIndex` 立即显示正确的那个，
+   * 所以期间也不会看到「第 2 页 / 共 1 页」这种自相矛盾的一帧。
+   */
   const clampedOffset = usersQuery.data
-    ? clampUsersOffset(params.offset, pageSize, usersQuery.data.total)
-    : params.offset;
-  if (usersQuery.data && clampedOffset !== params.offset) {
-    setPageIndex(Math.floor(clampedOffset / pageSize));
-  }
+    ? clampUsersOffset(requestedOffset, pageSize, usersQuery.data.total)
+    : requestedOffset;
+  const shownPageIndex = Math.floor(clampedOffset / pageSize);
+
+  useEffect(() => {
+    if (clampedOffset !== requestedOffset) setPageIndex(shownPageIndex);
+  }, [clampedOffset, requestedOffset, shownPageIndex]);
 
   const page = usersQuery.data;
   const rows = useMemo(() => page?.items ?? [], [page]);
@@ -543,7 +554,7 @@ export function UsersPanel({ currentUserEmail, canManageRoles }: UsersPanelProps
         footer={
           <TableFooter>
             <Pagination
-              page={pageIndex + 1}
+              page={shownPageIndex + 1}
               pageCount={pageCount}
               total={total}
               pageSize={pageSize}

@@ -64,32 +64,64 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
     queryFn: () => listUsers({ status: 'all', limit: 1, offset: 0 }),
   });
 
-  // 用 memo 固定引用：下面三个 useMemo 都以它为依赖，每次渲染换新数组会让它们全部失效
+  // 用 memo 固定引用：下面几个 useMemo 都以它为依赖，每次渲染换新数组会让它们全部失效
   const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
-  const modelsByProvider = useMemo(() => {
-    const map = new Map<string, AdminModel[]>();
+
+  /**
+   * 每个提供商的模型清单状态。
+   *
+   * `models === null` 且无 `error` = 还在加载。**必须与「有清单、但全部停用」区分开**：
+   * 两者在下面「没有可用模型」那条告警里含义完全相反（一个是不确定，一个是真有问题）。
+   */
+  const modelStateByProvider = useMemo(() => {
+    const map = new Map<string, { models: AdminModel[] | null; error: unknown }>();
     providers.forEach((provider, index) => {
       const result = modelQueries[index];
-      if (result?.data) map.set(provider.id, result.data);
+      map.set(provider.id, {
+        models: result?.data ?? null,
+        error: result?.isError ? result.error : null,
+      });
     });
     return map;
   }, [providers, modelQueries]);
 
-  const modelsLoading = providers.length > 0 && modelQueries.some((query) => query.isPending);
-  const models = Array.from(modelsByProvider.values()).flat();
+  /** 所有提供商的模型清单都到齐了吗（告警必须等这个为真才能下结论）。 */
+  const allModelsLoaded =
+    providers.length > 0 && providers.every((p) => modelStateByProvider.get(p.id)?.models != null);
+  /** 有清单拉失败的：这一栏就不能说「没有问题」，那是把「没查到」说成「没毛病」。 */
+  const failedModelCount = providers.filter((p) => modelStateByProvider.get(p.id)?.error != null).length;
 
   const stats = useMemo(() => {
-    const enabledProviders = providers.filter((provider) => provider.enabled);
-    const routable = models.filter(
-      (model) => model.enabled && providers.find((p) => p.id === model.provider_id)?.enabled,
-    );
+    const enabledProviders = providers.filter((provider) => provider.enabled).length;
+    // 模型总数直接用后端的 model_count：不必等 N 个清单请求，也不会在加载过程中
+    // 从 0 一路涨到真实值（那样每次进页面数字都变，像在抖）
+    const totalModels = providers.reduce((sum, provider) => sum + provider.model_count, 0);
+
     return {
       providers: providers.length,
-      enabledProviders: enabledProviders.length,
-      models: models.length,
-      routable: routable.length,
+      enabledProviders,
+      totalModels,
     };
-  }, [providers, models]);
+  }, [providers]);
+
+  /** 可路由模型数 = 启用的提供商下启用的模型。清单没齐时给 null，界面上显示「统计中」。 */
+  const routableCount = useMemo(() => {
+    if (!allModelsLoaded) return null;
+    return providers.reduce((sum, provider) => {
+      if (!provider.enabled) return sum;
+      const models = modelStateByProvider.get(provider.id)?.models ?? [];
+      return sum + models.filter((model) => model.enabled).length;
+    }, 0);
+  }, [allModelsLoaded, providers, modelStateByProvider]);
+
+  const defaultModel = useMemo(() => {
+    if (!allModelsLoaded) return undefined;
+    for (const provider of providers) {
+      const found = modelStateByProvider.get(provider.id)?.models?.find((m) => m.is_default);
+      if (found) return found;
+    }
+    return null;
+  }, [allModelsLoaded, providers, modelStateByProvider]);
 
   /** 「需要处理」清单：每一条都是一个具体、可点的下一步。 */
   const issues = useMemo(() => {
@@ -106,9 +138,24 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
       });
     }
 
-    const silentProviders = providers.filter(
-      (provider) => provider.enabled && (modelsByProvider.get(provider.id)?.filter((m) => m.enabled).length ?? 0) === 0,
-    );
+    // 清单拉取失败：此时任何「有没有可用模型 / 有没有默认模型」的结论都不可信，
+    // 先把这件事本身报出来
+    if (failedModelCount > 0) {
+      list.push({
+        id: 'model-query-failed',
+        tone: 'danger',
+        title: `${failedModelCount} 个提供商的模型清单拉取失败`,
+        detail: '下面的「没有可用模型」「没有默认模型」两项因此无法判断，请到提供商页重试。',
+        to: '/providers',
+        cta: '去重试',
+      });
+    }
+
+    // 只对「清单已到手」的提供商判断：没到手不等于 0 个可用模型
+    const silentProviders = providers.filter((provider) => {
+      const models = modelStateByProvider.get(provider.id)?.models;
+      return provider.enabled && models != null && models.every((m) => !m.enabled);
+    });
     if (silentProviders.length > 0) {
       list.push({
         id: 'silent-provider',
@@ -120,7 +167,8 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
       });
     }
 
-    if (models.length > 0 && !models.some((model) => model.is_default && model.enabled)) {
+    // 「没有默认模型」必须等全部清单到齐：只看一半时可能漏掉后面那个设了默认的
+    if (allModelsLoaded && defaultModel === null) {
       list.push({
         id: 'no-default',
         tone: 'warn',
@@ -144,7 +192,7 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
     }
 
     return list;
-  }, [providers, models, modelsByProvider, providersQuery.isSuccess, bannedQuery.data?.total]);
+  }, [providers, modelStateByProvider, allModelsLoaded, defaultModel, failedModelCount, providersQuery.isSuccess, bannedQuery.data?.total]);
 
   const error = providersQuery.error ?? bannedQuery.error ?? allUsersQuery.error;
 
@@ -173,10 +221,14 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
         <StatCard
           icon={Boxes}
           label="模型总数"
-          value={stats.models}
-          hint={modelsLoading ? '正在统计…' : `可路由 ${stats.routable} 个`}
+          value={stats.totalModels}
+          hint={
+            routableCount === null
+              ? '正在统计可路由数量…'
+              : `其中可路由 ${routableCount} 个`
+          }
           to="/providers"
-          loading={providersQuery.isPending || modelsLoading}
+          loading={providersQuery.isPending}
         />
         <StatCard
           icon={Users}
@@ -203,7 +255,7 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
         {issues.length === 0 ? (
           <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-3 text-xs text-emerald-700 dark:text-emerald-300">
             <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
-            {providersQuery.isPending || modelsLoading
+            {providersQuery.isPending || !allModelsLoaded
               ? '正在检查…'
               : '没有发现需要处理的问题。'}
           </div>
@@ -275,9 +327,10 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
               </tr>
             ) : (
               providers.map((provider) => {
-                const list = modelsByProvider.get(provider.id) ?? [];
-                const enabled = list.filter((model) => model.enabled);
-                const defaultModel = enabled.find((model) => model.is_default);
+                const state = modelStateByProvider.get(provider.id);
+                const list = state?.models ?? null;
+                const enabled = list?.filter((model) => model.enabled) ?? [];
+                const providerDefault = enabled.find((model) => model.is_default);
                 return (
                   <tr key={provider.id} className={TR_CLASS}>
                     <td className={TD_CLASS}>
@@ -285,11 +338,14 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
                       <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{provider.slug}</div>
                     </td>
                     <td className={TD_CLASS}>
-                      <ProviderStatus provider={provider} enabledModels={enabled.length} />
+                      {/* 清单没到手时不下「无可用模型」的结论：那可能只是没查到 */}
+                      <ProviderStatus provider={provider} enabledModels={enabled.length} loaded={list != null} failed={state?.error != null} />
                     </td>
                     <td className={`${TD_CLASS} text-xs tabular-nums`}>
-                      {modelsLoading && !modelsByProvider.has(provider.id) ? (
-                        <span className="text-muted-foreground">统计中…</span>
+                      {list == null ? (
+                        <span className={state?.error != null ? 'text-destructive' : 'text-muted-foreground'}>
+                          {state?.error != null ? '拉取失败' : '统计中…'}
+                        </span>
                       ) : (
                         <>
                           {provider.enabled ? enabled.length : <span className="text-muted-foreground">—</span>}
@@ -298,10 +354,10 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
                       )}
                     </td>
                     <td className={`${TD_CLASS} text-xs`}>
-                      {defaultModel ? (
-                        defaultModel.display_name
+                      {providerDefault ? (
+                        providerDefault.display_name
                       ) : (
-                        <span className="text-muted-foreground">未设置</span>
+                        <span className="text-muted-foreground">{list == null ? '—' : '未设置'}</span>
                       )}
                     </td>
                   </tr>
@@ -315,8 +371,21 @@ export function OverviewPanel({ canManageRoles }: OverviewPanelProps) {
   );
 }
 
-function ProviderStatus({ provider, enabledModels }: { provider: AdminProvider; enabledModels: number }) {
+function ProviderStatus({
+  provider,
+  enabledModels,
+  loaded,
+  failed,
+}: {
+  provider: AdminProvider;
+  enabledModels: number;
+  /** 模型清单是否已到手；没到手就不下「无可用模型」的结论。 */
+  loaded: boolean;
+  failed: boolean;
+}) {
   if (!provider.enabled) return <Badge tone="muted">已停用</Badge>;
+  if (failed) return <Badge tone="muted">清单拉取失败</Badge>;
+  if (!loaded) return <Badge tone="muted">检查中</Badge>;
   if (enabledModels === 0) return <Badge tone="warn">无可用模型</Badge>;
   return <Badge tone="ok">正常</Badge>;
 }

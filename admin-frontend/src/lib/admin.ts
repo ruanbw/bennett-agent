@@ -9,7 +9,6 @@
  */
 
 import { apiFetch, readErrorDetail } from './api';
-import { firstIssue, modelDraftSchema, providerDraftSchema } from './schemas';
 
 export { MAX_MODEL_DISPLAY_NAME_CHARS } from './schemas';
 
@@ -164,28 +163,9 @@ export interface ProviderDraft {
   clearApiKey: boolean;
 }
 
-export type ProviderDraftField = 'name' | 'baseUrl' | 'apiKey';
-
-export interface ProviderDraftIssue {
-  field: ProviderDraftField;
-  message: string;
-}
-
 /** 是否走厂商预设：`custom` 与「还没选」的空串都算自定义地址。 */
 export function isPresetKey(presetKey: string): boolean {
   return presetKey !== CUSTOM_PRESET_KEY && presetKey !== '';
-}
-
-/**
- * 表单草稿的本地校验（schema 见 `lib/schemas.ts`）。
- *
- * 只拦「一定会在服务端失败」的输入，错误文案直接复用后端那句中文：服务端 422 的
- * detail 形如 `body.base_url: Value error, 必须是以 http:// …`，带着英文前缀和字段
- * 路径，对管理员没有帮助。
- */
-export function validateProviderDraft(draft: ProviderDraft): ProviderDraftIssue | null {
-  const issue = firstIssue(providerDraftSchema, draft);
-  return issue ? { field: issue.field as ProviderDraftField, message: issue.message } : null;
 }
 
 export function buildProviderPayload(
@@ -274,33 +254,12 @@ export interface ModelDraft {
   reasoning: boolean;
 }
 
-export interface ModelDraftIssue {
-  field: ModelDraftField;
-  message: string;
-}
-
 function parseOptionalTokenLimit(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (!/^\d+$/.test(trimmed)) return null;
   const parsed = Number(trimmed);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-/**
- * 编辑模型元数据的本地校验。
- *
- * 名称是必填；两个 token 上限可留空表示「清空/未知」，但只要填了就必须是正整数。
- * 后端对非法数字返回的是 Pydantic 的英文 422，对管理员没有帮助，所以先在这里拦。
- */
-/**
- * 编辑模型元数据的本地校验（zod schema 见 `lib/schemas.ts`）。
- *
- * 后端对非法数字返回的是 Pydantic 的英文 422，对管理员没有帮助，所以先在这里拦。
- */
-export function validateModelDraft(draft: ModelDraft): ModelDraftIssue | null {
-  const issue = firstIssue(modelDraftSchema, draft);
-  return issue ? { field: issue.field as ModelDraftField, message: issue.message } : null;
 }
 
 export function buildModelPayload(draft: ModelDraft): ModelPayload {
@@ -440,9 +399,6 @@ export function describeProviderSync(result: ProviderSyncResult): string {
 
   return `同步完成：${parts.join('，')}；上游未返回的模型不会自动删除。`;
 }
-
-/** 模型列表默认平铺多少个；超出部分收进「展开全部」。 */
-export const VISIBLE_MODELS_COLLAPSED = 8;
 
 /**
  * 按关键词过滤模型（`model_id` 与展示名都匹配，大小写不敏感）。

@@ -88,8 +88,13 @@ function isOptionalPositiveInt(value: string): boolean {
   return Number.isSafeInteger(parsed) && parsed > 0;
 }
 
-/** schema 校验通过则返回 null，否则返回第一个问题（`{field, message}`）。 */
-export function firstIssue<T>(
+/**
+ * 校验通过返回 `error: null`，否则返回第一个问题。
+ *
+ * 对话框里用 `zodResolver` 直接把 issue 映射到字段；这个包装是给**单测**用的：
+ * 一条断言就能表达「哪个字段、什么文案」，不必逐层翻 `safeParse` 的结果。
+ */
+export function validate<T>(
   schema: z.ZodType<T>,
   value: unknown,
 ): { field: string; message: string } | null {
@@ -100,4 +105,14 @@ export function firstIssue<T>(
     field: String(issue?.path[0] ?? ''),
     message: issue?.message ?? '填写有误',
   };
+}
+
+/** 提供商草稿 → 第一个校验问题（`field` 与表单字段同名）。 */
+export function validateProviderDraft(draft: unknown): { field: string; message: string } | null {
+  return validate(providerDraftSchema, draft);
+}
+
+/** 模型草稿 → 第一个校验问题。 */
+export function validateModelDraft(draft: unknown): { field: string; message: string } | null {
+  return validate(modelDraftSchema, draft);
 }

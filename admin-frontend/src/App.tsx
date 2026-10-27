@@ -34,6 +34,7 @@ import { ProvidersPanel } from './components/admin/ProvidersPanel';
 import { UsersPanel } from './components/admin/UsersPanel';
 import { NotFoundPanel } from './components/admin/NotFoundPanel';
 import { QueryProvider } from './lib/query';
+import { queryClient } from './lib/query-client';
 import { Toaster } from './components/Toaster';
 import {
   canAccessAdmin,
@@ -144,6 +145,9 @@ export function App() {
       console.error('登出流程异常:', err);
       notice = '登出未确认：服务端会话可能仍有效，请关闭浏览器后重试';
     }
+    // 清缓存：queryClient 是模块级单例，不清的话换账号登录后会在 staleTime 内
+    // 先看到上一个账号拉到的用户列表 / 提供商密钥指纹（共用电脑时会串号）
+    queryClient.clear();
     setUser(null);
     setProbeFailed(false);
     setError(null);

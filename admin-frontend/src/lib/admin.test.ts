@@ -11,13 +11,15 @@ import {
   describeProviderSync,
   filterAdminModels,
   formatContextWindow,
-  validateModelDraft,
-  validateProviderDraft,
   type ModelDraft,
   type ProviderDraft,
 } from './admin';
 import { pageWindow } from '../components/admin/table-parts';
-import { MAX_MODEL_DISPLAY_NAME_CHARS } from './schemas';
+import {
+  MAX_MODEL_DISPLAY_NAME_CHARS,
+  validateModelDraft,
+  validateProviderDraft,
+} from './schemas';
 
 /** 表单草稿默认带前后空白：trim 是这些用例的主要断言对象之一。 */
 function draft(overrides: Partial<ProviderDraft> = {}): ProviderDraft {
@@ -388,5 +390,26 @@ describe('modelDraftSchema（zod）', () => {
     expect(
       validateModelDraft({ displayName: long, contextWindow: '', maxOutputTokens: '', reasoning: false })?.field,
     ).toBe('displayName');
+  });
+});
+
+describe('clampUsersOffset / 分页越界的实际场景', () => {
+  it('封掉最后一页最后一人后，offset 被夹回上一页而不是留在空页', () => {
+    // 21 人、每页 20：第 2 页只剩 1 人（offset=20）
+    expect(clampUsersOffset(20, 20, 21)).toBe(20);
+    // 把他封掉 → total 变 20，原来的 offset=20 已越界
+    expect(clampUsersOffset(20, 20, 20)).toBe(0);
+  });
+
+  it('总数归零时回到第一页（不是负数）', () => {
+    expect(clampUsersOffset(20, 20, 0)).toBe(0);
+  });
+
+  it('页码由夹过的 offset 推导，与请求用的 offset 一致', () => {
+    const pageSize = 20;
+    const total = 20;
+    const requested = 20; // 管理员原本停在第 2 页
+    const clamped = clampUsersOffset(requested, pageSize, total);
+    expect(Math.floor(clamped / pageSize)).toBe(0);
   });
 });

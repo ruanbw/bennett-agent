@@ -14,10 +14,11 @@
  *   同步 / 编辑模型后只失效那一条，不必重拉全部提供商；
  * - 动作反馈：base-ui Toast 报「做成了什么、几个」。
  *
- * ## 一次只展开一行
+ * ## 展开行为
  *
- * 管理动作都针对单个提供商；同时展开多行会让「测试连接」的结果条出现在视线之外。
- * 但模型清单的查询仍然按 providerId 缓存，来回展开不会重复请求。
+ * 允许多行同时展开：同一时间只好一个提供商管理动作的假设并不成立（对齐两份提供商
+ * 的模型清单是常见需求），而模型清单按 providerId 缓存，多展开也不会多请求。
+ * 每个展开区的过滤词与新建输入框由 `key={provider.id}` 隔离，不会串。
  */
 
 import { Fragment, useCallback, useMemo, useState } from 'react';
@@ -113,14 +114,33 @@ export function ProvidersPanel() {
     })),
   });
 
-  const modelsByProvider = useMemo(() => {
-    const map = new Map<string, AdminModel[]>();
+  /**
+   * 每个提供商的模型清单状态：`models` 有数据、`error` 拉失败、都没有 = 还在加载。
+   *
+   * 三者必须分开。之前只用「Map 里有没有这个 key」区分，失败时 key 不存在，
+   * 于是界面一直显示「正在加载」，管理员会以为再等一会就好，而实际是后端 500
+   * 或上游超时——他该做的是重试或去看提供商配置。
+   */
+  const modelStateByProvider = useMemo(() => {
+    const map = new Map<string, { models: AdminModel[] | null; error: unknown }>();
     providers.forEach((provider, index) => {
-      const data = modelQueries[index]?.data;
-      if (data) map.set(provider.id, data);
+      const result = modelQueries[index];
+      map.set(provider.id, {
+        models: result?.data ?? null,
+        error: result?.isError ? result.error : null,
+      });
     });
     return map;
   }, [providers, modelQueries]);
+
+  /** 有数据的那些提供商的模型清单（列上的「启用 / 总数」用它）。 */
+  const modelsByProvider = useMemo(() => {
+    const map = new Map<string, AdminModel[]>();
+    for (const [providerId, state] of modelStateByProvider) {
+      if (state.models) map.set(providerId, state.models);
+    }
+    return map;
+  }, [modelStateByProvider]);
 
   /** 让某个提供商的模型清单失效后重取（同步 / 加删模型之后）。 */
   const refreshModels = useCallback(
@@ -254,6 +274,13 @@ export function ProvidersPanel() {
     );
   }, [providers, query]);
 
+  const reloadModels = useCallback(
+    (providerId: string) => {
+      void queryClient.refetchQueries({ queryKey: queryKeys.providerModels(providerId) });
+    },
+    [queryClient],
+  );
+
   const columns = useMemo<ColumnDef<AdminProvider>[]>(
     () => [
       {
@@ -308,7 +335,9 @@ export function ProvidersPanel() {
           const list = modelsByProvider.get(row.original.id);
           const enabledCount = list?.filter((model) => model.enabled).length ?? 0;
           if (!row.original.enabled) return <Badge tone="muted">已停用</Badge>;
-          if (list && enabledCount === 0) return <Badge tone="warn">无可用模型</Badge>;
+          // 清单没拉到（加载中或失败）时不下结论：说「无可用模型」可能是假的
+          if (!list) return <Badge tone="muted">检查中</Badge>;
+          if (enabledCount === 0) return <Badge tone="warn">无可用模型</Badge>;
           return <Badge tone="ok">已启用</Badge>;
         },
         size: 100,
@@ -318,8 +347,18 @@ export function ProvidersPanel() {
         header: '模型',
         cell: ({ row }) => {
           const provider = row.original;
-          const list = modelsByProvider.get(provider.id);
-          if (!list) return <span className="text-xs text-muted-foreground">统计中…</span>;
+          const state = modelStateByProvider.get(provider.id);
+          const list = state?.models;
+          if (!list) {
+            // 失败要说「拉取失败」，不能停在「统计中…」——那是加载态，会让人一直等
+            return state?.error ? (
+              <span className="text-xs text-destructive" title={describeFailure(state.error)}>
+                拉取失败
+              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground">统计中…</span>
+            );
+          }
           const enabledCount = list.filter((model) => model.enabled).length;
           // 对话侧只列「提供商启用 + 模型启用」的行；后台要能管停用项，所以两个数一起写
           return (
@@ -424,7 +463,7 @@ export function ProvidersPanel() {
         size: 220,
       },
     ],
-    [busy, handleSync, handleTest, modelsByProvider],
+    [busy, handleSync, handleTest, modelsByProvider, modelStateByProvider],
   );
 
   const table = useReactTable({
@@ -566,9 +605,17 @@ export function ProvidersPanel() {
                     <tr>
                       <td colSpan={columnCount} className="border-b border-border/60 bg-muted/20 px-3 py-3">
                         <ModelsArea
+                          // key：同一位置换成另一个提供商时重新挂载，否则过滤词与新建输入框
+                          // 的本地状态会跨提供商串过去
+                          key={provider.id}
                           provider={provider}
-                          models={modelsByProvider.get(provider.id) ?? []}
-                          loading={!modelsByProvider.has(provider.id)}
+                          models={modelStateByProvider.get(provider.id)?.models ?? []}
+                          loading={
+                            !modelStateByProvider.get(provider.id)?.models &&
+                            !modelStateByProvider.get(provider.id)?.error
+                          }
+                          error={modelStateByProvider.get(provider.id)?.error ?? null}
+                          onRetry={() => reloadModels(provider.id)}
                           busy={busy}
                           onToggleModel={handleToggleModel}
                           onSetDefault={handleSetDefault}
@@ -676,6 +723,8 @@ function ModelsArea({
   provider,
   models,
   loading,
+  error,
+  onRetry,
   busy,
   onToggleModel,
   onSetDefault,
@@ -687,6 +736,9 @@ function ModelsArea({
   provider: AdminProvider;
   models: AdminModel[];
   loading: boolean;
+  /** 模型清单拉取失败的原因；有值时下方显示可重试的提示条，不显示空态。 */
+  error: unknown;
+  onRetry: () => void;
   busy: string | null;
   onToggleModel: (model: AdminModel) => void;
   onSetDefault: (model: AdminModel) => void;
@@ -832,6 +884,18 @@ function ModelsArea({
 
   return (
     <div className="space-y-2">
+      {error != null && (
+        <InlineAlert
+          action={
+            <Button variant="outline" size="xs" onClick={onRetry} className="cursor-pointer">
+              重试
+            </Button>
+          }
+        >
+          模型清单拉取失败：{describeFailure(error)}
+        </InlineAlert>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-medium">{provider.name} 的模型</span>
         <span className="text-[11px] text-muted-foreground">
@@ -872,6 +936,19 @@ function ModelsArea({
           <tbody>
             {loading ? (
               <TableStatusRow colSpan={modelColumns.length} loading text="正在加载模型…" />
+            ) : error != null && models.length === 0 ? (
+              // 失败且没有任何缓存数据：不要显示「暂无模型」——那句话会把
+              // 「后端 500」说成「上游没给模型」，管理员会去点同步而不是重试
+              <TableStatusRow
+                colSpan={modelColumns.length}
+                text="模型清单拉取失败，请重试"
+                icon={false}
+                action={
+                  <Button variant="outline" size="xs" onClick={onRetry} className="cursor-pointer">
+                    重试
+                  </Button>
+                }
+              />
             ) : visible.length === 0 ? (
               <TableStatusRow
                 colSpan={modelColumns.length}

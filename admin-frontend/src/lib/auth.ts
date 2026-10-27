@@ -10,6 +10,7 @@
  */
 
 import { apiFetch, readErrorDetail } from './api';
+import { ROLE_LABELS } from './admin';
 
 /** 当前登录用户。字段与后端 `UserRead` 对齐（snake_case 是线上契约）。 */
 export interface AuthUser {
@@ -38,13 +39,12 @@ export function canAccessAdmin(user: AuthUser | null): boolean {
   return user !== null && ADMIN_ROLES.has(user.role);
 }
 
-/** 顶栏菜单里展示的角色名。与后端 `app/roles.py` 的三档一一对应。 */
-const ROLE_LABELS: Record<string, string> = {
-  user: '普通用户',
-  admin: '管理员',
-  superadmin: '超级管理员',
-};
-
+/**
+ * 顶栏菜单里展示的角色名。
+ *
+ * 从 `lib/admin` 取同一份，不在这里再写一遍：两张表漂移时会出现「顶栏说超管、
+ * 用户表说管理员」——同一个人在同一个页面上有两种叫法。
+ */
 export function roleLabelOf(user: AuthUser | null): string {
   if (!user) return '未登录';
   return ROLE_LABELS[user.role] ?? user.role;

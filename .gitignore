@@ -53,3 +53,6 @@ scripts/demo/node_modules/
 # 录屏时间轴是一次性的产物（mark 时间只对那一条 raw.webm 有意义）
 docs/demo/timeline.json
 docs/demo-admin/timeline.json
+
+# macOS Finder 产物（仓库根也会生成，不只各子项目）
+.DS_Store
