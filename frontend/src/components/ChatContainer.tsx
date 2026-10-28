@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { Check, Pencil, Plus, X } from 'lucide-react';
 
 import { Thread } from './assistant-ui/elements/thread.aui';
+import { SandboxStatusIndicator } from './SandboxStatus/SandboxStatusIndicator';
 import { clampTitle, titleLength, TITLE_MAX_LENGTH } from '../lib/session-list';
 import { notify } from '../lib/toast';
 import { ChatSessionNotices } from './ChatProvider';
@@ -282,6 +283,13 @@ export function ChatContainer({
             </button>
           )}
         </div>
+
+        {/*
+          「我的电脑」状态入口（顶栏右侧）。
+          机器是每用户一台、跨会话共用，闲置会被自动回收——用户此前完全看不到它还在不在。
+          后端没开沙箱时组件自己返回 null，不会留下一个永远灰着的图标。
+        */}
+        <SandboxStatusIndicator sandboxAvailable={sandboxAvailable} />
       </header>
 
       <ChatSessionNotices />

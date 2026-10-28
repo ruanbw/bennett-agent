@@ -29,15 +29,19 @@ import {
   AlignLeft,
   Check,
   ChevronsUpDown,
+  Cpu,
   FoldVertical,
   KeyRound,
   Laptop,
   ListTree,
   Moon,
+  Plug,
+  RefreshCw,
   Rows3,
   Sun,
   UnfoldVertical,
   User,
+  Wrench,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -57,6 +61,18 @@ import {
   type DetailLevel,
 } from '../lib/detail-level';
 import { PERFORMANCE_USAGE_OPTIONS, type PerformanceUsage } from '../lib/performance-usage';
+import {
+  describeMcpCapability,
+  describeMcpError,
+  describeMcpServers,
+  describeSandboxCapability,
+  describeServerTools,
+  describeToolCount,
+  describeToolList,
+  describeWebSearchCapability,
+  summarizeMcpServers,
+} from '../lib/capabilities';
+import type { Capabilities } from '../types';
 import {
   DEFAULT_SETTINGS_SECTION,
   SETTINGS_SECTIONS,
@@ -416,6 +432,180 @@ export function ConversationSection() {
 }
 
 /* ------------------------------------------------------------------ *
+ * 运行时能力
+ * ------------------------------------------------------------------ */
+
+/** 一行「名称 → 值」。能力表里几乎每一项都是这个形状。 */
+function CapabilityRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: 'warning' | 'error';
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 px-3 py-2">
+      <dt className="shrink-0 text-[11px] text-muted-foreground">{label}</dt>
+      <dd
+        className={cn(
+          'min-w-0 text-right text-[11px] break-words text-foreground/90',
+          tone === 'warning' && 'text-amber-600 dark:text-amber-500',
+          tone === 'error' && 'text-destructive'
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+export interface CapabilitiesSectionProps {
+  /** `/api/capabilities` 的结果；`null` 表示还没拿到 / 拿不到。 */
+  capabilities: Capabilities | null;
+  /** 上一次探测是否失败——据此把「未知」解释成「查不到」而不是「没配」。 */
+  failed?: boolean;
+  /** 重新探测。 */
+  onRetry?: () => void;
+}
+
+/**
+ * 运行时能力：把 `/api/capabilities` 的**全部**字段摆到界面上。
+ *
+ * ## 为什么这一块必须存在
+ *
+ * `capabilities.ts` 里那几个 `describe*` 函数早就写好了（`describeWebSearchCapability` /
+ * `describeToolCount` / `describeMcpCapability` / `describeMcpServers`），但此前只有单测
+ * 在调用——界面上一个消费者都没有。后果是具体的：
+ *
+ * - 服务端没配搜索 Key → 起步建议里搜索示例整条消失 → 用户以为「这个助手不会搜索」；
+ * - MCP 配了但连不上 → 那些工具从列表里直接消失 → 运维以为配置从来没生效。
+ *   `types.ts` 里 `mcp_error` 的注释写明它「单独给出是为了让『配了但不通』可被界面解释」，
+ *   而在这次改动之前，全仓没有任何一行界面读它。
+ *
+ * ## 为什么把工具名整个列出来
+ *
+ * 「3 个工具」回答的是「有没有」，而排障时的问题是「**我要的那个**在不在」。列名字
+ * 是这个分区唯一能真正省掉一次「去翻日志」的地方。
+ *
+ * ## 为什么 `mcp_error` 原文照抄
+ *
+ * 它是上游给出的原始错误（连接串、退出码、包名都在里面）。改写会丢掉排查最关键的细节。
+ * 界面只负责把它摆在一个等宽、可换行的块里，不改一个字。
+ */
+export function CapabilitiesSection({
+  capabilities,
+  failed = false,
+  onRetry,
+}: CapabilitiesSectionProps) {
+  const servers = summarizeMcpServers(capabilities);
+  const mcpError = describeMcpError(capabilities);
+  const mcpSummary = describeMcpCapability(capabilities);
+  // 「配了但不通」= 有错误、且一个可用 server 都没有。这一档要用显眼的颜色：
+  // 它和「未配置」在文案上已经区分开了，但颜色能让用户一眼看到异常。
+  const mcpBroken = servers.length === 0 && Boolean(capabilities?.mcp_error);
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-2">
+        <SectionHeading Icon={Cpu}>服务端能力</SectionHeading>
+        <dl className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+          <CapabilityRow label="联网搜索" value={describeWebSearchCapability(capabilities)} />
+          <CapabilityRow label="隔离执行环境" value={describeSandboxCapability(capabilities)} />
+          <CapabilityRow label="工具数量" value={describeToolCount(capabilities)} />
+        </dl>
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          这是服务端**实际装配**的能力，不是项目宣称支持的能力。没启用的项在对话里就真的用不了；
+          需要时请让部署方在服务端配置。
+        </p>
+      </div>
+
+      {/* 工具清单：列名字，而不是只报数量 */}
+      <div className="space-y-2">
+        <SectionHeading Icon={Wrench}>已装配的工具</SectionHeading>
+        <p className="rounded-xl border border-border/70 bg-muted/20 px-3 py-2 font-mono text-[10.5px] leading-relaxed break-words text-foreground/90">
+          {describeToolList(capabilities)}
+        </p>
+      </div>
+
+      {/* MCP：每个 server 一行、各自的工具清单、以及连不上的原因 */}
+      <div className="space-y-2">
+        <SectionHeading Icon={Plug}>MCP 服务</SectionHeading>
+        <p
+          className={cn(
+            'text-[11px]',
+            mcpBroken ? 'text-amber-600 dark:text-amber-500' : 'text-foreground/90'
+          )}
+        >
+          {mcpSummary}
+          {servers.length > 0 && (
+            <span className="ml-1 text-muted-foreground">（{describeMcpServers(capabilities)}）</span>
+          )}
+        </p>
+
+        {servers.length > 0 && (
+          <ul className="space-y-1.5">
+            {servers.map((server) => (
+              <li
+                key={server.name}
+                className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-mono text-[11px] font-medium text-foreground">
+                    {server.name}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                    {server.toolCount} 个工具
+                  </span>
+                </div>
+                <p className="mt-0.5 font-mono text-[10px] leading-relaxed break-words text-muted-foreground">
+                  {describeServerTools(server.tools)}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* `mcp_error` 的原文：这是「配了但不通」唯一可被解释的地方 */}
+        {mcpError && (
+          <div
+            role="status"
+            className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2"
+          >
+            <div className="text-[10px] font-medium text-destructive">MCP 连接失败原因</div>
+            {/* 原文照抄：改写会丢掉排查最关键的细节 */}
+            <pre className="mt-1 max-h-40 overflow-auto font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words text-destructive/90 select-text">
+              {mcpError}
+            </pre>
+          </div>
+        )}
+      </div>
+
+      {/* 探测失败 / 未知时的重试入口：管理员刚配好 Key 之后最常用的动作 */}
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onRetry}
+          disabled={!onRetry}
+          className="text-[11px]"
+        >
+          <RefreshCw className="size-3" aria-hidden="true" />
+          重新探测
+        </Button>
+        <span className="text-[10.5px] text-muted-foreground">
+          {failed
+            ? '上次探测失败，显示的是未知或上一次的结果'
+            : '刚在服务端改过配置时，点这里刷新'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * 页面
  * ------------------------------------------------------------------ */
 
@@ -427,6 +617,12 @@ export interface SettingsPageProps {
   onPasswordChanged?: () => void;
   /** 首屏打开哪个分区。默认「账号与安全」。 */
   defaultSection?: SettingsSectionId;
+  /** 运行时能力清单（`/api/capabilities`）；「运行时能力」分区渲染它。 */
+  capabilities?: Capabilities | null;
+  /** 上次能力探测是否失败。 */
+  capabilitiesFailed?: boolean;
+  /** 重新探测运行时能力。 */
+  onRefreshCapabilities?: () => void;
 }
 
 /**
@@ -441,6 +637,9 @@ export function SettingsPage({
   onClose,
   onPasswordChanged,
   defaultSection = DEFAULT_SETTINGS_SECTION,
+  capabilities = null,
+  capabilitiesFailed = false,
+  onRefreshCapabilities,
 }: SettingsPageProps) {
   const [active, setActive] = useState<SettingsSectionId>(defaultSection);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -605,6 +804,13 @@ export function SettingsPage({
                   )}
                   {section.id === 'appearance' && <AppearanceSection />}
                   {section.id === 'conversation' && <ConversationSection />}
+                  {section.id === 'capabilities' && (
+                    <CapabilitiesSection
+                      capabilities={capabilities}
+                      failed={capabilitiesFailed}
+                      onRetry={onRefreshCapabilities}
+                    />
+                  )}
                 </div>
               ))}
             </div>

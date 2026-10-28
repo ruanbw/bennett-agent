@@ -252,10 +252,15 @@ function AuthenticatedShell({
   onLogout,
 }: AuthenticatedShellProps) {
   const { models, modelsError, defaultModel, refreshModels } = useModels();
-  // 运行时能力只用于裁剪空对话页的起步建议；失败时降级为「无联网搜索」，不阻塞界面。
-  // `failed` 原本喂给设置页的「重新探测」提示，设置页收掉信息展示后就没消费者了；
-  // 重探入口改为模型菜单的「重试」（它顺带调 `refreshCapabilities`）。
-  const { capabilities, retry: refreshCapabilities } = useCapabilities();
+  // 运行时能力有两个消费者：空对话页的起步建议（按 web_search / sandbox 裁剪），
+  // 以及设置页「运行时能力」分区（把全部字段和 mcp_error 摆出来）。
+  // 失败时降级为「无联网搜索」等保守值，不阻塞界面。
+  // 两个重探入口共用同一个 `retry`：设置页的「重新探测」按钮，以及模型菜单的「重试」。
+  const {
+    capabilities,
+    failed: capabilitiesFailed,
+    retry: refreshCapabilities,
+  } = useCapabilities();
   const {
     sessions,
     currentSessionId,
@@ -478,6 +483,12 @@ function AuthenticatedShell({
           userEmail={userEmail}
           userRole={userRole}
           onPasswordChanged={() => onSessionExpired('密码已修改，请用新密码重新登录')}
+          // 运行时能力：设置页的「运行时能力」分区直接渲染这几个已写好的 describe* 函数。
+          // 它们此前只有单测消费者，`mcp_error` 更是全仓零界面读取——「配了但不通」
+          // 只能靠翻日志才发现。
+          capabilities={capabilities}
+          capabilitiesFailed={capabilitiesFailed}
+          onRefreshCapabilities={refreshCapabilities}
         />
       )}
     </div>

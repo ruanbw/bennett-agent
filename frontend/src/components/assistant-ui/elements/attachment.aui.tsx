@@ -256,7 +256,7 @@ const AttachmentUnsupportedNotice: FC<{ count: number }> = ({ count }) => (
   >
     <AlertCircleIcon className="mt-px size-3 shrink-0" aria-hidden="true" />
     <span>
-      暂不支持附件：后端只接受文本，这 {count} 个文件不会被发送。
+      本项目暂未开放附件上传，这 {count} 个文件不会被发送。
       点缩略图右上角的 × 移除后即可发送。
     </span>
   </div>
@@ -288,17 +288,21 @@ export const ComposerAttachments: FC = () => {
 };
 
 /**
- * 附件入口：后端只接受文本，因此不打开文件选择器。
+ * 附件入口：当前版本不开放附件上传，因此不打开文件选择器。
  *
  * 用 `aria-disabled` 而不是原生 `disabled`：原生 disabled 按钮不进 Tab 顺序，
  * 键盘/读屏用户根本发现不了这个入口，也听不到「为什么不能用」。保留可聚焦，
  * 点击（或 Enter/Space）只弹一条说明，既阻止了白选文件，也让原因可被发现。
+ *
+ * 文案不提「后端只接受文本」：那句话会让用户以为部署有缺陷。后端拒绝非文本消息是
+ * 正确的协议边界，这里只是这个产品还没开放该功能（见 `attachmentUnsupportedMessage`）。
+ * 入口本身保留：以后接多模态时直接接上，不用再把它加回来。
  */
 export const ComposerAddAttachment: FC = () => {
   return (
     <TooltipIconButton
-      tooltip="附件暂不支持（后端只接受文本）"
-      title="附件暂不支持（后端只接受文本）"
+      tooltip="本项目暂未开放附件上传"
+      title="本项目暂未开放附件上传"
       side="bottom"
       variant="ghost"
       size="icon"
@@ -308,7 +312,7 @@ export const ComposerAddAttachment: FC = () => {
         notify("info", attachmentUnsupportedMessage(1));
       }}
       className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 pointer-coarse:size-8 rounded-full opacity-40 hover:opacity-60 focus-visible:opacity-100 active:scale-[0.96] motion-reduce:transition-none cursor-not-allowed"
-      aria-label="附件暂不支持：后端只接受文本"
+      aria-label="本项目暂未开放附件上传"
     >
       <PlusIcon className="aui-attachment-add-icon size-4" />
     </TooltipIconButton>

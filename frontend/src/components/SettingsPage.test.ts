@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AccountSection,
   AppearanceSection,
+  CapabilitiesSection,
   ConversationSection,
   SettingsPage,
 } from './SettingsPage';
@@ -78,15 +79,18 @@ describe('设置页布局：居中一列，左侧分区菜单 + 右侧内容', (
     expect(panelOpenTag(html, 'account')).toContain('hidden=""');
   });
 
-  it('设置里只有真正能调的三组：知识库 / 本机数据 / 关于系统不在这一页', () => {
+  it('设置页的分区就是这四项，知识库 / 本机数据 / 关于系统不在这一页', () => {
     const html = renderPage();
 
-    // 这三块是信息展示，不是设置项；混进来会把这一页撑成大表
     expect(SETTINGS_SECTIONS.map((section) => section.id)).toEqual([
       'account',
       'appearance',
       'conversation',
+      // 运行时能力是唯一破例的「信息展示」：它解释的是别的功能为什么不在
+      // （没配搜索 Key → 起步建议里没搜索示例；MCP 不通 → 工具从列表里消失）
+      'capabilities',
     ]);
+    // 这三块是纯信息展示，不是设置项；混进来会把这一页撑成大表
     expect(html).not.toContain('知识库');
     expect(html).not.toContain('本机数据');
     expect(html).not.toContain('关于系统');
@@ -195,5 +199,127 @@ describe('对话显示分区', () => {
 
   it('四档只改默认展开程度，不是能力开关', () => {
     expect(renderSection()).toContain('只决定默认露多少');
+  });
+});
+
+describe('运行时能力分区（A4）', () => {
+  const base = {
+    web_search: true,
+    sandbox: true,
+    tools: ['tavily_search', 'sandbox_exec'],
+    mcp_servers: [] as { name: string; tools: string[] }[],
+    mcp_error: null as string | null,
+  };
+
+  const render = (capabilities: Parameters<typeof CapabilitiesSection>[0]['capabilities'], props = {}) =>
+    renderToStaticMarkup(createElement(CapabilitiesSection, { capabilities, ...props }));
+
+  it('渲染那几个此前只有单测消费者的 describe* 函数：搜索 / 沙箱 / 工具数', () => {
+    const html = render(base);
+
+    expect(html).toContain('联网搜索');
+    expect(html).toContain('已启用');
+    expect(html).toContain('隔离执行环境');
+    // describeToolCount
+    expect(html).toContain('2 个');
+  });
+
+  it('工具名整个列出来：数量回答「有没有」，名字回答「我要的那个在不在」', () => {
+    const html = render(base);
+
+    expect(html).toContain('已装配的工具');
+    expect(html).toContain('tavily_search');
+    expect(html).toContain('sandbox_exec');
+  });
+
+  it('没有工具时列的是「暂无已装配的工具」，不是一片空白', () => {
+    expect(render({ ...base, tools: [] })).toContain('暂无已装配的工具');
+  });
+
+  it('未启用的能力显式说「未启用」，而不是从界面上消失', () => {
+    const html = render({ ...base, web_search: false, sandbox: false });
+
+    // 「功能缺失」和「部署没配」必须能区分开，后者才可以去找运维
+    expect(html).toContain('未启用');
+    expect(html).not.toContain('搜索示例');
+  });
+
+  it('能力清单还没拿到时显示「未知」，不显示「未启用」', () => {
+    const html = render(null);
+
+    expect(html).toContain('未知');
+    expect(html).not.toContain('已启用');
+  });
+
+  it('MCP：每个 server 一行，带各自的工具清单', () => {
+    const html = render({
+      ...base,
+      mcp_servers: [
+        { name: 'filesystem', tools: ['read_file', 'write_file'] },
+        { name: 'database', tools: ['query'] },
+      ],
+    });
+
+    expect(html).toContain('filesystem');
+    expect(html).toContain('read_file');
+    expect(html).toContain('database');
+    expect(html).toContain('query');
+    // describeMcpCapability 的结论也要在
+    expect(html).toContain('2 个 server · 3 个工具');
+  });
+
+  it('server 一个工具都没有时说「未提供工具」，不留一个空荡荡的名字', () => {
+    const html = render({ ...base, mcp_servers: [{ name: 'empty', tools: [] }] });
+
+    expect(html).toContain('empty');
+    expect(html).toContain('未提供工具');
+  });
+
+  it('MCP 配了但不通：`mcp_error` 原文照抄出来（此前全仓没有界面读它）', () => {
+    const raw = 'filesystem: spawn npx ENOENT（包未安装）';
+    const html = render({
+      ...base,
+      tools: [],
+      mcp_servers: [],
+      mcp_error: raw,
+    });
+
+    expect(html).toContain('配置了但未能连接');
+    expect(html).toContain('MCP 连接失败原因');
+    // 一字不改：连接串/退出码/包名都在原文里，改写会丢掉排查细节
+    expect(html).toContain(raw);
+  });
+
+  it('「未配置」与「配了但不通」在界面上必须能区分', () => {
+    const notConfigured = render({ ...base, mcp_servers: [], mcp_error: null });
+    const broken = render({ ...base, mcp_servers: [], mcp_error: 'x: 连接失败' });
+
+    expect(notConfigured).toContain('未配置');
+    expect(notConfigured).not.toContain('配置了但未能连接');
+    expect(broken).toContain('配置了但未能连接');
+    expect(broken).not.toContain('未配置');
+  });
+
+  it('有错误但零可用 server 时用告警色（一眼能看出是异常）', () => {
+    const broken = render({ ...base, mcp_servers: [], mcp_error: 'x' });
+
+    expect(broken).toContain('text-amber-600');
+    expect(broken).toContain('border-destructive/40');
+  });
+
+  it('提供了重新探测入口（管理员刚配好 Key 之后最常用的动作）', () => {
+    const html = render(base, { onRetry: vi.fn() });
+
+    expect(html).toContain('重新探测');
+  });
+
+  it('探测失败时说明「显示的是未知或上一次的结果」', () => {
+    expect(render(base, { failed: true })).toContain('上次探测失败');
+  });
+
+  it('mcp_error 是空串时也说清「服务端没给原因」，不留一个哑掉的提示', () => {
+    expect(render({ ...base, mcp_servers: [], mcp_error: '' })).toContain(
+      '服务端没有给出具体原因'
+    );
   });
 });

@@ -3,10 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   UNKNOWN_CAPABILITIES,
   describeMcpCapability,
+  describeMcpError,
   describeMcpServers,
+  describeSandboxCapability,
+  describeServerTools,
   describeToolCount,
+  describeToolList,
   describeWebSearchCapability,
   fetchCapabilities,
+  summarizeMcpServers,
 } from './capabilities';
 
 interface StubResponse {
@@ -186,5 +191,72 @@ describe('MCP 能力', () => {
       }),
     ).toBe('fs、db');
     expect(describeMcpServers(null)).toBe('');
+  });
+});
+
+describe('设置页「运行时能力」的明细辅助', () => {
+  const base = {
+    web_search: true,
+    sandbox: true,
+    tools: ['a', 'b'],
+    mcp_servers: [] as { name: string; tools: string[] }[],
+    mcp_error: null as string | null,
+  };
+
+  it('summarizeMcpServers 给出每个 server 的工具数与清单（数量单独看不出来）', () => {
+    expect(
+      summarizeMcpServers({
+        ...base,
+        mcp_servers: [
+          { name: 'fs', tools: ['read', 'write'] },
+          { name: 'db', tools: [] },
+        ],
+      })
+    ).toEqual([
+      { name: 'fs', toolCount: 2, tools: ['read', 'write'] },
+      { name: 'db', toolCount: 0, tools: [] },
+    ]);
+    expect(summarizeMcpServers(null)).toEqual([]);
+  });
+
+  it('summarizeMcpServers 复制工具数组，不与源数据共享引用', () => {
+    const source = { ...base, mcp_servers: [{ name: 'fs', tools: ['read'] }] };
+    const summary = summarizeMcpServers(source);
+
+    summary[0].tools.push('injected');
+
+    expect(source.mcp_servers[0].tools).toEqual(['read']);
+  });
+
+  it('describeServerTools：没有工具时说「未提供工具」，不留空串', () => {
+    expect(describeServerTools(['read', 'write'])).toBe('read、write');
+    expect(describeServerTools([])).toBe('未提供工具');
+  });
+
+  it('describeToolList 列出名字，空清单说「暂无」', () => {
+    expect(describeToolList(base)).toBe('a、b');
+    expect(describeToolList({ ...base, tools: [] })).toBe('暂无已装配的工具');
+    expect(describeToolList(null)).toBe('暂无已装配的工具');
+  });
+
+  it('describeMcpError 原样返回上游错误，不改写', () => {
+    const raw = 'filesystem: spawn npx ENOENT';
+    expect(describeMcpError({ ...base, mcp_error: raw })).toBe(raw);
+  });
+
+  it('describeMcpError：null / 缺失 = 没有错误；空串 = 有错误但没给原因', () => {
+    expect(describeMcpError({ ...base, mcp_error: null })).toBe('');
+    expect(describeMcpError(base)).toBe('');
+    expect(describeMcpError({ ...base, mcp_error: undefined })).toBe('');
+    // 空串是「配了但不通、但服务端没给原因」，不能和「没有错误」混为一谈
+    expect(describeMcpError({ ...base, mcp_error: '' })).toBe('（服务端没有给出具体原因）');
+    expect(describeMcpError(null)).toBe('');
+  });
+
+  it('describeSandboxCapability 与联网搜索同一套语义', () => {
+    expect(describeSandboxCapability(base)).toBe('已启用');
+    expect(describeSandboxCapability({ ...base, sandbox: false })).toBe('未启用');
+    expect(describeSandboxCapability(null)).toBe('未知');
+    expect(describeSandboxCapability(undefined)).toBe('未知');
   });
 });

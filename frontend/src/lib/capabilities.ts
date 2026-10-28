@@ -114,3 +114,79 @@ export function describeMcpServers(capabilities: Capabilities | null | undefined
   const servers = capabilities?.mcp_servers ?? [];
   return servers.map((server) => server.name).join('、');
 }
+
+/**
+ * MCP server 的明细行（设置页「运行时能力」分区用）。
+ *
+ * 与 `describeMcpServers`（只有名字、给悬浮提示用）不同：这里要能看出**每个 server
+ * 各带了哪些工具**，否则「2 个 server · 3 个工具」这行字仍然解释不了「我要的那个工具
+ * 到底在不在」。
+ *
+ * 返回数组而不是拼好的字符串：调用方要用 `name` 做 React key，拼成一个大字符串
+ * 就只剩一层 `<p>`，读屏也念不出一对一的关系。
+ */
+export interface McpServerSummary {
+  name: string;
+  /** 该 server 的工具数。 */
+  toolCount: number;
+  /** 工具名清单（用于展开显示）。 */
+  tools: string[];
+}
+
+export function summarizeMcpServers(
+  capabilities: Capabilities | null | undefined,
+): McpServerSummary[] {
+  return (capabilities?.mcp_servers ?? []).map((server) => ({
+    name: server.name,
+    toolCount: server.tools.length,
+    tools: [...server.tools],
+  }));
+}
+
+/**
+ * 一个 server 的工具清单文案。
+ *
+ * 没有工具时说「未提供工具」而不是空串：一个名字列在那里、后面什么都没有，读起来像
+ * 渲染坏了，也让人分不清「这个 server 就是没有工具」和「前端没拿到工具」。
+ */
+export function describeServerTools(tools: readonly string[]): string {
+  return tools.length > 0 ? tools.join('、') : '未提供工具';
+}
+
+/**
+ * 工具清单的整体文案。
+ *
+ * 与 `describeToolCount` 分开：那个只给数量（「3 个」），这里要**列出名字**。
+ * 数量回答「有没有」，名字回答「有没有我需要的那个」——排障时后者才是问题。
+ */
+export function describeToolList(capabilities: Capabilities | null | undefined): string {
+  const tools = capabilities?.tools ?? [];
+  return tools.length > 0 ? tools.join('、') : '暂无已装配的工具';
+}
+
+/**
+ * `mcp_error` 的展示文案。
+ *
+ * 原文照抄，不加任何前缀：这句话是给运维看的，它是上游（MCP 客户端 / server 启动器）
+ * 给出的原始错误，改写会丢掉排查最关键的细节（连接串、退出码、包名）。
+ * 保留 `null` 与空串的区分：前者是「没有错误」，后者是「有错误但原因没给」，
+ * 后者也要能被说出来，否则「配了但不通」仍然是哑的。
+ */
+export function describeMcpError(capabilities: Capabilities | null | undefined): string {
+  if (!capabilities) return '';
+  const error = capabilities.mcp_error;
+  if (error === undefined || error === null) return '';
+  return error || '（服务端没有给出具体原因）';
+}
+
+/**
+ * 沙箱能力文案。
+ *
+ * 与 `describeWebSearchCapability` 同一套语义（未知 / 已启用 / 未启用），单独一个函数
+ * 而不是传参复用：这两个字段以后可能演化出不同的解释（沙箱还有「按用户配额关闭」这类
+ * 中间态），共用会逼着以后加分支参数。
+ */
+export function describeSandboxCapability(capabilities: Capabilities | null | undefined): string {
+  if (!capabilities) return '未知';
+  return capabilities.sandbox ? '已启用' : '未启用';
+}

@@ -13,9 +13,9 @@
  * 顺序即页面顺序：账号在最上（最先被找）。
  */
 
-import { AlignLeft, Sun, User, type LucideIcon } from 'lucide-react';
+import { AlignLeft, Cpu, Sun, User, type LucideIcon } from 'lucide-react';
 
-export type SettingsSectionId = 'account' | 'appearance' | 'conversation';
+export type SettingsSectionId = 'account' | 'appearance' | 'conversation' | 'capabilities';
 
 export interface SettingsSection {
   id: SettingsSectionId;
@@ -43,6 +43,20 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
     label: '对话显示',
     description: '工作步骤露多少、什么时候收起，以及用量读数显示多少',
     Icon: AlignLeft,
+  },
+  /*
+   * 运行时能力。
+   *
+   * 这一项严格说也是「信息展示」，破例放进来的理由是它**解释别的功能的缺失**：
+   * 没有联网搜索时起步建议里搜不到「搜索最新动态」，用户只会以为这个助手不会搜索；
+   * MCP 配了但连不上时那些工具直接从列表里消失，运维会以为配置从来没生效。
+   * 把状态摆出来，问题就从「功能缺失」变成「部署没配」——前者用户没法处理，后者可以。
+   */
+  {
+    id: 'capabilities',
+    label: '运行时能力',
+    description: '当前服务端实际装配了什么：联网搜索、隔离执行环境、工具与 MCP',
+    Icon: Cpu,
   },
 ];
 

@@ -6,6 +6,8 @@
  */
 
 import type {
+  ApprovalState,
+  ApprovedToolCallRecord,
   ChatRole,
   ClarificationState,
   CompactionState,
@@ -66,6 +68,15 @@ const MESSAGE_PAYLOAD_KEYS = [
   'thinkingMs',
   'toolCalls',
   'clarification',
+  /*
+   * 待审批的工具调用。
+   *
+   * 少这一项时审批轮**出不了本机**：设备 A 收到审批轮后 push 上行，payload 里没有
+   * `approval`，设备 B 拉下来得到的是一条空正文、无审批的助手消息——那一轮被拦下的
+   * 调用在 B 上永远无法执行（续跑要靠客户端回放 `tool_calls` 快照）。它不是显示层的
+   * 装饰，而是跨设备继续这一轮的唯一凭据，与其余业务字段同级。
+   */
+  'approval',
   'fallback',
   'compaction',
   'usage',
@@ -174,6 +185,46 @@ function sanitizeClarification(value: unknown): ClarificationState | undefined {
   return { toolCallId, question, options, allowCustomInput };
 }
 
+/**
+ * 待审批调用的形状校验。
+ *
+ * 与 `sanitizeToolCalls` 刻意不同：那里「坏的那条丢掉、好的留下」，这里**只要有一条
+ * 不合法就整块丢掉**。理由是这个结构唯一用途是**逐条表态**——少一条调用，用户就会在
+ * 一个不完整的清单上按「提交决定」，提交出去的决定集合与那一轮真实被拦下的调用对不上，
+ * 而卡片本身的文案（「以下工具调用尚未执行」）会让用户以为自己看到了全部。半个审批框
+ * 比没有审批框更危险：没有框至少还能靠报错发现异常。
+ *
+ * 一条都没有同样整块丢掉：`toolCalls: []` 会渲染出一张「0 条待确认」、无法提交、
+ * 也无法忽略的卡片。
+ *
+ * 返回 `undefined` 表示「这一行没有可用的审批数据」，调用方据此**不动**本地字段；
+ * 而显式的 `null` 是另一回事，见 `sanitizeMessagePayload` 里对它的处理。
+ */
+function sanitizeApproval(value: unknown): ApprovalState | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  if (!Array.isArray(raw.toolCalls) || raw.toolCalls.length === 0) return undefined;
+
+  const toolCalls: ApprovedToolCallRecord[] = [];
+  for (const item of raw.toolCalls) {
+    const call = asRecord(item);
+    if (!call) return undefined;
+    const toolCallId = typeof call.toolCallId === 'string' && call.toolCallId ? call.toolCallId : undefined;
+    const toolName = typeof call.toolName === 'string' && call.toolName ? call.toolName : undefined;
+    const argsText = typeof call.argsText === 'string' ? call.argsText : undefined;
+    // description 缺失不致命（退化成空串会让卡片少一行，但决定仍可做出）；
+    // riskLevel 缺失同样退化成空串，由 `describeRisk` 走「未知风险、按最高风险呈现」，
+    // 这是安全的一侧，不需要因此丢掉整块。
+    const description = typeof call.description === 'string' ? call.description : '';
+    const riskLevel = typeof call.riskLevel === 'string' ? call.riskLevel : '';
+    // 前三个是提交决定的必需键：`toolCallId` 是决定的 key，缺了就没法表态；
+    // `toolName` / `argsText` 是用户判断后果的唯一依据，缺了就是让用户盲签。
+    if (toolCallId === undefined || toolName === undefined || argsText === undefined) return undefined;
+    toolCalls.push({ toolCallId, toolName, argsText, description, riskLevel });
+  }
+  return { toolCalls };
+}
+
 function sanitizeFallback(value: unknown): FallbackState | undefined {
   const raw = asRecord(value);
   if (!raw) return undefined;
@@ -277,6 +328,26 @@ export function sanitizeMessagePayload(value: unknown): Partial<MessageRecord> {
   if (toolCalls !== undefined) sanitized.toolCalls = toolCalls;
   const clarification = sanitizeClarification(raw.clarification);
   if (clarification !== undefined) sanitized.clarification = clarification;
+  const approval = sanitizeApproval(raw.approval);
+  if (approval !== undefined) sanitized.approval = approval;
+  /*
+   * 显式 `null` = 另一台设备**忽略了**这次审批，必须照写下去。
+   *
+   * 这是唯一一个「缺席」与「null」语义相反的字段，值得单独一段说明：
+   *
+   * - 字段缺席（老记录 / 服务端没带）→ 不动本地的 `approval`，因为 `fromMessageRow`
+   *   是 `{...local, ...payload}`，写 undefined 会把本地值抹掉、而且区分不出「服务端
+   *   没说」与「服务端说没有」；
+   * - 显式 `null` → **写下去**。它是清除信号：设备 B 忽略审批后推
+   *   `approval: null` 上行，设备 A 拉到这一行时若不落这个 null，本地那条
+   *   `{toolCalls: [...]}` 就会因为对象展开而存活下来——卡片在 A 上永远删不掉，
+   *   再点「忽略」也只是重复同一次无效的本地清理。
+   *
+   * 不写 `sanitizeApproval` 里返回 null：那个函数的返回值约定是
+   * 「有可用结构 / 没有可用结构」，把 null 混进去会让「坏数据」和「清除指令」
+   * 在调用方看来一模一样。
+   */
+  if (raw.approval === null) sanitized.approval = null;
   const fallback = sanitizeFallback(raw.fallback);
   if (fallback !== undefined) sanitized.fallback = fallback;
   const compaction = sanitizeCompaction(raw.compaction);

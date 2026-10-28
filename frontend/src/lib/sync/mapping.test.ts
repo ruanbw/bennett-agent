@@ -70,6 +70,15 @@ const messageRow = (overrides: Partial<MessageRow> = {}): MessageRow => ({
   ...overrides,
 });
 
+/** 一条待审批调用。跨设备那组用例要一个完整形状，抽出来避免每处各写一遍。 */
+const dangerousApprovalCall = {
+  toolCallId: 'call_1',
+  toolName: 'delete_document',
+  argsText: '{"document_id": 42}',
+  description: '删除一篇知识库文档（不可撤销）',
+  riskLevel: 'dangerous',
+};
+
 describe('toConversationPushRow', () => {
   it('isPinned 归一成布尔、deleted 缺省为 false', () => {
     expect(toConversationPushRow(session({ isPinned: 1 }))).toMatchObject({
@@ -104,6 +113,48 @@ describe('toMessagePushRow', () => {
 
   it('会话 id 映射成 conversation_id', () => {
     expect(toMessagePushRow(message({ sessionId: 'sess_z' })).conversation_id).toBe('sess_z');
+  });
+
+  /**
+   * M4：审批轮必须能出本机。
+   *
+   * 这是「白名单」最容易复发的一类 bug——新增业务字段时忘了加进名单，字段在本机
+   * 一切正常（落库、渲染都对），只在**换一台设备**时才消失。所以断言直接盯住 payload：
+   * 一旦有人把 `approval` 从名单里删掉，用例立刻失败。
+   */
+  it('待审批的调用进 payload：跨设备才能看到审批卡片并继续这一轮', () => {
+    const row = toMessagePushRow(
+      message({
+        approval: {
+          toolCalls: [
+            {
+              toolCallId: 'call_1',
+              toolName: 'delete_document',
+              argsText: '{"document_id": 42}',
+              description: '删除一篇知识库文档（不可撤销）',
+              riskLevel: 'dangerous',
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(row.payload.approval).toEqual({
+      toolCalls: [
+        {
+          toolCallId: 'call_1',
+          toolName: 'delete_document',
+          argsText: '{"document_id": 42}',
+          description: '删除一篇知识库文档（不可撤销）',
+          riskLevel: 'dangerous',
+        },
+      ],
+    });
+  });
+
+  it('没有待审批时 payload 里不出现 approval 键（老记录不会凭空多出一个 null）', () => {
+    expect(toMessagePushRow(message())).not.toHaveProperty('payload.approval');
+    expect(toMessagePushRow(message({ approval: null })).payload).toHaveProperty('approval', null);
   });
 });
 
@@ -360,5 +411,179 @@ describe('sanitizeMessagePayload：compaction', () => {
   it('非对象一律当缺席（老服务端不带这个字段）', () => {
     expect(sanitizeMessagePayload({ compaction: 'oops' }).compaction).toBeUndefined();
     expect(sanitizeMessagePayload({}).compaction).toBeUndefined();
+  });
+});
+
+describe('sanitizeMessagePayload：approval（M4 跨设备）', () => {
+  const call = (overrides: Record<string, unknown> = {}) => ({
+    toolCallId: 'call_1',
+    toolName: 'delete_document',
+    argsText: '{"document_id": 42}',
+    description: '删除一篇知识库文档（不可撤销）',
+    riskLevel: 'dangerous',
+    ...overrides,
+  });
+
+  it('合法记录原样还原：另一台设备据此渲染审批卡片并续跑', () => {
+    const payload = sanitizeMessagePayload({ approval: { toolCalls: [call()] } });
+
+    expect(payload.approval).toEqual({
+      toolCalls: [
+        {
+          toolCallId: 'call_1',
+          toolName: 'delete_document',
+          argsText: '{"document_id": 42}',
+          description: '删除一篇知识库文档（不可撤销）',
+          riskLevel: 'dangerous',
+        },
+      ],
+    });
+  });
+
+  it('push → pull 往返一致：白名单与守卫两头都对上才有效', () => {
+    const original = {
+      approval: { toolCalls: [call({ toolCallId: 'call_9', riskLevel: 'safe_write' })] },
+    };
+    const pushed = toMessagePushRow(message(original)).payload;
+    // 经过一次 JSON 往返（真实同步就是这样过了一遍网络）
+    const pulled = sanitizeMessagePayload(JSON.parse(JSON.stringify(pushed)));
+
+    expect(pulled.approval).toEqual(original.approval);
+  });
+
+  it('只要有一条调用坏掉就整块丢掉：半个审批框比没有更危险', () => {
+    // 少一条调用 → 用户在一个不完整的清单上「提交决定」，
+    // 提交出去的决定集合与那一轮真实被拦下的调用对不上
+    expect(
+      sanitizeMessagePayload({
+        approval: { toolCalls: [call(), { toolCallId: 'call_2', toolName: 'x' }] },
+      }).approval,
+    ).toBeUndefined();
+    expect(sanitizeMessagePayload({ approval: { toolCalls: [call(), 'nope'] } }).approval).toBeUndefined();
+    expect(sanitizeMessagePayload({ approval: { toolCalls: [call(), null] } }).approval).toBeUndefined();
+  });
+
+  it('缺 toolCallId / toolName / argsText 的那条会让整块失效（三个都是判断与表态的必需项）', () => {
+    for (const key of ['toolCallId', 'toolName', 'argsText']) {
+      expect(
+        sanitizeMessagePayload({ approval: { toolCalls: [call({ [key]: undefined })] } }).approval,
+        `缺 ${key} 时应整块丢掉`,
+      ).toBeUndefined();
+      expect(
+        sanitizeMessagePayload({ approval: { toolCalls: [call({ [key]: 42 })] } }).approval,
+        `${key} 类型不对时应整块丢掉`,
+      ).toBeUndefined();
+    }
+  });
+
+  it('空清单整块丢掉：0 条待确认的卡片既不能提交也不能忽略', () => {
+    expect(sanitizeMessagePayload({ approval: { toolCalls: [] } }).approval).toBeUndefined();
+    expect(sanitizeMessagePayload({ approval: {} }).approval).toBeUndefined();
+    expect(sanitizeMessagePayload({ approval: { toolCalls: 'nope' } }).approval).toBeUndefined();
+    expect(sanitizeMessagePayload({ approval: 'oops' }).approval).toBeUndefined();
+  });
+
+  it('坏数据（非 null）一律当缺席，不动本地字段', () => {
+    // 与下面那条对照：只有**显式 null** 才是清除信号，其余坏形状都不能冒充它，
+    // 否则一条脏数据就能把本机还挂着的审批卡片抹掉。
+    for (const broken of [{}, { toolCalls: [] }, { toolCalls: 'nope' }, 'oops', 42]) {
+      expect(sanitizeMessagePayload({ approval: broken })).not.toHaveProperty('approval');
+    }
+  });
+
+  it('description / riskLevel 缺失时退化成空串，不因此丢掉整块', () => {
+    // 少了风险等级会走「未知风险、按最高风险呈现」，是安全的一侧；
+    // 少了说明只是卡片少一行，决定仍然可以做出。
+    const payload = sanitizeMessagePayload({
+      approval: {
+        toolCalls: [{ toolCallId: 'c1', toolName: 'shell', argsText: '{"cmd":"ls"}' }],
+      },
+    });
+
+    expect(payload.approval).toEqual({
+      toolCalls: [{ toolCallId: 'c1', toolName: 'shell', argsText: '{"cmd":"ls"}', description: '', riskLevel: '' }],
+    });
+  });
+
+  it('与 toolCalls 的容错策略不同：toolCalls 丢坏条，approval 丢整块', () => {
+    const payload = sanitizeMessagePayload({
+      toolCalls: [
+        { toolCallId: 'c1', toolName: 'search', argsText: '{}', status: 'complete' },
+        { toolCallId: 'c2', toolName: 'search' },
+      ],
+      approval: { toolCalls: [call(), { toolCallId: 'c3', toolName: 'x' }] },
+    });
+
+    // 执行历史可以只留能看懂的；审批清单不行（漏一条 = 用户以为看到了全部）
+    expect(payload.toolCalls).toHaveLength(1);
+    expect(payload.approval).toBeUndefined();
+  });
+});
+
+/**
+ * M3 × M4：「忽略审批」必须能跨设备生效。
+ *
+ * 这两块单独看都对，合起来有个洞：M4 把 `approval` 加进白名单后，审批轮会带着
+ * `approval.toolCalls` 推到服务端；设备 B 忽略它时如果**只**把本地的 `approval` 清掉、
+ * 不推一个 `approval: null` 上行，那么设备 A 下次 pull 拿到的仍是带 `toolCalls` 的版本
+ * ——卡片又冒出来，而且再点「忽略」也一样（服务端那份从来没被清过）。
+ *
+ * 所以 `approval: null` 必须是**可同步的清除信号**，而不是一个被守卫丢掉的空值。
+ * 这一组用例把两端都钉住：推出去的 payload 里要真有 `approval: null`，拉回来时又要
+ * 能让本地卡片消失。
+ */
+describe('approval: null 是跨设备的清除信号', () => {
+  it('toMessagePushRow 把 approval: null 原样带进 payload（不能被当成「没有字段」跳过）', () => {
+    const row = toMessagePushRow(message({ approval: null }));
+
+    // 白名单循环用的是 `record[key] !== undefined`：null 会通过，这正是我们要的。
+    // 如果哪天有人把它改成 truthy 判断，清除信号就会被静默丢掉，这条会失败。
+    expect(row.payload).toHaveProperty('approval', null);
+  });
+
+  it('approval 缺席（老记录）时 payload 里就没有这个键', () => {
+    expect(toMessagePushRow(message())).not.toHaveProperty('payload.approval');
+  });
+
+  it('sanitizeMessagePayload 遇 approval: null 不报错，也不造一张空卡片出来', () => {
+    const payload = sanitizeMessagePayload({ content: 'x', approval: null });
+
+    expect(payload.content).toBe('x');
+    // 关键：不能返回 { toolCalls: [] } 这种半成品——那会渲染出一张
+    // 「0 条待确认」、既不能提交也不能忽略的卡片。
+    // 同时它必须是显式 `null`（清除信号），不能是 undefined（=「服务端没说」）。
+    expect(payload.approval).toBeNull();
+  });
+
+  it('拉到一个 approval: null 时，本地的旧审批必须被清掉', () => {
+    // 模拟设备 A：本地已经有一条带审批的消息
+    const local = message({
+      approval: { toolCalls: [dangerousApprovalCall] },
+      syncState: 'synced',
+      clientRev: 3,
+    });
+    // 设备 B 忽略后推上去的那一行（clientRev 前进了，approval 是 null）
+    const remote = messageRow({
+      client_rev: 4,
+      payload: { content: '回答', approval: null },
+    });
+
+    const merged = fromMessageRow(remote, local);
+
+    // 卡片要消失。若 sanitizeApproval 把 null 丢掉，`{...local, ...payload}` 会让
+    // local.approval 活下来 —— 设备 A 的卡片就永远删不掉。
+    expect(merged.approval).toBeNull();
+  });
+
+  it('反过来：拉到带 toolCalls 的行时，本地被清掉的审批会重新出现', () => {
+    const local = message({ approval: null, syncState: 'synced', clientRev: 2 });
+    const remote = messageRow({
+      client_rev: 5,
+      payload: { content: '回答', approval: { toolCalls: [dangerousApprovalCall] } },
+    });
+
+    expect(fromMessageRow(remote, local).approval).toEqual({
+      toolCalls: [dangerousApprovalCall],
+    });
   });
 });

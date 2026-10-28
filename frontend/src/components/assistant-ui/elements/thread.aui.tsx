@@ -536,7 +536,7 @@ const Composer: FC<{
   // `ComposerStats` 内部做一次遍历（它拿到的也是这个原数组）。
   const messages = useAuiState((s) => s.thread.messages);
 
-  // 附件暂不支持（后端只接受文本）。有附件时直接禁用发送，
+  // 本项目暂未开放附件上传。有附件时直接禁用发送，
   // 使「贴了图然后被静默丢掉」不可能发生——只靠提示语容易被忽略。
   const attachmentCount = useAuiState((s) => s.composer.attachments.length);
   const blockedByAttachments = attachmentCount > 0;

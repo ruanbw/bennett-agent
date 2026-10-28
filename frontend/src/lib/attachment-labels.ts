@@ -63,8 +63,15 @@ export function attachmentUploadError(message?: string | null): string {
  *
  * 附件入口已经禁用，但粘贴与拖拽仍可能绕过按钮。此前这些文件被静默忽略：用户以为
  * 图已经带上了。提示必须在他动作发生的这一刻出现，而不是等到发送被禁用。
+ *
+ * ## 为什么不说「后端只接受文本」
+ *
+ * 后端拒绝非文本消息是**正确的协议边界**（见 `app/schemas/chat.py`），不是缺陷；
+ * 但把这句话摆在用户面前，读起来像是「部署有问题，去催运维」。而实际情况是这个产品
+ * 本身就没开放这个功能。改成「本项目暂未开放附件上传」——客观陈述「没有」，
+ * 不暗示任何一方坏了。
  */
 export function attachmentUnsupportedMessage(count: number): string {
-  if (count > 1) return `附件暂不支持：收到 ${count} 个文件，后端目前只接受文本。`;
-  return '附件暂不支持：后端目前只接受文本。';
+  if (count > 1) return `本项目暂未开放附件上传：收到 ${count} 个文件，没有添加。`;
+  return '本项目暂未开放附件上传。';
 }

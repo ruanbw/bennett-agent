@@ -64,7 +64,14 @@ describe('附件操作文案', () => {
   });
 
   it('粘贴/拖入文件的提示带上文件数', () => {
-    expect(attachmentUnsupportedMessage(1)).toContain('只接受文本');
+    expect(attachmentUnsupportedMessage(1)).toContain('暂未开放');
     expect(attachmentUnsupportedMessage(3)).toContain('3 个文件');
+  });
+
+  it('不把原因说成「后端只接受文本」：那是把功能缺失说成部署缺陷', () => {
+    for (const count of [1, 2, 5]) {
+      expect(attachmentUnsupportedMessage(count)).not.toContain('后端');
+      expect(attachmentUnsupportedMessage(count)).toContain('暂未开放');
+    }
   });
 });

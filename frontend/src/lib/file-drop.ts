@@ -34,12 +34,12 @@ export function isInsideComposerRegion(target: EventTarget | null): boolean {
 /**
  * 拖到界面其它地方时的提示。
  *
- * 说清两件事：文件没被接受（否则用户以为加上了），以及去哪里能用它——当前版本只接受
- * 文本，粘贴文本或直接描述需求。
+ * 说清两件事：文件没被接受（否则用户以为加上了），以及**当前没有这个功能**——
+ * 不是「后端坏了」，所以文案里不提后端（理由见 `attachmentUnsupportedMessage`）。
  */
 export function foreignFileDropMessage(count: number): string {
   const files = count > 1 ? `${count} 个文件` : '文件';
-  return `附件暂不支持：拖入的${files}没有添加，后端目前只接受文本。`;
+  return `本项目暂未开放附件上传：拖入的${files}没有添加。`;
 }
 
 /**

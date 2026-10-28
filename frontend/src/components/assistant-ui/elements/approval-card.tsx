@@ -1,7 +1,12 @@
-import { useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { ApprovedToolCallRecord } from '@/types';
+import {
+  approvalAnnouncement,
+  approvalBatchSignature,
+  approvalFocusTarget,
+} from './approval-focus';
 
 /**
  * 工具审批卡片。
@@ -79,16 +84,21 @@ function prettyArgs(argsText: string): string {
 
 export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardProps) {
   const titleId = useId();
+  const announcementId = useId();
   const [decisions, setDecisions] = useState<Decisions>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDangerous, setConfirmingDangerous] = useState(false);
   // 同一个事件循环里的两次点击都在 React 提交 state 之前：ref 才是「只提交一次」的闸门。
   const submittingRef = useRef(false);
+  /** 卡片容器：首次出现时焦点落在这里（不是「批准」按钮，理由见 `approvalFocusTarget`）。 */
+  const containerRef = useRef<HTMLDivElement>(null);
+  /** 已经接管过焦点的那一批签名；用来挡住后续重渲染的重复抢焦点。 */
+  const focusedSignatureRef = useRef<string | null>(null);
 
   // 换了一批调用就重置（渲染期重置，避免 effect 里级联 setState）
   const signature = useMemo(
-    () => toolCalls.map((call) => call.toolCallId).join('|'),
+    () => approvalBatchSignature(toolCalls),
     [toolCalls],
   );
   const [prevSignature, setPrevSignature] = useState(signature);
@@ -99,6 +109,23 @@ export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardPro
     setSubmitting(false);
     setConfirmingDangerous(false);
   }
+
+  /*
+   * 卡片出现时把焦点从输入框移到卡片上。
+   *
+   * 不接管的话，正在打字的键盘用户完全感知不到这条审批请求：焦点还在 textarea，他继续
+   * 按 Enter 就会**发出一条新的普通提问**，而待审批的那一轮被搁置在一边。读屏用户的
+   * 处境更差——卡片是静默出现的，没有任何播报。
+   *
+   * 落点是容器而不是「批准」按钮：见 `approvalFocusTarget` 里关于「误触回车 = 执行
+   * 一个没有 undo 的删除」的说明。只在「第一次见到这一批调用」时接管，否则用户按完
+   * 「拒绝」后的第一次重渲染就把焦点抢回去了。
+   */
+  useEffect(() => {
+    if (approvalFocusTarget(focusedSignatureRef.current, signature) !== 'container') return;
+    focusedSignatureRef.current = signature;
+    containerRef.current?.focus();
+  }, [signature]);
 
   const undecided = toolCalls.filter((call) => !decisions[call.toolCallId]);
   const approveCount = toolCalls.filter((call) => decisions[call.toolCallId] === 'approve').length;
@@ -150,10 +177,29 @@ export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardPro
 
   return (
     <div
+      // `tabIndex={-1}`：可被脚本聚焦（焦点接管要用），但不进 Tab 序列
+      // （用户 Tab 一遍时不该先落到整块卡片上再走一遍里面的按钮）。
+      ref={containerRef}
+      tabIndex={-1}
       role="group"
       aria-labelledby={titleId}
-      className="my-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2.5"
+      aria-describedby={announcementId}
+      // 聚焦时不画整块的外圈：焦点落在这里是「转移注意力」，不是「这里可以按」
+      className="my-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2.5 focus:outline-none"
     >
+      {/*
+        即时播报。卡片是在用户打字时**静默**插进页面的：没有这一块，读屏用户完全
+        不知道有工具调用被拦下来等着他表态，键盘用户也只会看到光标毫无理由地跳走。
+
+        `role="alert"` 是隐式 assertive 实时区域，插入节点时就会播报；文案自己说清
+        「几条 / 发生了什么 / 批准后才执行」（见 `approvalAnnouncement`），只念
+        「需要审批」会让用户不知道该按几次键。视觉上不占位（sr-only）——卡片头部已经
+        有同样意思的可见文案，重复一遍只是多一行字。
+      */}
+      <p role="alert" id={announcementId} className="sr-only">
+        {approvalAnnouncement(toolCalls.length)}
+      </p>
+
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-500" />
         <div className="min-w-0 flex-1">

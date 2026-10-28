@@ -62,10 +62,13 @@ describe('shouldBlockWindowFileDrop', () => {
 });
 
 describe('foreignFileDropMessage', () => {
-  it('说清「没加上」以及当前只接受文本', () => {
+  it('说清「没加上」，并且把原因说成「暂未开放」而不是「后端只接受文本」', () => {
     const one = foreignFileDropMessage(1);
     expect(one).toContain('没有添加');
-    expect(one).toContain('只接受文本');
+    expect(one).toContain('暂未开放');
+    // 「后端只接受文本」会让用户以为这是部署缺陷、去催运维；
+    // 真实情况是这个产品还没开放该功能。
+    expect(one).not.toContain('后端');
 
     expect(foreignFileDropMessage(3)).toContain('3 个文件');
   });

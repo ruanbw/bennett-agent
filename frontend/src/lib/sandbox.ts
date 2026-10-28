@@ -30,8 +30,40 @@ export interface SandboxStatus {
   state: string;
   /** 租约到期时间（服务端给的字符串）；没给就是 null，前端不自己推算。 */
   expires_at: string | null;
-  /** 机器销毁时导出的产物地址；还在跑或没有产物时为 null。 */
+  /**
+   * 机器销毁时导出的产物**键**（不是可直接打开的 URL）。
+   *
+   * 形如 `sbx_abc/workspace.tar.gz`。要拿到能点的地址必须走
+   * `GET /api/sandbox/artifacts`（预签名、有时效），前端不拼存储路径也不猜桶名。
+   * 界面上的产物列表一律以那个端点为准，这个字段只用来判断「有没有产物值得去查」。
+   */
   artifact_uri: string | null;
+}
+
+/**
+ * 一个可下载的产物。
+ *
+ * 字段名是线上契约（snake_case），与 `/api/sandbox/artifacts` 的响应对齐。
+ */
+export interface SandboxArtifact {
+  /** 文件名（已由服务端展开到工作目录层面，可直接显示）。 */
+  name: string;
+  size_bytes: number;
+  /**
+   * 预签名下载地址。
+   *
+   * **有时效**（同响应里的 `expires_at`），所以不能缓存进消息、也不能拼路径——过期后
+   * 唯一的出路是重新请求这个端点。直接给浏览器用（`<a href>` / `window.open`）。
+   */
+  download_url: string;
+  /** 这个 URL 的失效时刻（服务端给的字符串）；给它是因为界面要能解释「点了 403」。 */
+  expires_at: string;
+}
+
+/** `/api/sandbox/artifacts` 的完整响应。 */
+export interface SandboxArtifactsResult {
+  state: SandboxStatus['state'] | null;
+  artifacts: SandboxArtifact[];
 }
 
 /**
@@ -96,4 +128,120 @@ function parseSandboxStatus(data: unknown): SandboxStatus | null {
     artifact_uri:
       typeof record.artifact_uri === 'string' && record.artifact_uri ? record.artifact_uri : null,
   };
+}
+
+/**
+ * 查询「我的电脑」里能下载的产物。
+ *
+ * 与 `/status` 分开成两条请求：状态是**每次打开面板都要知道**的轻量快照，产物则带着
+ * 预签名 URL（服务端要跟对象存储换一次签名），没必要为一次状态轮询跟着签一批链接。
+ *
+ * 404 与 `/status` 同义：这个会话没有机器（或服务端没开沙箱）→ 空列表。返回空列表而
+ * 不是 null，调用方就不用为「没有机器」和「机器还在建、暂无产物」写两套分支。
+ */
+export async function fetchSandboxArtifacts(sessionId: string): Promise<SandboxArtifactsResult> {
+  if (!isSessionIdSendable(sessionId)) return { state: null, artifacts: [] };
+
+  const res = await apiFetch(
+    `/api/sandbox/artifacts?session_id=${encodeURIComponent(sessionId)}`,
+  );
+  if (res.status === 404) return { state: null, artifacts: [] };
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  return parseSandboxArtifacts(await res.json());
+}
+
+/**
+ * 收窄产物列表。
+ *
+ * 逐条守卫而不是整块丢弃：一条坏记录（服务端换存储实现、某个键名拼错）不该让用户的
+ * 其余产物一起从界面上消失。但 `download_url` 缺失的那条**必须丢**——没有地址的条目
+ * 点了只会什么也不发生，比不显示更糟。
+ */
+function parseSandboxArtifacts(data: unknown): SandboxArtifactsResult {
+  if (!data || typeof data !== 'object') return { state: null, artifacts: [] };
+  const record = data as { state?: unknown; artifacts?: unknown };
+
+  const artifacts: SandboxArtifact[] = [];
+  if (Array.isArray(record.artifacts)) {
+    for (const entry of record.artifacts) {
+      if (!entry || typeof entry !== 'object') continue;
+      const raw = entry as Partial<SandboxArtifact>;
+      const name = typeof raw.name === 'string' && raw.name ? raw.name : undefined;
+      const downloadUrl =
+        typeof raw.download_url === 'string' && raw.download_url ? raw.download_url : undefined;
+      if (name === undefined || downloadUrl === undefined) continue;
+      artifacts.push({
+        name,
+        // 大小缺失/为负时退化 0：界面显示「0 B」比显示 NaN 或 undefined 更容易理解
+        size_bytes:
+          typeof raw.size_bytes === 'number' && Number.isFinite(raw.size_bytes) && raw.size_bytes >= 0
+            ? raw.size_bytes
+            : 0,
+        download_url: downloadUrl,
+        expires_at: typeof raw.expires_at === 'string' ? raw.expires_at : '',
+      });
+    }
+  }
+
+  return {
+    state: typeof record.state === 'string' && record.state ? record.state : null,
+    artifacts,
+  };
+}
+
+/**
+ * 租约状态的界面文案。
+ *
+ * 未知状态**不丢弃、也不显示成「未创建」**：后端新增一档时，一台真实存在的机器被显示成
+ * 「从未创建」会让用户以为数据没了。这里把它如实说成「状态未知」，并把原始值带上——
+ * 排障的人一眼就能看出是前端还没跟上，而不是机器真的没了。
+ */
+export function describeSandboxState(state: string | null | undefined): string {
+  switch (state) {
+    case 'provisioning':
+      return '正在启动';
+    case 'ready':
+      return '已就绪';
+    case 'paused':
+      return '已暂停';
+    case 'destroying':
+      return '正在回收';
+    case 'destroyed':
+      return '已回收';
+    case 'failed':
+      return '启动失败';
+    case 'destroy_failed':
+      return '回收失败';
+    // 没查到状态 ≠ 机器不存在：可能是还没建、也可能是这次探测失败了
+    case null:
+    case undefined:
+    case '':
+      return '未知';
+    default:
+      return `状态未知（${state}）`;
+  }
+}
+
+/**
+ * 产物大小。
+ *
+ * 用 1024 进制并保留一位小数：这里的用户在看自己机器上的文件，`1.5 MB` 比 `1572864`
+ * 更容易判断「要不要下载」。0 字节单独说「空文件」，`0 B` 看着像没算出来。
+ */
+export function formatSandboxArtifactSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '未知大小';
+  if (bytes === 0) return '空文件';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'] as const;
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  // 整数大小不摆一个没意义的 `.0`
+  const rounded = Math.round(value * 10) / 10;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${text} ${units[unitIndex]}`;
 }

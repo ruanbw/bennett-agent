@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchSandboxStatus, sendSandboxHeartbeat } from './sandbox';
+import {
+  describeSandboxState,
+  fetchSandboxArtifacts,
+  fetchSandboxStatus,
+  formatSandboxArtifactSize,
+  sendSandboxHeartbeat,
+} from './sandbox';
 
 /**
  * 沙箱客户端的两条请求：
@@ -162,5 +168,188 @@ describe('fetchSandboxStatus', () => {
     await expect(fetchSandboxStatus('')).resolves.toBeNull();
     await expect(fetchSandboxStatus('not-a-session')).resolves.toBeNull();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('fetchSandboxArtifacts', () => {
+  it('按 session_id 查询并解析产物列表（含预签名 URL 与时效）', async () => {
+    const calls = stubFetch({
+      status: 200,
+      json: async () => ({
+        session_id: SESSION_ID,
+        lease_id: 'sbx_abc',
+        state: 'destroyed',
+        artifacts: [
+          {
+            name: 'workspace.tar.gz',
+            size_bytes: 12_345,
+            download_url: 'https://storage.example/sbx_abc/workspace.tar.gz?sig=x',
+            expires_at: '2026-10-28T10:30:00+00:00',
+          },
+        ],
+      }),
+    });
+
+    await expect(fetchSandboxArtifacts(SESSION_ID)).resolves.toEqual({
+      state: 'destroyed',
+      artifacts: [
+        {
+          name: 'workspace.tar.gz',
+          size_bytes: 12_345,
+          download_url: 'https://storage.example/sbx_abc/workspace.tar.gz?sig=x',
+          expires_at: '2026-10-28T10:30:00+00:00',
+        },
+      ],
+    });
+    expect(calls[0].url).toBe(`/api/sandbox/artifacts?session_id=${SESSION_ID}`);
+  });
+
+  it('没有产物时是空列表，不是 null（调用方不必为两种「空」写两套分支）', async () => {
+    stubFetch({ status: 200, json: async () => ({ state: 'ready', artifacts: [] }) });
+
+    await expect(fetchSandboxArtifacts(SESSION_ID)).resolves.toEqual({
+      state: 'ready',
+      artifacts: [],
+    });
+  });
+
+  it('404 = 这个会话没有机器，返回空列表而不是抛错', async () => {
+    stubFetch({ ok: false, status: 404 });
+
+    await expect(fetchSandboxArtifacts(SESSION_ID)).resolves.toEqual({
+      state: null,
+      artifacts: [],
+    });
+  });
+
+  it('其余非 2xx 照旧上抛，由调用方决定怎么降级', async () => {
+    stubFetch({ ok: false, status: 502 });
+
+    await expect(fetchSandboxArtifacts(SESSION_ID)).rejects.toThrow('HTTP 502');
+  });
+
+  it('缺 download_url 的条目丢掉：点了什么也不会发生的条目不显示', async () => {
+    stubFetch({
+      status: 200,
+      json: async () => ({
+        state: 'destroyed',
+        artifacts: [
+          { name: 'no-url.tar', size_bytes: 1 },
+          { name: 'ok.tar', size_bytes: 2, download_url: 'https://x/ok', expires_at: 'e' },
+          { download_url: 'https://x/nameless' },
+          'nope',
+          null,
+        ],
+      }),
+    });
+
+    const result = await fetchSandboxArtifacts(SESSION_ID);
+
+    expect(result.artifacts.map((a) => a.name)).toEqual(['ok.tar']);
+  });
+
+  it('坏条目只丢自己，不连累同一批里的好条目', async () => {
+    stubFetch({
+      status: 200,
+      json: async () => ({
+        state: 'ready',
+        artifacts: [
+          { name: 'a.tar', size_bytes: 'big', download_url: 'https://x/a', expires_at: 'e1' },
+          { name: 'b.tar', size_bytes: 2048, download_url: 'https://x/b', expires_at: 'e2' },
+        ],
+      }),
+    });
+
+    const result = await fetchSandboxArtifacts(SESSION_ID);
+
+    // 大小类型不对退化成 0，条目本身留着（有可点的地址）
+    expect(result.artifacts).toEqual([
+      { name: 'a.tar', size_bytes: 0, download_url: 'https://x/a', expires_at: 'e1' },
+      { name: 'b.tar', size_bytes: 2048, download_url: 'https://x/b', expires_at: 'e2' },
+    ]);
+  });
+
+  it('响应不是对象或 artifacts 不是数组时不抛，返回空列表', async () => {
+    stubFetch({ status: 200, json: async () => null });
+    await expect(fetchSandboxArtifacts(SESSION_ID)).resolves.toEqual({
+      state: null,
+      artifacts: [],
+    });
+
+    stubFetch({ status: 200, json: async () => ({ state: 'ready', artifacts: 'nope' }) });
+    await expect(fetchSandboxArtifacts(SESSION_ID)).resolves.toEqual({
+      state: 'ready',
+      artifacts: [],
+    });
+  });
+
+  it('空值或形状不合法的 sessionId 不发请求', async () => {
+    const calls = stubFetch();
+
+    await expect(fetchSandboxArtifacts('')).resolves.toEqual({ state: null, artifacts: [] });
+    await expect(fetchSandboxArtifacts('not-a-session')).resolves.toEqual({
+      state: null,
+      artifacts: [],
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('describeSandboxState', () => {
+  it('七个已知状态都有中文文案', () => {
+    const known: Record<string, string> = {
+      provisioning: '正在启动',
+      ready: '已就绪',
+      paused: '已暂停',
+      destroying: '正在回收',
+      destroyed: '已回收',
+      failed: '启动失败',
+      destroy_failed: '回收失败',
+    };
+
+    for (const [state, label] of Object.entries(known)) {
+      expect(describeSandboxState(state)).toBe(label);
+    }
+  });
+
+  it('没有状态时是「未知」，不是「未创建」', () => {
+    expect(describeSandboxState(null)).toBe('未知');
+    expect(describeSandboxState(undefined)).toBe('未知');
+    expect(describeSandboxState('')).toBe('未知');
+  });
+
+  it('后端新增的状态如实带出原始值：不能显示成机器不存在', () => {
+    expect(describeSandboxState('migrating')).toBe('状态未知（migrating）');
+    expect(describeSandboxState('migrating')).toContain('migrating');
+  });
+});
+
+describe('formatSandboxArtifactSize', () => {
+  it('0 字节说「空文件」，不说 0 B（那个读数像没算出来）', () => {
+    expect(formatSandboxArtifactSize(0)).toBe('空文件');
+  });
+
+  it('小于 1KB 用字节', () => {
+    expect(formatSandboxArtifactSize(1)).toBe('1 B');
+    expect(formatSandboxArtifactSize(1023)).toBe('1023 B');
+  });
+
+  it('按 1024 进制逐级换算并保留一位小数', () => {
+    expect(formatSandboxArtifactSize(1024)).toBe('1 KB');
+    expect(formatSandboxArtifactSize(1536)).toBe('1.5 KB');
+    expect(formatSandboxArtifactSize(1024 * 1024)).toBe('1 MB');
+    expect(formatSandboxArtifactSize(12_345_678)).toBe('11.8 MB');
+    expect(formatSandboxArtifactSize(3 * 1024 ** 3)).toBe('3 GB');
+    expect(formatSandboxArtifactSize(1024 ** 4)).toBe('1 TB');
+  });
+
+  it('超大值停在 TB，不再往 PB 编一个单位', () => {
+    expect(formatSandboxArtifactSize(2048 * 1024 ** 4)).toBe('2048 TB');
+  });
+
+  it('非法值说「未知大小」，不渲染 NaN/负数', () => {
+    expect(formatSandboxArtifactSize(Number.NaN)).toBe('未知大小');
+    expect(formatSandboxArtifactSize(-1)).toBe('未知大小');
+    expect(formatSandboxArtifactSize(Number.POSITIVE_INFINITY)).toBe('未知大小');
   });
 });
