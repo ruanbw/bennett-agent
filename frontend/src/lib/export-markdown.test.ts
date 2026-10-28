@@ -564,3 +564,56 @@ describe('导出内容的 HTML 转义（L-09）', () => {
     expect(name.endsWith('.md')).toBe(true);
   });
 });
+
+/**
+ * 导出只写结构化事实，不写正文里的系统提示副本。
+ *
+ * 失败/断流时 `chat-store` 会把 `> ⚠️ **请求失败**: …` 拼进正文，同时 `error` 字段
+ * 也记着同一件事。两处都写进归档会让读文件的人无法分辨哪一句是模型说的；更要紧的是
+ * 「回答正文」里混进一条系统告警，等于把归档里的回答改写了。
+ */
+describe('导出不写入正文里的系统提示', () => {
+  it('失败轮只写结构化那一行，正文里的引用块被剥掉', () => {
+    const markdown = buildConversationMarkdown(session, [
+      userMessage(),
+      assistantMessage({
+        content: '先看索引类型。\n\n> ⚠️ **请求失败**: 网络已断开',
+        error: { message: '网络已断开', retryable: true, code: null },
+      }),
+    ])
+
+    // 结构化那行照旧在（这是归档该有的信息）
+    expect(markdown).toContain('本轮失败：网络已断开')
+    // 正文里那份副本被剥掉：引用块一条都不该剩
+    expect(markdown).not.toContain('⚠️ **请求失败**')
+    expect(markdown).toContain('先看索引类型。')
+  })
+
+  it('正文只有提示、没有真实内容的轮次仍出现在文件里（靠 error 字段）', () => {
+    const markdown = buildConversationMarkdown(session, [
+      userMessage(),
+      assistantMessage({
+        content: '\n\n> ⚠️ **请求失败**: 网络已断开',
+        error: { message: '网络已断开', retryable: true, code: null },
+      }),
+    ])
+
+    expect(markdown).toContain('本轮失败：网络已断开')
+    expect(markdown).toContain('助手 ·')
+    expect(markdown).not.toContain('⚠️ **请求失败**')
+  })
+
+  it('断流提示同样不落进归档', () => {
+    const markdown = buildConversationMarkdown(session, [
+      userMessage(),
+      assistantMessage({
+        content: '半截\n\n> ⚠️ **连接已中断**: 回复可能不完整',
+        incomplete: true,
+      }),
+    ])
+
+    expect(markdown).toContain('回复不完整（连接中断或生成异常）')
+    expect(markdown).not.toContain('⚠️ **连接已中断**')
+    expect(markdown).toContain('半截')
+  })
+})

@@ -35,6 +35,7 @@ import {
   abortRun,
   applyEvent,
   appendNotice,
+  clearApprovalForMessage,
   clearClarification,
   createRun,
   finishRun,
@@ -463,9 +464,17 @@ export async function resumeApprovalRun({
  * 与「拒绝」的区别必须清楚：拒绝是一次**明确的决定**，会带着 `false` 续跑，模型因此
  * 知道该操作没被允许并能改走别的路；而 dismiss 是「用户不想现在决定」，续跑不会发生，
  * 那一轮就停在那里。把 dismiss 也当成拒绝去续跑，用户会看到一条自己没要求的新回答。
+ *
+ * 必须**同时**清内存与库，与 `dismissClarification` 完全对称：
+ *   - 只清库：`ChatProvider` 的 `dbMessages` 是 useState 快照而非 live query，库里改了
+ *     屏幕上的列表也不会变，卡片留在原处、再点也没用；
+ *   - 只清内存：库里还带着 `approval`，刷新或下一次 pull 会把它重新拉回屏幕。
+ *
+ * 参数是**消息 id**（调用点手里只有它），所以内存态那边按消息 id 反查会话。
  */
 export function dismissApproval(messageId: string): void {
   if (!messageId) return;
+  clearApprovalForMessage(messageId);
   clearMessageApproval(messageId).catch((err: unknown) =>
     console.warn('清除待审批调用失败:', err),
   );

@@ -20,6 +20,7 @@
  */
 
 import { NOTIFY_COALESCE_MS } from './constants';
+import { formatNotice } from './message-copy';
 import { describeErrorLabel, readKnownErrorCode } from './run-error';
 import { usageTimingFromWire } from './usage-timing';
 import {
@@ -331,6 +332,10 @@ export function clearFinishedRun(sessionId: string): void {
   const run = runs.get(sessionId);
   if (!run?.finished) return;
   if (run.clarification) return;
+  // 待审批调用同理，而且更隐蔽：`ChatProvider` 的 `dbMessages` 是一份 useState 快照
+  // （不是 live query），卡片上的「忽略」只改 IndexedDB 的话屏幕上的列表仍是旧的，
+  // 卡片会一直留在那里、再点也没用。留着内存态，「忽略」才有可清的东西。
+  if (run.approval) return;
   // 落库失败时 DB 里存的是旧内容（或什么都没有）：丢掉内存态等于用旧内容替换
   // 刚流出的回复，用户会看到回复消失。必须留着，等 UI 决定怎么处理。
   if (run.persistFailed) return;
@@ -347,15 +352,56 @@ export function clearClarification(sessionId: string): void {
 }
 
 /**
+ * 清掉内存 run 上的待审批调用（与 `clearClarification` 完全对称）。
+ *
+ * 只清 IndexedDB 是不够的：`ChatProvider` 的 `dbMessages` 是 useState 快照而非 live
+ * query，库里改了也不会自动重读，卡片会留在屏幕上。内存态是覆盖层的唯一来源，
+ * 必须在这里同步清掉，`pendingApproval` 的推导才会立刻不成立。
+ */
+export function clearApproval(sessionId: string): void {
+  const run = runs.get(sessionId);
+  if (!run?.approval) return;
+  run.approval = null;
+  touch(sessionId);
+}
+
+/**
+ * 按助手消息 id 清掉内存 run 上的待审批调用。
+ *
+ * 「忽略」的调用点手里只有挂卡片那条消息的 id（`ChatProvider` 传的是
+ * `activeApproval.messageId`），而 run 是按会话存的。与其改调用方签名（`ChatProvider`
+ * 不在本次改动范围内），不如在这里按 `assistantMsgId` 找回会话——run 表里最多只有
+ * 几个正在生成/刚落库的会话，线性找一次无成本。
+ *
+ * 返回是否命中了内存 run：刷新后内存态已被丢弃时返回 false，此时卡片只能靠
+ * 「落库 + 下一次回读」消失，调用方据此知道不必再等一次同步清理。
+ */
+export function clearApprovalForMessage(messageId: string): boolean {
+  if (!messageId) return false;
+  for (const run of runs.values()) {
+    if (run.assistantMsgId !== messageId) continue;
+    clearApproval(run.sessionId);
+    return true;
+  }
+  return false;
+}
+
+/**
  * 追加一段给用户看的提示。
  *
  * 不属于协议事件的东西（网络失败、流被中断）都走这里，保证提示格式只有一处。
+ *
+ * **提示只给用户看，永远不该被当作回答的一部分**（`types.ts` 里 `FallbackState`
+ * 的不变量）。它拼在正文尾部，因此三个出口都要剥掉它：回放给模型
+ * （`chat-persistence.ts:toReplayable`）、复制回答、导出 Markdown——统一走
+ * `message-copy.ts:stripNotices`。写入形状与剥离规则因此都收敛在 `message-copy`
+ * 里，本文件只负责调用。
  */
 export function appendNotice(sessionId: string, label: string, detail?: string): void {
   const run = runs.get(sessionId);
   if (!run) return;
 
-  run.content += detail ? `\n\n> ⚠️ **${label}**: ${detail}` : `\n\n> ⚠️ **${label}**`;
+  run.content += formatNotice(label, detail);
   touch(sessionId);
 }
 
@@ -379,7 +425,7 @@ export function setRunError(sessionId: string, error: RunError): void {
   if (!hadOutput) run.sawError = true;
   // 消息里可能已经带了「请求失败：」前缀（`describeConnectionFailure` 为菜单等无标签
   // 场景加的），这里再抄一遍会出现「请求失败: 请求失败：…」。
-  run.content += `\n\n> ⚠️ **请求失败**: ${stripFailurePrefix(error.message)}`;
+  run.content += formatNotice('请求失败', stripFailurePrefix(error.message));
   touch(sessionId);
 }
 
@@ -556,7 +602,7 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       run.error = { message: event.message, retryable: event.retryable === true, code };
       // 分类决定这条提示的标题：「上下文已满」不是故障而是状态，「模型不可用」是配置
       // 变更的结果——两种都不该被写成泛泛的「错误」。正文仍用服务端给的文案。
-      run.content += `\n\n> ⚠️ **${describeErrorLabel(code)}**: ${event.message}`;
+      run.content += formatNotice(describeErrorLabel(code), event.message);
       break;
     }
 
@@ -568,9 +614,10 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
       // damaged 一经置位不再复位：丢过帧就是丢过帧，后文补上 done 也改变不了内容缺口
       run.damaged = run.damaged || event.damaged;
       run.incomplete = true;
-      run.content += event.damaged
-        ? '\n\n> ⚠️ **连接已中断**: 收到无法解析的流数据，回复可能不完整'
-        : '\n\n> ⚠️ **连接已中断**: 回复可能不完整';
+      run.content += formatNotice(
+        '连接已中断',
+        event.damaged ? '收到无法解析的流数据，回复可能不完整' : '回复可能不完整',
+      );
       break;
 
     default:

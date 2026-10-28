@@ -6,6 +6,8 @@ import {
   activeSessionIds,
   appendNotice,
   applyEvent,
+  clearApproval,
+  clearApprovalForMessage,
   clearClarification,
   clearFinishedRun,
   createRun,
@@ -935,5 +937,120 @@ describe('备用模型切换事件', () => {
     applyEvent('a', fallbackEvent())
 
     expect(getRun('a')!.fallback?.reason).toBeNull()
+  })
+})
+
+/**
+ * M3：点「忽略」之后审批卡片必须消失。
+ *
+ * 老实现的病根在 `clearFinishedRun`：它只对 clarification 保留内存态，审批轮的内存
+ * run 在回读后就被丢掉了。而 `ChatProvider` 的 `dbMessages` 是一份 useState 快照
+ * （不是 live query），「忽略」只改 IndexedDB 的话屏幕上的列表不会更新——卡片留在
+ * 原处、再点也没用。
+ */
+describe('审批卡片的忽略（M3）', () => {
+  const approvalEvent: ChatEvent = {
+    type: 'approval_required',
+    tool_calls: [
+      {
+        tool_call_id: 't1',
+        tool_name: 'delete_file',
+        args: '{"path":"a.txt"}',
+        description: '删除 a.txt',
+        risk_level: 'dangerous',
+      },
+    ],
+  }
+
+  it('有待审批调用时保留内存态（否则卡片失去依托）', () => {
+    start('a')
+    applyEvent('a', approvalEvent)
+    finishRun('a', {})
+
+    clearFinishedRun('a')
+    flushNow()
+
+    expect(getRun('a')).not.toBeNull()
+    expect(getRun('a')!.approval!.toolCalls).toHaveLength(1)
+  })
+
+  it('忽略之后内存态才真正释放（与澄清完全对称）', () => {
+    start('a')
+    applyEvent('a', approvalEvent)
+    finishRun('a', {})
+
+    clearApproval('a')
+    clearFinishedRun('a')
+    flushNow()
+
+    expect(getRun('a')).toBeNull()
+  })
+
+  it('clearApproval 清掉标记并通知订阅者（覆盖层据此重渲染）', () => {
+    start('a')
+    applyEvent('a', approvalEvent)
+    finishRun('a', {})
+    flushNow()
+
+    const listener = vi.fn()
+    subscribeRun('a', listener)
+
+    clearApproval('a')
+    flushNow()
+
+    expect(getRun('a')!.approval).toBeNull()
+    // 不通知就不会重渲染：卡片会一直停在屏幕上
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('clearApproval 对没有审批的 run 是空操作（不触发无谓重渲染）', () => {
+    start('a')
+    finishRun('a', {})
+    flushNow()
+
+    const listener = vi.fn()
+    subscribeRun('a', listener)
+
+    clearApproval('a')
+    flushNow()
+
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('clearApprovalForMessage 按消息 id 找回会话（调用点手里只有 messageId）', () => {
+    start('a', { assistantMsgId: 'msg_a' })
+    applyEvent('a', approvalEvent)
+    finishRun('a', {})
+
+    expect(clearApprovalForMessage('msg_a')).toBe(true)
+    expect(getRun('a')!.approval).toBeNull()
+  })
+
+  it('clearApprovalForMessage 找不到对应消息时返回 false（刷新后内存态已丢弃）', () => {
+    expect(clearApprovalForMessage('msg_unknown')).toBe(false)
+    expect(clearApprovalForMessage('')).toBe(false)
+  })
+})
+
+describe('提示的写入形状（一段提示 = 一行，剥离端才剥得掉）', () => {
+  it('appendNotice 把 detail 里的换行折成单行', () => {
+    start('a')
+    appendNotice('a', '请求失败', '连接被重置\n第二行说明')
+
+    // 放过换行的话这一整段在剥离端正则下匹配不到，模型会把多行告警当成自己说过的话
+    expect(getRun('a')!.content).toBe('\n\n> ⚠️ **请求失败**: 连接被重置 第二行说明')
+  })
+
+  it('setRunError 的详情同样折成单行', () => {
+    start('a')
+    setRunError('a', {
+      message: '请求失败：接口返回的不是事件流\n多次重试仍失败',
+      retryable: true,
+      code: null,
+    })
+
+    const content = getRun('a')!.content
+    expect(content).toBe('\n\n> ⚠️ **请求失败**: 接口返回的不是事件流 多次重试仍失败')
+    expect(content).not.toContain('\n第二行')
   })
 })

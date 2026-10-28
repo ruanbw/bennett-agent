@@ -33,6 +33,10 @@ vi.mock('../db', () => ({
   },
 }))
 
+/** 推送引擎：`saveFinal`/`clearMessageApproval` 尾巴上都要叫醒它。 */
+const pushSpy = vi.hoisted(() => vi.fn())
+vi.mock('./sync/engine', () => ({ requestPush: pushSpy }))
+
 const record = (
   overrides: Partial<MessageRecord> & Pick<MessageRecord, 'id' | 'role'>,
 ): MessageRecord => ({
@@ -169,26 +173,39 @@ describe('loadContextMessages', () => {
     expect(context[2]).toEqual({ role: 'user', content: '选 A' })
   })
 
-  it('本轮占位消息之外的空白助手消息仍然丢掉', async () => {
+  it('本轮占位消息（excludeId）不进历史，空白助手消息改为合成占位文本', async () => {
     dbMock.records = [
       record({ id: 'u1', role: 'user', content: '你好', createdAt: 1 }),
       record({ id: 'a-empty', role: 'assistant', content: '   ', createdAt: 2 }),
-      record({ id: 'a-current', role: 'assistant', content: '', createdAt: 3 }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+      record({ id: 'a-current', role: 'assistant', content: '', createdAt: 4 }),
     ]
 
     const { messages: context } = await loadContextMessages('s1', { excludeId: 'a-current', limit: 30 })
 
-    expect(context).toEqual([{ role: 'user', content: '你好' }])
+    // 本轮自己的空占位不进历史；a-empty 是上一轮的（用户按 Esc 停掉的那一轮），
+    // 必须留下并合成占位文本——丢掉它会让历史变成两条相邻的 user，后端 422。
+    expect(context).toEqual([
+      { role: 'user', content: '你好' },
+      { role: 'assistant', content: '（本轮未产生回答）' },
+      { role: 'user', content: '再问' },
+    ])
   })
 
   it('回放结果同样受单条上限约束', async () => {
     dbMock.records = [
-      record({ id: 'a1', role: 'assistant', content: 'x'.repeat(32_000), createdAt: 1 }),
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: 'x'.repeat(32_000), createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
     ]
 
     const { messages: context } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
 
-    expect(context[0].content).toHaveLength(CONTEXT_MAX_MESSAGE_CHARS)
+    // 中间那条被截到上限；首尾两条不受影响
+    expect(context).toHaveLength(3)
+    expect(context[1].content).toHaveLength(CONTEXT_MAX_MESSAGE_CHARS)
+    expect(context[0]).toEqual({ role: 'user', content: '问' })
+    expect(context[2]).toEqual({ role: 'user', content: '再问' })
   })
 })
 
@@ -330,7 +347,12 @@ describe('真实用量锚点（给服务端的上下文预算用）', () => {
     cacheReadTokens: 896,
   }
 
-  /** 14 条贴满单条上限的记录（合计 420k 字符，必然触发总量裁剪）；usageOn 指定谁带用量。 */
+  /**
+   * 14 条贴满单条上限的记录（合计 420k 字符，必然触发总量裁剪）；usageOn 指定谁带用量。
+   *
+   * 角色从 user 起严格交替，所以末条是 assistant —— 裁剪前要先按「末条必须是 user」
+   * 把它去掉，于是进入字符裁剪的是 13 条（首条 user 起、末条 user 收）。
+   */
   const bigHistory = (usageOn: Record<string, number>): MessageRecord[] =>
     Array.from({ length: 14 }, (_, index) => {
       const id = `m${index}`
@@ -358,8 +380,10 @@ describe('真实用量锚点（给服务端的上下文预算用）', () => {
     expect(messages[1]).toEqual({ role: 'assistant', content: '答' })
   })
 
-  it('空白的助手占位消息被滤掉后，下标跟着前移', async () => {
-    // 这是最容易错的一处：锚点下标必须按「滤过、裁过之后」的数组算
+  it('相邻的空白助手消息被合成占位文本后，下标跟着前移', async () => {
+    // 空正文的助手消息不再被丢掉（丢掉会造出相邻 user/user，后端 422），而是合成占位
+    // 文本；它和前一条助手消息同角色，于是被合并成一条。锚点下标必须按「合并、裁过
+    // 之后」的数组算——这是最容易错的一处。
     dbMock.records = [
       record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
       record({ id: 'a1', role: 'assistant', content: '答', usage, createdAt: 2 }),
@@ -370,6 +394,8 @@ describe('真实用量锚点（给服务端的上下文预算用）', () => {
     const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
 
     expect(messages).toHaveLength(3)
+    expect(messages[1].content).toContain('答')
+    expect(messages[1].content).toContain('本轮未产生回答')
     expect(anchor).toEqual({ messageIndex: 1, contextTokens: 1065 })
   })
 
@@ -404,14 +430,15 @@ describe('真实用量锚点（给服务端的上下文预算用）', () => {
   })
 
   it('锚点所在的消息被裁掉时没有锚点（不能拿一个已不在数组里的位置去算）', async () => {
-    // 14 条 × 30k 字符（单条先被截到 30k）= 420k > 380k 总量上限 → 最旧的两条被丢。
-    // 用量只挂在 m1 上，它正好被丢掉：此时必须放弃锚点、退回估算，而不是继续用一个
-    // 指向别处的下标。
+    // 末条 assistant 先被去掉（13 条），单条截到 30k = 390k > 380k 总量上限 → 再丢最旧的
+    // 一条（m0）。丢完首条变成 m1（assistant），形状对齐时又往后推一条，于是 m1 也离开
+    // 了数组。用量正好挂在 m1 上：此时必须放弃锚点、退回估算，而不是继续用一个指向
+    // 别处的下标。
     dbMock.records = bigHistory({ m1: 111 })
 
     const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
 
-    expect(messages).toHaveLength(12)
+    expect(messages).toHaveLength(11)
     expect(anchor).toBeNull()
   })
 
@@ -420,9 +447,325 @@ describe('真实用量锚点（给服务端的上下文预算用）', () => {
 
     const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'current', limit: 30 })
 
-    expect(messages).toHaveLength(12)
+    expect(messages).toHaveLength(11)
     // m7 原在第 7 位，丢掉最旧两条后落在第 5 位
     expect(anchor).toEqual({ messageIndex: 5, contextTokens: 222 })
     expect(messages[5].role).toBe('assistant')
+  })
+})
+
+/**
+ * 「会话永久 422 死锁」的回归锁。
+ *
+ * 这一组用例都是**在修之前必失败**的：它们直接断言「送出去的数组形状合法」，
+ * 而形状非法的表现是真机上的一次 422——那是用户唯一能看到的症状，且永久无法自愈
+ * （历史只增不减，下一轮同样非法）。
+ */
+describe('回放历史的形状（后端严格要求首条 user / 严格交替 / 末条 user）', () => {
+  /** 造一段 n 轮真实对话：每轮一问一答，末尾再补一条新的用户提问。长度恒为 2n+1。 */
+  const conversation = (turns: number): MessageRecord[] => {
+    const records: MessageRecord[] = []
+    for (let index = 0; index < turns; index += 1) {
+      records.push(
+        record({ id: `u${index}`, role: 'user', content: `问 ${index}`, createdAt: index * 2 }),
+        record({ id: `a${index}`, role: 'assistant', content: `答 ${index}`, createdAt: index * 2 + 1 }),
+      )
+    }
+    records.push(record({ id: 'u-latest', role: 'user', content: '最新的提问', createdAt: 9999 }))
+    return records
+  }
+
+  /** 后端 `_check_message_order` 的三条规则，逐条复刻。 */
+  const expectBackendShape = (messages: readonly ContextMessage[]): void => {
+    expect(messages.length).toBeGreaterThan(0)
+    expect(messages[0].role).toBe('user')
+    for (let index = 1; index < messages.length; index += 1) {
+      expect(messages[index].role).not.toBe(messages[index - 1].role)
+    }
+    expect(messages[messages.length - 1].role).toBe('user')
+  }
+
+  it('15 轮（31 条）切到 30 条时首条仍是 user —— slice(-30) 是老死锁的直接原因', async () => {
+    // 31 条是奇数、HISTORY_LIMIT 是偶数 30，切点必然落在 assistant 上：
+    // 老代码直接把 [assistant, user, …, user] 发出去，后端第一句就 422。
+    dbMock.records = conversation(15)
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expect(messages).toHaveLength(29)
+    expectBackendShape(messages)
+    // 保住的是最近的 29 条：最早那条「问 0」被丢掉，首条应从「答 0」之后的「问 1」开始
+    expect(messages[0]).toEqual({ role: 'user', content: '问 1' })
+    expect(messages[messages.length - 1]).toEqual({ role: 'user', content: '最新的提问' })
+  })
+
+  it('14 / 15 / 16 / 20 轮都给出合法形状（老代码只有 14 轮侥幸成立）', async () => {
+    for (const turns of [14, 15, 16, 20]) {
+      dbMock.records = conversation(turns)
+      const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+      expectBackendShape(messages)
+    }
+  })
+
+  it('发送后首 token 之前按 Esc 停止（落库空助手）不会造出相邻 user', async () => {
+    // 老代码把空助手消息整条滤掉 → [user, user] → 422「第 1 条与第 2 条都是 user」
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '第一个问题', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '', stopped: true, createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '第二个问题', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages[1]).toEqual({ role: 'assistant', content: '（本轮已停止，未产生回答）' })
+  })
+
+  it('审批轮点了「忽略」（正文仍空）不会造出相邻 user', async () => {
+    // dismissApproval 只清 approval，正文本来就是空的：老代码于是同样切出 [user, user]
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '删掉这些文件', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '', stopped: false, createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '算了我自己来', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages[1].content).toBe('（本轮未产生回答）')
+  })
+
+  it('未忽略的待审批轮用「待审批，未执行」占位，不让模型以为用户放弃了', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '删掉这些文件', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        approval: {
+          toolCalls: [
+            { toolCallId: 't1', toolName: 'rm', argsText: '{}', description: '', riskLevel: 'dangerous' },
+          ],
+        },
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '先等一下', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages[1].content).toBe('（本轮工具调用待审批，未执行）')
+  })
+
+  it('失败轮的空正文用「请求失败」占位', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '在吗', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        error: { message: '请求失败', retryable: true, code: null },
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '还在吗', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages[1].content).toBe('（本轮请求失败，未产生回答）')
+  })
+
+  it('空白 user 消息不进历史（后端 _require_user_content 必拒）', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '   ', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '答', createdAt: 2 }),
+      record({ id: 'u2', role: 'user', content: '真的问题', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages).toEqual([{ role: 'user', content: '真的问题' }])
+  })
+
+  it('末条是 assistant（上一轮还没等到新提问）时被去掉', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({ id: 'a1', role: 'assistant', content: '答', createdAt: 2 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    expect(messages).toEqual([{ role: 'user', content: '问' }])
+  })
+
+  it('同角色相邻的消息合成一条，不静默丢掉任何一轮的内容', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '第一句', createdAt: 1 }),
+      record({ id: 'u2', role: 'user', content: '补充一句', createdAt: 2 }),
+      record({ id: 'a1', role: 'assistant', content: '答', createdAt: 3 }),
+      record({ id: 'u3', role: 'user', content: '新问题', createdAt: 4 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    // 两条都保留在同一格里：丢掉任何一条都会让用户说过的话凭空消失
+    expect(messages[0].content).toBe('第一句\n\n补充一句')
+  })
+
+  it('字符裁剪吃掉开头后重新对齐形状（clampContextMessages 也会切出 assistant 开头）', async () => {
+    // 29 条各 30_000 字符 = 870k，远超 380k 总量上限 → 丢最旧直到 12 条（360k）。
+    // 29 - 12 = 17 条被丢掉，第 17 条（下标 17）是 assistant：裁剪后的首条就是 assistant，
+    // 老代码到这里同样发不出去。
+    const records: MessageRecord[] = []
+    for (let index = 0; index < 14; index += 1) {
+      records.push(
+        record({ id: `u${index}`, role: 'user', content: 'x'.repeat(30_000), createdAt: index * 2 }),
+        record({ id: `a${index}`, role: 'assistant', content: 'x'.repeat(30_000), createdAt: index * 2 + 1 }),
+      )
+    }
+    records.push(record({ id: 'u-latest', role: 'user', content: 'x'.repeat(30_000), createdAt: 9999 }))
+    dbMock.records = records
+
+    const { messages, anchor } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expectBackendShape(messages)
+    // 裁剪后再对齐会再让掉一条 assistant，于是剩 11 条
+    expect(messages).toHaveLength(11)
+    expect(anchor).toBeNull()
+  })
+})
+
+describe('回放历史不携带系统提示', () => {
+  it('失败轮正文尾部的「请求失败」引用块不发给模型', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '在吗', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '在的。\n\n> ⚠️ **请求失败**: 网络已断开',
+        error: { message: '网络已断开', retryable: true, code: null },
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '那就继续', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expect(messages[1].content).toBe('在的。')
+    expect(messages[1].content).not.toContain('⚠️')
+  })
+
+  it('断流提示同样剥掉（断 3 次就有 3 段，模型不该看到任何一段）', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content:
+          '半截回答\n\n> ⚠️ **连接已中断**: 回复可能不完整\n\n> ⚠️ **请求失败**: 网络已断开\n\n> ⚠️ **连接已中断**: 收到无法解析的流数据，回复可能不完整',
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expect(messages[1].content).toBe('半截回答')
+  })
+
+  it('只有提示、没有正文的失败轮回放成占位文本，而不是把提示当回答', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '在吗', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '\n\n> ⚠️ **请求失败**: 网络已断开',
+        error: { message: '网络已断开', retryable: true, code: null },
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '还在吗', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expect(messages[1].content).toBe('（本轮请求失败，未产生回答）')
+    expect(messages[1].content).not.toContain('⚠️')
+  })
+
+  it('模型自己在正文中间写的告警引用不动（只剥结尾的系统提示）', async () => {
+    dbMock.records = [
+      record({ id: 'u1', role: 'user', content: '问', createdAt: 1 }),
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '开头说明。\n\n> ⚠️ **注意**：这样做有风险，请先备份。\n\n结尾。',
+        createdAt: 2,
+      }),
+      record({ id: 'u2', role: 'user', content: '再问', createdAt: 3 }),
+    ]
+
+    const { messages } = await loadContextMessages('s1', { excludeId: 'placeholder', limit: 30 })
+
+    expect(messages[1].content).toContain('⚠️ **注意**：这样做有风险')
+    expect(messages[1].content).toContain('结尾。')
+  })
+})
+
+describe('忽略审批之后要把 approval: null 推上去（跨设备不再拉回卡片）', () => {
+  it('clearMessageApproval 落库后叫醒推送引擎', async () => {
+    const { clearMessageApproval } = await import('./chat-persistence')
+
+    await clearMessageApproval('a1')
+
+    // 落库 `null`：字段必须显式写 null，而不是「缺席」——缺席在 push 时会被跳过，
+    // 服务端那行的 approval 就永远是旧值，别的设备下次 pull 又把卡片拉回来
+    expect(dbMock.update).toHaveBeenCalledWith('a1', { approval: null })
+    // 表级 hook 已把本行标成 pending，但推送引擎得有人叫醒才会真的上行
+    expect(pushSpy).toHaveBeenCalled()
+  })
+})
+
+/**
+ * 跨设备那一面：忽略后的行要能把 `approval: null` 带上去。
+ *
+ * 服务端按「字段非缺失」判断要不要覆盖，所以这里必须是显式的 `null` 而不是「字段缺席」。
+ * 用真实的 `toMessagePushRow` 钉住这条契约，而不是只在 mock 上断言写了 `{approval: null}`。
+ */
+describe('忽略审批后 push payload 带的是 approval: null', () => {
+  it('null 能过白名单的 undefined 判断，payload 里字段存在且为 null', async () => {
+    const { toMessagePushRow } = await import('./sync/mapping')
+
+    const row = toMessagePushRow(record({ id: 'a1', role: 'assistant', content: '答', approval: null }))
+
+    expect('approval' in row.payload).toBe(true)
+    expect(row.payload.approval).toBeNull()
+  })
+
+  it('带调用时同样带得出去（忽略前后是两个不同的明确取值）', async () => {
+    const { toMessagePushRow } = await import('./sync/mapping')
+
+    const row = toMessagePushRow(
+      record({
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        approval: {
+          toolCalls: [
+            { toolCallId: 't1', toolName: 'rm', argsText: '{}', description: '', riskLevel: 'dangerous' },
+          ],
+        },
+      }),
+    )
+
+    expect(row.payload.approval).toEqual({
+      toolCalls: [
+        { toolCallId: 't1', toolName: 'rm', argsText: '{}', description: '', riskLevel: 'dangerous' },
+      ],
+    })
   })
 })

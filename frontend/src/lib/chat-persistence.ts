@@ -10,6 +10,7 @@
 import { db } from '../db';
 import { requestPush } from './sync/engine';
 import { isRunIncomplete, type RunState } from './chat-store';
+import { stripNotices } from './message-copy';
 import type { ClarificationState, MessageRecord, Run } from '../types';
 
 type MessageChanges = Partial<Omit<MessageRecord, 'id' | 'sessionId'>>;
@@ -95,6 +96,13 @@ export async function clearMessageClarification(messageId: string): Promise<void
  */
 export async function clearMessageApproval(messageId: string): Promise<void> {
   await db.messages.update(messageId, { approval: null });
+  // 与 `saveFinal` 末尾同一个理由：这一行得推上去。
+  //
+  // 表级 hook 已经把本行标成 pending、修订号 +1（`db/index.ts`），所以这里只需要
+  // 叫醒推送引擎。少了这一步，`approval: null` 永远留在本机：别的设备下次 pull
+  // 拿到的还是带 `approval` 的旧行，点过「忽略」的卡片会被重新拉回来——用户看到
+  // 「我明明忽略过了」。这是 M3 的跨设备那一面。
+  requestPush();
 }
 
 export async function loadSessionMessages(sessionId: string): Promise<MessageRecord[]> {
@@ -234,11 +242,48 @@ function renderClarification(clarification: ClarificationState): string {
   return lines.join('\n');
 }
 
+/**
+ * 正文为空的助手轮合成为占位文本。
+ *
+ * 改动前这里是「滤掉」：正文为空的助手消息直接从回放里消失，于是它两边的一问一答
+ * 变成相邻的两条 user 消息，服务端按「必须严格交替」拒掉（`app/schemas/chat.py:
+ * _check_message_order`），而且是**永久** 422——历史只在增长，下一轮同样非法，
+ * 用户没有任何出路。两个不需要任何故障就能走到的场景：
+ *
+ *   1. 发送后首 token 之前按 Esc 停止 → `saveFinal` 落库 `content: ''`；
+ *   2. 工具审批轮只发起调用、正文为空 → 用户点 × 忽略（只清 `approval`，正文仍空）；
+ *      或者干脆不理会，直接提下一个问题。
+ *
+ * 改成合成文本后，形状自然恢复成 [user, assistant, user]：占位同时在两侧合法
+ * （后端只要求 assistant 的 content 非空白语义无关，user 才要求非空白）。
+ * 文案要写成**第三人称的事实陈述**：这段话会被当作助手历史发给模型，用第一人称
+ * 会让模型以为「我刚才说了这句」。
+ */
+function renderEmptyAssistant(message: MessageRecord): string {
+  // 待审批优先：那一轮的操作还没有发生，说「已停止」会误导模型以为用户放弃了
+  if (message.approval?.toolCalls?.length) return '（本轮工具调用待审批，未执行）';
+  if (message.stopped) return '（本轮已停止，未产生回答）';
+  if (message.error) return '（本轮请求失败，未产生回答）';
+  // 只跑了工具、没有正文：确实是「没回答」，但也别让模型以为用户没提过问题
+  if (message.toolCalls?.length) return '（本轮只执行了工具调用，未产生正文回答）';
+  return '（本轮未产生回答）';
+}
+
 function toReplayable(message: MessageRecord): ReplayableMessage {
+  // 先剥掉尾部系统提示：失败/断流/跨标签冲突时 `chat-store` 会往正文尾部追加
+  // `> ⚠️ **请求失败**: …`。那段话是给用户看的，回放给模型就成了「上一轮我自己用
+  // 人类口吻写的一句告警」——断 3 次历史里就有 3 段。剥完才判空：一条只有提示、
+  // 没有正文的失败轮次应当走占位文本，而不是把提示当成回答发上去。
+  const body = message.role === 'assistant' ? stripNotices(message.content) : message.content;
+
   const content =
-    message.role === 'assistant' && !message.content.trim() && message.clarification
-      ? renderClarification(message.clarification)
-      : message.content;
+    message.role === 'assistant' && !body.trim()
+      ? message.clarification
+        ? renderClarification(message.clarification)
+        : renderEmptyAssistant(message)
+      : body;
+  // `body` 与 `message.content` 的差异只在尾部提示：正文为空但提示非空时，上面的
+  // 分支已经把它换成占位文本，不会再原样发出提示
 
   // 只有助手消息能带用量：它是那一轮回答产生的那次请求的 prompt token 数
   const anchorTokens =
@@ -250,16 +295,90 @@ function toReplayable(message: MessageRecord): ReplayableMessage {
 }
 
 /**
+ * 合并两条同角色消息的正文。空的一方不留下多余的空行。
+ */
+function joinContents(left: string, right: string): string {
+  const a = left.trim();
+  const b = right.trim();
+  if (!a) return b;
+  if (!b) return a;
+  return `${a}\n\n${b}`;
+}
+
+/**
+ * 把回放历史修成后端接受的形状：**首条 user、严格交替、末条 user**。
+ *
+ * 这是本文件里唯一一处「形状合法性」的保证，两步裁剪（条数上限、字符上限）都必须
+ * 经过它——两步各自都会把首条切成 assistant：
+ *
+ *   - `slice(-limit)` 按条数切，而一次正常的历史是「成对问答 + 末尾新提问」，长度恒为
+ *     **奇数**（2N+1）；`HISTORY_LIMIT = 30` 是偶数，所以切点必然落在 assistant 上。
+ *     31 条切 30 条后首条就是 assistant，`POST /api/chat` 直接 422。
+ *   - `clampContextMessages` 丢最旧同样从头部吃消息，吃掉的条数是任意值。
+ *
+ * 另外两件事也在这一处收口：正文空白的 user 消息后端必拒（`_require_user_content`），
+ * 以及理论上可能出现的同角色相邻（服务端合并/丢弃会让模型看到的上下文与用户以为的
+ * 不一致）。
+ *
+ * 纯函数：不改入参，返回新数组。
+ */
+export function shapeContextMessages(
+  messages: readonly ReplayableMessage[],
+): ReplayableMessage[] {
+  const out: ReplayableMessage[] = [];
+
+  for (const message of messages) {
+    // 空白 user 消息一定会被后端拒（422），留着就是给这个会话埋一颗永久地雷
+    if (message.role === 'user' && !message.content.trim()) continue;
+
+    const last = out[out.length - 1];
+    if (last && last.role === message.role) {
+      // 同角色相邻：合成一条。刻意不用「丢掉旧的」——那会静默吞掉一整轮内容，
+      // 而模型看不到的东西无法在界面上被用户察觉。
+      //
+      // 用量锚点取**较晚**那条：`anchorTokens` 是「截止到这一条（含）的上下文 token
+      // 数」，合并后这一格吃掉了两条的内容，用早那条的数会**低估**真实上下文，
+      // 服务端的预检于是放行一次必然超限的请求。晚那条覆盖的范围才包含合并进来的内容。
+      out[out.length - 1] = {
+        role: message.role,
+        content: joinContents(last.content, message.content),
+        anchorTokens: message.anchorTokens ?? last.anchorTokens,
+        // 目前 `toReplayable` 不产出 `tool_calls`（只有审批续跑的调用方会在形状合法
+        // 之后单独追加一条），这里保留是为了让合并本身不吞数据——将来若有人从回放里
+        // 带上工具调用，丢掉的是一条无结果的调用，服务端会按非法历史拒掉。
+        ...(last.tool_calls || message.tool_calls
+          ? { tool_calls: [...(last.tool_calls ?? []), ...(message.tool_calls ?? [])] }
+          : {}),
+      };
+      continue;
+    }
+
+    out.push(message);
+  }
+
+  // 首条必须是 user：切点落在 assistant 上时往后推，推到最近的 user 为止
+  while (out.length > 0 && out[0].role !== 'user') out.shift();
+
+  // 末条必须是 user。审批续跑是唯一的例外，由调用方在形状合法的历史之后自己追加
+  // 那条带 `tool_calls` 的助手消息（见 `chat-runs.ts:executeRun`）。
+  while (out.length > 0 && out[out.length - 1].role !== 'user') out.pop();
+
+  return out;
+}
+
+/**
  * 读取送往模型的历史上下文。
  *
- * 三点刻意为之：
- * 1. 排除本轮占位消息，并丢掉内容为空的助手消息——那些是流式占位符，进上下文只会污染输入。
- *    例外是带 clarification 的空助手消息：提问藏在 `clarification` 字段里，必须合成
- *    成文本回放（见 renderClarification）。
+ * 四点刻意为之：
+ * 1. 排除本轮占位消息。正文为空的助手消息**不丢**——它们被合成占位文本，见
+ *    `renderEmptyAssistant`；只有确实无法回放的（没有记录的）才消失。
  * 2. **不回放 `thinking`**。思考链只用于展示：把它回传会白白放大每次请求的体积，
  *    而且长度不可控——一旦超过后端的 `MAX_THINKING_CHARS`，该会话的每一次重试都会
  *    拿到 422，用户被永久卡住。
- * 3. 最后统一过一遍 clampContextMessages：条数裁剪挡不住单条超长与总量超长。
+ * 3. 形状先过 `shapeContextMessages`，再统一过 `clampContextMessages`：条数裁剪挡不住
+ *    单条超长与总量超长。
+ * 4. 字符裁剪之后**再对齐一次形状**：`clampContextMessages` 丢最旧时同样会把首条切成
+ *    assistant，不重对齐就等于没修。
  */
 export async function loadContextMessages(
   sessionId: string,
@@ -269,24 +388,20 @@ export async function loadContextMessages(
 
   const replayable = all
     .filter((message) => message.id !== excludeId)
-    // 待审批的助手消息（正文往往为空）在这里被滤掉是**对的**：它只在本轮续跑时
-    // 才有意义，而续跑的历史由 `startChatRun` 的 `resumeToolCalls` 快照单独构造。
-    // 若让它常驻回放，下一次普通提问的最后一条就会变成一条没有结果的 assistant
-    // 工具调用，服务端会按非法历史拒绝（`末条必须是 user`）。
-    .filter(
-      (message) => message.role !== 'assistant' || message.content.trim() || message.clarification,
-    )
     .slice(-limit)
     .map(toReplayable);
 
-  const clamped = clampContextMessages(replayable);
+  const shaped = shapeContextMessages(replayable);
+  const clamped = clampContextMessages(shaped);
+  // 裁剪可能又吃掉开头的几条：形状必须在**最终数组**上成立，否则前面两步都白做
+  const finalMessages = shapeContextMessages(clamped);
 
   // 锚点在**裁剪之后**算：下标要对应真正发出去的那个数组。
   // 从这里往回找最后一条带真实用量的助手消息——它的 `contextTokens` 覆盖了它之前的
   // 全部内容（含系统提示词），所以预检只需再估算它之后的那几条。
   let anchor: ContextAnchor | null = null;
-  for (let index = clamped.length - 1; index >= 0; index -= 1) {
-    const tokens = clamped[index].anchorTokens;
+  for (let index = finalMessages.length - 1; index >= 0; index -= 1) {
+    const tokens = finalMessages[index].anchorTokens;
     if (typeof tokens === 'number' && tokens > 0) {
       anchor = { messageIndex: index, contextTokens: tokens };
       break;
@@ -295,7 +410,7 @@ export async function loadContextMessages(
 
   // 只把协议字段交出去：`anchorTokens` 是本地推导用的，不跟着发上游
   return {
-    messages: clamped.map(({ role, content, tool_calls }) => ({
+    messages: finalMessages.map(({ role, content, tool_calls }) => ({
       role,
       content,
       ...(tool_calls ? { tool_calls } : {}),

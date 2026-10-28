@@ -392,3 +392,61 @@ describe('请求参数', () => {
     expect(mocks.streamChat).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'a' }))
   })
 })
+
+/**
+ * M3：「忽略」必须同时清内存与库。
+ *
+ * 只清库时屏幕上的卡片不动（`ChatProvider` 的 dbMessages 是快照，不是 live query）；
+ * 只清内存时刷新/下次 pull 会把卡片拉回来。两条都得锁住。
+ */
+describe('忽略审批（dismissApproval）', () => {
+  const approvalEvent: ChatEvent = {
+    type: 'approval_required',
+    tool_calls: [
+      {
+        tool_call_id: 't1',
+        tool_name: 'delete_file',
+        args: '{"path":"a.txt"}',
+        description: '删除 a.txt',
+        risk_level: 'dangerous',
+      },
+    ],
+  }
+
+  it('清掉内存 run 上的 approval（卡片立刻消失，不必等回读）', async () => {
+    const { dismissApproval } = await import('./chat-runs')
+    // 审批轮是「本轮最后一条事件，然后本轮结束」：流吐完 approval_required 就收尾
+    finishingStream(approvalEvent)
+    start()
+    await vi.waitFor(() => expect(getRun('a')?.finished).toBe(true))
+    expect(getRun('a')!.approval).not.toBeNull()
+
+    dismissApproval('m_a')
+
+    // 不清内存：覆盖层仍是带 approval 的旧对象，而 dbMessages 快照不会自己更新
+    expect(getRun('a')).not.toBeNull()
+    expect(getRun('a')!.approval).toBeNull()
+  })
+
+  it('同时把库里的 approval 写成 null（刷新后卡片不再出现）', async () => {
+    const { dismissApproval } = await import('./chat-runs')
+    finishingStream(approvalEvent)
+    start()
+    await vi.waitFor(() => expect(getRun('a')?.finished).toBe(true))
+
+    mocks.update.mockClear()
+    dismissApproval('m_a')
+
+    expect(mocks.update).toHaveBeenCalledWith('m_a', { approval: null })
+  })
+
+  it('消息 id 为空时是空操作（不写库、不抛错）', async () => {
+    const { dismissApproval } = await import('./chat-runs')
+    start()
+    await vi.waitFor(() => expect(getRun('a')).not.toBeNull())
+
+    mocks.update.mockClear()
+    expect(() => dismissApproval('')).not.toThrow()
+    expect(mocks.update).not.toHaveBeenCalled()
+  })
+})

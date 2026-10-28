@@ -19,6 +19,7 @@
 
 import type { MessageRecord, SessionRecord, ToolCallRecord } from '../types';
 import { formatTokens } from './context-usage';
+import { stripNotices } from './message-copy';
 import { formatToolDuration } from './tool-call-view';
 
 /** 工具参数/结果各自的截断上限（字符）。 */
@@ -132,7 +133,10 @@ function truncate(text: string, limit: number): string {
  */
 function hasRenderableContent(message: MessageRecord): boolean {
   return Boolean(
-    message.content.trim() ||
+    // 剥完提示再看：一条正文只有系统提示的轮次若因此变空，就不能靠它凑数——
+    // 否则文件里会多出一个只有标题、下面什么都没有的空条目。这类轮次照样会被导出，
+    // 因为产生提示的那件事本身就有结构化字段（`error` / `stopped` / `incomplete`）。
+    stripNotices(message.content).trim() ||
       message.clarification ||
       message.error ||
       message.fallback ||
@@ -301,7 +305,15 @@ function renderConversation(
     const role = message.role === 'user' ? '你' : '助手';
     lines.push(`${heading(titleLevel + 1)} ${role} · ${formatTimestamp(message.createdAt)}`, '');
 
-    const content = message.content.trim();
+    // 剥掉正文尾部的系统提示（失败/断流/跨标签冲突）。同一件事已经由下面的
+    // `renderNotices` 用**结构化字段**渲染成规范的一行；正文里那一段是它的重复副本，
+    // 而且是拼进回答正文的——不剥的话归档里会出现「回答中夹着一条告警引用块」，
+    // 事后阅读时无法分辨那是模型写的还是系统写的。
+    //
+    // 剥完可能变空（只有提示、没有正文的失败轮次）。那种轮次**不因此被丢掉**：
+    // `hasRenderableContent` 看的是原始的 `error`/`stopped` 等字段，而 `renderNotices`
+    // 会照旧写出「本轮失败」，所以下面只在剥完非空时才推入正文。
+    const content = stripNotices(message.content).trim();
     if (content) lines.push(content, '');
 
     if (message.clarification) {
