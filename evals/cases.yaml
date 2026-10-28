@@ -47,7 +47,7 @@ cases:
       max_answer_chars: 40
 
   - id: explain-no-tools
-    tags: [no-tool, knowledge]
+    tags: [no-tool, explanation]
     prompt: 用三句话解释什么是 Server-Sent Events（SSE）。
     expect:
       tools: []

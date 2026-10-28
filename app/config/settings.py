@@ -164,34 +164,6 @@ class Settings(BaseSettings):
             "写错的声明会让**启动失败**而不是静默跳过：声明出来的能力不能悄悄消失。"
         ),
     )
-    embedding_model: str | None = Field(
-        default=None,
-        description=(
-            "知识库（RAG）用的 embedding 模型 id，例如 `text-embedding-3-small`。"
-            "地址与密钥复用**默认提供商**（与对话同一个网关），因此不另配 base_url。"
-            "留空或仍是占位值时知识库整体不可用：入库与检索都会被跳过，对话照常。"
-            "换模型后必须重建索引——旧向量的维度与语义空间都不同，混用会让检索"
-            "静默返回不相关的结果。"
-        ),
-    )
-    rag_top_k: int = Field(
-        default=4,
-        ge=1,
-        le=8,
-        description=(
-            "每轮对话自动检索的知识库片段数上限。每多一块就多占一份上下文预算；"
-            "四块（约 3k token）已能覆盖绝大多数问题。"
-        ),
-    )
-    rag_min_score: float = Field(
-        default=0.15,
-        ge=0,
-        le=1,
-        description=(
-            "检索结果的最低混合分（向量 0.7 + 词法 0.3 加权后）。低于它的候选不返回："
-            "一条勉强相关的结果比没有结果糟——模型会拿它当依据编答案。"
-        ),
-    )
     # ------------------------------------------------------------------
     # 沙箱（每会话一台隔离执行环境）。
     # 默认全关：没有节点池的部署不应该凭空多出四个工具，也不该让模型
@@ -616,17 +588,17 @@ class Settings(BaseSettings):
         description="S3 / RustFS 的 secret key。**生产必须由密钥管理注入**，不写进镜像或 compose 文件。",
     )
     s3_bucket: str = Field(
-        default="bennett-uploads",
+        default="bennett-artifacts",
         description=(
-            "上传文件的原件桶。桶名全局唯一（跨账号），且必须是小写 DNS 兼容名——"
-            "带下划线或大写会在建桶时被 S3 直接拒绝。"
+            "沙箱产物（销毁前导出的 workspace 归档）的桶。桶名全局唯一（跨账号），"
+            "且必须是小写 DNS 兼容名——带下划线或大写会在建桶时被 S3 直接拒绝。"
         ),
     )
     s3_prefix: str = Field(
-        default="uploads",
+        default="sandbox",
         description=(
-            "桶内键前缀。**只用固定前缀 + 服务端生成的 UUID 拼键，绝不拼接用户文件名**："
-            "用户文件名里的 `../`、控制字符或超长中文会在对象键里变成另一层注入面。"
+            "桶内键前缀。**只用固定前缀 + 服务端生成的 ID 拼键，绝不拼接用户提供的文件名**："
+            "文件名里的 `../`、控制字符或超长中文会在对象键里变成另一层注入面。"
         ),
     )
     s3_use_path_style: bool = Field(
@@ -648,7 +620,7 @@ class Settings(BaseSettings):
         ge=30,
         le=3600,
         description=(
-            "下载原件的预签名 URL 有效期（秒）。默认 5 分钟：链接会被浏览器历史/日志/"
+            "下载产物（以及产物清单）的预签名 URL 有效期（秒）。默认 5 分钟：链接会被浏览器历史/日志/"
             "团队群聊留存，有效期过长等于把私有对象变成半公开。"
         ),
     )
@@ -662,68 +634,6 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # 文件上传（原件 → 对象存储 → 解析 → 知识库）
     # ------------------------------------------------------------------
-    uploads_enabled: bool = Field(
-        default=True,
-        description=(
-            "是否开放上传接口。关闭时端点返回 404（而不是 403）："
-            "对未启用的部署，声明“不存在”比“存在但你不能用”泄露更少。"
-        ),
-    )
-    upload_max_bytes: int = Field(
-        default=25 * 1024 * 1024,
-        ge=1024,
-        description=(
-            "单个文件的大小上限（字节）。**在流式读取过程中累计计数并在超限时立即中止**，"
-            "而不是先收完再判断——后者等于让任何人用 10GB 的 body 把磁盘/内存吃满。"
-        ),
-    )
-    upload_allowed_extensions: str = Field(
-        default="pdf,docx,md,txt,html,htm",
-        description=(
-            "允许的扩展名白名单（逗号分隔）。同时校验扩展名与嗅探到的 MIME："
-            "只看扩展名挡不住改名上传，只看 MIME 又不可靠（很多环境把一切非标准类型报成"
-            "application/octet-stream）。"
-        ),
-    )
-    upload_max_files_per_user: int = Field(
-        default=200,
-        ge=1,
-        description="单用户最多保留的上传记录数（含已失败）。防把对象存储当无限盘用。",
-    )
-    upload_total_bytes_per_user: int = Field(
-        default=1024 * 1024 * 1024,
-        ge=1024,
-        description="单用户上传原件累计字节上限（按未删除的记录求和）。",
-    )
-    upload_max_extracted_chars: int = Field(
-        default=200_000,
-        ge=10_000,
-        description=(
-            "单个文件允许入库的抽取文本上限（字符）。**必须不超过知识库的单篇上限**"
-            "（app/services/rag/store.py 的 MAX_DOCUMENT_CHARS，200k）：否则一份超长文档"
-            "会先烧完 embedding 配额再被入库层拒绝，用户等了几分钟只拿到一个错。"
-            "超限时解析会明确失败并提示拆分文件，而不是静默截断——被截掉的后半篇"
-            "用户永远不知道它不在索引里。"
-        ),
-    )
-    upload_worker_poll_seconds: float = Field(
-        default=2.0,
-        gt=0,
-        description=(
-            "解析 worker 在没有待处理任务时的轮询间隔（秒）。与 PostgreSQL 的"
-            "`LISTEN/NOTIFY` 相比这是朴素的轮询，但它在多实例、断连重连、重启恢复上都只有"
-            "一条路径要验证，且 2 秒延迟对“上传后后台解析”完全可接受。"
-        ),
-    )
-    upload_max_attempts: int = Field(
-        default=3,
-        ge=1,
-        description=(
-            "单个文件解析失败后最多重试几次。超过后置为 failed 并把原因写进记录："
-            "无限重试会让一份坏文件永远占着 worker，且每次重试都在烧 embedding 配额。"
-        ),
-    )
-
     auth_secret: str = Field(
         default=DEFAULT_AUTH_SECRET,
         description=(
@@ -874,53 +784,6 @@ class Settings(BaseSettings):
                 "且不能以点或连字符开头结尾。"
             )
         return cleaned
-
-    @field_validator("upload_allowed_extensions")
-    @classmethod
-    def _normalise_extensions(cls, value: str) -> str:
-        """扩展名白名单归一化：去点、小写、去重、去空。
-
-        配置里写 `.PDF` 或 `pdf, pdf` 是常见笔误。若不归一化，白名单比较会变成
-        “看你怎么写的”——同一个文件在不同部署上时好时坏。
-        """
-        seen: list[str] = []
-        for item in value.split(","):
-            cleaned = item.strip().lower().lstrip(".")
-            if cleaned and cleaned not in seen:
-                seen.append(cleaned)
-        if not seen:
-            raise ValueError("UPLOAD_ALLOWED_EXTENSIONS 不能为空：至少要允许一种可解析的文本格式。")
-        return ",".join(seen)
-
-    @model_validator(mode="after")
-    def _validate_upload_limits(self) -> "Settings":
-        """上传上限必须小于全局请求体上限，否则文件永远传不进来。
-
-        两个限额分别由 `MaxBodySizeMiddleware`（整个请求体）与流式计数（文件本身）执行。
-        配反了的表现极具误导性：用户上传一个 20MB 的文件，收到的是
-        「请求体过大」而不是「文件过大」，而后端日志里根本看不到这次上传——它在进
-        应用之前就被中间件截断了。
-        """
-        if self.uploads_enabled:
-            # multipart 边界与表单字段的额外开销约几百字节，留 1MB 余量
-            headroom = 1 * 1024 * 1024
-            if self.max_request_body_bytes < self.upload_max_bytes + headroom:
-                raise ValueError(
-                    f"MAX_REQUEST_BODY_BYTES（{self.max_request_body_bytes:,} 字节）必须至少比 "
-                    f"UPLOAD_MAX_BYTES（{self.upload_max_bytes:,} 字节）大 1MB，"
-                    "否则中间件会在文件进入上传逻辑之前就返回 413（用户看到的是「请求体过大」，"
-                    "而后端日志里看不到这次上传）。"
-                )
-        return self
-
-    def is_upload_extension_allowed(self, filename: str) -> bool:
-        """文件名扩展名是否在白名单内（大小写不敏感）。
-
-        只看扩展名，不代替 MIME 嗅探：两者任一不匹配都拒绝，见
-        `app/services/uploads/validators.py`。
-        """
-        suffix = Path(filename or "").suffix.lower().lstrip(".")
-        return bool(suffix) and suffix in set(self.upload_allowed_extensions.split(","))
 
     @field_validator("app_env", mode="before")
     @classmethod

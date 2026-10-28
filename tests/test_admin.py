@@ -1035,3 +1035,72 @@ async def test_superadmin_can_be_demoted_when_another_one_remains(registry_db, m
         target = await session.get(User, ids["target@example.com"])
         assert target.role == "user" and target.is_superuser is False
         assert await session.scalar(select(User.role).where(User.id == ids["caller@example.com"])) == "superadmin"
+
+
+async def test_sync_does_not_wipe_manually_entered_limits(registry_db, monkeypatch):
+    """同步不能把手填的上下文窗口抹成 NULL。
+
+    上游 `/v1/models` 大多不返回窗口（OpenAI 系只给 id），所以 `item.context_window`
+    对多数提供商是 None。无条件赋值会把它写成 NULL，而 NULL 的语义是「不知道窗口」→
+    上下文预算直接放行 → 该模型的守卫被**永久静默关闭**：超长历史发到上游、换回 400、
+    再被翻译成「模型不可用」。管理员完全看不出是「点了一次同步」导致的。
+    """
+    provider_id = await _seed_provider(
+        registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"manual-{uuid.uuid4().hex[:8]}"
+    )
+
+    # 第一次同步：上游给了窗口
+    first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "context_window": 128000}]})])
+    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    assert await model_service.sync_provider_models(provider_id) == (1, 1, 0)
+
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    # 管理员手填一个精确值（上游报的常常是保守值）
+    await model_service.update_provider_model(row.id, context_window=200000, max_output_tokens=16000)
+
+    # 再同步一次，这次上游**没给**窗口（绝大多数提供商的真实行为）
+    second = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o"}]})])
+    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    assert await model_service.sync_provider_models(provider_id) == (1, 0, 1)
+
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    assert row.context_window == 200000, "手填的窗口被同步抹掉了"
+    assert row.max_output_tokens == 16000, "手填的输出上限被同步抹掉了"
+
+
+async def test_sync_still_takes_limits_when_upstream_provides_them(registry_db, monkeypatch):
+    """上游**真的给了**窗口时仍然要覆盖——修的是「用 None 覆盖」，不是「不覆盖」。"""
+    provider_id = await _seed_provider(
+        registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"upd-{uuid.uuid4().hex[:8]}"
+    )
+    first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "context_window": 128000}]})])
+    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    await model_service.sync_provider_models(provider_id)
+
+    same_entry_but_bigger = {"id": "openai/gpt-4o", "context_window": 400000}
+    second = _FakeClient([_FakeResponse({"data": [same_entry_but_bigger]})])
+    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    await model_service.sync_provider_models(provider_id)
+
+    row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
+    assert row.context_window == 400000
+
+
+@pytest.mark.parametrize("field,value", [("context_window", 1), ("max_output_tokens", 1), ("context_window", 2**31)])
+async def test_model_limits_reject_absurd_values(registry_db, field, value):
+    """窗口/输出上限是**有量纲**的，不能只校验「正整数」。
+
+    填 1：`build_budget` 扣掉系统提示词开销（约 1.5k token）后 `limit_tokens=0`，
+    该模型下每一条对话都以 `context_overflow` 收尾，文案是「超过可用上限 0」——管理员
+    不会认为这是自己填错了一个数字。
+
+    填 2^31：列是 PG `INTEGER`，asyncpg 抛 DataError → 未捕获 → 500。
+    """
+    from pydantic import ValidationError
+
+    from app.schemas.admin import ModelCreate, ModelUpdate
+
+    with pytest.raises(ValidationError):
+        ModelCreate(model_id="openai/x", **{field: value})
+    with pytest.raises(ValidationError):
+        ModelUpdate(**{field: value})

@@ -165,8 +165,17 @@ class ModelCreate(BaseModel):
     description: str | None = Field(None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] = Field(default_factory=list)
-    context_window: int | None = Field(None, ge=1)
-    max_output_tokens: int | None = Field(None, ge=1)
+    #: 上下文窗口与输出上限都有**量纲**约束，不只是「正整数」。
+    #:
+    #: 下界 1024 不是拍脑袋：`build_budget` 先扣系统提示词与工具 schema 的固定开销
+    #: （实测约 1.5k token），再乘安全系数。窗口填 1 时算出来的 `limit_tokens` 是 0，
+    #: 于是该模型下**每一条**对话都以 `context_overflow` 收尾，文案是「超过可用上限 0
+    #: （该模型窗口 1）」——管理员不会认为这是自己填错了一个数字。
+    #:
+    #: 上界 10M：列是 PG `INTEGER`，2^31 溢出会让 asyncpg 直接抛 DataError 变成 500，
+    #: 而 10M 已经远超任何真实模型（当前最大约 2M）。
+    context_window: int | None = Field(None, ge=1024, le=10_000_000)
+    max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
     enabled: bool = True
     is_default: bool = False
 
@@ -184,8 +193,10 @@ class ModelUpdate(BaseModel):
     description: str | None = Field(None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] | None = None
-    context_window: int | None = Field(None, ge=1)
-    max_output_tokens: int | None = Field(None, ge=1)
+    #: 量纲约束与 `ModelCreate` 同一套理由（见那里）：填 1 会让该模型下每条对话
+    #: 都被判超限，填 2^31 会让 PG INTEGER 溢出成 500。
+    context_window: int | None = Field(None, ge=1024, le=10_000_000)
+    max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
     enabled: bool | None = None
     is_default: bool | None = None
 

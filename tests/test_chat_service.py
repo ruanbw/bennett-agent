@@ -542,3 +542,74 @@ def test_turn_timing_degrades_instead_of_raising():
 def test_turn_timing_is_none_without_a_run_result():
     """流没给终态事件时按「缺席」处理，且不为这种情况打带 traceback 的告警。"""
     assert chat_service._turn_timing(_FakeTimer(), None) is None
+
+
+def test_resuming_returns_none_prompt_not_empty_string():
+    """续跑审批时 `prompt` 必须是 `None`，不是空串（Must-5 的回归锁）。
+
+    pydantic-ai 用 `user_prompt is not None` 判断「要不要追加一条 UserPromptPart」。
+    传空串会让上游多收到一条 content 为空的 user 消息：OpenAI 兼容网关通常接受，
+    但 Anthropic 系对空 content 的 message 直接 400，而 400 被 `upstream_errors`
+    归成「模型不可用，请更换模型」——用户看到「批准了但一直失败」，文案还指错方向。
+    """
+    prompt, history = convert_chat_history(
+        [
+            msg("user", "重置沙箱"),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[{"tool_call_id": "c1", "tool_name": "sandbox_reset", "args": "{}"}],
+            ),
+        ],
+        resuming=True,
+    )
+
+    assert prompt is None
+    assert history
+
+
+def test_resuming_prompt_none_produces_no_extra_user_message():
+    """把 `None` 交给 pydantic-ai 后，请求里不该多出那条空的 UserPromptPart。"""
+    import asyncio
+
+    from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolApproved
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
+    from pydantic_ai.models.function import FunctionModel
+
+    seen: list[list[str]] = []
+
+    def fake_model(messages, info):  # noqa: ANN001, ANN202
+        seen.append([type(part).__name__ for message in messages for part in message.parts])
+        return ModelResponse(parts=[TextPart("好了")])
+
+    async def _risky() -> str:
+        """有副作用的操作。"""
+        return "done"
+
+    agent = Agent(
+        FunctionModel(fake_model),
+        tools=[_risky],
+        output_type=str | DeferredToolRequests,
+    )
+
+    async def run(prompt):  # noqa: ANN001, ANN202
+        return await agent.run(
+            prompt,
+            message_history=[
+                ModelRequest(parts=[UserPromptPart(content="重置沙箱")]),
+                ModelResponse(
+                    parts=[ToolCallPart(tool_name="_risky", args={}, tool_call_id="c1")],
+                ),
+            ],
+            deferred_tool_results=DeferredToolResults(approvals={"c1": ToolApproved()}),
+        )
+
+    # 历史里那条 UserPromptPart 是用户原本的提问，正常；关键是**不该再多出一条**。
+    asyncio.run(run(None))
+    with_none = seen[-1].count("UserPromptPart")
+    assert with_none == 1, f"None 时只该有历史那条提问：{seen[-1]}"
+
+    seen.clear()
+    asyncio.run(run(""))
+    with_empty = seen[-1].count("UserPromptPart")
+    assert with_empty == with_none + 1, f"空串会多产出一条 content 为空的 user 消息：{seen[-1]}"

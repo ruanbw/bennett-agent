@@ -50,7 +50,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from app.config import settings
-from app.db import engine
+from app.db import audit_provider_key_decryption, engine
 from app.services.metrics import metrics
 from app.services.redis_client import redis_health_detail
 from app.services.storage import StorageNotConfigured, get_object_store
@@ -87,7 +87,7 @@ def required_dependencies() -> frozenset[str]:
     未知名字直接忽略并告警：配置里写错一个词（`databse`）不该让服务启动失败，
     但也不能静默当成「不需要检查」——那会让一个本该被摘流的实例继续接流量。
     """
-    known = {"database", "redis", "storage"}
+    known = {"database", "redis", "storage", "provider_keys"}
     raw = (settings.readiness_required_dependencies or "").split(",")
     items = {item.strip().lower() for item in raw if item.strip()}
     unknown = items - known
@@ -132,6 +132,7 @@ async def health_ready(response: Response) -> dict[str, object]:
         "database": database,
         "redis": await redis_health_detail(timeout=READY_DB_TIMEOUT_SECONDS),
         "storage": await _storage_health(),
+        "provider_keys": await _provider_keys_health(),
     }
     failed_required = [name for name in required if str(checks[name].get("status")) != "ok"]
     if failed_required:
@@ -145,9 +146,29 @@ async def health_ready(response: Response) -> dict[str, object]:
     return {"status": overall, "required": sorted(required), **checks}
 
 
+async def _provider_keys_health() -> dict[str, object]:
+    """提供商的 API Key 是否都还能解密。
+
+    换过 `AUTH_SECRET` 之后，已落库的密文全部解不开，而下游表现是「上游 401 + 后台
+    显示未设置」——两条线索都指向「key 填错了」。这个探针是唯一能从运维面直接看出
+    「密钥换了」的地方。
+
+    **不参与 `required` 判定**：它不影响对话以外的一切（历史、管理、登录都正常），
+    把它算成不健康会让一个「只有模型调用失败」的实例被整体摘流。
+    """
+    try:
+        broken = await audit_provider_key_decryption()
+    except Exception:  # noqa: BLE001 - 探针不该把异常抛给编排器
+        logger.warning("readiness 检查失败：API Key 解密自检异常", exc_info=True)
+        return {"status": "unknown", "reason": "error"}
+    if broken:
+        return {"status": "degraded", "reason": "undecryptable", "providers": broken}
+    return {"status": "ok"}
+
+
 async def _storage_health() -> dict[str, object]:
-    """对象存储探测。未开启上传时显式报告 `disabled`，而不是假装 ok。"""
-    if not settings.uploads_enabled:
+    """对象存储探测（服务沙箱产物导出）。未开沙箱时显式报告 `disabled`，而不是假装 ok。"""
+    if not settings.sandbox_enabled:
         return {"status": "disabled"}
     try:
         ok, reason = await get_object_store().health()

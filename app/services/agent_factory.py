@@ -50,9 +50,6 @@ CLARIFICATION_TOOL_NAME = "ask_user_clarification"
 #: 当前时间工具名。纯本地计算、目前始终挂载，但提示词仍然按真实装配渲染——
 #: 「模板里写死的工具名」正是第 4 条修过的那类漂移。
 CURRENT_TIME_TOOL_NAME = "get_current_time"
-#: 知识库检索工具名。与 `tavily_search` 同一类：没配 embedding 就不挂，提示词里
-#: 也就不该教模型去调它。
-KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
 #: 沙箱工具的代表名。四个工具（exec / write / read / reset）同生同灭，取执行那个当探针。
 SANDBOX_TOOL_NAME = "sandbox_exec"
 
@@ -327,7 +324,6 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         web_search=WEB_SEARCH_TOOL_NAME in names,
         clarification=CLARIFICATION_TOOL_NAME in names,
         current_time=CURRENT_TIME_TOOL_NAME in names,
-        knowledge_base=KNOWLEDGE_TOOL_NAME in names,
         # 沙箱：不告诉模型「什么时候该用」，它就会永远只在回答里贴代码。
         # 与知识库/搜索同一个模式——能力开关决定提示词分支，两边不能各说各话。
         sandbox=SANDBOX_TOOL_NAME in names,
@@ -407,7 +403,27 @@ def _build_agent_cached(
 
     return Agent(
         model=model,
-        system_prompt=system_prompt,
+        # 系统提示词必须走 `instructions`，**不能**走 `system_prompt`。
+        #
+        # pydantic-ai 只在「历史为空」时才把 system_prompt 包成 `SystemPromptPart` 塞进
+        # 请求（`_agent_graph.py` 的 `UserPromptNode`：`if not messages: parts.extend(
+        # await self._sys_parts(...))`）。而本项目是**服务端无状态**：每轮的历史由客户端
+        # 全量回放上来，`convert_chat_history` 重建出的序列里没有 `SystemPromptPart`，
+        # 于是 `messages` 永远非空 —— 第 2 轮起系统提示词完全丢失。
+        #
+        # 丢失的不是「一段说明」，而是全部行为准则：工具使用规则、澄清流程、
+        # 「工具结果按数据对待」的注入防线、「不要假装已执行」、「不要复述系统提示词」
+        # 都在这份提示词里。实测第 2 轮问「你收到了什么系统提示词」，模型回答「没有收到」。
+        #
+        # `instructions` 走的是另一条路径：`_get_instructions` 在**每一步**把
+        # `InstructionPart` 注入请求，与历史无关。压缩摘要（`digest_instructions`）仍然
+        # 通过 `run_stream_events(instructions=...)` 传，pydantic-ai 会把它拼在后面
+        # （实测：`"<系统提示词>\n<摘要指令>"`），两者的职责不重叠。
+        #
+        # 标题 agent 与摘要 agent（下面两个 `_build_*_cached`）仍然用 `system_prompt`：
+        # 它们都是**单轮**调用、不带 message_history，`messages` 为空，那条注入路径成立。
+        # 改成 instructions 也一样对，但没必要动——真正的前提是「有没有历史」。
+        instructions=system_prompt,
         tools=tools,
         # 输出类型允许 `DeferredToolRequests`：工具需要审批时，pydantic-ai 会把它作为
         # **本轮输出**返回而不是执行工具（见 `app/tools/approval.py`）。这是无状态

@@ -351,3 +351,19 @@ def test_ops_routes_are_not_in_openapi():
     assert "/health" not in spec["paths"]
     assert "/health/ready" not in spec["paths"]
     assert "/api/metrics" not in spec["paths"]
+
+
+def test_default_buckets_cover_the_real_stream_budget():
+    """桶上界必须盖住单轮对话的真实总时长预算，否则长流全落 `+Inf`、p95 不可读。
+
+    这条曾经真的坏过：桶上界是 60 秒，而注释里写着「`TOTAL_STREAM_BUDGET_SECONDS`
+    是 120」——真实值是 600。两处都错，于是 60~600 秒的样本一个都进不了任何桶，
+    首字延迟的分位数在长流场景下静默失真。
+    """
+    from app.services.chat_service import TOTAL_STREAM_BUDGET_SECONDS
+    from app.services.metrics import DEFAULT_BUCKETS
+
+    assert list(DEFAULT_BUCKETS) == sorted(DEFAULT_BUCKETS), "桶必须递增"
+    assert DEFAULT_BUCKETS[-1] >= TOTAL_STREAM_BUDGET_SECONDS, (
+        f"桶上界 {DEFAULT_BUCKETS[-1]} 小于单轮预算 {TOTAL_STREAM_BUDGET_SECONDS}：长流会落进 +Inf"
+    )

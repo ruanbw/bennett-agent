@@ -17,13 +17,11 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.capabilities import router as capabilities_router
 from app.api.chat import router as api_router
-from app.api.knowledge import router as knowledge_router
 from app.api.ops import router as ops_router
 from app.api.sandbox import router as sandbox_router
 from app.api.sync import router as sync_router
-from app.api.uploads import router as uploads_router
 from app.config import settings
-from app.db import cleanup_expired_access_tokens, engine, verify_schema_at_head
+from app.db import audit_provider_key_decryption, cleanup_expired_access_tokens, engine, verify_schema_at_head
 from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
 from app.observability import HttpMetricsMiddleware, RequestContextMiddleware
 from app.prompts import prompt_manager
@@ -129,6 +127,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await _cleanup_expired_sessions_on_startup()
     _warn_if_auth_rate_limit_is_global()
+    await _warn_if_provider_keys_are_undecryptable()
     await _ensure_object_storage()
     await _discover_mcp_tools()
 
@@ -151,20 +150,48 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.warning("释放数据库连接失败", exc_info=True)
 
 
-async def _ensure_object_storage() -> None:
-    """启动时确保上传用的桶存在（幂等，失败不阻止启动）。
+async def _warn_if_provider_keys_are_undecryptable() -> None:
+    """启动时逐条试解提供商的 API Key，解不开的逐个点名。
 
-    为什么不阻止启动：对象存储只影响上传/下载，而对话、知识库检索、历史记录都不依赖它。
-    一次 S3 侧的网络抖动不该让整个服务起不来——那是把「部分功能不可用」升级成
-    「全站不可用」。但要在日志里说清：`/health/ready` 的 storage 段会一直显示不可用，
-    直到桶可达。
+    换 `AUTH_SECRET` 是允许的运维动作，但它失败的方式极具误导性：出站请求**不带
+    Authorization**（密钥为空）→ 上游 401 → 用户看到「上游认证配置问题」，同时后台的
+    「密钥」列显示「未设置」。两条线索都指向「key 填错了」，没人会想到是「密钥换了」。
+
+    这段日志是唯一能直接说出后者的地方。`/health/ready` 里也带同样的信息，供排障时
+    不用翻启动日志。
+    """
+    try:
+        broken = await audit_provider_key_decryption()
+    except Exception:  # noqa: BLE001 - 自检失败不该阻止启动
+        logger.warning("API Key 解密自检失败（不影响启动）", exc_info=True)
+        return
+    if broken:
+        logger.error(
+            "有 %d 个提供商的 API Key 解密失败（AUTH_SECRET 可能已更换）：%s。"
+            "这些提供商在对话时不会发送 Authorization，请到管理后台重新填写密钥。",
+            len(broken),
+            ", ".join(broken),
+        )
+
+
+async def _ensure_object_storage() -> None:
+    """启动时确保沙箱产物用的桶存在（幂等，失败不阻止启动）。
+
+    对象存储现在只服务于**沙箱产物**（机器销毁前把 workspace 导出，见
+    `app/services/sandbox/artifacts.py`）。所以未开沙箱时整段跳过——没开沙箱的部署
+    不该因为 S3 没配而在启动日志里报警。
+
+    为什么不阻止启动：产物导出是「尽力而为」（导出失败也照常销毁），对话与历史都不
+    依赖对象存储。一次 S3 侧的网络抖动不该让整个服务起不来——那是把「部分功能不可用」
+    升级成「全站不可用」。但要在日志里说清：`/health/ready` 的 storage 段会一直显示
+    不可用，直到桶可达。
 
     `S3_CREATE_BUCKET=false` 时不建桶（生产通常由 IaC 建桶并只授予对象级权限），
     但仍做一次可达性检查，让「端点填错了」在启动日志里就暴露。
     """
     from app.services.storage import StorageNotConfigured, get_object_store
 
-    if not settings.uploads_enabled:
+    if not settings.sandbox_enabled:
         return
     store = get_object_store()
     try:
@@ -172,9 +199,9 @@ async def _ensure_object_storage() -> None:
             await store.ensure_bucket()
         ok, reason = await store.health()
         if not ok:
-            logger.warning("对象存储不可用（上传功能会失败）: reason=%s", reason)
+            logger.warning("对象存储不可用（沙箱产物导出会失败）: reason=%s", reason)
     except StorageNotConfigured as exc:
-        logger.warning("对象存储未配置，上传接口将返回 503: %s", exc)
+        logger.warning("对象存储未配置，沙箱产物将不会被导出: %s", exc)
     except Exception:  # noqa: BLE001 - 见 docstring：不影响启动
         logger.warning("对象存储初始化失败（不影响启动）", exc_info=True)
 
@@ -244,10 +271,6 @@ _API_TAGS = [
         "description": "运行时能力探针：报告实际装配的工具（如是否可联网搜索）。",
     },
     {
-        "name": "knowledge",
-        "description": "用户私有知识库：上传文档（分块 + 向量化）、列表、删除、手动检索。",
-    },
-    {
         "name": "sandbox",
         "description": (
             "隔离执行环境「我的电脑」（每个用户一台、跨会话共用）：心跳续命与状态查询。"
@@ -257,10 +280,6 @@ _API_TAGS = [
     {
         "name": "sync",
         "description": "本机数据增量同步：push 逐行接受或拒绝，pull 用不透明游标做长轮询。",
-    },
-    {
-        "name": "uploads",
-        "description": "文件上传：原件入对象存储，后台解析为知识库文档；含状态、下载链接与删除。",
     },
     {
         "name": "admin",
@@ -435,10 +454,8 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     app.include_router(capabilities_router)
     app.include_router(sandbox_router)
-    app.include_router(knowledge_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
-    app.include_router(uploads_router)
     # Ops 路由（/health、/health/ready、/api/metrics）不打 tag：它们不该出现在
     # 业务 API 文档里，但 `include_in_schema=False` 之外仍要有 tag 供分组测试检查。
     app.include_router(ops_router)

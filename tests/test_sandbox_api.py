@@ -180,3 +180,109 @@ def test_session_id_pattern_rejects_foreign_shapes():
     with pytest.raises(ValidationError):
         SandboxHeartbeatRequest(session_id="../../etc/passwd")
     assert SimpleNamespace(session_id="sess_abc123").session_id  # 形状合法的样例
+
+
+# ---------------------------------------------------------------------
+# 产物清单
+# ---------------------------------------------------------------------
+class FakeObjectStore:
+    """只实现产物端点用到的那两个动作。"""
+
+    def __init__(self, objects: dict[str, int]) -> None:
+        self.objects = objects
+
+    async def stat_size(self, key: str):  # noqa: ANN202
+        return self.objects.get(key)
+
+    async def presigned_get_url(self, key: str, expires_in: int) -> str:
+        return f"https://s3.example/{key}?expires={expires_in}"
+
+
+@pytest.fixture
+def fake_store(monkeypatch):
+    """替换对象存储。
+
+    打的是**包**（`app.services.storage`）而不是 `app.services.storage.s3`：端点内部
+    是 `from app.services.storage import get_object_store`，那是包 `__init__` 里的绑定，
+    只 patch 子模块不会影响它。
+    """
+    import app.services.storage as storage_pkg
+
+    store = FakeObjectStore({"sandbox/u/l/workspace.tar.gz": 4096})
+    monkeypatch.setattr(storage_pkg, "get_object_store", lambda: store)
+    monkeypatch.setattr(settings, "sandbox_enabled", True)
+    return store
+
+
+async def test_artifacts_turn_the_key_into_a_presigned_link(user, redis, fake_store):
+    """`artifact_uri` 是对象键，用户拿不到——这个端点必须是它的唯一出口。"""
+    lease_id = await _lease(user)
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease_id) is True
+    async with async_session_maker() as session:
+        await mark_destroyed(session, lease_id, reason=DESTROY_IDLE, artifact_uri="sandbox/u/l/workspace.tar.gz")
+
+    async with async_session_maker() as session:
+        result = await api.sandbox_artifacts(session_id="sess_x", user=user, session=session)
+
+    assert result.lease_id == lease_id
+    assert result.state == "destroyed"
+    names = [item.name for item in result.artifacts]
+    assert names == ["workspace.tar.gz"]
+    artifact = result.artifacts[0]
+    assert artifact.download_url.startswith("https://s3.example/")
+    assert artifact.size_bytes == 4096
+    assert artifact.expires_at is not None
+
+
+async def test_artifacts_are_empty_before_the_machine_is_recycled(user, redis, fake_store):
+    """机器还活着时没有产物。这不是错误——返回 200 加空数组，不是 404。"""
+    await _lease(user)
+
+    async with async_session_maker() as session:
+        result = await api.sandbox_artifacts(session_id="sess_x", user=user, session=session)
+
+    assert result.state == "ready"
+    assert result.artifacts == []
+
+
+async def test_artifacts_are_empty_when_no_lease_ever_existed(user, redis, fake_store):
+    """从来没有过机器也没有产物，但仍然 200：前端轮询不该天天报错。"""
+    async with async_session_maker() as session:
+        result = await api.sandbox_artifacts(session_id="sess_none", user=user, session=session)
+
+    assert result.lease_id is None
+    assert result.state is None
+    assert result.artifacts == []
+
+
+async def test_artifacts_degrade_to_empty_when_storage_is_not_configured(user, redis, monkeypatch):
+    """没配对象存储的部署本来就没有产物，降级成空列表而不是 503。"""
+    import app.services.storage as storage_pkg
+    from app.services.storage import StorageNotConfigured
+
+    def _boom():
+        raise StorageNotConfigured("未配置")
+
+    monkeypatch.setattr(storage_pkg, "get_object_store", _boom)
+    monkeypatch.setattr(settings, "sandbox_enabled", True)
+
+    lease_id = await _lease(user)
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease_id) is True
+    async with async_session_maker() as session:
+        await mark_destroyed(session, lease_id, reason=DESTROY_IDLE, artifact_uri="sandbox/u/l/workspace.tar.gz")
+
+    async with async_session_maker() as session:
+        result = await api.sandbox_artifacts(session_id="sess_x", user=user, session=session)
+
+    assert result.artifacts == []
+
+
+async def test_artifacts_404_when_sandbox_disabled(user, redis, monkeypatch):
+    monkeypatch.setattr(settings, "sandbox_enabled", False)
+
+    async with async_session_maker() as session:
+        with pytest.raises(HTTPException) as excinfo:
+            await api.sandbox_artifacts(session_id="sess_x", user=user, session=session)
+    assert excinfo.value.status_code == 404

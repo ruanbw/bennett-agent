@@ -292,7 +292,9 @@ def test_tool_calls_are_restored_into_one_response():
 
     prompt, history = convert_chat_history(messages, resuming=True)
 
-    assert prompt == ""
+    # `None` 而不是 `""`：续跑没有新提问，空串会让上游多收到一条 content 为空的
+    # user 消息（Anthropic 系直接 400，见 convert_chat_history 的 docstring）。
+    assert prompt is None
     assert len(history) == 2
     response = history[1]
     kinds = [part.part_kind for part in response.parts]

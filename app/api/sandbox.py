@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,8 @@ from app.db import User, get_async_session
 from app.schemas.sandbox import (
     MAX_SESSION_ID_CHARS,
     SESSION_ID_PATTERN,
+    SandboxArtifact,
+    SandboxArtifactsResponse,
     SandboxHeartbeatRequest,
     SandboxStatusResponse,
 )
@@ -110,3 +113,97 @@ async def sandbox_status(
         expires_at=lease.hard_expires_at,
         artifact_uri=lease.artifact_uri,
     )
+
+
+#: 产物在对象键里的文件名。与 `artifacts.py` 导出时写的两个名字一一对应。
+#: 刻意写死成白名单而不是「按前缀列桶」：列桶要 `s3:ListBucket` 权限，而导出只需要
+#: `s3:PutObject`。少一个权限面，也少一次分页遍历。
+_ARTIFACT_FILENAMES: tuple[str, ...] = ("workspace.tar.gz", "manifest.txt")
+
+
+@router.get(
+    "/artifacts",
+    response_model=SandboxArtifactsResponse,
+    summary="「我的电脑」的产物清单（含下载直链）",
+    responses={404: {"description": "未启用执行环境"}},
+)
+async def sandbox_artifacts(
+    session_id: str = SESSION_ID_QUERY,
+    user: User = Depends(current_active_user),  # noqa: B008
+    session: AsyncSession = Depends(get_async_session),  # noqa: B008
+) -> SandboxArtifactsResponse:
+    """把最近一条租约的 `artifact_uri` 翻成预签名直链。
+
+    ## 为什么不是 404
+
+    `/status` 在「从来没有过环境」时返回 404，因为那是**该有东西却没有**。这里相反：
+    「还没销毁过，所以没有产物」是最常见的情形，把它做成 404 会让前端的每次轮询都
+    变成一条错误日志。所以永远 200，靠 `lease_id` / `state` / `artifacts` 三个字段
+    表达三种不同的空。
+
+    ## `session_id` 仍然不参与查询
+
+    机器是按用户分的（`ensure_lease` 的「每用户一台」），同一用户在任何会话里看到的
+    都是同一台机器、同一批产物。`session_id` 只回显，不寻址——与 `/status` 同一条
+    设计，见 `app/tools/sandbox_scope.py` 的「身份不能来自模型参数 / 客户端标识」。
+
+    ## 对象存储未配置时
+
+    整段降级成空列表而不是 503：产物是「尽力而为」（导出失败也照常销毁机器，见
+    `artifacts.py` 的失败策略）。一个没配 S3 的部署本来就没有产物，让它报错只会
+    把一个已知的限制伪装成故障。
+    """
+    if not settings.sandbox_enabled:
+        raise HTTPException(status_code=404, detail="未启用执行环境")
+
+    lease = await get_latest_lease(session, user_id=user.id)
+    if lease is None:
+        return SandboxArtifactsResponse(session_id=session_id)
+
+    artifacts: list[SandboxArtifact] = []
+    if lease.artifact_uri:
+        artifacts = await _describe_artifacts(lease.artifact_uri)
+
+    return SandboxArtifactsResponse(
+        session_id=session_id,
+        lease_id=lease.id,
+        state=lease.state,
+        artifacts=artifacts,
+    )
+
+
+async def _describe_artifacts(artifact_uri: str) -> list[SandboxArtifact]:
+    """`artifact_uri` 是**一个**键（归档或清单），这里把它扩成 1~2 条清单项。
+
+    导出逻辑只会写其中一个（体积超限退化成清单，见 `artifacts.py`），但两次导出
+    （`sandbox_reset` 之后重建）可能各留下一个。同目录下按白名单探测，比在数据库里
+    再存一张产物表便宜得多，也不需要迁移。
+    """
+    from app.services.storage import ObjectStoreError, StorageNotConfigured, get_object_store
+
+    try:
+        store = get_object_store()
+    except StorageNotConfigured:
+        logger.info("沙箱产物：对象存储未配置，产物清单为空")
+        return []
+
+    prefix = artifact_uri.rsplit("/", 1)[0]
+    expires_in = settings.s3_presign_expiry_seconds
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=expires_in)
+
+    found: list[SandboxArtifact] = []
+    for name in _ARTIFACT_FILENAMES:
+        key = f"{prefix}/{name}"
+        try:
+            size = await store.stat_size(key)
+            if size is None:
+                continue
+            url = await store.presigned_get_url(key, expires_in)
+        except ObjectStoreError as exc:
+            # 单个键探测失败不影响另一条：产物是尽力而为的能力，不该让清单整体 500
+            logger.warning("沙箱产物：读取失败 (key=%s)：%s", key, exc)
+            continue
+        found.append(SandboxArtifact(name=name, size_bytes=size, download_url=url, expires_at=expires_at))
+
+    return found

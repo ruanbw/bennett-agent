@@ -38,7 +38,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from redis.asyncio import Redis
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +86,16 @@ LIVE_STATES = (STATE_PROVISIONING, STATE_READY, STATE_PAUSED)
 #: `destroying` 两边都算：在 provider 确认之前，那台机器的 CPU/内存并没有还给节点池，
 #: 按它不占容量去放行会让节点池被打爆。
 OPEN_STATES = (*LIVE_STATES, STATE_DESTROYING)
+
+#: `destroying` 停留多久算「卡住了」、该被回收循环重试。见 `find_destroyable` 的 docstring。
+#:
+#: 这个值必须是**有**的。没有它的时候，一行 `destroying` 会永久吃掉该用户唯一的容量位
+#: （`_reject_if_at_capacity` 把 `destroying` 算进 `OPEN_STATES`），而同时
+#: `mark_destroying` 不允许从 `destroying` 重入、`get_active_lease` 也不认它——用户看到
+#: 的是「执行环境资源已满」，除了人工改库没有出路。触发窗口很宽：在
+#: 「抢占已提交」与「终态已提交」之间进程被 SIGKILL/OOM/滚动发布，中间包含 120 秒的
+#: 打包与最多 200MB 的读回。
+DESTROYING_STALE_SECONDS = 15 * 60
 
 #: 心跳键前缀。**不带** `settings.redis_key_prefix`：
 #: 它是跨部署共享的约定（运维脚本、面板都按这个前缀捞），而 Redis 库本身已经按环境分开了。
@@ -234,19 +244,42 @@ async def find_destroyable(
     会同时不被回收循环重试、也不被当成活动租约，是最典型的永久泄漏。这类候选的 reason
     沿用当初记下的 `destroy_reason`（那才是「为什么决定拆它」的真实答案），没有则记
     `DESTROY_ERROR`——不能按现在的时间重新算一遍，那会把归因写错。
+
+    `destroying` 也进候选，但它有**独立的 age 门槛**（`DESTROYING_STALE_SECONDS`）：
+    回收循环在正常销毁期间也会让行停在这个状态，太早重试会和正在干活的那个回收者
+    撞车（虽然有 `mark_destroying` 的条件 UPDATE 兜底，白跑一趟没意义）。超过门槛就
+    说明那次销毁**中断了**，必须有人接手——否则该用户的容量位永久被占。
     """
     now = now or datetime.now(timezone.utc)
     idle = settings.sandbox_idle_seconds if idle_seconds is None else idle_seconds
     idle_before = now - timedelta(seconds=idle)
+    # `destroying` 的重试门槛：抢到 `destroying` 之后，导出产物（最多 120s 打包 +
+    # 200MB 读回）加销毁的往返本来就慢，门槛必须比它宽松；但也不能太宽，否则进程被
+    # 硬杀后那台机器的容量位要一直占着。
+    destroying_before = now - timedelta(seconds=DESTROYING_STALE_SECONDS)
 
     rows = await session.scalars(
         select(SandboxLease)
         .where(
-            SandboxLease.state.in_((STATE_READY, STATE_PAUSED, STATE_DESTROY_FAILED)),
+            SandboxLease.state.in_((STATE_READY, STATE_PAUSED, STATE_DESTROY_FAILED, STATE_DESTROYING)),
+            # `destroying` 的判据必须与另外三种**互斥**，不能用 `or_` 里再加一条：
+            # 回收前它本来就是空闲的，通用的空闲分支对它几乎必然成立，age 门槛会被
+            # 直接绕过。所以两类分开写。
             or_(
-                SandboxLease.hard_expires_at < now,
-                # coalesce：`last_activity` 为空表示还没跑过任何命令，那台机器从创建起就在计空闲。
-                func.coalesce(SandboxLease.last_activity, SandboxLease.created_at) < idle_before,
+                and_(
+                    SandboxLease.state != STATE_DESTROYING,
+                    or_(
+                        SandboxLease.hard_expires_at < now,
+                        # coalesce：`last_activity` 为空表示还没跑过任何命令，那台机器从创建起就在计空闲。
+                        func.coalesce(SandboxLease.last_activity, SandboxLease.created_at) < idle_before,
+                    ),
+                ),
+                and_(
+                    SandboxLease.state == STATE_DESTROYING,
+                    # 没有 `destroying_since` 的行是旧数据（加列之前抢下的）：按 created_at
+                    # 兜底，宁可晚一点重试也不要让它永久占着容量位。
+                    func.coalesce(SandboxLease.destroying_since, SandboxLease.created_at) < destroying_before,
+                ),
             ),
         )
         # 先到期的先回收：候选数受节点池容量约束，不发 limit 也不会失控。
@@ -499,27 +532,49 @@ async def touch_activity(session: AsyncSession, lease_id: str, *, now: datetime 
     await session.commit()
 
 
-async def mark_destroying(session: AsyncSession, lease_id: str) -> bool:
+async def mark_destroying(session: AsyncSession, lease_id: str, *, now: datetime | None = None) -> bool:
     """抢占销毁权。返回是否抢到（`False` = 别人已经在销毁，或它本来就不是活动状态）。
 
-    整条语义就靠这一条语句：`UPDATE ... WHERE state IN ('ready','paused','destroy_failed')`。条件是
-    **原子**的一部分，所以「检查」与「改」之间不存在窗口——这正是回收循环不会把机器
-    从一条长 `exec` 下面抽走的原因。
+    整条语义就靠这一条语句：条件是 **原子**的一部分，所以「检查」与「改」之间不存在
+    窗口——这正是回收循环不会把机器从一条长 `exec` 下面抽走的原因，也是
+    「并发下只有一个调用者能抢到」的唯一保证。
 
-    `destroy_failed` 也在允许的源状态里，且**只能从它重入**：销毁失败（provider 报错、
-    导出超时）的机器仍然在跑、仍然占着内存，不重试就等于永久泄漏。把它排除在外会让
-    「失败」变成终态，而那是最贵的一种终态。
+    `destroy_failed` 与 `destroying` 都在允许的源状态里：销毁失败（provider 报错、导出
+    超时）的机器仍然在跑、仍然占着内存，不重试就等于永久泄漏。`destroying` 同理——它
+    可能是**一次被中断的**销毁留下的（进程在「抢占已提交」与「终态已提交」之间被
+    SIGKILL/OOM/滚动发布杀掉，中间还夹着 120 秒打包与最多 200MB 读回）。不许它重入，
+    那行就永久占着该用户唯一的容量位：`_reject_if_at_capacity` 把 `destroying` 算进
+    `OPEN_STATES`，而 `get_active_lease` 又不认它 —— 用户看到的是「资源已满」，
+    除了人工改库没有出路。
+
+    **重入必须带 age 条件**（`DESTROYING_STALE_SECONDS`）：无条件允许
+    `state='destroying'` 看起来更简单，但那样两个并发回收者会**同时**抢到——它们各自
+    都满足条件、各自提交，而「抢占唯一」是这条语句全部的意义。所以门槛落在 UPDATE 的
+    `WHERE` 里（与 `find_destroyable` 的候选判据同一个常量），而不是靠调用方自律。
 
     在这里提交：抢到之后调用方要去做产物导出 + provider destroy（几秒到几十秒），
     期间让整条连接和一个未提交的状态变更挂着，会让别的回收者以为这台机器还能用。
     """
+    moment = now or datetime.now(timezone.utc)
+    stalled_before = moment - timedelta(seconds=DESTROYING_STALE_SECONDS)
+
     claimed = await session.scalar(
         update(SandboxLease)
         .where(
             SandboxLease.id == lease_id,
-            SandboxLease.state.in_((STATE_READY, STATE_PAUSED, STATE_DESTROY_FAILED)),
+            or_(
+                # 正常入口：三种「可以开始销毁」的状态
+                SandboxLease.state.in_((STATE_READY, STATE_PAUSED, STATE_DESTROY_FAILED)),
+                # 重入入口：`destroying` 只在那次销毁**真的卡住了**之后才允许重抢。
+                # 无条件的 `state='destroying'` 会让两个并发回收者同时抢到（都满足条件
+                # 的 UPDATE 各自提交），而「抢占必须唯一」正是这条语句存在的理由。
+                and_(
+                    SandboxLease.state == STATE_DESTROYING,
+                    func.coalesce(SandboxLease.destroying_since, SandboxLease.created_at) < stalled_before,
+                ),
+            ),
         )
-        .values(state=STATE_DESTROYING)
+        .values(state=STATE_DESTROYING, destroying_since=moment)
         .returning(SandboxLease.id)
     )
     await session.commit()
@@ -547,6 +602,8 @@ async def mark_destroyed(
         .values(
             state=STATE_DESTROYED,
             destroyed_at=datetime.now(timezone.utc),
+            # 清掉：留着会让「下次销毁」的 age 门槛拿上一次的时间算，永远判成立。
+            destroying_since=None,
             destroy_reason=reason,
             artifact_uri=artifact_uri,
         )
@@ -583,7 +640,13 @@ async def mark_destroy_failed(
             SandboxLease.id == lease_id,
             SandboxLease.state.in_((STATE_DESTROYING, STATE_PROVISIONING)),
         )
-        .values(state=STATE_DESTROY_FAILED, destroy_reason=reason, error=error[:2_000])
+        .values(
+            state=STATE_DESTROY_FAILED,
+            # 同样清掉：失败态的候选判据不再需要它，留着只会误导下一次抢占的时间判断。
+            destroying_since=None,
+            destroy_reason=reason,
+            error=error[:2_000],
+        )
     )
     await session.commit()
 

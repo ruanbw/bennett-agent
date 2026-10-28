@@ -7,7 +7,7 @@
 
     Postgres   `bennett_test` 库（可用 TEST_DATABASE_URL 覆盖）
     Redis      第 15 号库（`REDIS_URL` 默认指向它，键前缀带 `bennett-test`）
-    RustFS     `bennett-test-uploads` 桶
+    RustFS     `bennett-test-artifacts` 桶
 
 后两者由 `docker compose up -d postgres redis rustfs` 提供。**没有它们时测试会失败**，
 而不是静默跳过：一个「悄悄跳过集成测试」的套件会让人误以为全绿，而 CI 与本地跑的
@@ -53,8 +53,8 @@ os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
 os.environ.setdefault("REDIS_KEY_PREFIX", "bennett-test")
 
 #: 测试用自己的桶：上传用例会删对象，落到开发桶里就是真实数据丢失。
-os.environ.setdefault("S3_BUCKET", "bennett-test-uploads")
-os.environ.setdefault("S3_PREFIX", "test-uploads")
+os.environ.setdefault("S3_BUCKET", "bennett-test-artifacts")
+os.environ.setdefault("S3_PREFIX", "test-artifacts")
 
 #: APP_ENV=test 让 .env.development 的覆盖失效（.env.test 不存在时其余配置来自 .env）。
 #: 取值合法性由 settings 的白名单校验（development/production/staging/test）。

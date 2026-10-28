@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # 分支名必须与**实际默认分支**一致：这个仓库只有 `master`（`git ls-remote origin`
+  # 只返回 refs/heads/master）。此前写的是 `main`，于是直接推到 master 的提交
+  # 一次都不会触发任何检查——那套 1314 个后端用例 + 1138 个前端用例，从没在 CI 里
+  # 跑过。改成两个分支都监听，以后改默认分支也不用再想这件事。
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 # 只读权限：CI 不需要写仓库内容，显式收窄默认的 GITHUB_TOKEN 权限
@@ -67,8 +71,8 @@ jobs:
       S3_ENDPOINT_URL: http://127.0.0.1:9000
       S3_ACCESS_KEY: rustfsadmin
       S3_SECRET_KEY: rustfsadmin
-      S3_BUCKET: bennett-test-uploads
-      S3_PREFIX: test-uploads
+      S3_BUCKET: bennett-test-artifacts
+      S3_PREFIX: test-artifacts
       S3_USE_PATH_STYLE: "true"
       # 建库脚本在应用启动时执行；测试由 conftest 自己跑一遍
       DATABASE_APPLY_SCHEMA: "true"
@@ -127,4 +131,35 @@ jobs:
       - name: 构建
         # 构建脚本本身也会先跑 tsc --noEmit；这里保留独立步骤是为了让
         # 「类型错误」和「打包失败」在 CI 里显示为两个不同的失败项
+        run: npm run build
+
+  admin-frontend:
+    name: 管理后台（lint + 类型 + 测试 + 构建）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: admin-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin-frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 测试
+        run: npm test
+
+      - name: 构建
         run: npm run build

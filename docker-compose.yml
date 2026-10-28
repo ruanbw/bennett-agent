@@ -6,7 +6,7 @@
 #   redis     限流计数、搜索缓存、会话 token 热缓存
 #   rustfs    对象存储（S3 协议），存上传文件的原件
 #   app       FastAPI 后端（只提供 /api/*，启动时执行 sql/init.sql 建表）  [profile: app]
-#   worker    解析上传文件的常驻进程（Postgres 当队列，SKIP LOCKED）  [profile: app]
+#   worker    沙箱空闲回收的常驻进程（时间驱动、可重启）  [profile: app]
 #
 # ## 开发与生产的区别：靠 profile 表达
 #
@@ -205,7 +205,14 @@ services:
       NO_PROXY: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${NO_PROXY:+,$NO_PROXY}"
       no_proxy: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${no_proxy:+,$no_proxy}"
       # 容器内必须监听 0.0.0.0，否则宿主映射的端口进不来
-      APP_ENV: ${APP_ENV:-production}
+      # 生产容器**强制** production：这里不能用 `${APP_ENV:-production}`。
+      # `.env.example` 里 APP_ENV=development，而 README 的生产部署步骤正是
+      # `cp .env.example .env && docker compose --profile app up`——compose 会用 .env
+      # 做插值，`environment:` 又覆盖 `env_file:`，于是生产容器实际跑在 development，
+      # 而所有生产守卫（拒绝占位 AUTH_SECRET、强制 Secure cookie、关闭 /docs、
+      # 收紧 CORS）全部挂在 `app_env == "production"` 上，一条都没生效。
+      # 要跑非生产环境请显式覆盖这个变量，而不是靠 .env 的默认值。
+      APP_ENV: production
     depends_on:
       postgres:
         condition: service_healthy
@@ -235,8 +242,8 @@ services:
         max-file: "3"
 
   worker:
-    # 上传文件的解析进程：从 Postgres 取 pending 任务（FOR UPDATE SKIP LOCKED），
-    # 拉原件 → 抽文本 → 切分 → 写知识库。与 app 同一镜像、不同命令。
+    # 沙箱空闲回收进程：扫租约表 → 心跳判定 → 导出产物 → 销毁机器。
+    # 与 app 同一镜像、不同命令。
     profiles: ["app"]
     image: bennett-agent:local
     container_name: bennett-worker
@@ -256,7 +263,14 @@ services:
       # TCP 服务的 postgres/redis 不受影响（代理只管 HTTP），列在这里是为了明确语义。
       NO_PROXY: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${NO_PROXY:+,$NO_PROXY}"
       no_proxy: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${no_proxy:+,$no_proxy}"
-      APP_ENV: ${APP_ENV:-production}
+      # 生产容器**强制** production：这里不能用 `${APP_ENV:-production}`。
+      # `.env.example` 里 APP_ENV=development，而 README 的生产部署步骤正是
+      # `cp .env.example .env && docker compose --profile app up`——compose 会用 .env
+      # 做插值，`environment:` 又覆盖 `env_file:`，于是生产容器实际跑在 development，
+      # 而所有生产守卫（拒绝占位 AUTH_SECRET、强制 Secure cookie、关闭 /docs、
+      # 收紧 CORS）全部挂在 `app_env == "production"` 上，一条都没生效。
+      # 要跑非生产环境请显式覆盖这个变量，而不是靠 .env 的默认值。
+      APP_ENV: production
     command: ["python", "main.py", "--worker"]
     # 镜像级 HEALTHCHECK 探的是 8000 端口的 /health/ready——worker **不监听 HTTP**，
     # 继承那个探针会让它永远 unhealthy（编排器会反复重启一个完全正常的进程）。
@@ -267,7 +281,8 @@ services:
         condition: service_healthy
       rustfs:
         condition: service_healthy
-    # 解析一份大 PDF 可能要几十秒；等它把手上的文件处理完再退。
+    # 回收一台机器最坏要几十秒（打包 workspace + 上传产物 + 销毁）。
+    # 等它把手上这一台收尾再退：停在 destroying 的租约没有代码能回收。
     stop_grace_period: 30s
     logging:
       driver: json-file

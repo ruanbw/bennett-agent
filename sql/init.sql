@@ -98,51 +98,6 @@ CREATE TABLE IF NOT EXISTS message (
 CREATE INDEX IF NOT EXISTS ix_message_conversation ON message (conversation_id, seq);
 CREATE INDEX IF NOT EXISTS ix_message_pull ON message (user_id, version);
 
-CREATE TABLE IF NOT EXISTS knowledge_document (
-    id              UUID         NOT NULL PRIMARY KEY,
-    user_id         UUID         NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
-    title           VARCHAR(200) NOT NULL,
-    source          VARCHAR(500),
-    embedding_model VARCHAR(200) NOT NULL,
-    dimensions      INTEGER      NOT NULL,
-    chunk_count     INTEGER      NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_knowledge_document_user ON knowledge_document (user_id, created_at);
-
-CREATE TABLE IF NOT EXISTS knowledge_chunk (
-    id          UUID         NOT NULL PRIMARY KEY,
-    document_id UUID         NOT NULL REFERENCES knowledge_document (id) ON DELETE CASCADE,
-    user_id     UUID         NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
-    chunk_index INTEGER      NOT NULL,
-    heading     VARCHAR(200) NOT NULL,
-    text        TEXT         NOT NULL,
-    embedding   BYTEA        NOT NULL,
-    dimensions  INTEGER      NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_knowledge_chunk_document ON knowledge_chunk (document_id, chunk_index);
-CREATE INDEX IF NOT EXISTS ix_knowledge_chunk_user ON knowledge_chunk (user_id);
-
-CREATE TABLE IF NOT EXISTS uploaded_file (
-    id                    UUID         NOT NULL PRIMARY KEY,
-    user_id               UUID         NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
-    original_name         VARCHAR(255) NOT NULL,
-    content_type          VARCHAR(128) NOT NULL,
-    size_bytes            BIGINT       NOT NULL,
-    sha256                VARCHAR(64)  NOT NULL,
-    storage_key           VARCHAR(512) NOT NULL,
-    status                VARCHAR(16)  NOT NULL,
-    attempts              INTEGER      NOT NULL,
-    error                 TEXT,
-    processing_started_at TIMESTAMPTZ,
-    document_id           UUID         REFERENCES knowledge_document (id) ON DELETE SET NULL,
-    created_at            TIMESTAMPTZ  NOT NULL,
-    updated_at            TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT uq_uploaded_file_user_sha256 UNIQUE (user_id, sha256)
-);
-CREATE INDEX IF NOT EXISTS ix_uploaded_file_queue ON uploaded_file (status, created_at);
-CREATE INDEX IF NOT EXISTS ix_uploaded_file_user ON uploaded_file (user_id, created_at);
-
 CREATE TABLE IF NOT EXISTS sandbox_lease (
     id               VARCHAR(64)  NOT NULL PRIMARY KEY,
     user_id          UUID         NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
@@ -156,6 +111,9 @@ CREATE TABLE IF NOT EXISTS sandbox_lease (
     last_activity    TIMESTAMPTZ,
     hard_expires_at  TIMESTAMPTZ  NOT NULL,
     destroyed_at     TIMESTAMPTZ,
+    -- 进入 destroying 的时刻。没有它就无法判断「这次销毁是还在进行、还是被中断了」，
+    -- 而这两者的正确处置完全相反（等 vs 立刻接手重试）。
+    destroying_since TIMESTAMPTZ,
     destroy_reason   VARCHAR(32),
     artifact_uri     VARCHAR(512),
     error            TEXT

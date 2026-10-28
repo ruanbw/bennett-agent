@@ -201,11 +201,11 @@ async def chat_stream(request: ChatRequest, user: User = Depends(current_active_
             reasoning_effort=request.reasoning_effort,
             context_anchor=request.context_anchor,
             cache_scope_key=str(user.id),
-            # 知识库是用户私有的：工具只能查当前登录用户的文档（见
-            # `app/tools/knowledge_scope.py`）。这个值由服务端注入，绝不来自模型参数。
+            # 用户 id：沙箱租约归属的寻址依据，也用于工具缓存的按人隔离。
+            # 由服务端注入，绝不来自模型参数。
             user_id=user.id,
-            # 会话标识：沙箱是「每会话一台机器」，服务端需要它定位租约。它只是**标识**，
-            # 不是授权凭据（见 `app/tools/sandbox_scope.py`）：即便被谎报，
+            # 会话标识：沙箱是「每用户一台机器」，session_id 只用于标记「最后是谁在用」。
+            # 它只是**标识**，不是授权凭据（见 `app/tools/sandbox_scope.py`）：即便被谎报，
             # 租约查询也一律带 user_id，拿到的只能是本用户自己的机器。
             session_id=request.session_id,
             # 审批续跑：客户端带回「批准/拒绝」。是否真的续跑由服务层看历史形状决定

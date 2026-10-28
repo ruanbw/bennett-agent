@@ -64,9 +64,8 @@ from app.tools.sandbox_scope import SandboxScope, current_sandbox_scope
 
 logger = logging.getLogger(__name__)
 
-#: 没有作用域时的统一口径。与 `knowledge_search` 的「当前会话没有关联知识库」一致：
-#: CLI 与未登录确实没有身份，说清楚比假装有一个默认身份好（后者会让所有匿名调用
-#: 挤到同一台机器上）。
+#: 没有作用域时的统一口径。CLI 与未登录确实没有身份，说清楚比假装有一个默认身份好
+#: （后者会让所有匿名调用挤到同一台机器上）。
 NO_SCOPE_MESSAGE = (
     "当前会话没有关联用户（CLI 模式或未登录），无法使用执行环境。请直接依据对话内容回答，并说明你没有可用的执行环境。"
 )

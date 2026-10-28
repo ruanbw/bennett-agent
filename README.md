@@ -25,12 +25,11 @@
 ## 功能特性
 
 - **多提供商模型接入**：所有提供商统一走 OpenAI 兼容端点 + LiteLLM 路由格式（如 `openai/gpt-4o`）。管理后台内置主流厂商预设（OpenAI、Anthropic、Google、DeepSeek、Kimi、通义千问、智谱、OpenRouter、Groq、xAI、硅基流动、火山方舟等），也支持 Ollama / LM Studio 本地模型；API Key 加密落库，首次启动可由环境变量引导。
-- **Agent 工具**：联网搜索（Tavily）、知识库检索（RAG）、沙箱代码执行、澄清提问，以及通过 MCP 动态发现的外部工具（http 与 stdio 两种传输）。
+- **Agent 工具**：联网搜索（Tavily）、沙箱代码执行、澄清提问，以及通过 MCP 动态发现的外部工具（http 与 stdio 两种传输）。
 - **沙箱执行**：每用户一台隔离执行环境（[OpenSandbox](https://github.com/opencode-ai/opensandbox)，本地 Docker 运行时 / 生产 K8s + Firecracker），心跳续命 + 自动回收。
-- **知识库**：文件上传（PDF / DOCX / HTML / MD / TXT）→ 对象存储 → 后台 worker 解析切分 → 向量化入库 → 对话中检索。
 - **上下文预算**：每轮生成前估算 token 用量，超限自动两级压缩（截断超长单条 → 折叠旧轮次为摘要），压缩对用户可见；也支持直接拒绝或不设防。
 - **模型容灾**：主模型返回 5xx / 429 / 超时时自动切换备用模型重试。
-- **本地优先前端**：会话数据存 IndexedDB，离线可用；通过增量同步引擎（push 行级 upsert / pull 游标长轮询）与服务端保持一致。
+- **本地优先前端**：会话数据存 IndexedDB，断网不会丢已同步的内容；通过增量同步引擎（push 行级 upsert / pull 游标长轮询）与服务端保持一致。**注意：进入应用本身需要联网**——启动时要调 `/api/auth/me` 确认登录态，断网会停在登录页（目前没有 Service Worker）。
 - **多租户与 RBAC**：HttpOnly Cookie 会话认证，`user` / `admin` / `superadmin` 三档角色；管理后台可维护提供商、模型与用户。
 
 ## 仓库结构
@@ -117,9 +116,9 @@ docker compose --profile app up -d --build
 docker compose logs -f app worker
 ```
 
-`app` profile 会额外启动：`app`（FastAPI，启动时执行 `sql/init.sql` 建表）、`worker`（上传解析进程）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
+`app` profile 会额外启动：`app`（FastAPI，启动时执行 `sql/init.sql` 建表）、`worker`（沙箱空闲回收进程）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
 
-所有服务端口只绑定回环地址；数据库与 Redis 无额外防护，远程访问请走 SSH 隧道或带 TLS 的反向代理。`docker compose down -v` 会删除全部数据（含上传原件），不可恢复。
+所有服务端口只绑定回环地址；数据库与 Redis 无额外防护，远程访问请走 SSH 隧道或带 TLS 的反向代理。`docker compose down -v` 会删除全部数据（含对象存储里的沙箱产物），不可恢复。
 
 ## 配置
 
@@ -131,10 +130,8 @@ docker compose logs -f app worker
 | 模型网关 | `LITELLM_API_BASE/KEY`、`MODEL_NAME`、备用模型、上游超时、出站 SSRF 防护 |
 | 上下文预算 | `CONTEXT_GUARD_MODE`（compact / reject / off）与两级压缩参数 |
 | 工具 | `TAVILY_API_KEY`、`MCP_SERVERS`、MCP 工具超时 |
-| 知识库 RAG | 嵌入模型、`RAG_TOP_K`、相似度阈值 |
 | 数据库 / Redis | 连接串、连接池、会话缓存开关 |
 | 对象存储 | S3 端点 / 凭据 / 桶（RustFS、AWS S3、OSS 同一套 API） |
-| 上传 | 大小上限、允许的扩展名、用户配额、worker 轮询 |
 | 认证 | `AUTH_SECRET`（兼提供商 API Key 加密密钥）、Cookie 与会话策略 |
 | 限流 | 按账号的对话限流、按 IP 的认证限流、可信代理 |
 | 沙箱 | 开关、运行时、资源配额、生命周期、容量上限、出网策略 |

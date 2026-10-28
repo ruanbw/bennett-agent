@@ -19,8 +19,6 @@
   token 只是一串随机值，状态在库里，因此登出/踢人/改密失效都是删一行，立即生效。
 - `model_provider` / `provider_model`：管理后台维护的模型清单。
 - `sync_counter` / `conversation` / `message`：跨设备同步的服务端镜像。
-- `knowledge_document` / `knowledge_chunk`：知识库（RAG）。
-- `uploaded_file`：上传文件的原件元数据与解析状态（原件本身在对象存储里）。
 
 ## 关于 user 表名
 
@@ -52,7 +50,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -66,7 +63,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
-from app.config.secret_box import decrypt_secret, encrypt_secret
+from app.config.secret_box import SecretDecryptError, decrypt_secret, encrypt_secret
 from app.roles import ROLE_USER, Role
 
 logger = logging.getLogger(__name__)
@@ -76,11 +73,27 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+#: 解密失败的告警只打一次：列表端点与每次对话都会读这一列，不去重会刷屏到
+#: 真正的根因（AUTH_SECRET 被换过）被淹没。
+_DECRYPT_FAILURE_REPORTED = False
+
+
 class EncryptedText(TypeDecorator):
     """透明的「落库加密、读取解密」文本列（API Key 用）。
 
     `TypeDecorator` 让所有业务代码继续把 `api_key` 当明文读写，加密只发生在
     SQLAlchemy 的 bind/result 边界；旧明文行由 `decrypt_secret` 原样返回。
+
+    ## 解不开时返回 `None`，并且不再装没事
+
+    这一层拿不到行上下文（不知道是哪一条 provider），所以不能在这里抛——抛出去会让
+    `GET /api/admin/providers` 整体 500，而「某一个提供商的密钥坏了」不配享有
+    「整个后台打不开」的后果。返回 `None` 的语义是「没有可用密钥」，与「从来没配过」
+    在**出站行为**上一致（都不发 Authorization），因此不会把密文当明文发上游。
+
+    真正的可诊断性由 `audit_provider_key_decryption()` 提供：它用原始 SQL 拿到
+    `(id, 密文)` 逐条试解，启动时调一次、`/health/ready` 里报一次，能说出**是哪几个
+    提供商**解不开。把「静默」和「整体 500」两个毛病分开治，是这里唯一能同时做到的事。
     """
 
     impl = Text
@@ -94,7 +107,46 @@ class EncryptedText(TypeDecorator):
     def process_result_value(self, value, dialect):  # noqa: ANN001, ANN201
         if value is None:
             return None
-        return decrypt_secret(str(value))
+        try:
+            return decrypt_secret(str(value))
+        except SecretDecryptError:
+            global _DECRYPT_FAILURE_REPORTED
+            if not _DECRYPT_FAILURE_REPORTED:
+                _DECRYPT_FAILURE_REPORTED = True
+                logger.error(
+                    "有提供商的 API Key 解密失败：AUTH_SECRET 可能已更换。"
+                    "受影响的行会以「未配置密钥」呈现；调用 /health/ready 可看到具体是哪几个。",
+                    exc_info=True,
+                )
+            return None
+
+
+async def audit_provider_key_decryption() -> list[str]:
+    """逐条试解 `model_provider.api_key`，返回**解不开**的提供商 id（十六进制字符串）。
+
+    为什么必须用原始 SQL：经过 `EncryptedText` 之后拿到的已经是解密结果（或 `None`），
+    再也分不清「没配」与「解不开」。这里读密文原文，手动调一次 `decrypt_secret`。
+
+    为什么值得单独一个函数：换 `AUTH_SECRET` 是**允许的运维动作**（`.env.example` 里
+    写明了后果），但它失败的方式是「上游 401 + 后台显示未设置」，两条线索都指向
+    「key 填错了」而不是「密钥换了」。启动日志与就绪探针必须能直接说出后者。
+    """
+    from sqlalchemy import text as _text
+
+    from app.config.secret_box import PREFIX
+
+    async with async_session_maker() as session:
+        rows = (await session.execute(_text("SELECT id, api_key FROM model_provider"))).all()
+    broken: list[str] = []
+    for row in rows:
+        raw = row[1]
+        if not raw or not str(raw).startswith(PREFIX):
+            continue
+        try:
+            decrypt_secret(str(raw))
+        except SecretDecryptError:
+            broken.append(str(row[0]))
+    return broken
 
 
 class Base(DeclarativeBase):
@@ -520,167 +572,6 @@ class Message(Base):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
-class KnowledgeDocument(Base):
-    """知识库文档（RAG 的入库单位）。
-
-    `dimensions` 与 `embedding_model` 存在**文档**上而不是全局配置里：检索时要按
-    片段的维度筛掉不兼容的候选，而「换了 embedding 模型却没重建索引」是这类系统最
-    常见的静默故障——旧向量还在，与查询算出来的相似度只是噪声，检索却仍会「成功
-    返回」若干条结果。
-    """
-
-    __tablename__ = "knowledge_document"
-    __table_args__ = (Index("ix_knowledge_document_user", "user_id", "created_at"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        GUID,
-        ForeignKey("user.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    title: Mapped[str] = mapped_column(String(200), nullable=False)
-    #: 来源说明（文件名、URL）。展示用，不参与检索。
-    source: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    #: 生成这些向量时用的模型。换模型后旧文档必须重建，否则维度对不上。
-    embedding_model: Mapped[str] = mapped_column(String(200), nullable=False)
-    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
-    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
-    )
-
-
-class KnowledgeChunk(Base):
-    """知识库片段（检索的最小单位）。
-
-    向量存成 float32 的二进制（`app/services/rag/store.py:pack_vector`）而不是
-    JSON：1024 维的 JSON 文本约 12KB，二进制是 4KB，且读出来不用 `json.loads`。
-    多文档检索时这个差别就是几十毫秒。
-
-    为什么不用 pgvector：当前检索是「按用户取全量片段，在 Python 里算余弦 + 词法
-    加权」。片段规模在万级以内时这是几十毫秒的事，而 pgvector 会引入一个**必须由
-    数据库镜像预装**的扩展（`CREATE EXTENSION vector` 在多数托管 PG 上需要单独开通）。
-    规模上去之后再换：`embedding` 列改成 `vector(N)` + HNSW 索引，混合检索的权重
-    逻辑可以保留。
-
-    `user_id` 与 `document_id` 冗余一份：检索按用户过滤时不必 join 文档表，
-    索引能直接命中（与 `message.user_id` 同一条取舍）。
-    """
-
-    __tablename__ = "knowledge_chunk"
-    __table_args__ = (
-        Index("ix_knowledge_chunk_user", "user_id"),
-        Index("ix_knowledge_chunk_document", "document_id", "chunk_index"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    document_id: Mapped[uuid.UUID] = mapped_column(
-        GUID,
-        ForeignKey("knowledge_document.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        GUID,
-        ForeignKey("user.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    #: 所属章节标题（最近的 Markdown 标题）；展示「这句来自哪一节」用。
-    heading: Mapped[str] = mapped_column(String(200), nullable=False, default="")
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    #: float32 小端二进制（`array.array("f")` 的 tobytes）。
-    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-# ---------------------------------------------------------------------
-# 上传文件
-# ---------------------------------------------------------------------
-#: 排队中，等待 worker 取走。
-UPLOAD_STATUS_PENDING = "pending"
-#: 已被某个 worker 取走（带租约，见 `processing_started_at`）。
-UPLOAD_STATUS_PROCESSING = "processing"
-#: 原件已存入对象存储、文本已解析、片段已写入知识库。
-UPLOAD_STATUS_READY = "ready"
-#: 重试次数用尽或遇到不可重试的错误（格式损坏、加密 PDF…）。
-UPLOAD_STATUS_FAILED = "failed"
-
-UPLOAD_STATUSES = frozenset(
-    {UPLOAD_STATUS_PENDING, UPLOAD_STATUS_PROCESSING, UPLOAD_STATUS_READY, UPLOAD_STATUS_FAILED}
-)
-
-
-class UploadedFile(Base):
-    """上传文件的原件元数据与解析状态。
-
-    原件在对象存储里（`storage_key`），**库里不存二进制**：把 PDF 塞进 BYTEA 会让
-    每次备份、每条 `SELECT *`、每个连接都拖着它们走。库里只留「去哪儿找 + 处理到哪一步」。
-
-    ## 状态机
-
-        pending → processing → ready
-                    ↓ 失败且还有重试次数
-                  pending
-                    ↓ 次数用尽 / 不可重试
-                  failed
-
-    `processing` 带租约（`processing_started_at`）：worker 崩溃后行会永久卡在该状态，
-    所以取任务的查询会把「租约过期的 processing」重新当作可领取。没有这一步，
-    一次 OOM Kill 就能让某个用户的文件永远停在「解析中」。
-
-    ## 去重
-
-    `(user_id, sha256)` 唯一：同一用户重复上传同一份文件不会产生第二个原件、
-    第二份切片，也不会烧第二次 embedding 配额。跨用户**不共享**——知识库是私有的，
-    共享原件会把「谁传过什么」泄露成 timing 侧信道。
-    """
-
-    __tablename__ = "uploaded_file"
-    __table_args__ = (
-        Index("ix_uploaded_file_user", "user_id", "created_at"),
-        # worker 的取任务查询走这个索引：WHERE status=... ORDER BY created_at
-        Index("ix_uploaded_file_queue", "status", "created_at"),
-        UniqueConstraint("user_id", "sha256", name="uq_uploaded_file_user_sha256"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        GUID,
-        ForeignKey("user.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    #: 用户提供的原始文件名（**只用于展示**，绝不参与对象键构造）。
-    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    #: 嗅探/用户声明的 MIME，供解析器选择与展示。
-    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
-    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    #: 原件内容的 SHA-256（hex），用于去重与完整性校验。
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    #: 对象存储里的键：`{prefix}/{user_id}/{uuid}`，不含扩展名与用户文件名。
-    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default=UPLOAD_STATUS_PENDING)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 失败原因（给用户看的一句话）与内部细节（日志里看）。
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: 租约起点。worker 每处理一份就写一次，用于判断「是不是被崩溃的 worker 拿走了」。
-    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    #: 解析成功后指向的知识库文档。删除文档时置空（原件仍保留，可重新解析）。
-    document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID,
-        ForeignKey("knowledge_document.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
-
-
 # ---------------------------------------------------------------------
 # 引擎与会话
 # ---------------------------------------------------------------------
@@ -748,7 +639,21 @@ def init_sql_text() -> str:
 
 
 async def verify_schema_at_head() -> None:
-    """执行 sql/init.sql 建表（幂等）。名字沿用旧调用点。"""
+    """执行 sql/init.sql 建表，然后**逐列比对模型与库**，漂移就拒绝启动。
+
+    ## 为什么建完还要比
+
+    `sql/init.sql` 里全是 `CREATE TABLE IF NOT EXISTS`。表已经存在时整句是 no-op，
+    于是**新加的列永远不会被建出来**，而启动依然成功——本项目不维护增量迁移
+    （README 的既定决策），这条路径就是「加一列」唯一的落地方式，而它对既有库无效。
+
+    后果是静默的：第一次 `SELECT` 到那列才炸（`UndefinedColumn` → 500），
+    而且往往在某个冷门路径里（例如 `artifact_uri` 只有回收时才读）。
+    `tests/test_db_schema.py` 抓不到它——CI 每次都是空库。
+
+    所以这里在脚本执行完之后做一次真实的列比对：模型有、库没有 → 抛错拒绝启动，
+    并给出可直接复制执行的 `ALTER TABLE` 提示。宁可起不来，也不要带着半个 schema 接流量。
+    """
     if not settings.database_apply_schema:
         logger.warning("已跳过建库脚本（DATABASE_APPLY_SCHEMA=false）")
         return
@@ -757,7 +662,43 @@ async def verify_schema_at_head() -> None:
     async with engine.begin() as connection:
         for statement in statements:
             await connection.execute(text(statement))
+
+    missing = await _missing_columns()
+    if missing:
+        detail = "\n".join(f"  ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column};" for table, column in missing)
+        raise RuntimeError(
+            "数据库结构已漂移：模型里有这些列，库里没有——`sql/init.sql` 的 "
+            "CREATE TABLE IF NOT EXISTS 对既有表不会加列。请重建开发库"
+            "（docker compose down -v && docker compose up -d postgres），"
+            "或在生产上手工执行：\n" + detail
+        )
     logger.info("数据库结构已就绪")
+
+
+async def _missing_columns() -> list[tuple[str, str]]:
+    """模型有、库里没有的列，返回 `[(表名, 列名)]`。
+
+    只查「缺列」不查「多列」：多出来的列（历史遗留）不影响正确性，而拒绝启动的代价
+    很高——缺列会让某条查询在运行期 500，两者严重程度不在一个量级。
+    """
+    from sqlalchemy import inspect as _inspect
+
+    missing: list[tuple[str, str]] = []
+
+    def compare(sync_connection):  # noqa: ANN001, ANN202
+        inspector = _inspect(sync_connection)
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                missing.append((table.name, "<整张表缺失>"))
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing:
+                    missing.append((table.name, column.name))
+
+    async with engine.connect() as connection:
+        await connection.run_sync(compare)
+    return missing
 
 
 # ---------------------------------------------------------------------
@@ -831,23 +772,15 @@ async def get_access_token_db(session: AsyncSession = Depends(get_async_session)
 
 __all__ = [
     "DATABASE_URL",
-    "UPLOAD_STATUSES",
-    "UPLOAD_STATUS_FAILED",
-    "UPLOAD_STATUS_PENDING",
-    "UPLOAD_STATUS_PROCESSING",
-    "UPLOAD_STATUS_READY",
     "AccessToken",
     "AppSetting",
     "Base",
     "Conversation",
     "HashedAccessTokenDatabase",
-    "KnowledgeChunk",
-    "KnowledgeDocument",
     "Message",
     "ModelProvider",
     "ProviderModel",
     "SyncCounter",
-    "UploadedFile",
     "User",
     "async_session_maker",
     "build_engine",
@@ -932,6 +865,8 @@ class SandboxLease(Base):
     #: 绝对上限。只靠空闲回收的话，一个挂着不动的标签页可以永远付费占机。
     hard_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 进入 `destroying` 的时刻（回收循环据此区分「正在销毁」与「销毁被中断」）。
+    destroying_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     #: idle / hard_ttl / session_deleted / user_banned / user_reset / error
     destroy_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 销毁前导出的产物（对象存储键）。产物比机器重要：机器可以重建，用户的计算结果不行。

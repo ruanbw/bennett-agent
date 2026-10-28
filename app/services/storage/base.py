@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import re
-import uuid
 from typing import Protocol
 
 #: 对象键允许的字符集。**用户文件名永远不进键**，这里只用于校验生成结果。
@@ -50,7 +49,7 @@ class ObjectStore(Protocol):
         ...
 
     async def get_bytes(self, key: str) -> bytes:
-        """读取整个对象。仅用于解析——调用方保证对象大小受 `UPLOAD_MAX_BYTES` 约束。"""
+        """读取整个对象。仅用于小对象（当前实现里没有调用方；产物走预签名直链）。"""
         ...
 
     async def delete(self, key: str) -> None:
@@ -59,6 +58,15 @@ class ObjectStore(Protocol):
 
     async def exists(self, key: str) -> bool:
         """对象是否存在。"""
+        ...
+
+    async def stat_size(self, key: str) -> int | None:
+        """对象大小（字节）；对象不存在时返回 `None`。
+
+        产物清单要给用户看「多大」，而键里没有尺寸信息——只能 HEAD 一次。不存在时
+        **返回 `None` 而不是抛异常**：租约表里留着一个早已被生命周期规则清掉的键是
+        正常情况（对象存储的过期规则比数据库行先动手），那不是故障。
+        """
         ...
 
     async def presigned_get_url(self, key: str, expires_in: int) -> str:
@@ -78,7 +86,8 @@ class ObjectStore(Protocol):
 def sanitize_display_name(raw: str) -> str:
     """把用户提供的文件名清洗成可安全展示/写日志的形式。
 
-    只做「展示安全」，**不做**「拿来拼路径」——对象键由 `build_storage_key` 生成。
+    只做「展示安全」，**不做**「拿来拼路径」——对象键一律由服务端生成（见
+    `app/services/sandbox/artifacts.py:_artifact_key`）。
     这两件事混在一起是路径穿越的经典来源：一旦有人用清洗后的名字拼键，任何清洗漏项
     都直接变成写任意键。
 
@@ -105,21 +114,6 @@ def sanitize_display_name(raw: str) -> str:
     dot = name.rfind(".")
     suffix = name[dot:] if dot > 0 and len(name) - dot <= 16 else ""
     return name[: MAX_DISPLAY_NAME_LENGTH - len(suffix)] + suffix
-
-
-def build_storage_key(prefix: str, user_id: uuid.UUID, *, extension: str = "") -> str:
-    """生成对象键：`{prefix}/{user_id}/{uuid4}{.ext}`。
-
-    **只有服务端生成的部分参与键**：用户 id（隔离维度）+ 随机 uuid（不可猜）。
-    用户文件名一个字符都不进键，因此 `../`、控制字符、超长中文都影响不到对象路径。
-
-    保留扩展名（而不是完全省略）是为了运维直接看桶时能分辨文件类型；它来自
-    **白名单校验过**的扩展名，不是用户原始文件名。
-    """
-    suffix = f".{extension.lstrip('.').lower()}" if extension else ""
-    key = f"{prefix.strip('/')}/{user_id}/{uuid.uuid4().hex}{suffix}"
-    _validate_key(key)
-    return key
 
 
 def _validate_key(key: str) -> None:

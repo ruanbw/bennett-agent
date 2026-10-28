@@ -228,6 +228,24 @@ class S3ObjectStore:
         except Exception as exc:  # noqa: BLE001
             raise ObjectStoreError("检查对象是否存在失败。") from exc
 
+    async def stat_size(self, key: str) -> int | None:
+        client = get_client()
+
+        def run() -> int | None:
+            try:
+                response = client.head_object(Bucket=self.bucket, Key=key)
+            except Exception as exc:  # noqa: BLE001
+                if _error_code(exc) in {"404", "NoSuchKey", "NotFound"}:
+                    return None
+                raise
+            size = response.get("ContentLength")
+            return int(size) if size is not None else None
+
+        try:
+            return await asyncio.to_thread(run)
+        except Exception as exc:  # noqa: BLE001
+            raise ObjectStoreError("读取对象大小失败。") from exc
+
     async def presigned_get_url(self, key: str, expires_in: int) -> str:
         client = get_client()
         try:

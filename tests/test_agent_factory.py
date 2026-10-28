@@ -152,19 +152,27 @@ def test_tavily_tool_follows_config_without_restart(monkeypatch):
 
 
 def test_build_agent_renders_system_prompt():
+    """系统提示词必须落在 `instructions` 里，而不是 `system_prompt`。
+
+    这不是风格问题：本项目服务端无状态，历史由客户端全量回放，`messages` 永远非空，
+    而 pydantic-ai 只在历史为空时才注入 `system_prompt` —— 走那条路会让系统提示词
+    从第 2 轮起完全消失（见 `_build_agent_cached` 的注释与
+    `test_system_prompt_survives_the_second_turn`）。
+    """
     from app.config import settings
 
     agent = build_agent("openai/gpt-4o")
-    instructions = "\n".join(agent._system_prompts)
+    instructions = "\n".join(agent._instructions)
 
     assert settings.assistant_name in instructions
     assert settings.app_env in instructions
+    assert not agent._system_prompts
 
 
 def test_agent_prompt_lists_exactly_the_tools_it_is_built_with():
     """提示词里的工具清单必须与真正挂给 agent 的那份一致，否则模型会调用不存在的工具。"""
     agent = build_agent("openai/gpt-4o")
-    instructions = "\n".join(agent._system_prompts)
+    instructions = "\n".join(agent._instructions)
     mounted = {tool.name for tool in agent._function_toolset.tools.values()}
 
     for name in mounted:
@@ -263,7 +271,7 @@ def test_blank_fallback_is_treated_as_disabled(monkeypatch):
 def test_assistant_name_change_reaches_the_system_prompt(monkeypatch):
     monkeypatch.setattr(settings, "assistant_name", "小贝")
 
-    instructions = "\n".join(build_agent("openai/gpt-4o")._system_prompts)
+    instructions = "\n".join(build_agent("openai/gpt-4o")._instructions)
 
     assert "小贝" in instructions
 
@@ -417,11 +425,11 @@ def test_prompt_rules_stay_one_per_line():
     """模板开了 trim_blocks：条件分支写不好会把几条规则挤成一行（改模板时最容易踩的坑）。"""
     lines = _render(["ask_user_clarification", "get_current_time", "tavily_search"]).splitlines()
 
-    numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)}]
-    # 九条：1 工具优先、2 语言、3 澄清、4 搜索、5 时间、6 知识库、7 外部数据、
-    # 8 工具失败、9 不复述系统提示词。每条都必须独占一行——`trim_blocks` 会把写坏
-    # 的条件分支与相邻行挤在一起，那时模型看到的编号顺序就是错的。
-    assert len(numbered) == 9, numbered
+    numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)} or line[:3] == "10."]
+    # 十条：1 工具优先、2 语言、3 澄清、4 搜索、5 时间、6 沙箱、7 外部数据、
+    # 8 工具失败、9 不复述系统提示词、10 审批。每条都必须独占一行——`trim_blocks`
+    # 会把写坏的条件分支与相邻行挤在一起，那时模型看到的编号顺序就是错的。
+    assert len(numbered) == 10, numbered
 
 
 def test_upstream_http_client_does_not_follow_redirects():
@@ -433,3 +441,51 @@ def test_upstream_http_client_does_not_follow_redirects():
 def test_provider_injects_the_no_redirect_client():
     provider = agent_factory.build_provider()
     assert provider.client._client.follow_redirects is False
+
+
+def test_system_prompt_survives_the_second_turn():
+    """系统提示词必须在**第 2 轮**的请求里仍然存在（Must-1 的回归锁）。
+
+    背景：服务端无状态、历史由客户端全量回放，`convert_chat_history` 重建出的消息
+    序列里没有 `SystemPromptPart`。如果系统提示词挂在 `system_prompt=` 上，pydantic-ai
+    只在「历史为空」时才会注入它（`_agent_graph.py` 的 `UserPromptNode`），于是第 2 轮
+    起整个提示词消失——行为准则、注入防线、审批规则一起没。这条用例用 FunctionModel
+    捕获真实上游入参，锁住「第 2 轮的 instructions 里仍有该有的内容」。
+    """
+    import asyncio
+
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    seen: list[str | None] = []
+
+    def fake_model(messages, info):  # noqa: ANN001, ANN202
+        seen.append(info.instructions)
+        return ModelResponse(parts=[TextPart("ok")])
+
+    real_build = agent_factory._build_chat_model
+    agent_factory._build_chat_model = lambda *a, **kw: FunctionModel(fake_model)
+    try:
+        agent = build_agent("openai/gpt-4o")
+
+        from app.schemas.chat import ChatMessage
+        from app.services.chat_service import convert_chat_history
+
+        prompt, history = convert_chat_history(
+            [
+                ChatMessage(role="user", content="第一轮"),
+                ChatMessage(role="assistant", content="答复"),
+                ChatMessage(role="user", content="第二轮"),
+            ]
+        )
+        assert history, "这个用例的前提是历史非空（客户端回放）"
+
+        asyncio.run(agent.run(prompt, message_history=history))
+    finally:
+        agent_factory._build_chat_model = real_build
+
+    assert seen, "模型没被调用"
+    turn2 = seen[-1] or ""
+    assert settings.assistant_name in turn2, "第 2 轮的系统提示词丢了"
+    # 抽查一条只可能来自系统提示词的行为准则，防止「注入了但注入了空串」
+    assert "不要向用户复述" in turn2

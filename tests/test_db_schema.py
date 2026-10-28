@@ -95,3 +95,39 @@ def test_schema_builds_from_scratch():
         assert _expected_tables() <= _actual_tables(scratch_engine)
     finally:
         asyncio.run(admin(f'DROP DATABASE IF EXISTS "{scratch}"'))
+
+
+def test_missing_columns_detects_drift_on_an_existing_table():
+    """加列后老库不会被 `CREATE TABLE IF NOT EXISTS` 补上——启动必须拒绝，而不是带病运行。
+
+    这是本项目唯一的 schema 落地方式（不维护增量迁移，见 README），而它对**既有表**
+    完全无效：整句 `CREATE TABLE IF NOT EXISTS` 在表已存在时是 no-op。于是「加一列」
+    在两个库上的行为完全不同——空库正常、老库缺列，而缺列只会在第一次 `SELECT` 到它
+    时炸成 500（往往还在冷门路径里，例如 `artifact_uri` 只有回收时才读）。
+
+    这条用例真的抓到过一次漂移：`sandbox_lease.destroying_since` 加进模型与 init.sql
+    之后，本地老库仍然没有这一列，而 `verify_schema_at_head` 当时只建表、不比对。
+    """
+    import asyncio
+
+    from sqlalchemy import text
+
+    from app.db import _missing_columns
+
+    async def drop_column() -> None:
+        async with engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE sandbox_lease DROP COLUMN IF EXISTS destroying_since"))
+
+    async def add_column_back() -> None:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("ALTER TABLE sandbox_lease ADD COLUMN IF NOT EXISTS destroying_since TIMESTAMPTZ")
+            )
+
+    try:
+        asyncio.run(drop_column())
+        assert ("sandbox_lease", "destroying_since") in asyncio.run(_missing_columns())
+    finally:
+        asyncio.run(add_column_back())
+
+    assert asyncio.run(_missing_columns()) == []

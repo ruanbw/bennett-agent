@@ -952,8 +952,16 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
             row.description = item.description
             row.reasoning = item.reasoning
             row.supported_reasoning_levels = list(item.supported_reasoning_levels)
-            row.context_window = item.context_window
-            row.max_output_tokens = item.max_output_tokens
+            # **只在非 None 时覆盖**：上游 `/v1/models` 大多不返回上下文窗口（OpenAI 系
+            # 只返回 id，Anthropic/百炼/智谱同理），所以 `item.context_window` 对绝大多数
+            # 提供商是 None。无条件赋值会把手填的 128000 抹成 NULL，而 NULL 的语义是
+            # 「不知道窗口」→ `resolve_context_budget` 直接放行 → 该模型的上下文守卫被
+            # **永久静默关闭**。表现是超长历史一路发到上游、换回 400、被翻译成
+            # 「模型不可用，请更换模型」——管理员不会想到是「点了一次同步」导致的。
+            if item.context_window is not None:
+                row.context_window = item.context_window
+            if item.max_output_tokens is not None:
+                row.max_output_tokens = item.max_output_tokens
             row.raw = dict(item.raw) if item.raw else None
             updated += 1
 

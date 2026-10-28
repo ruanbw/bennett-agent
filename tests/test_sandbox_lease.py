@@ -376,3 +376,77 @@ async def test_find_destroyable_covers_idle_and_hard_ttl(user_id, monkeypatch):
     assert row.state == STATE_DESTROYED
     assert row.destroy_reason == DESTROY_IDLE
     assert row.destroyed_at is not None
+
+
+async def test_stalled_destroying_lease_can_be_reclaimed(user_id):
+    """卡在 `destroying` 的租约必须能被回收循环接手。
+
+    这个状态没有出路时，它会永久吃掉该用户**唯一**的容量位
+    （`_reject_if_at_capacity` 把 `destroying` 算进 `OPEN_STATES`），而
+    `get_active_lease` 又不认它——用户看到的只有「执行环境资源已满」，除了人工改库
+    没有别的办法。触发窗口很宽：进程在「抢占已提交」与「终态已提交」之间被
+    SIGKILL/OOM/滚动发布杀掉，中间还夹着 120 秒打包与最多 200MB 读回。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.db import SandboxLease
+    from app.services.sandbox.lease import DESTROYING_STALE_SECONDS
+
+    provider = FakeProvider()
+    lease, _ = await _ensure(user_id, "sess_stalled", provider)
+
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease.id) is True
+
+    # 刚抢下时不能重入（这正是「抢占唯一」的含义）
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease.id) is False
+
+    # 时间推过门槛：那是一次**中断的**销毁，必须能被接手
+    stale_at = datetime.now(timezone.utc) + timedelta(seconds=DESTROYING_STALE_SECONDS + 1)
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease.id, now=stale_at) is True
+        row = await session.get(SandboxLease, lease.id)
+    assert row.state == STATE_DESTROYING
+    assert row.destroying_since is not None
+
+
+async def test_stalled_destroying_counts_as_a_reclaim_candidate(user_id):
+    """`find_destroyable` 要把它当候选，否则回收循环根本看不到它。"""
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.sandbox.lease import DESTROYING_STALE_SECONDS, find_destroyable
+
+    provider = FakeProvider()
+    lease, _ = await _ensure(user_id, "sess_stalled2", provider)
+
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease.id) is True
+
+    # 刚进入 destroying：不是候选（正常销毁进行中）
+    async with async_session_maker() as session:
+        fresh = await find_destroyable(session)
+    assert all(candidate.lease.id != lease.id for candidate in fresh)
+
+    # 超过门槛：成为候选
+    stale_at = datetime.now(timezone.utc) + timedelta(seconds=DESTROYING_STALE_SECONDS + 1)
+    async with async_session_maker() as session:
+        stale = await find_destroyable(session, now=stale_at)
+    assert [candidate.lease.id for candidate in stale] == [lease.id]
+
+
+async def test_mark_destroyed_clears_destroying_since(user_id):
+    """终态必须清掉 `destroying_since`，否则下一次销毁的 age 门槛会永远判成立。"""
+    from app.db import SandboxLease
+
+    provider = FakeProvider()
+    lease, _ = await _ensure(user_id, "sess_clear", provider)
+    async with async_session_maker() as session:
+        assert await mark_destroying(session, lease.id) is True
+    async with async_session_maker() as session:
+        await mark_destroyed(session, lease.id, reason=DESTROY_IDLE)
+
+    async with async_session_maker() as session:
+        row = await session.get(SandboxLease, lease.id)
+    assert row.state == STATE_DESTROYED
+    assert row.destroying_since is None

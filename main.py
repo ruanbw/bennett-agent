@@ -211,11 +211,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="开发期热重启：保存 Python / 提示词 / .env 后自动重启（隐含 --web，仅限非 production）",
     )
-    # 上传解析 worker：与 web 进程同一镜像、不同命令（见 docker-compose 的 worker 服务）
+    # 后台循环进程：与 web 进程同一镜像、不同命令（见 docker-compose 的 worker 服务）
     parser.add_argument(
         "--worker",
         action="store_true",
-        help="运行上传解析 worker（消费 uploaded_file 队列；不监听 HTTP）",
+        help="运行后台循环（沙箱空闲回收；不监听 HTTP）",
     )
     return parser
 
@@ -295,17 +295,17 @@ def main() -> None:
             )
         return _run_dev_reload(host=args.host, port=args.port, run_all=not (args.web or args.worker or args.cli))
 
-    # 默认（不带参数）= 全套：API + 上传解析 + 沙箱回收。
+    # 默认（不带参数）= 全套：API + 沙箱回收。
     #
-    # 为什么默认是「全部」：本地只要少起一个循环，症状就是「上传的文件永远停在解析中」
-    # 或「沙箱机器不回收」——两者都不报错，只是看起来像功能坏了。默认全开、需要时再用
-    # `--web` / `--worker` 拆开（生产的 compose 就是那样拆的），比反过来要求人记住
-    # 两个命令正确得多。终端交互退到显式的 `--cli`。
+    # 为什么默认是「全部」：本地只要少起一个循环，症状就是「沙箱机器永远不回收」——
+    # 而它不报错，只是看起来像功能坏了。默认全开、需要时再用 `--web` / `--worker`
+    # 拆开（生产的 compose 就是那样拆的），比反过来要求人记住两个命令正确得多。
+    # 终端交互退到显式的 `--cli`。
     if args.cli:
         return asyncio.run(_run_cli())
 
     if args.worker and not args.web:
-        return asyncio.run(_run_upload_worker())
+        return asyncio.run(_run_background_loops())
 
     if args.web and not args.worker:
         import uvicorn
@@ -339,11 +339,11 @@ def main() -> None:
 
 
 async def _run_all(host: str, port: int) -> None:
-    """一条命令跑全套：API + 上传解析 + 沙箱回收。
+    """一条命令跑全套：API + 沙箱回收。
 
     ## 为什么是 asyncio 而不是启动子进程
 
-    三个循环必须共用**同一个事件循环**：`app/db.py` 的 engine、限流器、Redis 客户端都是
+    两个循环必须共用**同一个事件循环**：`app/db.py` 的 engine、限流器、Redis 客户端都是
     进程级单例，而它们内部的 asyncpg / httpx 连接绑在创建它的 loop 上。起子进程就变成
     「两份连接池 + 两份限流计数」，正是 `docker-compose` 里 app/worker 分离时要靠 Redis
     共享状态来解决的问题——本地没必要背这份复杂度。
@@ -351,9 +351,9 @@ async def _run_all(host: str, port: int) -> None:
     ## 停机的顺序
 
     uvicorn 收到 SIGTERM/SIGINT 后会先停止接收新请求、等新请求收尾，`serve()` 才返回。
-    这时才置 `stop`：两个后台循环各自把手上这一条处理完（见 `uploads/worker.py` 与
-    `sandbox/reaper.py` 的 `wait_for(stop.wait(), ...)`），最后统一释放连接池。
-    顺序反了的话，正在解析的上传会写一半、正在销毁的沙箱会停在 `destroying`。
+    这时才置 `stop`：回收循环把手上这一台处理完（见 `sandbox/reaper.py` 的
+    `wait_for(stop.wait(), ...)`），最后统一释放连接池。顺序反了的话，正在销毁的沙箱会
+    停在 `destroying`——而那个状态没有任何代码能回收它。
     """
     import uvicorn
 
@@ -361,15 +361,11 @@ async def _run_all(host: str, port: int) -> None:
     from app.services.http_client import close_http_client
     from app.services.redis_client import close_redis
     from app.services.sandbox.reaper import run_reaper
-    from app.services.uploads.worker import run_worker
 
     await verify_schema_at_head()
 
     stop = asyncio.Event()
-    loops = [
-        asyncio.create_task(run_worker(stop), name="upload-worker"),
-        asyncio.create_task(run_reaper(stop), name="sandbox-reaper"),
-    ]
+    loops = [asyncio.create_task(run_reaper(stop), name="sandbox-reaper")]
     server = uvicorn.Server(
         uvicorn.Config(
             "app.server:app",
@@ -387,7 +383,7 @@ async def _run_all(host: str, port: int) -> None:
     print("=" * 60)
     print(f" Bennett Agent API: http://{host}:{port}{docs_hint()}")
     print(f" {frontend_hint()}")
-    print(" 后台循环：上传解析 + 沙箱回收（生产请改用 --web 与 --worker 分开）")
+    print(" 后台循环：沙箱回收（生产请改用 --web 与 --worker 分开）")
     print("=" * 60)
 
     try:
@@ -412,21 +408,21 @@ async def _run_all(host: str, port: int) -> None:
             logger.warning("释放数据库连接失败", exc_info=True)
 
 
-async def _run_upload_worker() -> None:
-    """上传解析 worker 的主流程：**单一事件循环** + 优雅停机。
+async def _run_background_loops() -> None:
+    """后台循环（目前只有沙箱回收）的主流程：**单一事件循环** + 优雅停机。
 
-    为什么单独一个入口而不是塞进 web 进程：worker 的负载特征（长 CPU 任务、可重启、
-    可水平扩）与 API 完全不同。混在 web 进程里意味着一次大 PDF 的解析会参与抢占同一
-    个进程的事件循环与内存，而它还带着正在流式输出的对话。
+    为什么单独一个入口而不是塞进 web 进程：沙箱回收是「时间驱动、与请求无关」的长任务
+    （见 `app/services/sandbox/reaper.py` 的模块 docstring），而它一旦抢到 web 事件循环，
+    正在流式输出的对话就要陪它等。
 
-    SIGTERM 转成 `stop` 事件而不是直接退出：worker 可能正写到一半（文档已 flush、
-    状态还没提交），要让它把手上这条处理完再走。`docker stop` 的超时
-    （compose 里配了 30s）就是给这个窗口的。
+    SIGTERM 转成 `stop` 事件而不是直接退出：回收可能正做到一半（已抢占 `destroying`、
+    产物还没导出、机器还没销毁），要让它把手上这一台处理完再走——停在中途会留下一条
+    永远卡在 `destroying` 的租约。`docker stop` 的超时（compose 里配了 30s）就是给这个
+    窗口的。
     """
     import signal
 
     from app.services.sandbox.reaper import run_reaper
-    from app.services.uploads.worker import run_worker
 
     await verify_schema_at_head()
 
@@ -438,10 +434,7 @@ async def _run_upload_worker() -> None:
             loop.add_signal_handler(sig, stop.set)
 
     try:
-        # 两个循环共用同一个 stop 事件：一个是上传解析、一个是沙箱回收。放在一起跑是因为
-        # 它们的负载特征完全一样（时间驱动、可重启、不占 web 事件循环），而分成两个进程
-        # 只会多一份部署配置与一份「漏启动其中一个」的故障。
-        await asyncio.gather(run_worker(stop), run_reaper(stop))
+        await asyncio.gather(run_reaper(stop))
     finally:
         try:
             await close_redis()

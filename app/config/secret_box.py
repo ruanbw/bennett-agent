@@ -41,11 +41,40 @@ def encrypt_secret(value: str) -> str:
     return f"{PREFIX}{_fernet.encrypt(value.encode('utf-8')).decode('ascii')}"
 
 
-def decrypt_secret(value: str) -> str:
+class SecretDecryptError(Exception):
+    """密文存在但解不开（AUTH_SECRET 被换过，或这一行本身已损坏）。"""
+
+
+def decrypt_secret(value: str | None) -> str:
+    """解密；**解不开时抛 `SecretDecryptError`，不返回空串**。
+
+    ## 为什么不能返回空串
+
+    以前这里 `except InvalidToken: return ""`。空串会一路静默下去：
+    `_auth_headers` 看到 `provider.api_key` 为空就干脆**不发 Authorization**
+    （`registry.py` 的 `if provider.api_key and ...`）→ 上游 401 → 用户看到
+    「上游认证配置问题，请联系管理员」；后台的「密钥」列显示「未设置」，于是管理员
+    看不出「有密文、但解不开」，只会去把 key 再填一遍。而根因是 `AUTH_SECRET` 换了。
+
+    抛异常之后，密钥是**显式不可用**的：列表里那一行会带上 `api_key_error`，
+    `/health/ready` 能报出「有几个提供商的密钥解不开」，日志里有 provider id。
+
+    ## 另外两个必须一起接住的异常
+
+    `InvalidToken` 只覆盖「格式对但解不开」。还有两类会让整个列表端点 500：
+    - `UnicodeEncodeError`：列里出现 `enc:v1:中文`（dump/restore 编码错乱，或历史
+      明文行恰好以 `enc:v1:` 开头）时 `.encode("ascii")` 直接抛，而它会从 ORM 的
+      `process_result_value` 冒出来，让 `GET /api/admin/providers` 整体 500；
+    - `ValueError`：Fernet 对不合法的 base64 抛的就是它。
+    三者一律翻成 `SecretDecryptError`，调用方按「这一行不可用」处理。
+    """
+    if not value:
+        return ""
     if not value.startswith(PREFIX):
         return value  # 历史明文行：原样使用，下次保存时自然加密
     try:
         return _fernet.decrypt(value[len(PREFIX) :].encode("ascii")).decode("utf-8")
-    except InvalidToken:
-        logger.error("敏感配置解密失败：AUTH_SECRET 可能已更换，请在管理后台重新填写该提供商的 API Key")
-        return ""
+    except (InvalidToken, ValueError, UnicodeError) as exc:
+        raise SecretDecryptError(
+            "敏感配置解密失败：AUTH_SECRET 可能已更换，请在管理后台重新填写该提供商的 API Key"
+        ) from exc

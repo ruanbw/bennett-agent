@@ -46,12 +46,19 @@ def test_prompt_templates_trigger_reload():
 
 
 def test_env_files_at_project_root_trigger_reload():
-    """settings 是模块级单例，只在 import 时读一次 .env。"""
+    """settings 是模块级单例，只在 import 时读一次 .env。
+
+    **不断言「至少加载了一个」**：`.env*` 被 `.gitignore` 忽略，干净的检出（以及 CI）
+    本来就没有任何 .env 文件，而那时这个功能完全正常——没有文件要监听而已。曾经这里
+    写的是 `assert loaded`，于是整个后端测试套件在每次全新 clone 上都是红的，而失败
+    信息（「当前环境应至少加载一个 .env 文件」）指向的是测试环境而不是代码缺陷。
+    """
     loaded = _loaded_env_files()
     if (PROJECT_ROOT / ".env.development") in loaded:
         assert should_reload(PROJECT_ROOT / ".env.development") is True
-    # 无论当前 APP_ENV 是什么，清单里第一个存在的文件都必须被监听
-    assert loaded, "当前环境应至少加载一个 .env 文件"
+    # 清单里任何一个**存在**的文件都必须被监听（空清单是合法情形，见 docstring）
+    for path in loaded:
+        assert should_reload(path) is True, f"{path} 会被 settings 加载，却没被监听"
 
 
 def test_env_example_does_not_trigger_reload():

@@ -90,7 +90,6 @@ from app.tools.approval import DENIED_RESULT, all_deferred_ids
 from app.tools.ask_user_clarification import normalize_clarification
 from app.tools.cache_scope import cache_scope
 from app.tools.guard import collect_tool_failures
-from app.tools.knowledge_scope import knowledge_scope
 from app.tools.registry import RiskLevel
 from app.tools.sandbox_scope import sandbox_scope
 
@@ -207,10 +206,17 @@ def convert_chat_history(
     messages: list[ChatMessage],
     *,
     resuming: bool = False,
-) -> tuple[str, list[ModelMessage]]:
+) -> tuple[str | None, list[ModelMessage]]:
     """将前端上传的历史对话转换为 PydanticAI 所需的 (prompt, message_history)
 
     校验失败时抛出 `InvalidChatHistory`，其文案是刻意写给用户看的，调用方可以原样返回。
+
+    **`prompt` 可以是 `None`**（只在续跑时）：pydantic-ai 用「有没有新 prompt」决定是否
+    追加一条 `UserPromptPart`（`_agent_graph.py`：`if self.user_prompt is not None`）。
+    续跑审批时本轮**没有**新提问，传空串是「有提问，内容是空」——上游会收到一条 content
+    为空的 user 消息。OpenAI 兼容网关通常接受，但 Anthropic 系对空 content 的 message
+    直接 400，而 400 又被 `upstream_errors` 归成「模型不可用，请更换模型」，用户看到的是
+    「批准了但一直失败」，文案还指错了方向。所以这里必须用 `None` 而不是 `""`。
 
     只处理 user/assistant：schema 已不允许 `system` 角色。此前那个分支会把调用方
     提供的文本变成 `SystemPromptPart` 插进历史，等于把系统提示词的控制权交给客户端。
@@ -253,7 +259,8 @@ def convert_chat_history(
 
     if resuming:
         # 续跑：末条是带工具调用的 assistant，没有新的用户提问。
-        current_prompt = ""
+        # `None` 而不是 `""`：见 docstring，空串会多产出一条空 content 的 user 消息。
+        current_prompt: str | None = None
         replay = messages
         last = messages[-1]
         if last.role != "assistant" or not last.tool_calls:
@@ -1030,17 +1037,13 @@ async def stream_chat_events(
 
     # 收集器必须覆盖整个重试循环：切换与工具失败计数都发生在 agent 内部，
     # 却要在本层翻译成事件 / 决定给模型的文案。
-    # 工具缓存按用户隔离：同一 query 的搜索结果不跨账号共享，避免网页里的注入内容
-    # 在别人的上下文里存续（I-03）。CLI 不传 scope，保持全局缓存。
-    # `knowledge_scope` 与 `cache_scope` 是两件事：前者是**授权**（工具能查谁的文档），
-    # 后者是**缓存隔离**（搜索结果不跨账号命中）。都由服务端在这里注入，绝不来自模型
-    # 参数——模型如果能把 user_id 当参数填，就等于可以遍历整个实例的知识库。
+    #
+    # 工具缓存按用户隔离（`cache_scope`）：同一 query 的搜索结果不跨账号共享，避免
+    # 网页里的注入内容在别人的上下文里存续。CLI 不传 scope，保持全局缓存。
     with (
         cache_scope(cache_scope_key),
-        knowledge_scope(user_id),
-        # 沙箱作用域：与知识库同一个机制、不同用途。它决定「哪台机器属于这次请求」，
-        # 而不是「能查谁的文档」。结合起来看：user_id 定人，session_id 定机器。
-        # 两个缺失都只会让沙箱工具回一句拒绝文案，不影响本轮其他能力。
+        # 沙箱作用域：它决定「哪台机器属于这次请求」。缺了它只会让沙箱工具回一句
+        # 拒绝文案，不影响本轮其他能力。
         sandbox_scope(user_id, session_id),
         collect_fallbacks() as fallbacks,
         collect_tool_failures(),

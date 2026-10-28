@@ -45,3 +45,33 @@ class SandboxStatusResponse(BaseModel):
         default=None,
         description="回收后产物在对象存储里的键；没有产物或还没导出时为 null",
     )
+
+
+class SandboxArtifact(BaseModel):
+    """回收后导出的一份产物。"""
+
+    name: str = Field(description="文件名（归档名或清单名）")
+    size_bytes: int = Field(description="对象大小（字节）")
+    download_url: str = Field(description="预签名下载直链（有时效，别缓存、别转发）")
+    expires_at: datetime = Field(description="链接失效时间")
+
+
+class SandboxArtifactsResponse(BaseModel):
+    """「我的电脑」的产物清单。
+
+    机器销毁前会把 workspace 打包导出（见 `app/services/sandbox/artifacts.py`），
+    `artifact_uri` 只是对象存储里的键——用户拿不到它。这个端点是那个键的**唯一出口**：
+    把键翻成有时效的预签名直链。
+
+    `state` 与 `lease_id` 一起返回，是因为前端要能区分三种空：从来没有过机器
+    （`lease_id=null`）、机器还在（没产物，因为还没销毁）、机器已销毁但没有产物
+    （导出失败，见 `lease.error`）。只给一个空数组会把这三件事混成一句「没有」。
+    """
+
+    session_id: str = Field(description="请求里带的会话标识（仅回显，不参与查询）")
+    lease_id: str | None = Field(default=None, description="最近一条租约的 id；从未创建过为 null")
+    state: str | None = Field(default=None, description="租约状态；从未创建过为 null")
+    artifacts: list[SandboxArtifact] = Field(
+        default_factory=list,
+        description="已导出的产物；没有产物（还没销毁/导出失败/未配置对象存储）时为空数组",
+    )

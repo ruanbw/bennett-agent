@@ -42,7 +42,6 @@ NOISY_THIRD_PARTY: tuple[str, ...] = (
     "openai",
     "urllib3",
     "asyncio",
-    "multipart",
 )
 
 _VALID_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
