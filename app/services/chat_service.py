@@ -1,78 +1,61 @@
-"""对话流服务：历史转换、pydantic-ai 事件翻译、SSE 事件产出。
+"""对话流服务：一轮对话的编排——上下文预算、压缩、重试、备用模型与事件产出。
 
 只产出类型化事件（`app/schemas/events.py`）；SSE 分帧是传输层的职责，见 `app/api/chat.py`。
+历史转换 / 事件翻译 / 审批 / 标题按变化原因拆到各自模块，本模块只留编排，并按旧路径再导出。
 """
 
 import asyncio
-import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 from uuid import uuid4
 
-from pydantic_ai import DeferredToolRequests, DeferredToolRequestsEvent, DeferredToolResults, ToolApproved, ToolDenied
-from pydantic_ai.messages import (
-    FinalResultEvent,
-    ModelMessage,
-    ModelRequest,
-    ModelResponse,
-    PartDeltaEvent,
-    PartEndEvent,
-    PartStartEvent,
-    RetryPromptPart,
-    TextPart,
-    TextPartDelta,
-    ThinkingPart,
-    ThinkingPartDelta,
-    ToolCallEvent,
-    ToolCallPart,
-    ToolCallPartDelta,
-    ToolResultEvent,
-    UserPromptPart,
-)
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.run import AgentRunResultEvent
 
 from app.config import settings
 from app.schemas.chat import ChatMessage, ContextAnchor
 from app.schemas.events import (
-    ApprovalRequiredEvent,
-    ApprovalToolCall,
     ChatEvent,
-    ClarificationRequest,
-    ContentDelta,
     ContextCompacted,
     Done,
     FallbackUsed,
     StreamError,
-    ThinkingDelta,
-    ToolCall,
-    ToolResult,
     Usage,
     UsageTiming,
 )
-from app.services.agent_factory import (
-    TITLE_TIMEOUT_SECONDS,
-    build_agent,
-    build_summary_agent,
-    build_title_agent,
+from app.services.agent_factory import build_agent, build_summary_agent
+from app.services.approval_flow import (
+    _pending_from_result,
+    _remember_deferred,
+    build_approval_event,
+    build_resume_results_for,
 )
+from app.services.chat_history import InvalidChatHistory, convert_chat_history
 from app.services.context_compaction import (
     SUMMARY_TIMEOUT_SECONDS,
     CompactionPlan,
     compact_history,
 )
+from app.services.event_translation import CLARIFICATION_TOOL_NAME, translate_event
 from app.services.fallback_tracker import FallbackOccurrence, collect_fallbacks
 from app.services.metrics import (
     CHAT_FIRST_EVENT_DURATION,
     CHAT_STREAMS_TOTAL,
     CONTEXT_COMPACTIONS_TOTAL,
-    TOOL_EXECUTIONS_TOTAL,
     metrics,
 )
 from app.services.model_service import ChatModelSnapshot
 from app.services.model_target import ModelTarget
-from app.services.title_text import fallback_title, normalize_title
+from app.services.title_service import (
+    DEFAULT_TITLE,
+    FALLBACK_TITLE_CHARS,
+    MAX_TITLE_CHARS,
+    MAX_TITLE_INPUT_CHARS,
+    TITLE_TIMEOUT_SECONDS,
+    generate_title_from_prompt,
+)
 from app.services.token_budget import (
     ContextBudget,
     overflow_message,
@@ -84,23 +67,34 @@ from app.services.upstream_errors import (
     upstream_error_message,
 )
 from app.services.usage import TurnTimer, extract_turn_usage
-from app.tools import registry
-from app.tools.approval import DENIED_RESULT, all_deferred_ids
-from app.tools.ask_user_clarification import normalize_clarification
 from app.tools.cache_scope import cache_scope
 from app.tools.guard import collect_tool_failures
-from app.tools.registry import RiskLevel
 from app.tools.sandbox_scope import sandbox_scope
 
 logger = logging.getLogger(__name__)
 
-#: 意图确认工具名，由本层翻译成 `ClarificationRequest`，客户端无需知道这个字符串。
-CLARIFICATION_TOOL_NAME = "ask_user_clarification"
-
-MAX_TITLE_INPUT_CHARS = 500
-MAX_TITLE_CHARS = 20
-FALLBACK_TITLE_CHARS = 15
-DEFAULT_TITLE = "新对话"
+# 再导出面：这些名字原先是本模块的实现，调用方与测试按旧路径 import，搬走后从这里取。
+__all__ = [
+    "CLARIFICATION_TOOL_NAME",
+    "DEFAULT_TITLE",
+    "FALLBACK_TITLE_CHARS",
+    "InvalidChatHistory",
+    "MAX_STREAM_ATTEMPTS",
+    "MAX_TITLE_CHARS",
+    "MAX_TITLE_INPUT_CHARS",
+    "STREAM_RETRY_BACKOFF_SECONDS",
+    "STREAM_TIMEOUT_MESSAGE",
+    "TITLE_TIMEOUT_SECONDS",
+    "TOTAL_STREAM_BUDGET_SECONDS",
+    "StreamTimeoutError",
+    "build_approval_event",
+    "build_digest_instructions",
+    "build_resume_results_for",
+    "convert_chat_history",
+    "generate_title_from_prompt",
+    "stream_chat_events",
+    "translate_event",
+]
 
 #: 单轮对话的总时长预算（秒）：上游超时只管「多久没收到数据」，叠加 SDK 与网关的重试后
 #: 单轮仍可能拖到十几分钟，这一道是总体上界，超预算即中止并提示可重试。
@@ -114,21 +108,6 @@ STREAM_RETRY_BACKOFF_SECONDS = 0.5
 #: 可外泄的中文文案；「哪些错误可重试 / 可切备用模型」的判定在 `app/services/upstream_errors.py`，
 #: 备用模型装配（`agent_factory`）必须与对话流共用它，否则两处对「可恢复」的理解会漂移。
 STREAM_TIMEOUT_MESSAGE = "生成超时，请重试"
-
-#: `allow_custom_input` 的假值写法。`bool("false")` 是 True——网关把 JSON 布尔值当字符串
-#: 回传时，用户选了「不允许自定义」却会看到输入框。
-_FALSY_TEXT_VALUES = frozenset({"", "0", "false", "no", "off"})
-
-#: 已告警过的未识别事件类型：未识别类型一旦出现就是高频的（每个流事件一条），
-#: 不去重会刷爆日志、反而掩盖真正的问题。
-_WARNED_UNKNOWN_EVENT_KEYS: set[str] = set()
-
-
-class InvalidChatHistory(ValueError):
-    """`convert_chat_history` 的校验失败。
-
-    只有本异常的 message 可外泄：`ValidationError` 也是 `ValueError`，按后者分类会漏内部细节。
-    """
 
 
 def _turn_timing(
@@ -166,428 +145,6 @@ def _new_error_id() -> str:
     只回该 ID：异常原文可能含上游 URL、provider 上下文乃至密钥，一律只进日志。
     """
     return uuid4().hex[:12]
-
-
-def _warn_unknown_once(key: str, message: str, *args: Any) -> None:  # noqa: ANN401
-    """对未识别的 pydantic-ai 事件/part 类型告警一次（每种 key 只告一次）。
-
-    这些分支的后果是正文/思考增量被静默丢弃，而生产日志级别是 INFO，只能靠 WARNING 发现。
-    """
-    if key in _WARNED_UNKNOWN_EVENT_KEYS:
-        return
-    _WARNED_UNKNOWN_EVENT_KEYS.add(key)
-    logger.warning(message, *args)
-
-
-# =====================================================================
-# 历史转换
-# =====================================================================
-def convert_chat_history(
-    messages: list[ChatMessage],
-    *,
-    resuming: bool = False,
-) -> tuple[str | None, list[ModelMessage]]:
-    """把前端历史转成 PydanticAI 的 (prompt, message_history)；校验失败抛 `InvalidChatHistory`（文案可外泄）。
-
-    `prompt` 只在续跑时为 `None` 而非 `""`：空串会产出一条 content 为空的 user 消息，Anthropic 系直接 400。
-    工具调用必须与正文同放一个 `ModelResponse`，拆成两条会被判序列非法。
-    """
-    if not messages:
-        raise InvalidChatHistory("消息列表不能为空")
-
-    # 首条必须是 user：序列以 ModelRequest 开头且 request/response 交替；公开函数自己兜一道。
-    if messages[0].role != "user":
-        raise InvalidChatHistory("首条消息必须是 user 消息")
-
-    # 严格交替：连续同角色在装配层会被合并/丢弃，模型看到的上下文与用户以为的不一致。
-    for index in range(1, len(messages)):
-        if messages[index].role == messages[index - 1].role:
-            raise InvalidChatHistory(
-                f"消息必须以 user 与 assistant 交替出现：第 {index} 条与第 {index + 1} 条都是 "
-                f"{messages[index].role} 消息"
-            )
-
-    if resuming:
-        # 续跑：末条是带工具调用的 assistant，没有新的用户提问；`None` 而非 `""` 见 docstring。
-        current_prompt: str | None = None
-        replay = messages
-        last = messages[-1]
-        if last.role != "assistant" or not last.tool_calls:
-            raise InvalidChatHistory("续跑审批时最后一条必须是带工具调用的 assistant 消息")
-    else:
-        last_msg = messages[-1]
-        if last_msg.role != "user" or not last_msg.content or not last_msg.content.strip():
-            raise InvalidChatHistory("最后一条消息必须是内容非空的 user 消息")
-        current_prompt = last_msg.content
-        replay = messages[:-1]
-
-    converted_history: list[ModelMessage] = []
-
-    for msg in replay:
-        if msg.role == "user":
-            if msg.content:
-                converted_history.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
-        else:
-            parts: list[object] = []
-            if msg.thinking:
-                parts.append(ThinkingPart(content=msg.thinking))
-            if msg.content:
-                parts.append(TextPart(content=msg.content))
-            # 入参解析失败时跳过这条调用而非整轮失败：历史由客户端回放，一条坏 JSON 不该让会话不可用。
-            for call in msg.tool_calls:
-                arguments = _parse_tool_args(call.args, call.tool_call_id)
-                if arguments is None:
-                    continue
-                parts.append(
-                    ToolCallPart(
-                        tool_name=call.tool_name,
-                        args=arguments,
-                        tool_call_id=call.tool_call_id,
-                    )
-                )
-            if parts:
-                converted_history.append(ModelResponse(parts=parts))
-
-    return current_prompt, converted_history
-
-
-def _parse_tool_args(args_text: str, tool_call_id: str) -> dict[str, Any] | str | None:
-    """解析客户端回放的工具入参；解析报错返回 `None`，调用方跳过这条调用。
-
-    只记 WARNING 不抛：回放的历史可能是几天前存的，一条坏记录不该让整轮 500。
-    """
-    text = (args_text or "").strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError):
-        logger.warning("工具调用入参不是合法 JSON，已跳过 (tool_call_id=%s)", tool_call_id)
-        return None
-    if isinstance(parsed, dict):
-        return parsed
-    # 非对象（数组/字符串/数字）原样交出：pydantic-ai 会当作未解析的 JSON 文本再校验。
-    return text
-
-
-# =====================================================================
-# pydantic-ai 事件 → 聊天事件
-#
-# 用 isinstance 分派而非 `type(event).__name__` 比较：后者在 pydantic-ai 升级改名后表现为静默无输出。
-# =====================================================================
-def _stringify(value: Any) -> str:  # noqa: ANN401
-    """把工具返回的任意内容压成字符串，失败时降级而不是抛错。"""
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    try:
-        return json.dumps(value, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        return str(value)
-
-
-_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
-
-
-def _tool_outcome(part: Any) -> str:  # noqa: ANN401
-    """取工具结果的结构化 outcome，供前端区分成功与失败。
-
-    用 outcome 而非让前端猜结果字符串；`RetryPromptPart` 无 outcome，本身就是参数校验失败，按 failed 处理。
-    """
-    outcome = getattr(part, "outcome", None)
-    if outcome in _TOOL_OUTCOMES:
-        return outcome
-    if isinstance(part, RetryPromptPart):
-        return "failed"
-    return "success"
-
-
-def _serialize_tool_args(args: Any) -> str:  # noqa: ANN401
-    """工具入参保持字符串形态：前端原样展示，格式化交给展示层。"""
-    if isinstance(args, str):
-        return args
-    if args is None:
-        return ""
-    try:
-        return json.dumps(args, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(args)
-
-
-def _parse_allow_custom_input(value: Any) -> bool:  # noqa: ANN401
-    """解析 `allow_custom_input`，缺失时默认允许；字符串要显式解析，`bool("false")` 是 True。"""
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return value.strip().lower() not in _FALSY_TEXT_VALUES
-    if isinstance(value, bool):
-        return value
-    return bool(value)
-
-
-def _clarification_from(args: Any, tool_call_id: str) -> ClarificationRequest | None:  # noqa: ANN401
-    """从 `ask_user_clarification` 的原始入参解出提问；返回 `None` 表示本轮不展示提问。
-
-    必须复用工具的 `normalize_clarification`：本层看到的是工具开始执行的事件，等不到它的拒绝结果。
-    """
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except json.JSONDecodeError:
-            parsed = None
-    else:
-        parsed = args
-
-    if not isinstance(parsed, dict):
-        logger.warning("意图确认工具入参无法解析，本轮不会展示提问 (tool_call_id=%s, args=%r)", tool_call_id, args)
-        return None
-
-    normalized = normalize_clarification(parsed.get("question"), parsed.get("options"))
-    if isinstance(normalized, str):
-        # 工具文案已写明哪个参数越界，直接用它记日志，不必再对照两份规则。
-        logger.warning(
-            "意图确认入参未通过校验，本轮不会展示提问 (tool_call_id=%s, reason=%s)",
-            tool_call_id,
-            normalized,
-        )
-        return None
-
-    return ClarificationRequest(
-        tool_call_id=tool_call_id,
-        question=normalized.question,
-        options=normalized.options,
-        allow_custom_input=_parse_allow_custom_input(parsed.get("allow_custom_input")),
-    )
-
-
-def translate_event(
-    event: Any,  # noqa: ANN401
-    seen_clarification_ids: set[str] | None = None,
-) -> Iterator[ChatEvent]:
-    """把一个 pydantic-ai 流事件翻译成 0..n 个聊天事件；未识别类型告警一次。
-
-    `seen_clarification_ids` 是单轮去重集合（`None` 表示不去重）：同一轮的重复提问会让前端弹两个框。
-    终态 `AgentRunResultEvent` 有意忽略：真实用量要配模型窗口，那是 `stream_chat_events` 的活。
-    """
-    if isinstance(event, AgentRunResultEvent):
-        logger.debug("忽略的终态事件: %s（真实用量由 stream_chat_events 单独产出）", type(event).__name__)
-        return
-
-    if isinstance(event, PartStartEvent):
-        part = event.part
-        if isinstance(part, TextPart):
-            if part.content:
-                yield ContentDelta(delta=part.content)
-            return
-        if isinstance(part, ThinkingPart):
-            if part.content:
-                yield ThinkingDelta(delta=part.content)
-            return
-        if isinstance(part, ToolCallPart):
-            # 有意忽略：调用在 `ToolCallEvent` 里带全入参一次性给出，起始 part 只是它的空壳。
-            logger.debug("忽略的起始 part: %s", type(part).__name__)
-            return
-        _warn_unknown_once(
-            f"part-start:{type(part).__name__}",
-            "未处理的 pydantic-ai 起始 part: %s（其正文/思考增量会被静默丢弃）",
-            type(part).__name__,
-        )
-        return
-
-    if isinstance(event, PartDeltaEvent):
-        delta = event.delta
-        if isinstance(delta, TextPartDelta):
-            if delta.content_delta:
-                yield ContentDelta(delta=delta.content_delta)
-            return
-        if isinstance(delta, ThinkingPartDelta):
-            if delta.content_delta:
-                yield ThinkingDelta(delta=delta.content_delta)
-            return
-        if isinstance(delta, ToolCallPartDelta):
-            logger.debug("忽略的 part 增量: %s", type(delta).__name__)
-            return
-        if delta is not None:
-            _warn_unknown_once(
-                f"part-delta:{type(delta).__name__}",
-                "未处理的 pydantic-ai part 增量: %s（其正文/思考增量会被静默丢弃）",
-                type(delta).__name__,
-            )
-        return
-
-    # 用基类 `ToolCallEvent` 而非子类 `FunctionToolCallEvent`：同级还有 `OutputToolCallEvent`，
-    # 用子类判断会让它落进兜底告警，工具调用整体消失。
-    if isinstance(event, ToolCallEvent):
-        part = event.part
-        tool_call_id = getattr(part, "tool_call_id", "") or ""
-        tool_name = getattr(part, "tool_name", "") or ""
-
-        if tool_name == CLARIFICATION_TOOL_NAME:
-            if tool_call_id and seen_clarification_ids is not None and tool_call_id in seen_clarification_ids:
-                logger.debug("同一轮的重复意图确认，已忽略后到者 (tool_call_id=%s)", tool_call_id)
-                return
-
-            request = _clarification_from(part.args, tool_call_id)
-            if request is None:
-                return
-
-            if tool_call_id and seen_clarification_ids is not None:
-                seen_clarification_ids.add(tool_call_id)
-            yield request
-            return
-
-        yield ToolCall(
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            args=_serialize_tool_args(part.args),
-        )
-        return
-
-    if isinstance(event, ToolResultEvent):
-        # 用 part.content（结果本体），不是 event.content（结果之后追加给模型的额外内容）。
-        part = event.part
-        tool_name = getattr(part, "tool_name", "") or ""
-
-        # 意图确认的返回是 agent 循环的内部细节（模型靠它继续），前端不需要知道这个工具名。
-        if tool_name == CLARIFICATION_TOOL_NAME:
-            logger.debug("不转发意图确认工具的结果事件 (tool_call_id=%s)", getattr(part, "tool_call_id", ""))
-            return
-
-        # 成功记在这里、失败在 `guard.on_tool_execute_error` 里记，两边同一组 `tool`+`outcome` 标签；
-        # 失败率 = failed / (success + failed)，denied / interrupted 是审批与中断，不算故障。
-        metrics.increment(
-            TOOL_EXECUTIONS_TOTAL,
-            tool=tool_name,
-            outcome=_tool_outcome(part),
-        )
-
-        yield ToolResult(
-            tool_call_id=getattr(part, "tool_call_id", "") or "",
-            tool_name=tool_name,
-            result=_stringify(part.content),
-            outcome=_tool_outcome(part),
-        )
-        return
-
-    if isinstance(event, DeferredToolRequestsEvent):
-        # 审批拦下的调用原样交给 `stream_chat_events` 翻译：工具说明与风险等级是装配层的知识。
-        logger.debug("审批拦下 %d 个工具调用", len(event.requests.approvals))
-        return
-
-    # `PartEndEvent` / `FinalResultEvent` 是每次响应的固定成分，内容已由增量发过；
-    # 归入有意忽略，否则兜底告警会在 100% 的正常流量上打 WARNING，把唯一的信号淹掉。
-    if isinstance(event, (PartEndEvent, FinalResultEvent)):
-        logger.debug("忽略的流事件: %s", type(event).__name__)
-        return
-
-    _warn_unknown_once(
-        f"event:{type(event).__name__}",
-        "未处理的 pydantic-ai 流事件: %s（其正文/思考增量会被静默丢弃）",
-        type(event).__name__,
-    )
-
-
-# =====================================================================
-# 审批（HITL）
-# =====================================================================
-def _remember_deferred(event: Any, sink: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401
-    """记住流里出现的待审批请求，作为终态取不到时的兜底。
-
-    权威来源是 `run_result.output`（见 `_pending_from_result`），它也覆盖 capability 没解决任何调用的情况。
-    """
-    if isinstance(event, DeferredToolRequestsEvent):
-        sink["requests"] = event.requests
-    return sink
-
-
-def _pending_from_result(
-    run_result: Any,  # noqa: ANN401
-    deferred: dict[str, Any],
-) -> DeferredToolRequests | None:
-    """从本轮终态取出待审批的调用；没有则返回 `None`。
-
-    优先 `run_result.output`：它是 pydantic-ai 声明的本轮输出，`DeferredToolRequestsEvent` 只是流上的通知。
-    """
-    output = getattr(run_result, "output", None)
-    if isinstance(output, DeferredToolRequests):
-        return output
-    requests = deferred.get("requests")
-    return requests if isinstance(requests, DeferredToolRequests) else None
-
-
-def build_approval_event(requests: DeferredToolRequests) -> ApprovalRequiredEvent:
-    """把待审批请求翻译成前端事件，补上工具说明与风险等级。
-
-    参数常常看不出后果（`{"id": 42}` 删的是什么？），所以这两个字段必需；查不到就留空，
-    但不因此拒掉整轮（注册表可能在两轮之间被改配置）。
-    """
-    calls: list[ApprovalToolCall] = []
-    for part in requests.approvals:
-        tool_call_id = getattr(part, "tool_call_id", "") or ""
-        tool_name = getattr(part, "tool_name", "") or ""
-        description, risk_level = _describe_tool(tool_name)
-        calls.append(
-            ApprovalToolCall(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                args=_serialize_tool_args(getattr(part, "args", None)),
-                description=description,
-                risk_level=risk_level,
-            )
-        )
-    return ApprovalRequiredEvent(tool_calls=calls)
-
-
-def _describe_tool(tool_name: str) -> tuple[str, str]:
-    """查工具的说明与风险等级，先本地注册表再 MCP；查不到返回空串。
-
-    配置可能在两轮之间变了，审批框宁可少一行说明，也不能因此不出。
-    """
-    try:
-        tool = registry.get(tool_name)
-    except Exception:  # noqa: BLE001 - 注册表读取失败不该阻断审批
-        logger.warning("读取工具元数据失败 (tool=%s)", tool_name, exc_info=True)
-        tool = None
-
-    if tool is not None:
-        risk = tool.risk_level
-        return (tool.description or "", risk.value if hasattr(risk, "value") else str(risk))
-
-    # MCP 工具的名字带 `server__` 前缀，来自远端工具定义
-    try:
-        from app.tools.mcp_client import get_mcp_registry
-
-        for info in get_mcp_registry().cached_tools():
-            if info.qualified_name == tool_name:
-                return (info.description or "", RiskLevel.SAFE_WRITE.value)
-    except Exception:  # noqa: BLE001 - 同上
-        logger.debug("读取 MCP 工具元数据失败 (tool=%s)", tool_name, exc_info=True)
-    return ("", "")
-
-
-def build_resume_results_for(
-    approvals: dict[str, bool],
-    history: list[ModelMessage],
-) -> DeferredToolResults | None:
-    """把客户端的审批决定变成 pydantic-ai 的续跑结果；不是续跑时返回 `None`。
-
-    `DeferredToolResults` 必须覆盖每个待审批调用，缺失的按拒绝处理：没回应等于拒绝，否则关页面就是批准删除。
-    拒绝也要显式给 `ToolDenied`：给了结果模型才会改走别的路，悬空的调用会让它再发一次。
-    """
-    pending_ids = all_deferred_ids(history)
-    if not pending_ids:
-        # 客户端带了 approvals 但没有对应调用（调用已有结果），按普通请求处理，别让多出的决定报错。
-        logger.warning("请求带了审批决定，但历史里没有对应的待审批调用，按普通请求处理")
-        return None
-
-    results = DeferredToolResults()
-    for call_id in pending_ids:
-        approved = approvals.get(call_id, False)
-        results.approvals[call_id] = ToolApproved() if approved else ToolDenied(DENIED_RESULT)
-        if not approved:
-            logger.info("用户拒绝执行工具调用 (tool_call_id=%s)", call_id)
-    return results
 
 
 # =====================================================================
@@ -1006,28 +563,3 @@ async def stream_chat_events(
     # 不能用 finally——其中的 yield 会吞掉异常。
     metrics.increment(CHAT_STREAMS_TOTAL, outcome=outcome)
     yield Done()
-
-
-async def generate_title_from_prompt(snapshot: ChatModelSnapshot, prompt: str) -> str:
-    """用 LLM 为会话生成简短标题，失败时回退到首行截断——标题只是装饰，不该让用户看到报错。
-
-    清洗与截断在 `title_text`（纯函数）：不剥「标题：」前缀的话，它会原样出现在侧边栏。
-    """
-    model_name = snapshot.key
-    try:
-        if snapshot.target is None and snapshot.registry_managed:
-            raise RuntimeError(f"模型不可用: {model_name}")
-        agent = build_title_agent(model_name, target=snapshot.target)
-        result = await agent.run(
-            f"请为以下内容生成简短标题：\n{prompt[:MAX_TITLE_INPUT_CHARS]}",
-            # 标题是装饰：预算远小于流式空闲超时，避免网关卡住时白占两分钟
-            model_settings={"timeout": TITLE_TIMEOUT_SECONDS},
-        )
-        title = normalize_title(result.output, MAX_TITLE_CHARS)
-        if title:
-            return title
-        logger.info("标题模型返回空内容，回退到首行截断 (model=%s)", model_name)
-    except Exception:
-        logger.warning("生成会话标题失败，回退到截断首行 (model=%s)", model_name, exc_info=True)
-
-    return fallback_title(prompt, FALLBACK_TITLE_CHARS) or DEFAULT_TITLE

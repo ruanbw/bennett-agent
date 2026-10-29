@@ -116,6 +116,30 @@ def test_build_agent_registers_configured_tools():
     assert set(agent._function_toolset.tools) == {tool.__name__ for tool in build_tools()}
 
 
+def test_tool_builder_port_is_injectable():
+    """装配点只认「给我一份当前可挂载的工具」，默认实现仍是 `app.tools.build_tools`。
+
+    这是运行时与工具实现之间的接缝：少了它，测试装配行为就必须动整个注册表。
+    """
+    from pydantic_ai.tools import Tool
+
+    def fake_tool() -> str:
+        """假的工具。"""
+        return "ok"
+
+    agent_factory.set_tool_builder_for_tests(lambda: [Tool(fake_tool, name="fake_tool")])
+    try:
+        agent = build_agent("openai/gpt-4o")
+        assert set(agent._function_toolset.tools) == {"fake_tool"}
+    finally:
+        agent_factory.set_tool_builder_for_tests(None)
+        # 装配结果按参数缓存：还原端口后必须清缓存，否则假工具会留在后面的用例里
+        reset_agent_cache()
+
+    # 还原后必须回到默认实现
+    assert set(build_agent("openai/gpt-4o")._function_toolset.tools) != {"fake_tool"}
+
+
 def test_build_tools_adds_tavily_only_with_a_key(monkeypatch):
     """没有 key 时挂 tavily 只是给模型一个必然失败的工具，白烧一轮 token。
 

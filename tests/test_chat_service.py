@@ -21,7 +21,7 @@ from pydantic_ai.messages import ModelRequest
 
 from app.config import settings
 from app.schemas.chat import ChatMessage
-from app.services import chat_service
+from app.services import chat_service, title_service
 from app.services.chat_service import InvalidChatHistory, convert_chat_history
 
 
@@ -275,7 +275,7 @@ async def test_title_falls_back_to_first_line_when_model_fails(monkeypatch):
     """模型不可用时用首行兜底，且清掉 Markdown 标题记号。"""
     snapshot = _title_snapshot(target=None, registry_managed=True)
 
-    title = await chat_service.generate_title_from_prompt(snapshot, "# 帮我写个排序函数\n要求稳定")
+    title = await title_service.generate_title_from_prompt(snapshot, "# 帮我写个排序函数\n要求稳定")
 
     assert title == "帮我写个排序函数"
 
@@ -292,9 +292,9 @@ async def test_title_cleans_model_output_before_returning(monkeypatch):
         async def run(self, _prompt, **_kwargs):
             return _Result()
 
-    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+    monkeypatch.setattr(title_service, "build_title_agent", lambda *_a, **_k: _Agent())
 
-    title = await chat_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
+    title = await title_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
 
     assert title == "向量数据库选型"
 
@@ -310,9 +310,9 @@ async def test_empty_model_title_falls_back_instead_of_storing_blank(monkeypatch
         async def run(self, _prompt, **_kwargs):
             return _Result()
 
-    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+    monkeypatch.setattr(title_service, "build_title_agent", lambda *_a, **_k: _Agent())
 
-    title = await chat_service.generate_title_from_prompt(snapshot, "帮我分析这份财报")
+    title = await title_service.generate_title_from_prompt(snapshot, "帮我分析这份财报")
 
     assert title == "帮我分析这份财报"
 
@@ -333,13 +333,13 @@ async def test_title_call_gets_its_own_short_timeout(monkeypatch):
             captured.update(kwargs)
             return _Result()
 
-    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+    monkeypatch.setattr(title_service, "build_title_agent", lambda *_a, **_k: _Agent())
 
-    await chat_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
+    await title_service.generate_title_from_prompt(snapshot, "向量数据库怎么选")
 
-    assert captured["model_settings"] == {"timeout": chat_service.TITLE_TIMEOUT_SECONDS}
+    assert captured["model_settings"] == {"timeout": title_service.TITLE_TIMEOUT_SECONDS}
     # 必须真的比流式空闲超时（默认 120s）小一个量级，否则这条约束没有意义
-    assert chat_service.TITLE_TIMEOUT_SECONDS <= 15
+    assert title_service.TITLE_TIMEOUT_SECONDS <= 15
 
 
 async def test_title_timeout_falls_back_to_the_first_line(monkeypatch):
@@ -350,9 +350,9 @@ async def test_title_timeout_falls_back_to_the_first_line(monkeypatch):
         async def run(self, _prompt, **_kwargs):
             raise TimeoutError("标题模型超时")
 
-    monkeypatch.setattr(chat_service, "build_title_agent", lambda *_a, **_k: _Agent())
+    monkeypatch.setattr(title_service, "build_title_agent", lambda *_a, **_k: _Agent())
 
-    title = await chat_service.generate_title_from_prompt(snapshot, "帮我把这段 SQL 优化一下")
+    title = await title_service.generate_title_from_prompt(snapshot, "帮我把这段 SQL 优化一下")
 
     assert title == "帮我把这段 SQL 优化一下"
 

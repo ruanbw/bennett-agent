@@ -29,6 +29,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from app.schemas.chat import ChatMessage
+from app.services.approval_flow import build_approval_event
 from app.services.chat_service import build_resume_results_for, convert_chat_history
 from app.tools.approval import (
     APPROVAL_REQUIRED_LEVELS,
@@ -385,6 +386,39 @@ def test_approval_event_is_a_chat_event():
 
     parsed = TypeAdapter(ChatEvent).validate_python({"type": "approval_required", "tool_calls": []})
     assert isinstance(parsed, ApprovalRequiredEvent)
+
+
+def test_approval_event_reads_tool_metadata_from_the_catalog():
+    """工具说明与风险等级只向 `ToolCatalog` 要，本层不再直接摸注册表与 MCP。
+
+    注入必须真的生效：审批框的两行字是用户做出决定的唯一依据。
+    """
+    requests = DeferredToolRequests(approvals=[ToolCallPart("sandbox_reset", {}, tool_call_id="c1")])
+
+    class _Catalog:
+        def describe(self, name: str) -> tuple[str, RiskLevel | None]:
+            assert name == "sandbox_reset"
+            return ("重置后已装的依赖与文件都会丢", RiskLevel.DANGEROUS)
+
+    event = build_approval_event(requests, catalog=_Catalog())
+
+    assert event.tool_calls[0].description == "重置后已装的依赖与文件都会丢"
+    assert event.tool_calls[0].risk_level == "dangerous"
+
+
+def test_unknown_tool_still_gets_an_approval_event():
+    """查不到元数据不能把整轮拒掉：审批照常发出，只是少两行说明。"""
+    requests = DeferredToolRequests(approvals=[ToolCallPart("mcp__gone", {"id": 1}, tool_call_id="c2")])
+
+    class _Catalog:
+        def describe(self, name: str) -> tuple[str, RiskLevel | None]:
+            return ("", None)
+
+    event = build_approval_event(requests, catalog=_Catalog())
+
+    call = event.tool_calls[0]
+    assert (call.description, call.risk_level) == ("", "")
+    assert call.args == '{"id": 1}'
 
 
 # ---------------------------------------------------------------------

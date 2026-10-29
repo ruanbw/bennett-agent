@@ -43,16 +43,16 @@ from app.schemas.events import (
     Usage,
     UsageTiming,
 )
-from app.services import chat_service
-from app.services.chat_service import CLARIFICATION_TOOL_NAME, translate_event
+from app.services import event_translation
+from app.services.event_translation import CLARIFICATION_TOOL_NAME, translate_event
 
 
 @pytest.fixture(autouse=True)
 def _reset_unknown_event_warnings():
     """未识别事件的告警按类型**全局**去重，不隔离就会跨用例互相吞掉日志。"""
-    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
+    event_translation._WARNED_UNKNOWN_EVENT_KEYS.clear()
     yield
-    chat_service._WARNED_UNKNOWN_EVENT_KEYS.clear()
+    event_translation._WARNED_UNKNOWN_EVENT_KEYS.clear()
 
 
 def translate(event):
@@ -99,7 +99,7 @@ def test_empty_deltas_are_ignored():
 
 def test_tool_call_delta_is_intentionally_ignored(caplog):
     """工具入参增量有意忽略：入参在 FunctionToolCallEvent 到达时一次性给出。"""
-    with caplog.at_level(logging.DEBUG, logger="app.services.chat_service"):
+    with caplog.at_level(logging.DEBUG, logger="app.services.event_translation"):
         events = translate(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='{"q":')))
 
     assert events == []
@@ -257,7 +257,7 @@ def test_clarification_options_are_cleaned(raw, expected):
 )
 def test_unparseable_clarification_warns_and_yields_nothing(caplog, bad_args):
     """入参根本不是 dict 时不能静默：既不发 ToolCall（前端会当成普通工具），也要留警告。"""
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+    with caplog.at_level(logging.WARNING, logger="app.services.event_translation"):
         events = translate(clarification_call(bad_args))
 
     assert events == []
@@ -293,7 +293,7 @@ def test_invalid_clarification_args_are_refused_with_the_tool_reason(caplog, bad
     参数越界——靠 reason 能直接看出是哪个参数。超限入参（问题过长、选项过多、
     单项过长）尤其必须在**翻译层**提前拒绝，不能先弹窗再让工具报错。
     """
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+    with caplog.at_level(logging.WARNING, logger="app.services.event_translation"):
         events = translate(clarification_call(bad_args))
 
     assert events == []
@@ -304,7 +304,7 @@ def test_invalid_clarification_args_are_refused_with_the_tool_reason(caplog, bad
 
 def test_translate_and_tool_agree_on_the_same_rules():
     """同一个入参，工具与翻译层必须给出**一致**的通过/拒绝结论。"""
-    from app.services.chat_service import _clarification_from
+    from app.services.event_translation import _clarification_from
     from app.tools.ask_user_clarification import normalize_clarification
 
     cases = [
@@ -373,7 +373,7 @@ def test_allow_custom_input_is_parsed_explicitly(raw, expected):
 )
 def test_routine_events_are_not_warned_about(caplog, event):
     """正常流量的固定成分不能被当成「未识别事件」。"""
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+    with caplog.at_level(logging.WARNING, logger="app.services.event_translation"):
         events = translate(event)
 
     assert events == []
@@ -394,7 +394,7 @@ def test_genuinely_unknown_event_warns_once_per_type(caplog):
     class UnknownEventB:
         pass
 
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+    with caplog.at_level(logging.WARNING, logger="app.services.event_translation"):
         assert translate(UnknownEventA()) == []
         assert translate(UnknownEventA()) == []
         assert translate(UnknownEventB()) == []
@@ -438,7 +438,7 @@ def model_response(input_tokens=1_066, output_tokens=2, cache_read_tokens=896):
 
 def test_terminal_event_is_a_deliberate_ignore_not_an_unknown_event(caplog):
     """它带的是真实用量，不是「未识别的 pydantic-ai 流事件」。"""
-    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+    with caplog.at_level(logging.WARNING, logger="app.services.event_translation"):
         assert list(translate_event(terminal_event(model_response()))) == []
 
     assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []

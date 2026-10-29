@@ -1,6 +1,6 @@
 """用户意图澄清/提问工具。
 
-`normalize_clarification` 是校验规则的唯一实现，工具与 `chat_service._clarification_from` 都必须
+`normalize_clarification` 是校验规则的唯一实现，工具与 `event_translation._clarification_from` 都必须
 调它：规则不一致时工具报错但弹窗已经弹了，模型带新 `tool_call_id` 重试会绕过去重，用户看到两个弹窗。
 """
 

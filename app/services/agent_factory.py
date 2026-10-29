@@ -7,6 +7,7 @@
 import logging
 from collections.abc import Callable, Sequence
 from functools import lru_cache
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -16,6 +17,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
+from pydantic_ai.tools import Tool
 
 from app.config import is_usable_api_key, settings
 from app.config.proxy_env import sanitize_no_proxy_env
@@ -24,9 +26,6 @@ from app.services.fallback_config import configured_fallback_name
 from app.services.fallback_tracker import record_fallback
 from app.services.model_target import ModelTarget
 from app.services.upstream_errors import describe_fallback_reason, is_fallback_eligible
-from app.tools import build_tools
-from app.tools.approval import ApprovalGate
-from app.tools.guard import ToolErrorIsolation
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +53,44 @@ TITLE_SYSTEM_INSTRUCTION = (
 #: 缓存条目上限：远大于实际模型数，同时给「客户端乱传 model 名」兜底。
 AGENT_CACHE_SIZE = 32
 
-#: 工具异常隔离，无状态可共用；少了它任意工具的普通异常都会中止整轮生成（`app/tools/guard.py`）。
-_TOOL_ERROR_ISOLATION = ToolErrorIsolation()
+#: 工具装配端口：services 只认「给我一份当前可挂载的工具」，默认实现仍是 `app.tools.build_tools`。
+#: 默认实现放在函数内 import：装配 agent 是 services 的职责，不该在 import 期就把整个工具包
+#: （注册表、沙箱、Tavily 实现）连带拉起。
+ToolBuilder = Callable[[], Sequence[Tool[Any]]]
 
-#: 审批闸门：把 `RiskLevel` 从元数据变成真的执行闸门（`app/tools/approval.py`），无状态可共用。
-_APPROVAL_GATE: AbstractCapability[None] = ApprovalGate()
+
+def _default_tool_builder() -> Sequence[Tool[Any]]:
+    """默认装配：每次调用重新按配置判断（`tavily` 的 key 可能两轮之间才配上）。"""
+    from app.tools import build_tools
+
+    return build_tools()
+
+
+_TOOL_BUILDER: ToolBuilder = _default_tool_builder
+
+
+def set_tool_builder_for_tests(builder: ToolBuilder | None) -> None:
+    """替换/还原工具装配端口。只给测试用（`None` 还原默认实现）。"""
+    global _TOOL_BUILDER
+    _TOOL_BUILDER = builder or _default_tool_builder
+
+
+#: 审批闸门与工具异常隔离缓存：两者都无状态可共用。少了隔离层，任意工具的普通异常都会中止
+#: 整轮生成（`app/tools/guard.py`）；审批闸门把 `RiskLevel` 从元数据变成真的执行闸门
+#: （`app/tools/approval.py`）。函数内 import 同 `_default_tool_builder`。
+_TOOL_CAPABILITIES: list[AbstractCapability[Any]] | None = None
+
+
+def _tool_capabilities() -> list[AbstractCapability[Any]]:
+    """工具侧的 capability（惰性构造并缓存），同上：不在 import 期拉起 `app.tools`。"""
+    global _TOOL_CAPABILITIES
+    if _TOOL_CAPABILITIES is None:
+        from app.tools.approval import ApprovalGate
+        from app.tools.guard import ToolErrorIsolation
+
+        _TOOL_CAPABILITIES = [ApprovalGate(), ToolErrorIsolation()]
+    return _TOOL_CAPABILITIES
+
 
 #: 建连/写/取连接的硬上限，不需要可配置：超出这些值已经说明网络或上游异常。
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -255,7 +287,7 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
     装配与 `token_budget` 的固定开销共用本函数，各写一遍 render 参数会变成「预算按 A 算、
     实际发出去的是 B」。`tool_names` 默认取实际装配结果，否则模型会去调没挂上的工具。
     """
-    names = list(tool_names) if tool_names is not None else [tool.name for tool in build_tools()]
+    names = list(tool_names) if tool_names is not None else [tool.name for tool in _TOOL_BUILDER()]
     return prompt_manager.render(
         SYSTEM_PROMPT_TEMPLATE,
         app_env=settings.app_env,
@@ -313,9 +345,9 @@ def _build_agent_cached(
     `effort` 须已归一化、`cache_key` 来自 `_settings_cache_key()`、`target` 来自
     `model_service.resolve_model_target()`：三者都进缓存键，保证等价输入同槽位、配置变了换槽位。
     """
-    # 只装配一次工具：提示词里的清单必须与真正挂上去的同一份，两次 `build_tools()`
+    # 只装配一次工具：提示词里的清单必须与真正挂上去的同一份，两次 `_TOOL_BUILDER()`
     # 在配置热更新时可能拿到不同结果。
-    tools = build_tools()
+    tools = _TOOL_BUILDER()
     system_prompt = render_system_prompt([tool.name for tool in tools])
 
     model_settings: dict[str, object] = {}
@@ -342,7 +374,7 @@ def _build_agent_cached(
         toolsets=_mcp_toolsets(),
         # 工具是外部边界：一个工具抛异常不该让整轮回答作废。顺序有意义：审批闸门必须在隔离
         # 层之前，否则 `ApprovalRequired` 会被当成工具失败降级成文案，工具照常执行（实测如此）。
-        capabilities=[_APPROVAL_GATE, _TOOL_ERROR_ISOLATION],
+        capabilities=_tool_capabilities(),
     )
 
 
