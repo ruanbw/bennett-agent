@@ -18,12 +18,14 @@ import logging
 
 import pytest
 
-from app.services.model_service import (
-    _build_models_url,
-    _fallback,
-    _parse_models,
-    _parse_reasoning_levels,
+from app.services.model_service.gateway import (
+    build_models_url,
+    fallback_model_list,
+    parse_gateway_models,
+)
+from app.services.model_service.upstream import (
     next_page_cursor,
+    parse_reasoning_levels,
     parse_upstream_models,
 )
 
@@ -32,30 +34,30 @@ from app.services.model_service import (
 # 思考等级解析
 # ---------------------------------------------------------------------
 def test_reasoning_levels_accept_object_shape():
-    assert _parse_reasoning_levels([{"effort": "high"}, {"effort": "low"}]) == ["high", "low"]
+    assert parse_reasoning_levels([{"effort": "high"}, {"effort": "low"}]) == ["high", "low"]
 
 
 def test_reasoning_levels_accept_string_shape():
-    assert _parse_reasoning_levels(["high", "low"]) == ["high", "low"]
+    assert parse_reasoning_levels(["high", "low"]) == ["high", "low"]
 
 
 def test_reasoning_levels_ignore_unknown_shapes():
     """伪造等级会让用户选了之后请求失败。"""
-    assert _parse_reasoning_levels([1, None, {"other": "x"}, "high"]) == ["high"]
+    assert parse_reasoning_levels([1, None, {"other": "x"}, "high"]) == ["high"]
 
 
 def test_reasoning_levels_ignore_blank_and_non_string_effort():
     """`{"effort": null}` 经 str() 会变成等级 "None"，整行都该丢掉。"""
-    assert _parse_reasoning_levels([{"effort": None}, {"effort": 5}, {"effort": "  "}, {"effort": "high"}]) == ["high"]
+    assert parse_reasoning_levels([{"effort": None}, {"effort": 5}, {"effort": "  "}, {"effort": "high"}]) == ["high"]
 
 
 def test_reasoning_levels_are_stripped_and_deduplicated():
-    assert _parse_reasoning_levels([" high ", "high", {"effort": "low"}, "low"]) == ["high", "low"]
+    assert parse_reasoning_levels([" high ", "high", {"effort": "low"}, "low"]) == ["high", "low"]
 
 
 @pytest.mark.parametrize("raw", [None, "high", 42, {"a": 1}])
 def test_reasoning_levels_tolerate_non_list(raw):
-    assert _parse_reasoning_levels(raw) == []
+    assert parse_reasoning_levels(raw) == []
 
 
 # ---------------------------------------------------------------------
@@ -75,7 +77,7 @@ def test_parses_gateway_payload():
         ]
     }
 
-    result = _parse_models(payload, "openai/gpt-4o", "magpie_label")
+    result = parse_gateway_models(payload, "openai/gpt-4o", "magpie_label")
 
     assert result is not None
     assert result.default_model == "openai/gpt-4o"
@@ -93,7 +95,7 @@ def test_missing_default_falls_back_to_first_model(caplog):
     payload = {"data": [{"id": "a/one"}, {"id": "b/two"}]}
 
     with caplog.at_level(logging.INFO, logger="app.services.model_service"):
-        result = _parse_models(payload, "missing/model", "magpie_label")
+        result = parse_gateway_models(payload, "missing/model", "magpie_label")
 
     assert result is not None
     assert result.default_model == "a/one"
@@ -108,33 +110,33 @@ def test_description_field_is_configurable():
     """字段名属于网关细节，由配置传入，不硬编码在模块里。"""
     payload = {"data": [{"id": "a/one", "vendor_label": "厂商标签"}]}
 
-    assert _parse_models(payload, "a/one", "vendor_label").models[0].description == "厂商标签"
+    assert parse_gateway_models(payload, "a/one", "vendor_label").models[0].description == "厂商标签"
     # 未提供展示名时回退为 'provider id'（沿袭原有行为，即使看着有点冗余）
-    assert _parse_models(payload, "a/one", "absent_field").models[0].description == "a a/one"
+    assert parse_gateway_models(payload, "a/one", "absent_field").models[0].description == "a a/one"
 
 
 def test_description_falls_back_to_provider_and_display_name():
     payload = {"data": [{"id": "openai/gpt-4o", "display_name": "GPT-4o"}]}
 
-    assert _parse_models(payload, "openai/gpt-4o", "absent").models[0].description == "openai GPT-4o"
+    assert parse_gateway_models(payload, "openai/gpt-4o", "absent").models[0].description == "openai GPT-4o"
 
 
 def test_derives_provider_from_id_when_absent():
     payload = {"data": [{"id": "openai/gpt-4o"}]}
 
-    assert _parse_models(payload, "openai/gpt-4o", "x").models[0].provider == "openai"
+    assert parse_gateway_models(payload, "openai/gpt-4o", "x").models[0].provider == "openai"
 
 
 def test_provider_is_custom_without_namespace():
     payload = {"data": [{"id": "plain-model"}]}
 
-    assert _parse_models(payload, "plain-model", "x").models[0].provider == "Custom"
+    assert parse_gateway_models(payload, "plain-model", "x").models[0].provider == "Custom"
 
 
 def test_skips_entries_without_id():
     payload = {"data": [{"display_name": "no id"}, {"id": "a/one"}]}
 
-    assert len(_parse_models(payload, "a/one", "x").models) == 1
+    assert len(parse_gateway_models(payload, "a/one", "x").models) == 1
 
 
 # ---------------------------------------------------------------------
@@ -152,7 +154,7 @@ def test_bad_entry_does_not_discard_the_whole_list(caplog):
     }
 
     with caplog.at_level(logging.WARNING, logger="app.services.model_service"):
-        result = _parse_models(payload, "a/one", "x")
+        result = parse_gateway_models(payload, "a/one", "x")
 
     assert result is not None
     assert [m.id for m in result.models] == ["a/one", "c/three"]
@@ -166,7 +168,7 @@ def test_bad_entry_does_not_discard_the_whole_list(caplog):
 def test_int_like_strings_are_parsed():
     payload = {"data": [{"id": "a/one", "context_window": "200000", "max_output_tokens": " 8192 "}]}
 
-    model = _parse_models(payload, "a/one", "x").models[0]
+    model = parse_gateway_models(payload, "a/one", "x").models[0]
 
     assert model.context_window == 200000
     assert model.max_output_tokens == 8192
@@ -177,7 +179,7 @@ def test_unparseable_int_fields_are_none_not_fabricated(value):
     """不做单位换算也不猜：前端会拿这个数字做判断，编一个比空着更糟。"""
     payload = {"data": [{"id": "a/one", "context_window": value, "max_output_tokens": value}]}
 
-    model = _parse_models(payload, "a/one", "x").models[0]
+    model = parse_gateway_models(payload, "a/one", "x").models[0]
 
     assert model.context_window is None
     assert model.max_output_tokens is None
@@ -188,7 +190,7 @@ def test_unparseable_int_fields_are_none_not_fabricated(value):
     [{}, {"data": "not a list"}, {"data": []}, [], None, "nope", {"data": [{"display_name": "x"}]}],
 )
 def test_unusable_payloads_return_none(payload):
-    assert _parse_models(payload, "openai/gpt-4o", "x") is None
+    assert parse_gateway_models(payload, "openai/gpt-4o", "x") is None
 
 
 # ---------------------------------------------------------------------
@@ -196,20 +198,20 @@ def test_unusable_payloads_return_none(payload):
 # ---------------------------------------------------------------------
 def test_reasoning_is_none_when_gateway_omits_the_field():
     """「网关没说」不能当成「明确不支持」，否则前端会白白隐藏思考等级选择器。"""
-    model = _parse_models({"data": [{"id": "a/one"}]}, "a/one", "x").models[0]
+    model = parse_gateway_models({"data": [{"id": "a/one"}]}, "a/one", "x").models[0]
 
     assert model.reasoning is None
 
 
 def test_reasoning_false_is_preserved():
-    model = _parse_models({"data": [{"id": "a/one", "reasoning": False}]}, "a/one", "x").models[0]
+    model = parse_gateway_models({"data": [{"id": "a/one", "reasoning": False}]}, "a/one", "x").models[0]
 
     assert model.reasoning is False
 
 
 @pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
 def test_reasoning_non_bool_is_unknown(value):
-    model = _parse_models({"data": [{"id": "a/one", "reasoning": value}]}, "a/one", "x").models[0]
+    model = parse_gateway_models({"data": [{"id": "a/one", "reasoning": value}]}, "a/one", "x").models[0]
 
     assert model.reasoning is None
 
@@ -219,7 +221,7 @@ def test_reasoning_non_bool_is_unknown(value):
 # ---------------------------------------------------------------------
 def test_fallback_does_not_fabricate_reasoning():
     """刻意不伪造：前端据此隐藏思考等级选择器。"""
-    fallback = _fallback("openai/gpt-4o")
+    fallback = fallback_model_list("openai/gpt-4o")
     model = fallback.models[0]
 
     assert model.reasoning is False
@@ -228,13 +230,13 @@ def test_fallback_does_not_fabricate_reasoning():
 
 
 def test_fallback_splits_namespace():
-    model = _fallback("openai/gpt-4o").models[0]
+    model = fallback_model_list("openai/gpt-4o").models[0]
 
     assert (model.provider, model.name) == ("openai", "gpt-4o")
 
 
 def test_fallback_without_namespace():
-    model = _fallback("plain-model").models[0]
+    model = fallback_model_list("plain-model").models[0]
 
     assert (model.provider, model.name) == ("Custom", "plain-model")
 
@@ -389,15 +391,15 @@ def test_unparseable_window_is_none_not_fabricated():
 
 def test_build_models_url_versioned_bases():
     """路径里已有版本段的地址直接拼 /models；裸主机才补 /v1/models。"""
-    assert _build_models_url("http://localhost:4000") == "http://localhost:4000/v1/models"
-    assert _build_models_url("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
-    assert _build_models_url("https://open.bigmodel.cn/api/paas/v4") == "https://open.bigmodel.cn/api/paas/v4/models"
+    assert build_models_url("http://localhost:4000") == "http://localhost:4000/v1/models"
+    assert build_models_url("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
+    assert build_models_url("https://open.bigmodel.cn/api/paas/v4") == "https://open.bigmodel.cn/api/paas/v4/models"
     assert (
-        _build_models_url("https://generativelanguage.googleapis.com/v1beta/openai")
+        build_models_url("https://generativelanguage.googleapis.com/v1beta/openai")
         == "https://generativelanguage.googleapis.com/v1beta/openai/models"
     )
     assert (
-        _build_models_url("https://ark.cn-beijing.volces.com/api/v3")
+        build_models_url("https://ark.cn-beijing.volces.com/api/v3")
         == "https://ark.cn-beijing.volces.com/api/v3/models"
     )
 

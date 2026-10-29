@@ -31,7 +31,7 @@ def test_legacy_plaintext_is_returned_unchanged():
 def test_wrong_key_raises_instead_of_returning_empty(monkeypatch):
     """解不开时必须抛，不能返回空串。
 
-    返回空串会一路静默：`_auth_headers` 看到空 key 就不发 Authorization → 上游 401 →
+    返回空串会一路静默：`build_auth_headers` 看到空 key 就不发 Authorization → 上游 401 →
     用户看到「上游认证配置问题」；后台显示「未设置」，管理员只会去重填 key。而根因是
     AUTH_SECRET 换过。异常让「这一行不可用」成为显式状态。
     """

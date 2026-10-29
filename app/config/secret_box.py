@@ -38,7 +38,7 @@ class SecretDecryptError(Exception):
 
 def decrypt_secret(value: str | None) -> str:
     """解密；解不开时抛 `SecretDecryptError` 而不是返回空串。
-    空串会让 `_auth_headers` 干脆不发 Authorization，上游 401 被归因成「key 填错了」，实际根因是 `AUTH_SECRET` 换了。
+    空串会让 `build_auth_headers` 干脆不发 Authorization，上游 401 被归因成「key 填错了」，根因是 `AUTH_SECRET` 换了。
     `ValueError` / `UnicodeError` 也要一起接住（非法 base64、`enc:v1:中文`），否则会从 ORM 冒出来让整个列表端点 500。
     """
     if not value:

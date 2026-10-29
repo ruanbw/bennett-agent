@@ -1,12 +1,12 @@
-"""模型清单服务的对外出口：re-export `registry`（库权威路径）与 `gateway`（旧版兜底）。
+"""模型服务的对外出口：只导出对外契约，私有实现留在各子模块里。
 
-拆包只按变化原因分（registry/gateway/outbound_guard/upstream/presets/errors），本模块原样 re-export
-拆分前的全部公开 API 与测试引用的私有名；权威性与缓存口径见 `registry` 的模块 docstring。
+导出面 = 管理端与对话路径真正调用的入口 + 有明确语义的公开查询（默认模型、白名单、窗口上限）。
+拆包只按变化原因分：`provider_repo`（行级读写）、`provider_sync`（写用例与上游同步）、
+`registry`（模型解析与对外清单）、`gateway`（旧版环境变量兜底）、`outbound_guard`（出站守卫）、
+`upstream`（上游响应解析）、`presets`（厂商预设）、`errors`（错误类型）。
+要验证内部实现就去它的定义处引用：`__all__` 不是内部实现的冻结契约。
 """
 
-import socket
-
-from app.services.model_service import gateway, outbound_guard, presets, registry
 from app.services.model_service.errors import (
     ApiKeyRequiredError,
     DuplicateModelError,
@@ -14,84 +14,39 @@ from app.services.model_service.errors import (
     ProviderFetchError,
     ProviderNotFoundError,
 )
-from app.services.model_service.gateway import (
-    FALLBACK_CACHE_TTL_SECONDS,
-    MODELS_CACHE_TTL_SECONDS,
-    MODELS_TIMEOUT_SECONDS,
-    _build_models_url,
-    _build_url,
-    _fallback,
-    _parse_models,
-    reset_models_cache,
-)
-from app.services.model_service.outbound_guard import (
-    _is_internal_address,
-    _is_metadata_range,
-    _reject_private_target,
-    _warn_plaintext_key_over_public_http,
-)
+from app.services.model_service.outbound_guard import reject_private_target
 from app.services.model_service.presets import (
     AUTH_STYLES,
     get_preset,
     list_presets,
 )
-from app.services.model_service.registry import (
-    DEFAULT_PROVIDER_NAME,
-    PROVIDER_SYNC_TIMEOUT_SECONDS,
-    REGISTRY_MARKER_KEY,
-    SYNC_MAX_PAGES,
-    ChatModelSnapshot,
-    _auth_headers,
-    _build_target,
-    _default_display_name,
-    _enabled_rows,
-    _fetch_remote_models,
-    _find_duplicate_model_id,
-    _load_provider,
-    _mark_registry_initialized,
-    _provider_config_exists,
-    _unique_provider_slug,
+from app.services.model_service.provider_sync import (
     create_provider,
     create_provider_model,
     delete_provider,
     delete_provider_model,
-    fetch_available_models,
-    get_default_model_key,
-    get_known_model_ids,
-    get_model_limits,
     get_provider,
     list_provider_models,
     list_providers,
-    make_model_key,
-    provider_config_exists,
-    resolve_chat_model,
-    resolve_model_target,
     seed_default_provider,
-    slugify_provider_name,
     sync_provider_models,
     test_provider_connection,
     update_provider,
     update_provider_model,
 )
-from app.services.model_service.upstream import (
-    UpstreamModel,
-    _parse_int_field,
-    _parse_reasoning_flag,
-    _parse_reasoning_levels,
-    next_page_cursor,
-    parse_upstream_models,
+from app.services.model_service.registry import (
+    ChatModelSnapshot,
+    fetch_available_models,
+    get_default_model_key,
+    get_known_model_ids,
+    get_model_limits,
+    make_model_key,
+    provider_config_exists,
+    resolve_chat_model,
+    resolve_model_target,
 )
 
-#: 列在 `__all__` 里才算「有意导出」：这些私有名被 `token_budget` 与 tests/ 直接引用，拆分后必须仍可达。
-#: `socket` 是模块对象本身：测试把 getaddrinfo 补丁打在这个对象上，`outbound_guard` 因此同样生效。
 __all__ = [
-    "DEFAULT_PROVIDER_NAME",
-    "FALLBACK_CACHE_TTL_SECONDS",
-    "MODELS_CACHE_TTL_SECONDS",
-    "MODELS_TIMEOUT_SECONDS",
-    "PROVIDER_SYNC_TIMEOUT_SECONDS",
-    "REGISTRY_MARKER_KEY",
-    "SYNC_MAX_PAGES",
     "AUTH_STYLES",
     "ApiKeyRequiredError",
     "ChatModelSnapshot",
@@ -99,34 +54,11 @@ __all__ = [
     "InvalidModelStateError",
     "ProviderFetchError",
     "ProviderNotFoundError",
-    "UpstreamModel",
-    "_auth_headers",
-    "_build_models_url",
-    "_build_target",
-    "_build_url",
-    "_default_display_name",
-    "_enabled_rows",
-    "_fetch_remote_models",
-    "_find_duplicate_model_id",
-    "_fallback",
-    "_is_internal_address",
-    "_is_metadata_range",
-    "_load_provider",
-    "_mark_registry_initialized",
-    "_parse_int_field",
-    "_parse_models",
-    "_parse_reasoning_flag",
-    "_parse_reasoning_levels",
-    "_provider_config_exists",
-    "_reject_private_target",
-    "_unique_provider_slug",
-    "_warn_plaintext_key_over_public_http",
     "create_provider",
     "create_provider_model",
     "delete_provider",
     "delete_provider_model",
     "fetch_available_models",
-    "gateway",
     "get_default_model_key",
     "get_known_model_ids",
     "get_model_limits",
@@ -136,18 +68,11 @@ __all__ = [
     "list_provider_models",
     "list_providers",
     "make_model_key",
-    "next_page_cursor",
-    "outbound_guard",
-    "parse_upstream_models",
-    "presets",
     "provider_config_exists",
-    "registry",
-    "reset_models_cache",
+    "reject_private_target",
     "resolve_chat_model",
     "resolve_model_target",
     "seed_default_provider",
-    "slugify_provider_name",
-    "socket",
     "sync_provider_models",
     "test_provider_connection",
     "update_provider",

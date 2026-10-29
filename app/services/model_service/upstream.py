@@ -1,6 +1,6 @@
 """上游「列出模型」响应的统一解析：信封形状与字段别名在这里收敛成一份白名单。
 
-同步（`registry._fetch_remote_models`）与旧版网关（`gateway._parse_models`）共用本模块。
+同步（`provider_sync._fetch_remote_models`）与旧版网关（`gateway.parse_gateway_models`）共用本模块。
 别名表外的字段不读：窗口上限会被 token 预算拿去截断请求，编一个数比留 None 更危险。
 """
 
@@ -67,7 +67,7 @@ def _parse_reasoning_flag(item: dict) -> bool | None:  # noqa: ANN001 - 上游�
     return value if isinstance(value, bool) else None
 
 
-def _parse_reasoning_levels(raw: object) -> list[str]:
+def parse_reasoning_levels(raw: object) -> list[str]:
     """解析模型支持的思考等级；两种形状都接受（`[{"effort": "high"}]` 或 `["high"]`）。
 
     其它形状丢掉：伪造等级会让用户选完请求失败（`{"effort": null}` 经 `str()` 会变成 "None"）。
@@ -254,7 +254,7 @@ def _parse_entry(item: dict, description_field: str) -> UpstreamModel:  # noqa: 
         description=_extract_description(item, description_field, owned_by, display_name, model_id),
         owned_by=owned_by,
         reasoning=_extract_reasoning(item),
-        supported_reasoning_levels=_parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
+        supported_reasoning_levels=parse_reasoning_levels(item.get("supported_reasoning_levels", [])),
         context_window=_first_int(item, _CONTEXT_WINDOW_PATHS),
         max_output_tokens=_first_int(item, _MAX_OUTPUT_PATHS),
         raw=item,

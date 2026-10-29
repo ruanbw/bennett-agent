@@ -116,7 +116,7 @@ async def _resolve_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddres
     return addresses
 
 
-async def _reject_private_target(base_url: str) -> None:
+async def reject_private_target(base_url: str) -> None:
     """出站前检查目标地址，命中则抛 `ProviderFetchError`。
     调用点必须覆盖全部出站路径（建/改提供商、拉模型、`_build_target` 的对话出站），少一处就能被绕过。
     """

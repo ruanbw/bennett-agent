@@ -1,5 +1,5 @@
 """模型服务对外的错误类型。
-单列成模块是为了让 `registry` 与 `outbound_guard` 都能引用而不形成循环导入；与 HTTP 的映射
+单列成模块是为了让 `provider_sync` 与 `outbound_guard` 都能引用而不形成循环导入；与 HTTP 的映射
 （400/404/409/502）在 `app/api/admin.py`，这里只管「服务层能给出哪种确定结论」。
 """
 

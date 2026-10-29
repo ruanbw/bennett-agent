@@ -11,8 +11,8 @@
 - 并发写撞唯一约束必须翻译成可读的服务层错误，而不是 500。
 
 数据库用 conftest 的共享测试库：每个用例前 `TRUNCATE ... RESTART IDENTITY`，因此
-「库里有没有提供商 / 有没有 marker」不会随用例顺序漂移。这里仍然替换 `registry.async_session_maker` 指向同一个 maker，
-因为注册表在导入时按名字绑定了它——这正是「测试通过但线上没生效」的经典形态。
+「库里有没有提供商 / 有没有 marker」不会随用例顺序漂移。这里仍然替换 `registry` / `provider_sync` 的
+`async_session_maker` 指向同一个 maker，因为它们都在导入时按名字绑定了它——这正是「测试通过但线上没生效」的经典形态。
 """
 
 import socket
@@ -26,7 +26,7 @@ from app.db import ModelProvider, ProviderModel, async_session_maker
 from app.db import engine as app_engine
 from app.schemas.chat import ModelListResponse
 from app.services import fallback_config, model_service
-from app.services.model_service import registry
+from app.services.model_service import provider_repo, provider_sync, registry
 
 # ---------------------------------------------------------------------
 # 出站目标地址检查（API Key 不能送到元数据服务／任意主机）
@@ -44,7 +44,7 @@ from app.services.model_service import registry
 )
 async def test_metadata_targets_are_always_rejected(base_url):
     with pytest.raises(model_service.ProviderFetchError) as excinfo:
-        await model_service._reject_private_target(base_url)
+        await model_service.reject_private_target(base_url)
     assert "链路本地" in str(excinfo.value)
 
 
@@ -61,7 +61,7 @@ async def test_metadata_targets_are_always_rejected(base_url):
     ],
 )
 async def test_loopback_and_private_targets_are_allowed_by_default(base_url):
-    await model_service._reject_private_target(base_url)
+    await model_service.reject_private_target(base_url)
 
 
 @pytest.mark.parametrize(
@@ -71,7 +71,7 @@ async def test_loopback_and_private_targets_are_allowed_by_default(base_url):
 async def test_private_targets_are_rejected_in_strict_mode(monkeypatch, base_url):
     monkeypatch.setattr(settings, "provider_block_private_targets", True)
     with pytest.raises(model_service.ProviderFetchError) as excinfo:
-        await model_service._reject_private_target(base_url)
+        await model_service.reject_private_target(base_url)
     assert "内网" in str(excinfo.value)
 
 
@@ -89,17 +89,17 @@ def _loopback_getaddrinfo(host, port):  # noqa: ANN001, ARG001
 )
 async def test_public_targets_are_allowed(monkeypatch, base_url):
     # 公网域名不该真的去解析：用例只关心这条规则是否放行
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
-    await model_service._reject_private_target(base_url)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
+    await model_service.reject_private_target(base_url)
 
 
 async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
     def _unresolvable(host, port):  # noqa: ANN001, ARG001
         raise socket.gaierror(-2, "Name or service not known")
 
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _unresolvable)
+    monkeypatch.setattr(socket, "getaddrinfo", _unresolvable)
     # 不抛：解析失败交给后面的连接错误，而不是在这里报「内网」
-    await model_service._reject_private_target("https://provider.invalid/v1")
+    await model_service.reject_private_target("https://provider.invalid/v1")
 
 
 # ---------------------------------------------------------------------
@@ -109,10 +109,11 @@ async def test_dns_failure_is_not_treated_as_an_internal_target(monkeypatch):
 def registry_db(monkeypatch):
     """把模型注册表指向共享测试库，并返回 engine（供 `queries` 监听 SQL）。
 
-    替换的是 `registry.async_session_maker`：注册表在导入时按名字绑定了它，改
+    替换的是 `registry` / `provider_sync` 的 `async_session_maker`：它们都在导入时按名字绑定了它，改
     `app.db` 里的同名对象对已绑定的引用无效（这正是「测试通过但线上没生效」的经典形态）。
     """
     monkeypatch.setattr(registry, "async_session_maker", async_session_maker)
+    monkeypatch.setattr(provider_sync, "async_session_maker", async_session_maker)
     return app_engine
 
 
@@ -161,7 +162,7 @@ async def _add_model(registry_db, provider_id, model_id="openai/gpt-4o", **field
 # F3: http + 公网 → 明文 key 告警（只告警，不拒绝）
 # ---------------------------------------------------------------------
 async def test_plaintext_key_over_public_http_warns(registry_db, monkeypatch, caplog):
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
 
     with caplog.at_level("WARNING", logger="app.services.model_service.outbound_guard"):
         provider = await model_service.create_provider(
@@ -178,7 +179,7 @@ async def test_plaintext_key_over_public_http_warns(registry_db, monkeypatch, ca
 
 async def test_plaintext_key_warning_skips_private_hosts(registry_db, monkeypatch, caplog):
     """内网/本机网关走 http 是文档里的主要用法，不该被提示。"""
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _loopback_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _loopback_getaddrinfo)
 
     with caplog.at_level("WARNING", logger="app.services.model_service.outbound_guard"):
         await model_service.create_provider(name="本机", base_url="http://gateway.internal:4000/v1", api_key="sk-1")
@@ -187,7 +188,7 @@ async def test_plaintext_key_warning_skips_private_hosts(registry_db, monkeypatc
 
 
 async def test_plaintext_key_warning_skips_https_and_keyless_providers(registry_db, monkeypatch, caplog):
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
 
     with caplog.at_level("WARNING", logger="app.services.model_service.outbound_guard"):
         await model_service.create_provider(name="https", base_url="https://api.example.com/v1", api_key="sk-1")
@@ -199,7 +200,7 @@ async def test_plaintext_key_warning_skips_https_and_keyless_providers(registry_
 async def test_plaintext_key_warning_also_covers_base_url_changes(registry_db, monkeypatch, caplog):
     """更新地址同样会改变 key 的传输路径，告警不能只在 create 里做。"""
     provider_id = await _seed_provider(registry_db, base_url="https://api.example.com/v1")
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
 
     with caplog.at_level("WARNING", logger="app.services.model_service.outbound_guard"):
         await model_service.update_provider(provider_id, base_url="http://api.example.com/v1", api_key="sk-new")
@@ -259,7 +260,7 @@ async def test_resaving_same_base_url_does_not_require_api_key(registry_db):
 async def test_concurrent_provider_creation_is_reported_as_fetch_error(registry_db, monkeypatch):
     """两个管理员同时建同名提供商：slug 的「先查后插」双双落空，唯一约束才是裁决者。"""
     await _seed_provider(registry_db, name="默认网关")
-    monkeypatch.setattr(registry, "_unique_provider_slug", _always("gw"))
+    monkeypatch.setattr(provider_repo, "unique_provider_slug", _always("gw"))
 
     with pytest.raises(model_service.ProviderFetchError, match="冲突"):
         await model_service.create_provider(name="默认网关", base_url="http://127.0.0.1:5000/v1")
@@ -269,7 +270,7 @@ async def test_concurrent_model_creation_is_reported_as_duplicate(registry_db, m
     """`create_provider_model` 的预检查不到（另一边的插入还没提交），只能靠唯一约束兜底。"""
     provider_id = await _seed_provider(registry_db)
     await _add_model(registry_db, provider_id, model_id="openai/gpt-4o")
-    monkeypatch.setattr(registry, "_find_duplicate_model_id", _always(None))
+    monkeypatch.setattr(provider_repo, "find_duplicate_model_id", _always(None))
 
     with pytest.raises(model_service.DuplicateModelError):
         await model_service.create_provider_model(provider_id, model_id="openai/gpt-4o")
@@ -556,7 +557,7 @@ async def test_user_search_still_does_substring_and_case_insensitive_match(regis
 # 环境变量引导：一条写错的 LITELLM_API_BASE 不该把实例变成「零个可用模型」
 # ---------------------------------------------------------------------
 def test_validate_bootstrap_base_url_accepts_http_and_strips_trailing_slash():
-    from app.services.model_service.registry import validate_bootstrap_base_url
+    from app.services.model_service.provider_sync import validate_bootstrap_base_url
 
     assert validate_bootstrap_base_url("http://localhost:4000/") == ("http://localhost:4000", "")
     assert validate_bootstrap_base_url("  https://api.example.com/v1  ") == ("https://api.example.com/v1", "")
@@ -574,7 +575,7 @@ def test_validate_bootstrap_base_url_accepts_http_and_strips_trailing_slash():
     ],
 )
 def test_validate_bootstrap_base_url_rejects_bad_values(raw, fragment):
-    from app.services.model_service.registry import validate_bootstrap_base_url
+    from app.services.model_service.provider_sync import validate_bootstrap_base_url
 
     url, reason = validate_bootstrap_base_url(raw)
 
@@ -585,33 +586,29 @@ def test_validate_bootstrap_base_url_rejects_bad_values(raw, fragment):
 async def test_bad_bootstrap_url_keeps_the_env_path_working(registry_db, monkeypatch, caplog):
     """写错的地址不能写进库：一旦写进库，后台就成了权威，实例变成零个可用模型。"""
     from app.config import settings
-    from app.services.model_service import registry as reg
-
     monkeypatch.setattr(settings, "bootstrap_provider_from_env", True)
     monkeypatch.setattr(settings, "litellm_api_base", "localhost:4000")
 
-    with caplog.at_level("WARNING", logger="app.services.model_service.registry"):
-        created = await reg.seed_default_provider()
+    with caplog.at_level("WARNING", logger="app.services.model_service.provider_sync"):
+        created = await provider_sync.seed_default_provider()
 
     assert created is False
-    # 关键断言：库里没有任何提供商，`_provider_config_exists` 仍为 False，
+    # 关键断言：库里没有任何提供商，`provider_config_exists` 仍为 False，
     # 于是解析继续走环境变量路径（服务不会变成「零个可用模型」）
-    assert await reg.provider_config_exists() is False
+    assert await model_service.provider_config_exists() is False
     assert any("跳过从环境变量引导" in record.getMessage() for record in caplog.records)
 
 
 async def test_valid_bootstrap_url_still_seeds_a_provider(registry_db, monkeypatch):
     from app.config import settings
-    from app.services.model_service import registry as reg
-
     monkeypatch.setattr(settings, "bootstrap_provider_from_env", True)
     monkeypatch.setattr(settings, "litellm_api_base", "http://127.0.0.1:4000/")
     monkeypatch.setattr(settings, "model_name", "openai/gpt-4o")
 
-    assert await reg.seed_default_provider() is True
-    assert await reg.provider_config_exists() is True
+    assert await provider_sync.seed_default_provider() is True
+    assert await model_service.provider_config_exists() is True
 
-    providers = await reg.list_providers()
+    providers = await model_service.list_providers()
     assert providers[0].base_url == "http://127.0.0.1:4000"
 
 
@@ -629,20 +626,20 @@ def test_auth_headers_follow_auth_style():
         return ModelProvider(**fields)
 
     bearer = provider(api_key="sk-1", auth_style="bearer")
-    assert model_service._auth_headers(bearer) == {"Authorization": "Bearer sk-1"}
+    assert provider_sync.build_auth_headers(bearer) == {"Authorization": "Bearer sk-1"}
 
     anthropic = provider(api_key="sk-2", auth_style="x-api-key", extra_headers={"anthropic-version": "2023-06-01"})
-    assert model_service._auth_headers(anthropic) == {"anthropic-version": "2023-06-01", "x-api-key": "sk-2"}
+    assert provider_sync.build_auth_headers(anthropic) == {"anthropic-version": "2023-06-01", "x-api-key": "sk-2"}
 
     goog = provider(api_key="sk-3", auth_style="x-goog-api-key")
-    assert model_service._auth_headers(goog) == {"x-goog-api-key": "sk-3"}
+    assert provider_sync.build_auth_headers(goog) == {"x-goog-api-key": "sk-3"}
 
     keyless = provider(api_key="sk-4", auth_style="none")
     # none 是「这个网关不收凭据」：即使误存了 key 也不能发出去
-    assert model_service._auth_headers(keyless) == {}
+    assert provider_sync.build_auth_headers(keyless) == {}
 
     no_key = provider(api_key=None, auth_style="bearer", extra_headers={"x-flag": "1"})
-    assert model_service._auth_headers(no_key) == {"x-flag": "1"}
+    assert provider_sync.build_auth_headers(no_key) == {"x-flag": "1"}
 
 
 class _FakeResponse:
@@ -655,7 +652,7 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    """记录请求并按序回放响应；`registry.get_http_client` 被替换成返回它。"""
+    """记录请求并按序回放响应；`provider_sync.get_http_client` 被替换成返回它。"""
 
     def __init__(self, responses):
         self.responses = list(responses)
@@ -671,7 +668,7 @@ async def _run_sync(registry_db, monkeypatch, responses):
         registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"sync-{uuid.uuid4().hex[:8]}"
     )
     client = _FakeClient(responses)
-    monkeypatch.setattr(registry, "get_http_client", lambda: client)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: client)
     result = await model_service.sync_provider_models(provider_id)
     return result, client
 
@@ -710,7 +707,7 @@ async def test_sync_refreshes_raw_without_touching_enabled(registry_db, monkeypa
     )
 
     first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 1}]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: first)
     assert await model_service.sync_provider_models(provider_id) == (1, 1, 0)
 
     row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
@@ -718,7 +715,7 @@ async def test_sync_refreshes_raw_without_touching_enabled(registry_db, monkeypa
 
     new_entry = {"id": "openai/gpt-4o", "owned_by": "openai", "context_window": 999, "note": "changed"}
     second = _FakeClient([_FakeResponse({"data": [new_entry]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: second)
     assert await model_service.sync_provider_models(provider_id) == (1, 0, 1)
 
     row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
@@ -757,7 +754,7 @@ async def test_create_provider_with_preset_applies_auth(registry_db, monkeypatch
     """
     from app.services.model_service.presets import get_preset
 
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
 
     provider = await model_service.create_provider(name="Claude", api_key="sk-x", preset_key="anthropic")
     preset = get_preset("anthropic")
@@ -770,7 +767,7 @@ async def test_create_provider_with_preset_applies_auth(registry_db, monkeypatch
 
 async def test_create_provider_with_preset_base_url_override(registry_db, monkeypatch):
     """预设 + 显式地址：地址用管理员给的（代理/镜像），认证方式仍按预设。"""
-    monkeypatch.setattr(model_service.socket, "getaddrinfo", _public_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo)
 
     provider = await model_service.create_provider(
         name="OpenAI 代理",
@@ -881,7 +878,7 @@ async def test_status_all_keeps_every_account(registry_db):
 )
 async def test_embedded_and_cloud_metadata_targets_are_rejected(base_url):
     with pytest.raises(model_service.ProviderFetchError) as excinfo:
-        await model_service._reject_private_target(base_url)
+        await model_service.reject_private_target(base_url)
     assert "链路本地" in str(excinfo.value)
 
 
@@ -889,14 +886,14 @@ async def test_nat64_loopback_is_internal_in_strict_mode(monkeypatch):
     """64:ff9b::7f00:1 外层是 global，严格模式也必须按内嵌 127.0.0.1 拦下。"""
     monkeypatch.setattr(settings, "provider_block_private_targets", True)
     with pytest.raises(model_service.ProviderFetchError) as excinfo:
-        await model_service._reject_private_target("http://[64:ff9b::7f00:1]/v1")
+        await model_service.reject_private_target("http://[64:ff9b::7f00:1]/v1")
     assert "内网" in str(excinfo.value)
 
 
 async def test_nat64_public_embedded_address_is_allowed(monkeypatch):
     """NAT64 包装的公网地址不应被误杀（严格模式下也放行）。"""
     monkeypatch.setattr(settings, "provider_block_private_targets", True)
-    await model_service._reject_private_target("http://[64:ff9b::808:808]/v1")
+    await model_service.reject_private_target("http://[64:ff9b::808:808]/v1")
 
 
 async def test_resolve_chat_model_carries_declared_reasoning_levels(registry_db):
@@ -1051,7 +1048,7 @@ async def test_sync_does_not_wipe_manually_entered_limits(registry_db, monkeypat
 
     # 第一次同步：上游给了窗口
     first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "context_window": 128000}]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: first)
     assert await model_service.sync_provider_models(provider_id) == (1, 1, 0)
 
     row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
@@ -1060,7 +1057,7 @@ async def test_sync_does_not_wipe_manually_entered_limits(registry_db, monkeypat
 
     # 再同步一次，这次上游**没给**窗口（绝大多数提供商的真实行为）
     second = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o"}]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: second)
     assert await model_service.sync_provider_models(provider_id) == (1, 0, 1)
 
     row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")
@@ -1074,12 +1071,12 @@ async def test_sync_still_takes_limits_when_upstream_provides_them(registry_db, 
         registry_db, base_url="http://127.0.0.1:4000/v1", slug=f"upd-{uuid.uuid4().hex[:8]}"
     )
     first = _FakeClient([_FakeResponse({"data": [{"id": "openai/gpt-4o", "context_window": 128000}]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: first)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: first)
     await model_service.sync_provider_models(provider_id)
 
     same_entry_but_bigger = {"id": "openai/gpt-4o", "context_window": 400000}
     second = _FakeClient([_FakeResponse({"data": [same_entry_but_bigger]})])
-    monkeypatch.setattr(registry, "get_http_client", lambda: second)
+    monkeypatch.setattr(provider_sync, "get_http_client", lambda: second)
     await model_service.sync_provider_models(provider_id)
 
     row = await _load_model_row(registry_db, provider_id, "openai/gpt-4o")

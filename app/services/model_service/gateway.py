@@ -19,7 +19,7 @@ from app.services.model_service.upstream import (
 
 logger = logging.getLogger(__name__)
 
-#: 路径里形如 `v1` / `v3` / `v1beta` 的段。见 `_build_models_url`。
+#: 路径里形如 `v1` / `v3` / `v1beta` 的段。见 `build_models_url`。
 _VERSION_SEGMENT = re.compile(r"^v\d+")
 
 #: 拉取模型列表是页面加载路径上的一步，3 秒没结果就该走兜底。
@@ -42,7 +42,7 @@ _lock: asyncio.Lock | None = None
 _lock_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _build_models_url(base_url: str) -> str:
+def build_models_url(base_url: str) -> str:
     """根据提供商的 base_url 拼出模型列表地址。
 
     路径里已有 `v<数字>` 段（`/v1`、`/api/paas/v4`、`/v1beta/openai`）就直接拼 `/models`，否则补 `/v1/models`。
@@ -56,10 +56,10 @@ def _build_models_url(base_url: str) -> str:
 
 
 def _build_url() -> str:
-    return _build_models_url(settings.litellm_api_base)
+    return build_models_url(settings.litellm_api_base)
 
 
-def _parse_models(
+def parse_gateway_models(
     payload: object,
     default_model_id: str,
     description_field: str,
@@ -108,7 +108,7 @@ def _parse_models(
     return ModelListResponse(models=models, default_model=default_model_id)
 
 
-def _fallback(default_model_id: str) -> ModelListResponse:
+def fallback_model_list(default_model_id: str) -> ModelListResponse:
     """兜底：只报配置里的那个模型。
 
     不伪造思考能力与等级：`reasoning=False` + 空等级让前端不展示选择器，避免「选了却请求失败」。
@@ -199,26 +199,26 @@ async def _fetch_from_gateway(default_model_id: str) -> tuple[ModelListResponse,
         )
     except Exception as exc:
         logger.warning("从上游网关拉取模型列表失败，将使用默认兜底配置: %s", exc)
-        return _fallback(default_model_id), True
+        return fallback_model_list(default_model_id), True
 
     if response.status_code != 200:
         logger.warning("上游 /v1/models 响应非 200: %s", response.status_code)
-        return _fallback(default_model_id), True
+        return fallback_model_list(default_model_id), True
 
     try:
         payload = response.json()
     except ValueError:
         logger.warning("上游 /v1/models 返回的不是 JSON")
-        return _fallback(default_model_id), True
+        return fallback_model_list(default_model_id), True
 
     try:
-        parsed = _parse_models(payload, default_model_id, settings.model_description_field)
+        parsed = parse_gateway_models(payload, default_model_id, settings.model_description_field)
     except Exception as exc:
         logger.warning("解析上游 /v1/models 响应失败，将使用默认兜底配置: %s", exc)
-        return _fallback(default_model_id), True
+        return fallback_model_list(default_model_id), True
 
     if parsed is None:
         logger.warning("上游 /v1/models 未返回可用模型，将使用默认兜底配置")
-        return _fallback(default_model_id), True
+        return fallback_model_list(default_model_id), True
 
     return parsed, False
