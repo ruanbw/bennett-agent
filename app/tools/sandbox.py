@@ -10,8 +10,7 @@ import logging
 from pydantic_ai import RunContext
 
 from app.config import settings
-from app.db import async_session_maker
-from app.services.sandbox import get_provider
+from app.services.sandbox import get_provider, lease_service
 from app.services.sandbox.base import (
     DEFAULT_EXEC_TIMEOUT_S,
     MAX_EXEC_TIMEOUT_S,
@@ -24,19 +23,8 @@ from app.services.sandbox.base import (
     SandboxTimeout,
     owner_tag,
 )
-from app.services.sandbox.lease import (
-    DESTROY_USER_RESET,
-    STATE_PROVISIONING,
-    LeaseView,
-    ensure_lease,
-    get_active_lease,
-    mark_destroy_failed,
-    mark_destroyed,
-    mark_destroying,
-    record_command,
-    touch_activity,
-)
-from app.tools.sandbox_scope import SandboxScope, current_sandbox_scope
+from app.services.sandbox.lease import STATE_PROVISIONING, LeaseView
+from app.tools.sandbox_scope import current_sandbox_scope
 
 logger = logging.getLogger(__name__)
 
@@ -109,24 +97,6 @@ def render_exec_result(result: ExecResult, command: str) -> str:
     return "\n".join(parts)
 
 
-# ---------------------------------------------------------------------
-# 租约：按作用域解析，必要时隐式创建
-# ---------------------------------------------------------------------
-async def _ensure_lease(scope: SandboxScope) -> LeaseView:
-    """取本会话的租约，没有就建一台。
-    幂等点在 `sandbox_lease` 的部分唯一索引（`ensure_lease`），工具层的判断挡不住同一轮的并发调用；
-    除建机外不在任何 provider 调用期间持有数据库会话——exec 可能跑几分钟，握着连接会耗尽池。
-    """
-    async with async_session_maker() as session:
-        lease, _created = await ensure_lease(
-            session,
-            user_id=scope.user_id,
-            session_id=scope.session_id,
-            create=get_provider().create,
-        )
-    return lease
-
-
 def _unusable_reason(lease: LeaseView) -> str | None:
     """租约存在但还不能用时的文案，能用时返回 None。
     `get_active_lease` 也会返回 `provisioning`（并发建机的后到者）；「正在启动」与「已回收」的
@@ -137,41 +107,6 @@ def _unusable_reason(lease: LeaseView) -> str | None:
     if lease.state == STATE_PROVISIONING:
         return "执行环境正在启动，请稍后再试。"
     return ERR_NOT_FOUND
-
-
-async def _touch_activity(lease_id: str) -> None:
-    """刷新 `last_activity`，回收循环靠它区分「用户关了页面」与「agent 还在跑长任务」。
-    失败只记日志：命令已经跑完，统计写入失败不该变成「环境不可用」，代价是可能被回收早一点。
-    """
-    try:
-        async with async_session_maker() as session:
-            await touch_activity(session, lease_id)
-    except Exception:  # noqa: BLE001 - 见 docstring：统计失败不该改变工具结果
-        logger.exception("刷新沙箱活动时间失败 (lease=%s)", lease_id)
-
-
-async def _record_command(
-    lease: LeaseView, command: str, result: ExecResult, output_head: str, truncated: bool
-) -> None:
-    """把这次执行写进审计表，失败只记日志（审计缺失要告警，但不能让模型以为命令没跑）。
-    提交权在 `lease.py`：状态迁移的条件 UPDATE 必须立刻对其他回收者可见。
-    """
-    try:
-        async with async_session_maker() as session:
-            await touch_activity(session, lease.id)
-            await record_command(
-                session,
-                lease.id,
-                command=command,
-                exit_code=result.exit_code,
-                duration_ms=result.duration_ms,
-                output_bytes=result.output_bytes,
-                # 审计要回答「模型当时看到了什么」，所以存渲染后的截断文本（见 `app/db.py`）。
-                output_head=output_head,
-                truncated=truncated,
-            )
-    except Exception:  # noqa: BLE001 - 见 docstring
-        logger.exception("写入沙箱命令审计失败 (lease=%s)", lease.id)
 
 
 # ---------------------------------------------------------------------
@@ -256,7 +191,7 @@ async def sandbox_exec(ctx: RunContext[None], command: str, timeout_s: int = DEF
     try:
         # provider 构造也在 try 里：后端配置写错抛的是 `SandboxError`，不该以异常形式漏给模型。
         provider = get_provider()
-        lease = await _ensure_lease(scope)
+        lease = await lease_service.ensure_for_scope(user_id=scope.user_id, session_id=scope.session_id)
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
@@ -278,7 +213,13 @@ async def sandbox_exec(ctx: RunContext[None], command: str, timeout_s: int = DEF
         result.stdout, head_chars=MAX_OUTPUT_HEAD_CHARS, tail_chars=MAX_OUTPUT_TAIL_CHARS
     )
     _, stderr_omitted = _truncate(result.stderr, head_chars=STDERR_HEAD_CHARS, tail_chars=STDERR_TAIL_CHARS)
-    await _record_command(lease, cleaned, result, stdout_head, bool(stdout_omitted or stderr_omitted))
+    await lease_service.record_command(
+        lease.id,
+        command=cleaned,
+        result=result,
+        output_head=stdout_head,
+        truncated=bool(stdout_omitted or stderr_omitted),
+    )
     return render_exec_result(result, cleaned)
 
 
@@ -304,7 +245,7 @@ async def sandbox_write_file(ctx: RunContext[None], path: str, content: str) -> 
 
     try:
         provider = get_provider()
-        lease = await _ensure_lease(scope)
+        lease = await lease_service.ensure_for_scope(user_id=scope.user_id, session_id=scope.session_id)
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
@@ -317,7 +258,7 @@ async def sandbox_write_file(ctx: RunContext[None], path: str, content: str) -> 
         logger.exception("沙箱写文件出现未预期异常 (user=%s)", scope.user_id)
         return ERR_GENERIC
 
-    await _touch_activity(lease.id)
+    await lease_service.touch(lease.id)
     return f"已写入 {target}（{len(data):,} 字节）。"
 
 
@@ -337,7 +278,7 @@ async def sandbox_read_file(ctx: RunContext[None], path: str, max_bytes: int = M
     limit = _clamp_max_bytes(max_bytes)
     try:
         provider = get_provider()
-        lease = await _ensure_lease(scope)
+        lease = await lease_service.ensure_for_scope(user_id=scope.user_id, session_id=scope.session_id)
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
@@ -349,7 +290,7 @@ async def sandbox_read_file(ctx: RunContext[None], path: str, max_bytes: int = M
         logger.exception("沙箱读文件出现未预期异常 (user=%s)", scope.user_id)
         return ERR_GENERIC
 
-    await _touch_activity(lease.id)
+    await lease_service.touch(lease.id)
     try:
         text = data.decode("utf-8")
         note = ""
@@ -358,22 +299,6 @@ async def sandbox_read_file(ctx: RunContext[None], path: str, max_bytes: int = M
         text = data.decode("utf-8", errors="replace")
         note = "（文件不是纯 UTF-8 文本，无法解码的字节已替换为 �）\n"
     return f"{target}（{len(data):,} 字节）：\n{note}{text}"
-
-
-async def _mark_destroy_failed(lease_id: str, exc: BaseException) -> None:
-    """把销毁失败落成 `destroy_failed`（带原因），这一步失败只记日志。
-    模型没有「重试销毁」的手段，报细节只会多一轮无用调用；运维靠日志与那条 `destroying` 行排查。
-    """
-    try:
-        async with async_session_maker() as session:
-            await mark_destroy_failed(
-                session,
-                lease_id,
-                error=f"{type(exc).__name__}: {exc}",
-                reason=DESTROY_USER_RESET,
-            )
-    except Exception:  # noqa: BLE001
-        logger.exception("写入沙箱销毁失败状态时出错 (lease=%s)", lease_id)
 
 
 async def sandbox_reset(ctx: RunContext[None]) -> str:
@@ -386,15 +311,13 @@ async def sandbox_reset(ctx: RunContext[None]) -> str:
 
     try:
         provider = get_provider()
-        async with async_session_maker() as session:
-            lease = await get_active_lease(session, user_id=scope.user_id)
-            if lease is None:
-                return "当前会话还没有创建执行环境，无需重置。下次执行时会自动创建。"
-            # 条件 UPDATE 抢占销毁权：回收循环可能同时在场，先读后写会把机器从长任务下面抽走。
-            won = await mark_destroying(session, lease.id)
+        lease, won = await lease_service.claim_for_reset(user_id=scope.user_id)
     except Exception:  # noqa: BLE001 - 工具契约是「永远返回文案，不把异常抛给模型」
         logger.exception("沙箱重置时读取租约失败 (user=%s)", scope.user_id)
         return ERR_GENERIC
+
+    if lease is None:
+        return "当前会话还没有创建执行环境，无需重置。下次执行时会自动创建。"
 
     if not won:
         # 别人（空闲回收 / 并发的另一次重置）已拿到销毁权，或机器还在建：不能声称「已重置」。
@@ -410,15 +333,10 @@ async def sandbox_reset(ctx: RunContext[None]) -> str:
         # 停在 `destroying` 的租约既不被回收循环重试、也不是活动租约（见 lease.py），是最容易
         # 永久泄漏机器的中间态；失败必须落成 `destroy_failed`，告警与重试才有东西可查。
         logger.warning("沙箱销毁失败 (lease=%s): %s", lease.id, type(exc).__name__)
-        await _mark_destroy_failed(lease.id, exc)
+        await lease_service.mark_failed(lease.id, exc)
         return _error_message(exc) if isinstance(exc, SandboxError) else ERR_GENERIC
 
-    try:
-        async with async_session_maker() as session:
-            await mark_destroyed(session, lease.id, reason=DESTROY_USER_RESET)
-    except Exception:  # noqa: BLE001
-        # 机器已销毁、只是账没对上：回收循环会按 destroying 重试，所以不报成失败。
-        logger.exception("沙箱已销毁但租约状态未落库 (lease=%s)", lease.id)
+    await lease_service.finish_reset(lease.id)
     return "已重置，下次执行会创建新环境。"
 
 

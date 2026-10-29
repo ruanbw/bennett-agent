@@ -12,7 +12,8 @@
 
 provider 用 `FakeProvider`：上面四条与 Docker/KVM 无关，用真后端跑反而会把「工具层的
 契约」和「后端的实现」搅在一起。数据库是 conftest 的真实 Postgres——审计行与租约状态
-是工具层的产出，mock 掉它等于不验。
+是这条调用链的产出，mock 掉它等于不验；但工具层本身不再开会话，会话在
+`app/services/sandbox/lease_service.py` 里。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from sqlalchemy import func, select
 from app.config import settings
 from app.db import SandboxCommand, SandboxLease, User, async_session_maker
 from app.services import sandbox as sandbox_service
+from app.services.sandbox import lease_service
 from app.services.sandbox.base import (
     MAX_EXEC_TIMEOUT_S,
     MAX_OUTPUT_HEAD_CHARS,
@@ -479,3 +481,28 @@ async def test_exec_clamps_timeout_and_passes_command(env: Env):
     assert call["command"] == "python3 a.py"
     assert call["timeout_s"] == MAX_EXEC_TIMEOUT_S
     assert call["workdir"] == settings.sandbox_workdir
+
+
+# ---------------------------------------------------------------------
+# 分层：会话留在 `lease_service`，工具层只表达业务语义
+# ---------------------------------------------------------------------
+def test_tool_layer_does_not_open_database_sessions():
+    """工具层只调 `lease_service`：这里再出现 `async_session_maker` 就是会话又漏上来了。"""
+    from app.tools import sandbox as tools
+
+    assert not hasattr(tools, "async_session_maker")
+
+
+async def test_lease_service_swallows_write_failures(monkeypatch):
+    """审计/统计写失败不该变成「环境不可用」：命令已经跑完，工具必须照常返回结果。"""
+
+    def _broken_maker():
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(lease_service, "async_session_maker", _broken_maker)
+    result = ExecResult(exit_code=0, stdout="ok", stderr="", duration_ms=1)
+
+    await lease_service.touch("sbx_missing")
+    await lease_service.record_command("sbx_missing", command="ls", result=result, output_head="ok", truncated=False)
+    await lease_service.mark_failed("sbx_missing", SandboxError("boom"))
+    await lease_service.finish_reset("sbx_missing")
