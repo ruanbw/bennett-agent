@@ -1,21 +1,5 @@
-"""SSE 聊天事件的类型化契约。
-
-这是 R-1 的核心：事件从「带 `data:` 前缀的字符串」变成有判别键的类型。
-
-改动前同一套分帧知识存在 4 份副本——
-
-1. `chat_service` 产出 `"data: {json}\\n\\n"` 字符串；
-2. `api/chat.py::_collect_chat_response` 把 `"data:"` 剥掉，取回自己需要的 JSON；
-3. `api/chat.py::event_generator` 再剥一次，交给 `EventSourceResponse` 又加回去；
-4. `frontend/src/lib/chat-runs.ts` 第四次解析同一套分帧。
-
-第 2、3 步是纯仪式：往返后字节完全一致。现在服务端只产类型对象，且只在
-`app/api/chat.py` 一处序列化；客户端拿到的是有 `type` 判别键的结构，而不是
-需要自己剥前缀的字符串。
-
-序列化统一用 `model_dump_json()`（紧凑分隔符）。它与原先的
-`json.dumps(..., ensure_ascii=False)` 语义等价，唯一差别是 `:` 后的空格；
-两者都会把裸换行转义成 `\\n`，因此 SSE 分帧安全。
+"""SSE 聊天事件的类型化契约：判别键是 `type`，服务端只在 `app/api/chat.py` 一处序列化。
+统一用 `model_dump_json()`（紧凑分隔符）：它会把裸换行转义成 `\n`，SSE 分帧才安全。
 """
 
 from typing import Annotated, Literal
@@ -38,10 +22,7 @@ class ThinkingDelta(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """工具开始调用。
-
-    `args` 保持为字符串：前端原样展示，不做二次解析。格式化交给展示层。
-    """
+    """工具开始调用；`args` 保持字符串，前端原样展示、不做二次解析。"""
 
     type: Literal["tool_call"] = "tool_call"
     tool_call_id: str
@@ -50,11 +31,8 @@ class ToolCall(BaseModel):
 
 
 class ToolResult(BaseModel):
-    """工具调用返回。
-
-    `outcome` 是 pydantic-ai 给的结构化执行结果：工具抛错被隔离、
-    权限拒绝、中断，都与「成功返回一段文字」语义不同。前端据此显示失败状态，
-    而不是把隔离后的错误文案当成一次成功的工具调用。
+    """工具调用返回；`outcome` 区分成功 / 隔离失败 / 权限拒绝 / 中断。
+    前端据 `outcome` 显示失败状态，不能把隔离后的错误文案当成一次成功调用。
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -65,12 +43,7 @@ class ToolResult(BaseModel):
 
 
 class ClarificationRequest(BaseModel):
-    """模型发起意图确认提问。
-
-    R-6 的落点：提问是一等公民事件，字段已在服务端解析完毕。改动前前端要靠
-    `event.tool_name === 'ask_user_clarification'` 比对字符串、再自己
-    `JSON.parse(event.args)` 才能拿到提问——那是把一个协议细节漏进了展示层。
-    """
+    """模型发起意图确认提问：字段已在服务端解析完毕，前端不必比对 tool_name 再自己 parse args。"""
 
     type: Literal["clarification"] = "clarification"
     tool_call_id: str
@@ -80,12 +53,8 @@ class ClarificationRequest(BaseModel):
 
 
 class FallbackUsed(BaseModel):
-    """主模型失败，本轮已自动切换到备用模型。
-
-    为什么要有这个事件：切换本身是静默的，但用户看到的回答来自另一个模型。
-    不告诉用户，排障时既不知道这轮是谁答的，也会把备用模型的能力差异误判成
-    「这个模型变差了」。事件只带模型 id 与一句**类别**短语，不带上游错误原文
-    （原文可能含上游 URL 与凭据上下文，只进日志）。
+    """主模型失败、本轮已自动切到备用模型（静默切换会让能力差异被误判成模型变差）。
+    只带模型 id 与原因类别短语：上游错误原文可能含 URL 与凭据上下文，只进日志。
     """
 
     type: Literal["fallback"] = "fallback"
@@ -103,38 +72,9 @@ class Done(BaseModel):
 
 
 class UsageTiming(BaseModel):
-    """本轮计时的**实测**明细（服务端量的，不是估算）。
-
-    这个类存在的理由：前端要显示「1 轮 37 步 · 208 tok/s」与一个统计弹层，
-    而 `tok/s` 的分母必须是**真正的解码阶段**。用整轮墙钟当分母会把工具执行、
-    上游排队、重试退避都算成「生成速度」——一个跑了 20 秒工具的一轮会显示成
-    3 tok/s。那不是模型慢，是工具慢，而这个错误结论会让用户去换模型。
-
-    ## 一起给，或一起缺席
-
-    七个字段在协议上是**同一个块**：服务端只在真的量到了才给 `timing`，整块缺席
-    时前端不显示这些统计项，**绝不补 0**。0 会被读成明确的错误结论：
-    `0 tok/s` = 模型卡住了，`首字 0ms` = 秒回，`0 步` = 一个请求都没发。
-    宁可不显示，也不要给一个看起来像测量结果、实际只是默认值的数。
-
-    `ttft_ms` / `decode_ms` / `decode_tokens` 在块内额外允许为 null：某几步可能
-    量不到分片时间（网关一次性返回整段文本，解码窗口约等于 0）。它们缺席时前端
-    只隐藏对应的那一项，其余照常显示。
-
-    口径（与 `app/services/usage.py::TurnTimer` 逐条对应，改一边要改另一边）：
-
-    - `steps`：本轮模型请求次数。有工具调用时一轮不止一次请求。
-    - `turn_ms`：整轮墙钟。含上游排队、重试退避、备用模型切换与工具执行；
-      **不含**上下文压缩、历史转换、Agent 装配（那三段发生在流式生成之前）。
-    - `llm_ms`：模型请求占用累计 = Σ(每步「请求发出 → 该步最后一个输出分片到达」)。
-      含首字等待与解码，是分辨「慢在模型」还是「慢在工具」的那一半。
-    - `tool_ms`：工具执行占用累计 = Σ(每次工具「开始执行 → 返回」)。并发工具时
-      是各自耗时之和，可能大于墙钟里的那一段。**没有工具时是真实的 0**——
-      它与「量不到」不是一回事：量不到时整块 `timing` 都不下发。
-    - `ttft_ms`：首 token 延迟，按步取平均。没有可测样本时 null。
-    - `decode_ms` / `decode_tokens`：只统计真正的解码窗口（该步第一个输出分片 →
-      最后一个输出分片）与落在这些窗口里的输出 token。两者**成对**：只有一个为正、
-      另一个为零时会算出无穷大的速度，那种情况两者都给 null。
+    """本轮计时的实测明细（服务端量的），字段口径与 `app/services/usage.py::TurnTimer` 逐条对应。
+    七个字段是同一个块：没量到就整块缺席，前端绝不补 0（`0 tok/s` 会被读成模型卡住）；
+    `tool_ms` 无工具时是真实的 0，`ttft_ms` / `decode_ms` / `decode_tokens` 只取真实解码窗口、成对缺失。
     """
 
     steps: int
@@ -147,22 +87,9 @@ class UsageTiming(BaseModel):
 
 
 class Usage(BaseModel):
-    """本轮的**真实** token 用量（来自上游响应，不是估算）。
-
-    `type` 只能说明「这是一个用量事件」，所以这里把口径写在字段名里：
-
-    - `context_tokens` 是**本轮最后一次**模型请求的 prompt token 数，也就是当前
-      上下文的长度。一轮里如有工具调用会有多次请求，累加值会把上下文算大
-      （每次请求都重发一遍历史），所以此处不提供累加值。
-    - `context_window` 是该模型的原始窗口；`context_limit_tokens` 才是后端判定
-      超限时使用的上限（窗口扣除为回答预留的空间、再乘安全系数）。两者不同：
-      32k 窗口的模型可能只剩 19k 能放历史，前端拿原始窗口算占比会严重低估占用。
-      没有上下文预算（守卫关闭 / 窗口未知 / 备用模型接手）时为 null。
-    - `output_tokens` 是本轮生成的总输出（含工具调用之间的中间输出）。
-    - `cache_read_tokens` 是上下文里命中上游缓存的部分，是 `context_tokens` 的
-      子集，不是额外开销。
-
-    上游没在流式响应里回用量时**不发这个事件**，不发一个 0。
+    """本轮的 token 用量（来自上游响应，不是估算），把口径写进字段名。
+    `context_tokens` 是最后一次请求的 prompt token（不是累加）；`context_limit_tokens` 才是后端判超限的上限，
+    与 `context_window` 不同；`cache_read_tokens` 是 `context_tokens` 的子集而非额外开销；上游没回就不发事件。
     """
 
     type: Literal["usage"] = "usage"
@@ -171,22 +98,14 @@ class Usage(BaseModel):
     context_limit_tokens: int | None = None
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    #: 本轮计时明细。**整块给或整块缺席**：`None` 表示服务端没量到（老服务端、
-    #: 或流式链路拿不到分片时序），前端此时不显示步数/速度/首字，**不要补 0**。
+    #: 本轮计时明细；`None` 表示服务端没量到（老服务端或流式链路拿不到分片时序），此时不显示也不补 0。
     #: 口径见 `UsageTiming` 的 docstring。
     timing: UsageTiming | None = None
 
 
 class ContextCompacted(BaseModel):
-    """本轮开始前做过上下文压缩（把早期消息折叠成摘要，或截断了超长消息）。
-
-    为什么必须告诉用户：压缩本身是**改了模型看到的上下文**。不说的话，用户会
-    把「模型忘了刚才说的」当成模型变笨；运维拿到截图也无从判断是压缩造成的还是
-    真的丢消息了。这与「切换备用模型要说明原因」是同一条原则。
-
-    只给数字与策略，不给摘要正文：摘要正文走 pydantic-ai 的运行期 instructions
-    （服务端自己拼），不进消息历史，也没有必要回传给客户端（它可能含早期对话的
-    敏感内容，而下发会被前端落库并同步到其他设备）。
+    """本轮开始前做过上下文压缩（折叠早期消息或截断超长消息）——它改了模型看到的上下文，必须说。
+    只给数字与策略，不下发摘要正文：正文可能含早期对话的敏感内容，而客户端会落库并同步到其他设备。
     """
 
     type: Literal["compaction"] = "compaction"
@@ -216,26 +135,10 @@ class ApprovalToolCall(BaseModel):
 
 
 class ApprovalRequiredEvent(BaseModel):
-    """本轮有工具调用需要用户批准，**尚未执行**。
+    """本轮有工具调用需要用户批准，尚未执行（本轮到此结束，客户端回放后再续跑）。
 
-    ## 为什么本轮就此结束
-
-    服务端无状态：历史由客户端每轮全量回放，SSE 也没有「服务端暂停等一个回答再
-    继续」的双向通道。所以审批只能**分段**做——本轮在工具执行前停下（工具一次都
-    没执行），把决定交还给用户，用户点完再发起一次请求续跑。
-
-    客户端要做两件事：
-    1. 把 `tool_calls` 原样持久化到这条助手消息上（续跑时服务端要靠它认出
-       「上一次到底要调用什么」，见 `app/tools/approval.py`）；
-    2. 用户做出决定后，下一次请求带上 `approvals: {tool_call_id: bool}`。
-
-    不批准等于不执行：缺失的决定一律按**拒绝**处理。
-
-    ## 为什么带 `risk_level` 与 `description`
-
-    用户只能对着「参数」做判断，而参数本身常常看不出后果（`{"id": 42}` 删的是什么？）。
-    `description` 取工具自身的说明，`risk_level` 取注册时的分级——两者一起构成
-    做决定所需的最小上下文。只给工具名会让审批框变成一次盲点确认。
+    服务端无状态且 SSE 无双向通道，审批只能分段：客户端须把 `tool_calls` 原样持久化并在续跑时回传，
+    缺失的决定一律按拒绝处理（见 `app/tools/approval.py`）；`description` / `risk_level` 是判断所需的最小上下文。
     """
 
     type: Literal["approval_required"] = "approval_required"
@@ -244,28 +147,9 @@ class ApprovalRequiredEvent(BaseModel):
 
 
 class StreamError(BaseModel):
-    """本轮失败。
-
-    `message` 只允许放可以外泄的文案：校验类错误可以给原文，内部异常只能给关联 ID。
-    这条边界由 `app/services/chat_service.py::stream_chat_events` 的三条兜底分支
-    实现（`_new_error_id` 只把 ID 回给客户端，上游 URL 与 provider 报错上下文只进日志）。
-
-    `retryable` 只用于**客户端是否显示「重试」按钮**：它不代表服务端会自动重试，
-    也不保证重试一定成功。凭据/权限问题（401/403）与请求本身的问题（400/404）
-    标 false——同一个请求再发一次结果不会变。
-
-    `code` 是给机器看的失败分类，`type` 只能区分「哪一类事件」而区分不了「哪一种
-    失败」。取值如下：
-
-    - `context_overflow`：上下文超出模型窗口，重试必然同样失败，用户只能新建会话/
-      换更大的模型；
-    - `model_unavailable`：数据库配置里这个模型已停用或不存在（典型是管理员在
-      请求途中改配置），刷新模型列表就能看到真实清单，重试同一个模型同样失败；
-    - `internal_error`：服务端自己出错了（查库失败、模板渲染失败等），**没有**给出
-      任何关于模型的确定结论——所以不能归成上面两类，否则会把一次数据库抖动报成
-      「模型已下架」，让用户去刷新一个本来正常的列表。已附关联 ID，可重试。
-
-    客户端不该去猜 `message` 里的中文，也不该把「重试按钮」当作万能出路。
+    """本轮失败；`message` 只允许放可外泄文案（内部异常只给关联 ID，见 `stream_chat_events`）。
+    `retryable` 只决定客户端是否显示重试按钮：401/403/400/404 标 false，同一个请求再发结果不变。
+    `code`：`context_overflow` 重试必败、`model_unavailable` 配置里没有该模型、`internal_error` 是服务端自身错。
     """
 
     type: Literal["error"] = "error"

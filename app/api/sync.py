@@ -1,26 +1,7 @@
 """跨设备同步的 HTTP 接口：两个端点，语义见 `app/services/sync_service.py`。
 
-## 为什么只有两个端点
-
-- `POST /api/sync/push`：客户端把本机变更（会话 + 消息）批量推上来，幂等。
-- `GET /api/sync/pull`：客户端带着不透明游标拉增量；没有变化时长轮询挂住。
-
-删除不是独立端点：删会话就是推一条 `deleted=true` 的会话行。少一个端点就少一套
-权限与幂等语义要对齐。
-
-## 客户端必须按这两条错误动作自救
-
-- `400 invalid_cursor`：游标不是本服务端能认的格式（客户端 bug 或协议升级）。
-- `410 resync_required`：游标指向当前数据之外（服务端回滚 / 旧库恢复）。
-
-两种情况下客户端的动作是同一个：**丢弃游标，从头做一次全量拉取**。分开报是为了让
-日志能区分「客户端写错了」与「服务端状态变了」。
-
-## 长轮询
-
-`pull` 在「带游标 + 没有变化 + 没有分页剩余」时会挂起最多 `SYNC_LONG_POLL_SECONDS`
-秒，有变更立刻唤醒（`asyncio.Event`，见 `notify_change`）。首次同步（不带游标）
-永远不挂起——它要的是全量，不是「等新消息」。
+推幂等、拉用不透明游标（无变化时长轮询）；删除就是推一条 `deleted=true` 的行，少一个端点就少
+一套权限与幂等语义。`400 invalid_cursor` 与 `410 resync_required` 对客户端动作相同：丢弃游标重拉。
 """
 
 import logging
@@ -49,10 +30,9 @@ def get_sync_limiter():  # noqa: ANN201
 
 
 async def enforce_sync_rate_limit(user: User = Depends(current_active_user)) -> None:  # noqa: B008
-    """按**账号**计数的同步限流。
+    """按账号计数的同步限流。
 
-    声明了 `current_active_user` 依赖，因此只要用它，认证就一定先生效——配额配成 0
-    也不会变成匿名可访问。
+    声明了 `current_active_user` 依赖，因此只要用它认证就一定先生效——配额配成 0 也不会变成匿名可访问。
     """
     if settings.sync_rate_limit_per_minute <= 0:
         return

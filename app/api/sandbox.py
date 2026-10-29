@@ -1,20 +1,7 @@
-"""沙箱的客户端端点：心跳与状态。
+"""沙箱的客户端端点：心跳与状态；租约一律由服务端按 `(user_id, session_id)` 解析。
 
-## 只有两个端点，且都不接受租约 id
-
-- `POST /api/sandbox/heartbeat`：客户端告诉我们「这个会话还开着」；
-- `GET /api/sandbox/status`：前端显示「正在开机 / 已回收 / 产物在哪」。
-
-租约一律由服务端按 `(登录态 user_id, session_id)` 解析。客户端手里没有可伪造的租约句柄
-——与工具层同一个决定。**不给用户直接 exec 的接口**：那会多一个必须与
-工具层同等严格、却只服务「用户自己敲命令」的授权面，而本项目的 scope 里没有它。
-
-## 心跳为什么写 Redis 而不是数据库
-
-每个打开的会话每 30 秒一次写库，就是给自己制造写放大：一个 200 人在线的实例 =
-每秒 6 次 UPDATE，而它唯一的作用是「刷新一个时间戳」。用 `SET key EX ttl`
-写 Redis，语义完全一样（键没了 = 心跳断了），回收循环读一次 EXISTS 即可。
-`last_activity`（服务端观察到的真实使用）仍然写库，因为它要参与审计与排查。
+不给用户直接 exec 的接口：那会多一个必须与工具层同等严格、却只服务「自己敲命令」的授权面。
+心跳写 Redis 而非数据库：每 30 秒刷一次时间戳的 UPDATE 是纯写放大，而键没了就等于心跳断了。
 """
 
 from __future__ import annotations
@@ -65,11 +52,9 @@ async def heartbeat(
     user: User = Depends(current_active_user),  # noqa: B008
     session: AsyncSession = Depends(get_async_session),  # noqa: B008
 ) -> Response:
-    """刷新这台机器的「客户端还在」标记。
+    """刷新这台机器的「客户端还在」标记，永远返回 204。
 
-    **永远返回 204**，即使没有机器：客户端不该需要知道「现在有没有环境」，
-    而且「没有机器」和「别人的机器」必须无法区分（存在性探测）。
-    心跳失败也不该在 UI 上冒错误——它只是续命，不是业务动作。
+    有无机器必须无法区分（存在性探测），心跳失败也不该在 UI 上冒错误——它只是续命。
     """
     if not settings.sandbox_enabled:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -94,13 +79,9 @@ async def sandbox_status(
     user: User = Depends(current_active_user),  # noqa: B008
     session: AsyncSession = Depends(get_async_session),  # noqa: B008
 ) -> SandboxStatusResponse:
-    """返回该用户**最近一条**租约（含已销毁的），让界面能说「已回收，产物在这里」。
+    """返回该用户最近一条租约（含已销毁的），让界面能说「已回收，产物在这里」。
 
-    `session_id` 只用于校验形状（前端按会话发请求），**不参与查询**：机器是按用户分的，
-    同一用户在任何会话里看到的都是同一台。
-
-    404 只用于「这个用户从来没有过环境」：它与「环境已销毁」在界面上是两句不同的话，
-    混成空对象会让前端把「还没开始」显示成「不见了」。
+    `session_id` 只校验形状、不参与查询：机器按用户分；404 只表示「从来没有过环境」。
     """
     if not settings.sandbox_enabled:
         raise HTTPException(status_code=404, detail="未启用执行环境")
@@ -115,9 +96,8 @@ async def sandbox_status(
     )
 
 
-#: 产物在对象键里的文件名。与 `artifacts.py` 导出时写的两个名字一一对应。
-#: 刻意写死成白名单而不是「按前缀列桶」：列桶要 `s3:ListBucket` 权限，而导出只需要
-#: `s3:PutObject`。少一个权限面，也少一次分页遍历。
+#: 产物在对象键里的文件名，与 `artifacts.py` 导出时写的两个名字对应；写死成白名单是为了
+#: 不要 `s3:ListBucket`（导出只需要 `s3:PutObject`）。
 _ARTIFACT_FILENAMES: tuple[str, ...] = ("workspace.tar.gz", "manifest.txt")
 
 
@@ -134,24 +114,8 @@ async def sandbox_artifacts(
 ) -> SandboxArtifactsResponse:
     """把最近一条租约的 `artifact_uri` 翻成预签名直链。
 
-    ## 为什么不是 404
-
-    `/status` 在「从来没有过环境」时返回 404，因为那是**该有东西却没有**。这里相反：
-    「还没销毁过，所以没有产物」是最常见的情形，把它做成 404 会让前端的每次轮询都
-    变成一条错误日志。所以永远 200，靠 `lease_id` / `state` / `artifacts` 三个字段
-    表达三种不同的空。
-
-    ## `session_id` 仍然不参与查询
-
-    机器是按用户分的（`ensure_lease` 的「每用户一台」），同一用户在任何会话里看到的
-    都是同一台机器、同一批产物。`session_id` 只回显，不寻址——与 `/status` 同一条
-    设计，见 `app/tools/sandbox_scope.py` 的「身份不能来自模型参数 / 客户端标识」。
-
-    ## 对象存储未配置时
-
-    整段降级成空列表而不是 503：产物是「尽力而为」（导出失败也照常销毁机器，见
-    `artifacts.py` 的失败策略）。一个没配 S3 的部署本来就没有产物，让它报错只会
-    把一个已知的限制伪装成故障。
+    永远 200：「还没销毁过所以没产物」是最常见的情形，做成 404 会让每次轮询都变成一条错误日志。
+    `session_id` 同样只回显不寻址；对象存储未配置时降级成空列表而不是 503（产物本就尽力而为）。
     """
     if not settings.sandbox_enabled:
         raise HTTPException(status_code=404, detail="未启用执行环境")
@@ -173,11 +137,9 @@ async def sandbox_artifacts(
 
 
 async def _describe_artifacts(artifact_uri: str) -> list[SandboxArtifact]:
-    """`artifact_uri` 是**一个**键（归档或清单），这里把它扩成 1~2 条清单项。
+    """`artifact_uri` 只是一个键（归档或清单），这里同目录按白名单探测，扩成 1~2 条清单项。
 
-    导出逻辑只会写其中一个（体积超限退化成清单，见 `artifacts.py`），但两次导出
-    （`sandbox_reset` 之后重建）可能各留下一个。同目录下按白名单探测，比在数据库里
-    再存一张产物表便宜得多，也不需要迁移。
+    两次导出（`sandbox_reset` 后重建）可能各留一个；探测比再存一张产物表便宜，也不用迁移。
     """
     from app.services.storage import ObjectStoreError, StorageNotConfigured, get_object_store
 

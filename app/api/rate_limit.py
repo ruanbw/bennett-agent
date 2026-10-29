@@ -1,30 +1,7 @@
 """滑动窗口限流（Redis 共享计数 + 进程内降级）。
 
-本模块的 IP 限流服务于**认证端点**（注册/登录，防密码暴力破解与批量注册）；
-对话端点 `/api/chat` 已要求登录，按**账号**限流（见 `app/api/chat.py`），
-因为反代部署下 `client.host` 是代理地址，按 IP 计数会退化成全站共享配额。
-
-## 计数存在哪里
-
-默认在 **Redis**（`RedisSlidingWindowLimiter`）：滑动窗口用 ZSET，判断、写入、
-设过期在同一个 Lua 脚本里完成，多 worker / 多实例拿到的是同一份配额。
-曾经用过一个共享 SQLite 文件，它在多机部署下直接不成立（文件是本地的），
-而多机一旦出现，配额就会被乘以机器数。
-
-Redis 不可用时按 `RATE_LIMIT_ON_REDIS_ERROR` 处置（默认退到进程内计数）：
-降级是可接受的，**静默降级不是**——每一类降级都记日志与指标。
-
-**不信任客户端可写的 `X-Forwarded-For`**：只有显式配置 `trusted_proxy_headers`
-才会读它，且取**最右侧**非空地址——那才是最后一跳代理写入的真实来源；客户端自己
-塞进列表最左侧的伪造值被忽略。这要求代理用 `$proxy_add_x_forwarded_for` 之类的
-方式**追加或覆盖**该头，而不是原样透传客户端传入的值。
-
-## 两种限流键
-
-本模块提供基元（`SlidingWindowLimiter` / `RedisSlidingWindowLimiter` /
-`resolve_client_ip` / `client_key`）与**认证端点**的限流依赖。对话端点的限流在
-`app/api/chat.py`，因为它需要 `current_active_user`（按账号计数），而本模块刻意
-不依赖任何业务服务。
+认证端点按 IP 计数（反代下 `client.host` 是代理地址，全站共享配额），对话端点按账号，
+见 `app/api/chat.py`。本模块不依赖业务服务，也不采信客户端可写的 `X-Forwarded-For`。
 """
 
 import ipaddress
@@ -62,19 +39,13 @@ class SlidingWindowLimiter:
     def _evict(self, now: float) -> None:
         """容量满时腾出一个位置（调用方已确认待插入的 key 不在表中）。
 
-        淘汰顺序按代价从低到高：
-
-        1. 窗口内已经没有命中的键——计数已归零，丢掉不改变任何限流结果；
-        2. 未达限的键里最久未使用的那个；
-        3. 兜底才丢最久未使用的键，保证内存有界。
-
-        **绝不能把已封禁（已达限）的键排在未达限的键前面**：那等于给攻击者一个后门——
-        churn 几个新 key 就能把任意封禁重置掉。
+        淘汰优先级：窗口内已无命中的键 → 未达限的 LRU → 兜底 LRU。绝不能把已达限的 key
+        排在未达限的 key 前面，否则 churn 几个新 key 就能把任意封禁重置掉。
         """
         cutoff = now - self.window_seconds
         evictable_lru: str | None = None
-        # 按 LRU 顺序（最旧在前）找候选。过期键直接删掉并 return：迭代器这一步之后再
-        # 也不会被推进，所以删除不会触发「遍历中修改」。
+        # 按 LRU 顺序（最旧在前）找候选。过期键直接删掉并 return：迭代器此后再不会推进，
+        # 所以删除不会触发「遍历中修改」。
         for key, hits in self._hits.items():
             if not hits or hits[-1] <= cutoff:
                 del self._hits[key]
@@ -92,8 +63,7 @@ class SlidingWindowLimiter:
     def check(self, key: str) -> tuple[bool, float]:
         """记录一次访问并返回 `(是否允许, 建议的 Retry-After 秒数)`。
 
-        `limit <= 0` 表示不限流（与 `settings` 里「0=关闭」的约定一致），直接放行，
-        调用方无需自己特判。
+        `limit <= 0` 表示不限流（与 settings 「0=关闭」的约定一致），直接放行，调用方无需特判。
         """
         now = time.monotonic()
 
@@ -153,9 +123,8 @@ def _parse_ip(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
 def bucket_ip_address(value: str | None) -> str:
     """把来源地址归一化成限流桶键。
 
-    IPv6 的一个订阅通常是一整个 /64：如果按完整地址计数，轮换地址（隐私扩展）
-    就能无限换桶绕过限流（I-07）。这里把 IPv6 归并到 /64；IPv4-mapped 先解包成
-    IPv4。无法解析的值原样返回（不能因此把请求归到 "unknown" 而放大误伤）。
+    IPv6 的一个订阅通常是一整个 /64，按完整地址计数就能轮换地址绕过限流（I-07），故归并到
+    /64，IPv4-mapped 先解包；解析不了的值原样返回，不能归到 "unknown" 而放大误伤。
     """
     ip = _parse_ip(value)
     if ip is None:
@@ -170,8 +139,8 @@ def bucket_ip_address(value: str | None) -> str:
 def parse_trusted_proxy_networks(raw: str | None) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     """解析 `TRUSTED_PROXY_IPS`（逗号分隔的 IP/CIDR）。
 
-    空值返回空列表——**空列表意味着不采信任何代理标头**（fail closed）。
-    非法条目跳过并告警，不静默把整份配置作废。
+    空值返回空列表——空列表意味着不采信任何代理标头（fail closed）。非法条目跳过并告警，
+    不静默把整份配置作废。
     """
     networks = []
     for item in (raw or "").split(","):
@@ -196,21 +165,8 @@ def resolve_client_ip(
 ) -> str:
     """从受信任的标头或直连客户端解析真实客户端 IP。
 
-    ## 为什么需要两层信任
-
-    只配「标头名」而不管「谁发来的」是不安全的：后端一旦能被直连，任意客户端都能
-    自己写一个 `X-Forwarded-For`，每换一个值就换一个限流桶（L-10）。因此必须同时
-    配置 `TRUSTED_PROXY_IPS`；且直连对端本身必须落在这些网段里，否则**完全不采信**
-    标头、退回 `direct_host`。
-
-    ## 从右往左找第一个非代理地址
-
-    解析 `X-Forwarded-For` 时从**最右**开始，跳过属于受信代理网段的地址，返回第一个
-    非代理地址。这比「取最右」更准确：两跳代理（CDN → Nginx）时，最右是 Nginx 的
-    上游 CDN 地址；继续往左跳过所有受信代理后才是真实客户端。也避免了「取最左」被
-    客户端自填值欺骗。
-
-    任何无法解析成 IP 的条目都会被忽略，不会变成可自选的限流键。
+    直连对端必须落在 `TRUSTED_PROXY_IPS` 里，否则完全不采信标头（L-10：能被直连的后端任人自填
+    `X-Forwarded-For` 换桶）。XFF 从右往左跳过受信代理，第一个非代理地址才是真实客户端 IP。
     """
     global _warned_missing_proxy_ips
 
@@ -252,12 +208,10 @@ def resolve_client_ip(
 
 
 def client_key(host: str | None, scope: str = "") -> str:
-    """限流键：`[scope:]来源 IP`。缺失时归入同一个桶，宁可保守也不要放过。
+    """限流键：`[scope:]来源 IP`；缺失时归入同一个桶，宁可保守也不要放过。
 
-    `scope` 把同一 IP 的**不同端点**分到不同的桶里。共用同一个桶会造出一个很难
-    解释的失败模式：有人在一个 NAT 出口后面猛试密码，把 10 次/分钟打满之后，
-    同一出口的**正常注册**也做不了（反之亦然）。两者要挡的攻击面不一样，配额
-    不该互相挤占。
+    `scope` 把同一 IP 的不同端点分到不同的桶：共用一桶时，有人在一个 NAT 出口猛试密码打满
+    配额，同一出口的正常注册也做不了，而两者要挡的攻击面不同。
     """
     return f"{scope}:{host or 'unknown'}" if scope else (host or "unknown")
 
@@ -265,31 +219,8 @@ def client_key(host: str | None, scope: str = "") -> str:
 class RedisSlidingWindowLimiter:
     """基于 Redis 的滑动窗口限流器（跨进程 / 跨实例共享配额）。
 
-    ## 为什么必须是原子脚本
-
-    「先清理过期、再计数、再插入」三步如果分开执行，两个并发请求会同时读到
-    `count = limit - 1`，然后一起放行——超出的量正好等于并发度。限流器在压力下
-    失效是最糟的失效方式，而这类 bug 在低并发测试里永远复现不了。
-
-    Lua 脚本在 Redis 里单线程执行，整段判断天然原子；`ZADD` 与 `PEXPIRE` 也在同一
-    段里完成，不会出现「键写进去了但没过期时间」的泄漏。
-
-    ## 时间源用 Redis 的时钟（`TIME`），不用应用进程的
-
-    多实例部署时各机器的时钟可能有偏差（NTP 漂移、容器时钟）。用进程本地时间做窗口
-    边界，会让「同一秒」在不同实例上落在不同窗口，配额变成「大致正确」。
-    Redis 的 `TIME` 是单一时钟源，且与脚本在同一台机器上，误差可以忽略。
-
-    ## Redis 不可用时（`rate_limit_on_redis_error`）
-
-    - `local_fallback`（默认）：退到进程内计数。配额在故障期间会乘以实例数，
-      但攻击者至少仍有配额约束，且登录/对话不会因为缓存抖动而全部 429。
-    - `fail_closed`：一律拒绝（可用性换确定性）。适合安全要求高、且 Redis 自身
-      是高可用部署的场景。
-    - `fail_open`：一律放行。仅在「限流是纯优化」的部署里合理。
-
-    三种模式都会记日志与 `redis_unavailable_total{reason="rate_limit"}` 指标——
-    降级可以接受，静默降级不行。
+    判断/写入/设过期必须在同一个 Lua 脚本里、时间源用 Redis 的 `TIME`：否则并发请求会一起读到
+    `count = limit - 1` 全放行（低并发测不出来），多实例也落不到同一窗口边界。
     """
 
     #: KEYS[1] = 限流键；ARGV = limit, window_ms, member。
@@ -372,8 +303,8 @@ class RedisSlidingWindowLimiter:
     async def reset(self) -> None:
         """清空本限流器的计数（测试与「人工解封」用）。
 
-        只删自己前缀下的键：`FLUSHDB` 会连带清掉会话缓存与搜索缓存，
-        而调用方想要的是「把限流窗口归零」，不是「把整个 Redis 清空」。
+        只删自己前缀下的键：`FLUSHDB` 会连带清掉会话缓存与搜索缓存，而调用方要的是把
+        限流窗口归零。
         """
         from app.services.redis_client import get_redis
 
@@ -416,11 +347,10 @@ def limiter_with(current: SlidingWindowLimiter | None, limit: int) -> SlidingWin
 
 
 def too_many(retry_after: float, limit: int | None = None) -> HTTPException:
-    """429 响应。
+    """429 响应；`Retry-After` 让客户端知道该等多久，而不是盲目重试。
 
-    `Retry-After` 让客户端知道该等多久，而不是盲目重试；`X-RateLimit-*` 让客户端与
-    监控能读到标准配额信息。`limit` 由调用方传入当前限流器的配额——限流器不是全局
-    单例（配额变化时会重建），本函数拿不到它，因此不传就不发这几个头。
+    `X-RateLimit-*` 需要当前配额，但限流器不是全局单例（配额变化会重建），本函数拿不到它，
+    因此 `limit` 由调用方传入，不传就不发这几个头。
     """
     seconds = max(1, ceil(retry_after))
     headers = {"Retry-After": str(seconds)}
@@ -451,15 +381,10 @@ def get_trusted_proxy_headers() -> list[str]:
 
 
 async def enforce_auth_rate_limit(request: Request) -> None:
-    """认证端点限流：按 **IP** 计数（login / register 各自一个桶）。
+    """认证端点限流：按 IP 计数（login / register 各自一个桶）。
 
-    挡的是两件事：对某个账号的密码暴力破解，以及批量注册。这两个场景里攻击者
-    换的是账号（或来源）、目标是常量，所以必须按 IP 而不是按账号计数。
-
-    在这之前认证端点**完全没有限流**，密码可以被无限次尝试。
-
-    端点作用域从 `request.url.path` 的最后一段取（`/api/auth/login` → `login`），
-    这样同一份依赖挂在两个路由上仍然分桶，不需要调用方传参。
+    挡的是对某账号的密码暴力破解与批量注册：攻击者换账号、目标是常量，所以按 IP 而非账号。
+    作用域取 `request.url.path` 的最后一段，同一份依赖挂多个路由上仍能分桶，无需调用方传参。
     """
     if settings.auth_rate_limit_per_minute <= 0:
         return

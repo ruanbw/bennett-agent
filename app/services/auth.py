@@ -1,41 +1,7 @@
 """认证装配：cookie 会话后端与「当前登录用户」依赖。
 
-## 为什么不用 JWT
-
-JWT 把状态放在令牌内部，服务端无法单方面作废——登出只是让客户端删掉本地副本，
-令牌在过期前依然有效。这里的组合是：
-
-- 传输层 `CookieTransport`：令牌放 HttpOnly cookie，JS 读不到，XSS 偷不走。
-- 策略层 `DatabaseStrategy`：令牌只是一串随机值，真正的状态在 `access_token` 表里。
-
-于是登出 = 删一行，改密 = 删该用户所有行，踢人 = 删指定行，**全部立即生效**。
-这正是 JWT 做不到的部分，也是本项目选会话而非令牌的原因。
-
-## cookie 与跨域
-
-`SameSite=Lax` 配前端同源（Vite 把 `/api` 代理到本服务），所以不需要
-`allow_credentials=True`，`app/server.py` 的 CORS 配置保持原样即可。
-
-`cookie_secure` 来自 `settings.auth_cookie_secure`：**本地 http 下必须为 false**，
-否则浏览器不会回传 cookie（框架该参数默认是 true，是个常见的坑）。
-
-## AUTH_SECRET 的真实作用范围
-
-`settings.auth_secret` **不参与会话**：cookie 里放的是不透明服务端 token，既不签名，
-轮换它也不会让任何登录态失效（要让会话失效请删 `access_token` 行）。它目前喂给：
-
-- `UserManager.reset_password_token_secret` / `verification_token_secret`（将来接入
-  邮件流程时生效）；
-- `app/config/secret_box.py`，用于加密数据库里的提供商 API Key。轮换它会让已加密的
-  key 无法解密（需要在后台重填），旧明文行不受影响。
-
-## 角色从哪里来
-
-**只在数据库里**（`user.role`，见 `app/roles.py`）。唯一入口：播种脚本建初始超管
-（`scripts/seed_admin.py`），之后由超管在管理后台给人升/降级。没有任何路径能让
-注册、启动或环境变量直接授予角色。
-
-`apply_role()` 是 `role` 与派生布尔位 `is_superuser` 的**唯一**写入口。
+会话状态在 `access_token` 表而非 JWT，所以登出/改密/踢人立即生效；本地 http 必须 `cookie_secure=false`。
+`AUTH_SECRET` 不参与会话（轮换不让登录失效），只用于重置/验证令牌与 `secret_box` 加密。
 """
 
 import logging
@@ -67,26 +33,14 @@ from app.roles import ADMIN_LEVEL, ROLE_SUPERADMIN, Role
 
 logger = logging.getLogger(__name__)
 
-#: 密码最小长度。
-#:
-#: 为什么需要显式定一个：基类的 `validate_password` 是**空实现**（源码里只有
-#: "You should overload this method" 一句注释），不覆盖就能用 1 个字符注册成功
-#: （已实测 201）。本项目没有邮箱验证、忘记密码也走不了自助流程，密码是唯一凭据，
-#: 因此设下限是有意义的，不是形式主义。
+#: 密码最小长度：基类 `validate_password` 是空实现，不覆盖就能用 1 个字符注册。
 MIN_PASSWORD_LENGTH = 8
 
 
 def role_assignment(role: Role) -> dict[str, object]:
-    """角色对应的列值（`role` 与两个派生布尔位）。
+    """角色对应的列值（`role` 与两个派生布尔位），供 ORM 写入与 `admin.py` 的子查询 UPDATE 共用。
 
-    抽出来是为了让两条写路径共用同一份口径：
-
-    - `apply_role()` 在 ORM 对象上 setattr（种子脚本、普通路径）；
-    - `app/api/admin.py` 的降级走一条**带子查询的 UPDATE**，需要同样的 values
-      映射，但不能先把对象读出来再写（那会重新引入「先查后写」的竞态）。
-
-    管理员账号一并记为已验证：本项目没有邮箱验证流程，让 is_verified 长期为 False
-    只会在前端多显示一行无用提示。
+    管理员一并记为已验证：没有邮箱验证流程，is_verified 长期为 False 只是多一行无用提示。
     """
     values: dict[str, object] = {
         "role": role.value_str,
@@ -98,13 +52,9 @@ def role_assignment(role: Role) -> dict[str, object]:
 
 
 def apply_role(user: User, role: Role) -> None:
-    """**唯一**改动用户角色的 ORM 入口：同时写 `role` 与派生的 `is_superuser`。
+    """唯一改动用户角色的 ORM 入口：同时写 `role` 与派生的 `is_superuser`。
 
-    两列必须一起改。fastapi-users 的基表强制带 `is_superuser`，而它是内置
-    `current_user(superuser=True)` 依赖的判据；若只改 `role`，两套依赖会给出相反结论。
-    指望每个人记住「不要用内置的那个」太脆弱，因此这里保持同步，同时**鉴权只读 role**。
-
-    不提交事务：调用方（路由 / 种子脚本）在自己的 session 上决定何时 commit。
+    只改 `role` 会让内置 `current_user(superuser=True)` 与本项目判据给出相反结论；不提交事务，谁调用谁 commit。
     """
     for field, value in role_assignment(role).items():
         setattr(user, field, value)
@@ -121,19 +71,15 @@ cookie_transport = CookieTransport(
     cookie_max_age=settings.session_lifetime_seconds,
     cookie_secure=settings.auth_cookie_secure,
     cookie_httponly=True,
-    # SameSite 由 `settings.resolved_cookie_samesite()` 决定：跨站部署（CORS 带凭据）
-    # 必须是 `none`，写死 `lax` 会让跨站 fetch 一律不回传 cookie——登录接口 204、
-    # 下一个请求 401。`none` 与 `secure=false` 的组合由 settings 在启动时拒绝。
+    # 跨站部署（CORS 带凭据）必须 `none`，写死 `lax` 会让跨站 fetch 不回传 cookie（登录 204、下一个请求 401）。
     cookie_samesite=settings.resolved_cookie_samesite(),
 )
 
 
 class HashedDatabaseStrategy(DatabaseStrategy):
-    """在 `DatabaseStrategy` 之上把入库值换成摘要（I-10）。
+    """在 `DatabaseStrategy` 之上把入库值换成摘要：库被读时在线会话不能被直接回放。
 
-    框架默认把 `secrets.token_urlsafe()` 原样写进 `access_token.token`：数据库被读
-    等于所有在线会话可被直接回放。这里只改「写入」：库里存 `hash_access_token`
-    的结果，cookie 里仍是原文；读取由 `HashedAccessTokenDatabase` 先摘要后兼容明文。
+    cookie 里仍是原文，读取由 `HashedAccessTokenDatabase` 先摘要后兼容明文。
     """
 
     async def write_token(self, user: User) -> str:
@@ -145,16 +91,10 @@ class HashedDatabaseStrategy(DatabaseStrategy):
 def get_database_strategy(
     access_token_db: AccessTokenDatabase[AccessToken] = Depends(get_access_token_db),  # noqa: B008
 ) -> DatabaseStrategy:
-    """会话策略。
-
-    必须写成函数而不是模块级常量：`DatabaseStrategy` 需要注入数据库适配器，而适配器
-    持有每个请求独立的 SQLAlchemy session，不能跨请求复用。
-    """
+    """会话策略工厂：适配器持有请求级 session，不能做成模块级常量复用。"""
     lifetime = settings.session_lifetime_seconds
     if lifetime <= 0:
-        # 防御纵深：fastapi-users 的 read_token 用 `if self.lifetime_seconds:` 判断是否
-        # 检查过期（0 是假值 → 永不过期）。settings 已有 ge=60 兜底，这里再补一道，
-        # 任何绕过 settings 校验的调用路径都拿不到永不过期的策略。
+        # read_token 用 `if self.lifetime_seconds:` 判过期，0 是假值即永不过期；settings 已有 ge=60，这里再兜一道。
         raise ValueError(
             f"session_lifetime_seconds 必须 >=60，当前为 {lifetime}：0/负值会让服务端会话永不过期，请设 >=60。"
         )
@@ -169,44 +109,27 @@ auth_backend = AuthenticationBackend(
 
 
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
-    """用户生命周期钩子。
+    """用户生命周期钩子；暂不接入邮件，邮箱验证与忘记密码不可自助。
 
-    **暂不接入邮件**：邮箱验证与忘记密码都需要 SMTP，当前未配置，因此这两个流程
-    不可自助。
-
-    `reset_password_token_secret` / `verification_token_secret` 是基类声明的类属性，
-    框架**不会**在导入时校验其非空，只在这两个流程真正被调用时才用到。这里一并设置，
-    避免将来接上邮件流程时拿着空密钥签发令牌。
+    两个 token secret 是基类声明的类属性，框架不会校验非空，只在这两个流程被调用时才用到。
     """
 
     reset_password_token_secret = settings.auth_secret
     verification_token_secret = settings.auth_secret
 
     async def validate_password(self, password: str, user: schemas.UC | User) -> None:
-        """密码强度校验（基类默认不校验，见 MIN_PASSWORD_LENGTH 的说明）。
-
-        只设下限而不加复杂度规则：长度是唯一与真实熵相关的约束，强制大小写/符号
-        只会把人逼向 `Password1!` 这种可预测模式。
-        """
+        """密码强度校验：只设下限，强制大小写/符号只会把人逼向 `Password1!` 这类可预测模式。"""
         if len(password) < MIN_PASSWORD_LENGTH:
             raise InvalidPasswordException(reason=f"密码至少需要 {MIN_PASSWORD_LENGTH} 个字符")
 
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
-        """新用户注册后只记一条日志。
-
-        **角色维持默认的 `user`**：注册完全开放，但建号不授予任何特权，提权只能由
-        管理后台完成（见 `app/api/admin.py` 的角色接口）。
-        """
+        """新用户注册后只记一条日志：注册开放，但建号不授予权限，提权只能走管理后台。"""
         logger.info("新用户注册: id=%s role=%s", user.id, user.role)
 
     async def on_after_login(
         self, user: User, request: Request | None = None, response: Response | None = None
     ) -> None:
-        """登录成功后顺手清理过期会话行（best-effort，失败不影响登录）。
-
-        登录是天然低频、幂等的维护时刻，不需要为清理单独引入定时任务。
-        清理失败（例如库被锁）只记警告：过期行的堆积不该升级成「登录不可用」。
-        """
+        """登录成功后顺手清理过期会话行；失败只记警告（过期行堆积不该升级成「登录不可用」）。"""
         try:
             removed = await cleanup_expired_access_tokens(settings.session_lifetime_seconds)
         except Exception:  # noqa: BLE001 - 见 docstring：任何清理故障都必须被隔离
@@ -217,11 +140,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             logger.info("清理过期会话: 删除=%d", removed)
 
     async def on_after_update(self, user: User, update_dict: dict[str, Any], request: Request | None = None) -> None:
-        """用户更新后让该用户的全部旧会话立即失效。
+        """用户更新后让该用户的全部旧会话立即失效（框架更新成功后回调这里）。
 
-        重置密码/改密路由未来挂载时自动生效（只要它们经 `user_manager.update()` 落库）：
-        框架更新成功后回调这里，所以「改密 = 删该用户所有行」不必在路由里重复实现。
-        这里**不吞异常**——删失败却静默通过，等于泄露的旧会话继续可用。
+        不吞异常：删失败却静默通过，等于泄露的旧会话继续可用。
         """
         removed = await delete_user_access_tokens(user.id)
         logger.info("用户更新，已失效其全部会话: id=%s 删除=%d", user.id, removed)
@@ -235,22 +156,10 @@ fastapi_users = FastAPIUsers[User, uuid.UUID](get_user_manager, [auth_backend])
 
 
 async def _read_user_from_token(token: str | None) -> User | None:
-    """用**独立短会话**校验 cookie token，返回已加载的用户对象。
+    """用独立短会话校验 cookie token，返回已加载的用户对象。
 
-    为什么不复用 fastapi-users 的 `current_user` 依赖：它内部依赖 `get_user_db`
-    → `get_async_session`，而后者是请求级 `yield` 依赖，**要到响应结束才释放**。
-    `/api/chat`（SSE）与 `/api/sync/pull`（长轮询）会因此把一条数据库连接占住
-    几十秒到十分钟；连接池（QueuePool 5+10）被占满后，所有需要数据库的请求都会
-    在 30s 后抛 `QueuePool TimeoutError`，全站 5xx（H-01）。
-
-    这里改成「开一个短会话 → 读 token / 用户 → 立即关闭」，用户对象被 detach
-    后属性（id / email / role / hashed_password / is_active…）已经加载，流式期间
-    不再占用任何连接。语义与框架依赖保持一致：无效 token、过期、用户不存在、
-    账号停用都返回 None。
-
-    注意 `DatabaseStrategy.read_token` 会按 `lifetime_seconds` 过滤过期的
-    `access_token` 行——这里必须复用同一策略，而不是自己写一条 `token ==` 的
-    查询，否则过期会话会继续有效。
+    不能复用 fastapi-users 的 `current_user`：它的请求级 session 要到响应结束才释放，SSE/长轮询会把连接池耗尽。
+    必须复用 `DatabaseStrategy.read_token`（按 lifetime 过滤过期行），自己写 `token ==` 查询会让过期会话继续有效。
     """
     if not token:
         return None
@@ -272,10 +181,9 @@ async def _read_user_from_token(token: str | None) -> User | None:
 
 
 async def current_active_user(request: Request) -> User:
-    """端点认证依赖：从 HttpOnly cookie 解析当前用户；未登录/已停用 → 401。
+    """端点认证依赖：从 HttpOnly cookie 解析当前用户，未登录/已停用 → 401。
 
-    **不声明任何数据库 `Depends`**：认证只在一个短会话里完成，流式与长轮询请求
-    不再持有请求级连接（见 `_read_user_from_token` 的说明）。
+    不声明数据库 `Depends`，否则流式与长轮询又会持有请求级连接（见 `_read_user_from_token`）。
     """
     user = await _read_user_from_token(request.cookies.get(settings.auth_cookie_name))
     if user is None or not user.is_active:
@@ -290,12 +198,8 @@ async def current_active_user(request: Request) -> User:
 async def current_admin(user: User = Depends(current_active_user)) -> User:  # noqa: B008
     """管理后台依赖：`role >= admin` 才放行，否则 403。
 
-    不用内置的 `current_user(superuser=True)`：它读的是 `is_superuser` 布尔位，
-    而本项目的判据是 `role`（见 `app/roles.py`）。两者目前由 `apply_role` 保持同步，
-    但**鉴权只该有一个来源**——真漏同步一次，读布尔位的那条路就是静默越权。
-
-    401 / 403 的分工与内置依赖一致：没有有效登录态是 401，登录了但权限不够是 403。
-    前端靠这个区分「重新登录」与「找管理员要权限」。
+    不用内置 `current_user(superuser=True)`：它读 `is_superuser`，漏同步一次就是静默越权。
+    401 表示没有登录态、403 表示权限不够，前端靠这个区分「重新登录」与「找管理员」。
     """
     if user.role_level < ADMIN_LEVEL:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")

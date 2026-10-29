@@ -1,23 +1,5 @@
-"""销毁前把 workspace 导出到对象存储。
-
-## 为什么这件事不能省
-
-「按会话销毁」+「用户下次回来东西没了」是产品级事故，不是技术债。机器是可以重建的
-（同一个镜像几秒就起来），用户那份算出来的结果不行。所以销毁流程固定为：
-
-    claim(destroying) → export → provider.destroy → mark_destroyed(artifact_uri)
-
-## 为什么先量体积再打包
-
-`get_file` 是把内容读进内存的（provider 契约定死的），所以导出必须有硬上限：
-一个 `dd if=/dev/zero of=big` 出来的 20GB 文件会把控制面进程直接 OOM。超限时退化成
-**只导出清单**（文件名 + 大小），至少能告诉用户「有什么、多大」，而不是什么都没有。
-
-## 失败策略：导出失败也要销毁
-
-反过来（导出失败就不销毁）会让一台机器因为对象存储抖动而**永远**占着内存，而且没有
-任何人会再来看它。所以这里失败只告警并返回 None，销毁继续，`lease.error` 记一笔。
-代价是把「产物」降级成「尽力而为」。
+"""销毁前把 workspace 导出到对象存储：机器可以重建，用户算出来的结果不行。
+导出失败也要继续销毁（否则对象存储抖一下就永久占着内存）；导出必须有硬上限，超限退化成清单。
 """
 
 from __future__ import annotations
@@ -34,8 +16,7 @@ from app.services.storage import ObjectStoreError, StorageNotConfigured, get_obj
 
 logger = logging.getLogger(__name__)
 
-#: 打包文件在沙箱内的固定路径。固定（而不是随机）是为了让 `get_file` 失败时，
-#: 运维还能连上去看一眼那个半成品。
+#: 打包文件在沙箱内的固定路径：`get_file` 失败时运维还能连上去看那个半成品。
 ARCHIVE_PATH = "/tmp/bennett-workspace.tar.gz"
 
 #: 清单最多列多少条。它只是给用户的线索，不是完整索引。
@@ -44,7 +25,6 @@ MAX_MANIFEST_ENTRIES = 200
 
 async def export_workspace(provider: SandboxProvider, lease: LeaseView, *, workdir: str) -> str | None:
     """把 workspace 打包上传，返回对象存储 key；失败返回 None。
-
     `provider_ref` 为空（还在 provisioning）时直接返回 None：没有机器可导出。
     """
     if not lease.provider_ref:
@@ -62,8 +42,7 @@ async def export_workspace(provider: SandboxProvider, lease: LeaseView, *, workd
         return None
 
     if size is None or size > limit:
-        # 太大，或者量不出来：只导出清单。`size is None` 必须走这条路——
-        # 把「读不到」当成「很小」正是会把控制面读爆的那一次。
+        # 太大或量不出来都只导清单：把「读不到」当成「很小」正是会把控制面读爆的那一次。
         return await _export_manifest(provider, lease, workdir, owner, size=size)
 
     return await _export_archive(provider, lease, workdir, owner, size=size)
@@ -94,7 +73,7 @@ async def _export_manifest(
     *,
     size: int | None,
 ) -> str | None:
-    """只导出文件清单。这是「有总比没有好」的降级路径。"""
+    """只导出文件清单：「有总比没有好」的降级路径。"""
     result = await provider.exec(
         ref=lease.provider_ref or "",
         command=(
@@ -124,7 +103,7 @@ async def _export_archive(
     ref = lease.provider_ref or ""
     packed = await provider.exec(
         ref,
-        # `-C workdir .`：归档里是相对路径，解包时不会把宿主的绝对路径带进去。
+        # `-C workdir .`：归档里是相对路径，解包不会把宿主绝对路径带进去。
         f"tar czf {ARCHIVE_PATH} -C {workdir} . 2>/dev/null && stat -c%s {ARCHIVE_PATH}",
         timeout_s=120,
         workdir=workdir,
@@ -134,7 +113,7 @@ async def _export_archive(
         logger.warning("沙箱产物：打包失败 (lease=%s) exit=%s", lease.id, packed.exit_code)
         return None
 
-    # 压缩后可能比原始体积小很多，但不会更小到离谱；给 1.5 倍余量后仍然用配置上限兜住。
+    # 压缩后通常更小；给 1.5 倍余量，但最终仍由配置上限兜住。
     budget = min(settings.sandbox_artifact_max_bytes, int(size * 1.5) + 1024 * 1024)
     try:
         blob = await provider.get_file(ref, ARCHIVE_PATH, max_bytes=budget, owner_tag=owner)
@@ -146,7 +125,7 @@ async def _export_archive(
 
 
 async def _upload(key: str, data: bytes, content_type: str) -> str | None:
-    """上传字节。对象存储未配置/抖动时只告警——销毁不能被它挡住。"""
+    """上传字节。对象存储未配置或抖动时只告警——销毁不能被它挡住。"""
     try:
         store = get_object_store()
     except StorageNotConfigured:
@@ -155,7 +134,7 @@ async def _upload(key: str, data: bytes, content_type: str) -> str | None:
 
     path = None
     try:
-        # 接口只收本地路径（`put_file`），所以落一次临时文件；用后即删。
+        # 接口只收本地路径，所以落一次临时文件，用后即删。
         fd, path = tempfile.mkstemp(prefix="sbx-artifact-")
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -171,8 +150,6 @@ async def _upload(key: str, data: bytes, content_type: str) -> str | None:
 
 def _artifact_key(lease: LeaseView, filename: str) -> str:
     """对象键：`sandbox/{user_id}/{lease_id}/{filename}`。
-
-    带 user_id 是为了让运维按人清理，带 lease_id 是因为同一会话会重建多次环境
-    （`sandbox_reset`），每次的产物必须分开——否则后一次的导出会覆盖前一次。
+    带 lease_id 是因为同一会话会重建多次环境（`sandbox_reset`），否则后一次导出会覆盖前一次。
     """
     return f"sandbox/{lease.user_id}/{lease.id}/{filename}"

@@ -1,12 +1,7 @@
 """旧版环境变量网关：直接读 `LITELLM_API_BASE` 的 `/v1/models`。
 
-库里一条提供商都没有时（旧部署、测试、尚未引导）才走这条路径。它只为了升级不中断，
-不是第二套配置入口：首次启动会用环境变量**引导**出一条「默认网关」提供商，之后由
-后台接管（见 `registry.seed_default_provider`）。
-
-这一条路径的缓存保持原样（数据库路径不缓存，理由见包 docstring）：网关的模型列表
-变化很慢，而每次页面加载都打上游既慢又浪费；失败还要单独负缓存，避免慢失败的兜底
-顶掉刚拿到的成功列表。
+只在库里一条提供商都没有时兜底（首次启动会用环境变量引导出默认网关，之后后台接管），不是第二套配置入口。
+缓存只属于这条路径：列表变化很慢，失败单独进负缓存，不顶掉已有的成功结果。
 """
 
 import asyncio
@@ -30,20 +25,19 @@ _VERSION_SEGMENT = re.compile(r"^v\d+")
 #: 拉取模型列表是页面加载路径上的一步，3 秒没结果就该走兜底。
 MODELS_TIMEOUT_SECONDS = 3.0
 
-#: 缓存有效期。网关的模型列表变化很慢，而每次页面加载都打上游既慢又浪费。
+#: 成功结果缓存有效期：列表变化很慢，每次页面加载都打上游既慢又浪费。
 MODELS_CACHE_TTL_SECONDS = 300.0
 
-#: 兜底结果缓存有效期（负缓存）。避免上游瞬时抖动造成过长时间锁定，同时防止频繁超时。
+#: 兜底结果缓存有效期（负缓存）：别让一次瞬时抖动被锁定太久。
 FALLBACK_CACHE_TTL_SECONDS = 10.0
 
-#: 成功结果的缓存：(写入时刻, 响应)。只有成功结果会写进这一格。
+#: 成功结果的缓存：(写入时刻, 响应)。
 _success_cache: tuple[float, ModelListResponse] | None = None
-#: 负缓存：最近一次「上游不可用」产生的兜底响应。刻意与成功缓存分开存——失败永远
-#: 顶不掉已有的成功结果（共用一格时，慢失败的兜底会盖掉刚拿到的成功列表）。
+#: 负缓存：与成功缓存分开放，失败永远顶不掉已有的成功结果。
 _fallback_cache: tuple[float, ModelListResponse] | None = None
 
-#: single-flight 锁，以及它绑定的 loop。锁按事件循环惰性重建：asyncio.Lock 会绑定
-#: 首次使用它的 loop，模块级常量锁在「每个用例一个 loop」的测试环境里会 RuntimeError。
+#: single-flight 锁及它绑定的 loop：`asyncio.Lock` 绑定首次使用它的 loop，模块级常量锁在
+#: 「每个用例一个 loop」的测试里会 RuntimeError，所以按 loop 惰性重建。
 _lock: asyncio.Lock | None = None
 _lock_loop: asyncio.AbstractEventLoop | None = None
 
@@ -51,14 +45,8 @@ _lock_loop: asyncio.AbstractEventLoop | None = None
 def _build_models_url(base_url: str) -> str:
     """根据提供商的 base_url 拼出模型列表地址。
 
-    兼容两大类写法：
-
-    - **已带版本段**：`http://host:4000/v1`、`https://host/api/paas/v4`（智谱）、
-      `https://host/api/v3`（火山方舟）、`https://host/v1beta/openai`（Gemini 兼容层）。
-      路径里任何一段形如 `v<数字>` 就认为版本已经在地址里，直接拼 `/models`；
-    - **裸主机**：`http://host:4000`（OpenAI SDK 的 base_url 习惯），补上 `/v1/models`。
-
-    重复拼 `/v1` 会让提供商返回 404，而 404 又很容易被误读成「提供商不可用」。
+    路径里已有 `v<数字>` 段（`/v1`、`/api/paas/v4`、`/v1beta/openai`）就直接拼 `/models`，否则补 `/v1/models`。
+    重复拼 `/v1` 会让提供商返回 404，而 404 很容易被误读成「提供商不可用」。
     """
     base = base_url.strip().rstrip("/")
     path = urlsplit(base).path
@@ -78,14 +66,10 @@ def _parse_models(
     *,
     mark_default: bool = True,
 ) -> ModelListResponse | None:
-    """把上游响应转成 `ModelListResponse`；无可用模型时返回 None。
+    """把上游响应转成 `ModelListResponse`；无可用模型时返回 `None`。
 
-    信封与字段别名解析统一走 `upstream.parse_upstream_models`（与同步路径共用一份，
-    避免两套解析各自漂移）；这里只保留网关路径自己的两件事：
-
-    - `mark_default=False` 用于管理后台的同步：默认模型由数据库行决定，这里不该把
-      上游列表的第一项强行标成默认（也不该为「配置的默认模型」打一条误导性日志）。
-    - 没匹配到配置的默认模型时回退为列表第一项，让前端始终有一个可选项。
+    信封与字段别名解析走 `upstream.parse_upstream_models`（与同步路径共用，避免两套解析漂移）。
+    `mark_default=False` 供管理后台同步：默认模型由数据库行决定，不能把上游列表首项标成默认。
     """
     entries = parse_upstream_models(payload, description_field)
     if not entries:
@@ -112,7 +96,7 @@ def _parse_models(
         )
 
     if not found_default and mark_default:
-        # 没有匹配到配置的默认模型时，把第一个标为默认，避免前端没有可选项
+        # 没匹配到配置的默认模型时回退为列表首项，保证前端总有可选项
         logger.info(
             "配置的默认模型 %s 不在网关返回的列表中，回退为列表首个模型 %s",
             default_model_id,
@@ -127,8 +111,7 @@ def _parse_models(
 def _fallback(default_model_id: str) -> ModelListResponse:
     """兜底：只报配置里的那个模型。
 
-    刻意不伪造思考能力与支持等级——`reasoning=False` + 空等级会让前端不展示
-    思考等级选择器，从而避免「用户选了却请求失败」。
+    不伪造思考能力与等级：`reasoning=False` + 空等级让前端不展示选择器，避免「选了却请求失败」。
     """
     provider, _, name = default_model_id.partition("/")
     if not name:
@@ -187,7 +170,7 @@ async def _load_models(*, use_cache: bool) -> tuple[ModelListResponse, bool]:
             return cached
 
     async with _get_lock():
-        # 双检：等锁期间先到的请求可能已经把结果写进缓存了，此时不该再打一次上游
+        # 双检：等锁期间先到的请求可能已写入缓存，不该再打一次上游
         if use_cache:
             cached = _read_fresh_cache()
             if cached is not None:
@@ -195,8 +178,7 @@ async def _load_models(*, use_cache: bool) -> tuple[ModelListResponse, bool]:
 
         result, is_fallback = await _fetch_from_gateway(settings.model_name)
         if is_fallback:
-            # 失败只进负缓存，绝不覆盖成功缓存：否则上游刚恢复又抖了一下，
-            # 用户会在一分钟内看到兜底模型
+            # 失败只进负缓存，不覆盖成功缓存：否则上游刚恢复又抖一下，用户会看到兜底模型
             _fallback_cache = (time.monotonic(), result)
         else:
             _success_cache = (time.monotonic(), result)

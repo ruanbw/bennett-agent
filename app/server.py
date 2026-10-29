@@ -1,8 +1,6 @@
-"""FastAPI 服务装配（纯 API）。
+"""FastAPI 服务装配（纯 API）：只提供 `/api/*`，不挂载前端构建产物。
 
-前后端分离：这里只提供 `/api/*`，不挂载前端构建产物。前端由 Vite 独立运行
-（`cd frontend && npm run dev`），通过 `frontend/.env` 的 `VITE_API_BASE_URL`
-直连本服务。
+前端由 Vite 独立运行（`cd frontend && npm run dev`），经 `VITE_API_BASE_URL` 直连本服务。
 """
 
 import logging
@@ -34,11 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 async def _cleanup_expired_sessions_on_startup() -> None:
-    """启动时清理过期会话行（best-effort）。
+    """启动时清理过期会话行（best-effort，为何要显式清理见 `app.db.cleanup_expired_access_tokens`）。
 
-    启动是无需额外定时任务就能兜住过期行增长的时机（为何需要显式清理见
-    `app.db.cleanup_expired_access_tokens`）。清理失败只记警告：数据库被锁之类的
-    瞬时故障不该把服务拦在启动之外。
+    清理失败只记警告：数据库被锁之类的瞬时故障不该把服务拦在启动之外。
     """
     try:
         removed = await cleanup_expired_access_tokens(settings.session_lifetime_seconds)
@@ -53,13 +49,7 @@ async def _cleanup_expired_sessions_on_startup() -> None:
 def _warn_if_auth_rate_limit_is_global() -> None:
     """反代部署 + 未配 `trusted_proxy_headers` 时告警：认证限流会退化成全站单桶。
 
-    为什么只告警不报错：单进程直连部署（本机开发、反代直连后端）下
-    `request.client.host` 就是真实客户端地址，限流工作正常。只有「中间还隔着一个反代」
-    时才会把所有请求看成一个来源。这里无法从代码侧判断部署形态，只能在启动日志里
-    明确说出这个组合与后果——否则运维只会看到「登录莫名 429，等一分钟就好」。
-
-    同一个坑在对话端点已经被绕开了（改成按账号计数，见 `app/api/chat.py`），
-    认证端点不行：登录/注册本来就没有账号身份可用。
+    代码侧判断不出部署形态，只能靠启动日志说明；登录/注册没有账号身份，无法像对话端点那样按账号计数。
     """
     if settings.auth_rate_limit_per_minute <= 0:
         return
@@ -68,8 +58,7 @@ def _warn_if_auth_rate_limit_is_global() -> None:
     ips_configured = bool(settings.trusted_proxy_ips.strip())
 
     if headers_configured and not ips_configured:
-        # 只配标头不配代理网段等于「谁来都信」：直连客户端可以轮换 XFF 绕过限流（L-10）。
-        # 限流器会 fail closed（不采信标头），但部署者必须知道这个配置不会生效。
+        # 只配标头不配代理网段等于「谁来都信」：限流器会 fail closed 不采信标头，但部署者得知道它不生效。
         logger.warning(
             "TRUSTED_PROXY_HEADERS 已配置但 TRUSTED_PROXY_IPS 为空：代理标头不会被采信，"
             "认证限流将按直连地址计数；如确实在反向代理之后，请补上 TRUSTED_PROXY_IPS。"
@@ -89,12 +78,8 @@ def _warn_if_auth_rate_limit_is_global() -> None:
 def validate_prompts() -> None:
     """启动自检：编译全部模板，并确认主系统提示词能渲染出内容。
 
-    模板写坏（少一个 `endif`、变量名拼错、内容被条件分支挡光）此前的表现是：服务正常
-    启动，直到某位用户发第一条消息才在预算预检里炸成「请求处理失败」——现场既看不见
-    是提示词的问题，也不会有人想到去查模板文件。启动即失败比那好得多：这是一个纯文件
-    问题，重启就是修复动作。
-
-    抛 `PromptTemplateError` 由调用方决定如何呈现（lifespan 里会记 error 并中止启动）。
+    模板坏是纯文件问题，启动即失败好过等第一条用户消息才在预算预检里炸成「请求处理失败」。
+    抛 `PromptTemplateError`，由 lifespan 记 error 并中止启动。
     """
     from app.services.agent_factory import render_system_prompt
 
@@ -106,19 +91,16 @@ def validate_prompts() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    # 提示词是纯文件：写坏了就立刻失败，别等第一条用户消息才炸
     try:
         validate_prompts()
     except Exception as exc:  # noqa: BLE001 - 统一转成启动失败，日志里点明原因
         logger.error("提示词自检失败，服务不会启动: %s", exc)
         raise
 
-    # 建表必须在处理任何请求之前完成：认证依赖会查 user / access_token 两张表。
-    # 脚本幂等，多实例同时启动也安全（见 app/db.py:verify_schema_at_head）。
+    # 建表必须在处理任何请求之前完成（认证依赖会查 user / access_token）；幂等，见 app/db.py:verify_schema_at_head。
     await verify_schema_at_head()
 
-    # 首次启动（或库里一条提供商都没有）时，用环境变量引导出一条「默认网关」，
-    # 让管理后台还没配置时也不至于没有任何模型可用。只写库不联网。
+    # 库里没有任何提供商时用环境变量引导出一条默认网关（只写库不联网），管理后台没配也有人能用。
     try:
         if await seed_default_provider():
             logger.info("模型提供商已从环境变量完成引导，可在管理后台继续维护")
@@ -134,8 +116,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        # try/finally：yield 点收到异常（例如上层取消）时也要走到关闭，
-        # 否则共享 httpx 客户端与数据库连接池都会漏。
+        # yield 点收到异常（上层取消）也要走到关闭，否则 httpx 客户端与连接池都会漏。
         try:
             await close_http_client()
         except Exception:  # noqa: BLE001 - 单个资源关闭失败不能遮蔽另一个资源
@@ -153,12 +134,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 async def _warn_if_provider_keys_are_undecryptable() -> None:
     """启动时逐条试解提供商的 API Key，解不开的逐个点名。
 
-    换 `AUTH_SECRET` 是允许的运维动作，但它失败的方式极具误导性：出站请求**不带
-    Authorization**（密钥为空）→ 上游 401 → 用户看到「上游认证配置问题」，同时后台的
-    「密钥」列显示「未设置」。两条线索都指向「key 填错了」，没人会想到是「密钥换了」。
-
-    这段日志是唯一能直接说出后者的地方。`/health/ready` 里也带同样的信息，供排障时
-    不用翻启动日志。
+    换了 `AUTH_SECRET` 后请求不带 Authorization → 上游 401 → 用户看到「密钥未设置」，没人会想到是密钥换了。
+    启动日志是唯一能直接说出后者的地方；`/health/ready` 里也带同样的信息。
     """
     try:
         broken = await audit_provider_key_decryption()
@@ -177,17 +154,8 @@ async def _warn_if_provider_keys_are_undecryptable() -> None:
 async def _ensure_object_storage() -> None:
     """启动时确保沙箱产物用的桶存在（幂等，失败不阻止启动）。
 
-    对象存储现在只服务于**沙箱产物**（机器销毁前把 workspace 导出，见
-    `app/services/sandbox/artifacts.py`）。所以未开沙箱时整段跳过——没开沙箱的部署
-    不该因为 S3 没配而在启动日志里报警。
-
-    为什么不阻止启动：产物导出是「尽力而为」（导出失败也照常销毁），对话与历史都不
-    依赖对象存储。一次 S3 侧的网络抖动不该让整个服务起不来——那是把「部分功能不可用」
-    升级成「全站不可用」。但要在日志里说清：`/health/ready` 的 storage 段会一直显示
-    不可用，直到桶可达。
-
-    `S3_CREATE_BUCKET=false` 时不建桶（生产通常由 IaC 建桶并只授予对象级权限），
-    但仍做一次可达性检查，让「端点填错了」在启动日志里就暴露。
+    只有沙箱产物用它（见 `app/services/sandbox/artifacts.py`），导出是尽力而为，未开沙箱时整段跳过。
+    `S3_CREATE_BUCKET=false` 时不建桶，但仍做一次可达性检查，让「端点填错」在启动日志里暴露。
     """
     from app.services.storage import StorageNotConfigured, get_object_store
 
@@ -209,15 +177,8 @@ async def _ensure_object_storage() -> None:
 async def _discover_mcp_tools() -> None:
     """启动时发现 MCP 工具，让提示词与能力探针拿到真实清单。
 
-    为什么要在启动时做而不是等第一次对话：
-
-    1. `render_system_prompt` 是同步的（预算预检每轮都会调它），它只能读缓存好的
-       工具快照——不预先发现，提示词里就永远少一段 MCP 能力；
-    2. 发现要建连（stdio 还要起子进程），放在第一轮对话里等于让第一个用户替所有人
-       付这次开销，而且会撞上 SSE 的总时长预算。
-
-    失败**不阻止启动**：MCP 是增强能力。但要在日志里说清楚是哪个 server 连不上
-    （`discovery_error` 同时会出现在 `/api/capabilities` 里）。
+    `render_system_prompt` 是同步的、只读缓存好的工具快照；发现要建连，放第一轮会撞上 SSE 总预算。
+    失败不阻止启动（MCP 是增强能力），但要记下哪个 server 连不上（`discovery_error` 也进 `/api/capabilities`）。
     """
     from app.tools.mcp_client import get_mcp_registry
 
@@ -244,19 +205,15 @@ async def _discover_mcp_tools() -> None:
 def _api_docs_enabled() -> bool:
     """是否暴露 /docs、/redoc 与 /openapi.json。
 
-    默认 None 表示按环境自动决定：production 下这些页面会把全部端点结构与
-    请求/响应模型白送给未认证访客，是纯侦察面，关掉；其余环境保留，本地调试离不开。
+    `None` 表示按环境决定：production 下这些页面把端点结构白送给未认证访客，其余环境保留。
     """
     if settings.enable_api_docs is None:
         return settings.app_env != "production"
     return settings.enable_api_docs
 
 
-#: OpenAPI 分组说明。
-#:
-#: 端点本身已有中文 summary，但 /docs 左侧的分组默认只有英文 tag 名（auth/chat…），
-#: 第一次打开的人分不清哪个是登录、哪个是管理。这里给每组一句用途与权限说明；
-#: `tests/test_server.py` 还会锁住「没有端点落在未声明的 tag 下」，避免新增路由时忘了分组。
+#: OpenAPI 分组说明：/docs 左侧只有英文 tag 名（auth/chat…），新人分不清哪组是登录、哪组是管理。
+#: `tests/test_server.py` 锁住「没有端点落在未声明的 tag 下」，新增路由不会忘了分组。
 _API_TAGS = [
     {
         "name": "auth",
@@ -289,9 +246,7 @@ _API_TAGS = [
 
 
 #: 不需要登录、因而不该在文档里标「需要 cookie 会话」的端点。
-#:
-#: 这份清单是**刻意显式**的：新增一个公开端点时必须改这里，`tests/test_server.py` 会
-#: 逼你做这个决定，而不是悄悄多出一个没有任何认证说明的接口。
+#: 刻意显式：新增公开端点必须改这里，`tests/test_server.py` 会逼你做这个决定。
 _PUBLIC_PATHS = frozenset({"/api/auth/register", "/api/auth/login"})
 
 #: OpenAPI 里的 HTTP 方法（`paths` 下还有 `parameters` 这类非方法键，必须过滤掉）。
@@ -299,15 +254,9 @@ _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "opt
 
 
 def _install_cookie_security_scheme(app: FastAPI) -> None:
-    """在 OpenAPI 里声明「会话是一个 cookie」。
+    """在 OpenAPI 里把会话声明成 cookie，让 /docs 标出哪些端点需要认证。
 
-    此前文档只在描述里写着「要求 HttpOnly cookie 会话」：`/docs` 里没有 Authorize 入口，
-    也没法一眼看出哪些端点要登录、登录后浏览器会自动带哪个 cookie。声明成
-    `apiKey in: cookie` 之后，Swagger UI 会把需要认证的端点标出来，客户端生成器也能
-    据此知道凭据放在哪里。
-
-    公开端点（注册/登录/健康检查）**不加** `security`：给它们标上认证要求会让客户端
-    生成器在登录前就去要凭据，形成死循环。
+    公开端点（注册/登录）不加 `security`：否则客户端生成器会在登录前就要凭据，形成死循环。
     """
 
     def custom_openapi() -> dict:
@@ -322,9 +271,7 @@ def _install_cookie_security_scheme(app: FastAPI) -> None:
             tags=_API_TAGS,
         )
         schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
-        # fastapi-users 已经声明了 `APIKeyCookie`（`in: cookie`，名字取自 transport）。
-        # 再补一个等价的 `cookieAuth` 只会让文档里出现两个意义相同的方案，客户端生成器
-        # 还要用户二选一——复用它，只把说明补成中文。
+        # 复用 fastapi-users 已声明的 `APIKeyCookie`：再加一个等价方案会让客户端生成器要用户二选一。
         scheme_name = "APIKeyCookie"
         scheme = schemes.setdefault(
             scheme_name,
@@ -354,24 +301,9 @@ def _install_cookie_security_scheme(app: FastAPI) -> None:
 
 
 def _install_unhandled_error_handler(app: FastAPI) -> None:
-    """未捕获异常统一返回 500 + 关联 ID，而不是纯文本的 "Internal Server Error"。
+    """未捕获异常统一返回 500 + 关联 ID：uvicorn 的纯文本 500 让前端只能显示「请求失败」。
 
-    ## 为什么需要它
-
-    FastAPI 的默认行为是把异常交给 uvicorn，uvicorn 返回一个**纯文本** 500。前端
-    `readErrorDetail` 拿到非 JSON 响应，只能显示「请求失败（HTTP 500）」——
-    用户既不知道原因，也没有任何可以报给运维的编号。
-
-    ## 与 `chat_service` 的 error_id 的关系
-
-    流式对话**自己**处理异常并下发 `error` 事件（SSE 已经发了 200，改不了状态码），
-    那条路径不受这里影响。这个 handler 管的是普通 HTTP 端点（认证、同步、管理后台、
-    知识库）：它们抛异常时应当得到同样可回查的关联 ID。
-
-    ## 为什么不把异常原文回给客户端
-
-    异常消息可能含 SQL、文件路径、上游 URL 与凭据上下文。关联 ID + 服务端日志是唯一
-    正确的组合：用户报 ID，运维在日志里 grep 到完整堆栈。
+    流式对话自己下发 `error` 事件（SSE 已发 200），不经这里。异常原文可能含 SQL、路径与凭据，只回 ID。
     """
     from fastapi import Request
     from fastapi.responses import JSONResponse
@@ -380,8 +312,7 @@ def _install_unhandled_error_handler(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:  # noqa: ARG001
-        # 请求 ID 与响应头里的 `X-Request-ID` 是同一个值（由中间件注入），
-        # 所以用户从浏览器 devtools 里也能直接拿到，不必等错误文案。
+        # 与响应头的 `X-Request-ID` 同值，用户从 devtools 也能拿到，不必等错误文案。
         error_id = current_request_id() or "-"
         logger.exception("未处理异常 (error_id=%s, path=%s)", error_id, request.url.path)
         return JSONResponse(
@@ -402,7 +333,7 @@ def create_app() -> FastAPI:
             "除注册与登录外，所有 `/api/*` 都要求 HttpOnly cookie 会话；"
             "接口文档默认只在非 production 环境暴露，可用 `ENABLE_API_DOCS=true` 显式打开。"
         ),
-        # 版本号只有一个来源（已安装包的元数据），不再与 pyproject 里的值各说各话
+        # 版本号只有这一个来源（已安装包的元数据），不与 pyproject 各说各话
         version=APP_VERSION,
         openapi_tags=_API_TAGS,
         lifespan=lifespan,
@@ -414,18 +345,15 @@ def create_app() -> FastAPI:
     _install_cookie_security_scheme(app)
     _install_unhandled_error_handler(app)
 
-    # 前端与后端不同源（Vite 跑在自己的端口上），跨域是常态而非例外
     cors_origins = settings.get_cors_origins()
     if settings.cors_allow_credentials and "*" in cors_origins:
-        # 浏览器对「通配来源 + 携带凭据」的响应一律拒绝，静默降级成跨域不可用
-        # 比启动即报错难查得多；这里要求把来源写成具体域名。
+        # 浏览器一律拒绝「通配来源 + 携带凭据」，静默降级比启动报错难查得多，所以要求具体域名。
         raise ValueError(
             'CORS 配置无效：cors_allow_credentials=True 时 cors_allowed_origins 不能包含 "*"，'
             "浏览器会拒绝该组合；请改成具体来源（如 https://app.example.com）。"
         )
 
-    # 请求体上限 / 跨站请求守卫必须在 CORS **之前**注册（后注册的更外层），
-    # 这样 413/403 响应同样带上 CORS 头，跨域前端能读到具体错误。
+    # 请求体上限 / 跨站守卫必须在 CORS 之前注册（后注册的更外层），这样 413/403 也带 CORS 头。
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=cors_origins)
 
@@ -435,16 +363,13 @@ def create_app() -> FastAPI:
         allow_credentials=settings.cors_allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
-        # 跨域前端要能读到限流的配额信息。不写这一行的话浏览器只放行 6 个简单响应头，
-        # `fetch` 拿到的是 `null`——前端没法告诉用户「还要等几秒」。
+        # 不写这一行浏览器只放行 6 个简单响应头，前端读不到限流信息，没法告诉用户还要等几秒。
         expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
-    # 指标与请求 ID 放在 CORS 之内、安全头之外：它们要给所有响应加头/计时，但不需要
-    # 看到 CORS 预检（OPTIONS 也是 http 请求，统计进去只会让请求数虚高）。
+    # 指标放在 CORS 之内：要给所有响应计时，但统计 OPTIONS 预检只会让请求数虚高。
     app.add_middleware(HttpMetricsMiddleware)
-    # 请求 ID 必须在**最外层**之一：这样连 413/403（由更外层的中间件产生）也带上
-    # X-Request-ID，用户报障时任何一类失败都有可回查的 ID。
+    # 请求 ID 要在最外层之一：连外层中间件产生的 413/403 也带 X-Request-ID。
     app.add_middleware(RequestContextMiddleware)
 
     # 最后注册 = 最外层：连 CORS/限流产生的错误响应也带上安全头。
@@ -456,8 +381,7 @@ def create_app() -> FastAPI:
     app.include_router(sandbox_router)
     app.include_router(admin_router)
     app.include_router(sync_router)
-    # Ops 路由（/health、/health/ready、/api/metrics）不打 tag：它们不该出现在
-    # 业务 API 文档里，但 `include_in_schema=False` 之外仍要有 tag 供分组测试检查。
+    # Ops 路由不该出现在业务 API 文档里，但仍要 tag 供分组测试检查。
     app.include_router(ops_router)
 
     return app

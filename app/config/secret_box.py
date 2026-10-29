@@ -1,15 +1,6 @@
-"""敏感配置的落库加密（API Key at rest）。
-
-数据库里的提供商 API Key 此前是明文：数据库备份被读（备份、误提交、同主机其他
-用户）就等于拿到所有上游凭据。这里用 `AUTH_SECRET` 派生 Fernet 密钥做对称加密：
-
-- 写入时 `enc:v1:<token>`；读取时透明解密；
-- 旧明文值原样返回（兼容升级，不需要迁移脚本）；
-- `AUTH_SECRET` 被更换后旧密文无法解密，函数记 ERROR 并返回空串（宁可让管理员
-  重新填 key，也不要把密文当 key 发给上游）。
-
-密钥来自 AUTH_SECRET：生产环境已有「必须是强随机 ≥32 字符」的启动守卫，因此
-默认配置下这是强密钥；本地开发用的是占位值，只防误读、不防知道源码的人。
+"""敏感配置的落库加密（API Key at rest）：用 `AUTH_SECRET` 派生 Fernet 密钥做对称加密。
+存储为 `enc:v1:<token>`，读取时透明解密；旧明文行原样返回（不需要迁移脚本）；`AUTH_SECRET` 更换后
+旧密文解不开就抛错，而不是把密文当 key 发给上游（生产启动守卫已保证 secret 强随机）。
 """
 
 from __future__ import annotations
@@ -46,27 +37,9 @@ class SecretDecryptError(Exception):
 
 
 def decrypt_secret(value: str | None) -> str:
-    """解密；**解不开时抛 `SecretDecryptError`，不返回空串**。
-
-    ## 为什么不能返回空串
-
-    以前这里 `except InvalidToken: return ""`。空串会一路静默下去：
-    `_auth_headers` 看到 `provider.api_key` 为空就干脆**不发 Authorization**
-    （`registry.py` 的 `if provider.api_key and ...`）→ 上游 401 → 用户看到
-    「上游认证配置问题，请联系管理员」；后台的「密钥」列显示「未设置」，于是管理员
-    看不出「有密文、但解不开」，只会去把 key 再填一遍。而根因是 `AUTH_SECRET` 换了。
-
-    抛异常之后，密钥是**显式不可用**的：列表里那一行会带上 `api_key_error`，
-    `/health/ready` 能报出「有几个提供商的密钥解不开」，日志里有 provider id。
-
-    ## 另外两个必须一起接住的异常
-
-    `InvalidToken` 只覆盖「格式对但解不开」。还有两类会让整个列表端点 500：
-    - `UnicodeEncodeError`：列里出现 `enc:v1:中文`（dump/restore 编码错乱，或历史
-      明文行恰好以 `enc:v1:` 开头）时 `.encode("ascii")` 直接抛，而它会从 ORM 的
-      `process_result_value` 冒出来，让 `GET /api/admin/providers` 整体 500；
-    - `ValueError`：Fernet 对不合法的 base64 抛的就是它。
-    三者一律翻成 `SecretDecryptError`，调用方按「这一行不可用」处理。
+    """解密；解不开时抛 `SecretDecryptError` 而不是返回空串。
+    空串会让 `_auth_headers` 干脆不发 Authorization，上游 401 被归因成「key 填错了」，实际根因是 `AUTH_SECRET` 换了。
+    `ValueError` / `UnicodeError` 也要一起接住（非法 base64、`enc:v1:中文`），否则会从 ORM 冒出来让整个列表端点 500。
     """
     if not value:
         return ""

@@ -1,27 +1,7 @@
 """认证 HTTP 接口：注册 / 登录 / 登出 / 当前用户。
 
-## 三个必须知道的接口约定
-
-**1. 登录用表单编码，不是 JSON。** fastapi-users 的登录端点复用
-`OAuth2PasswordRequestForm`，所以前端必须发
-`application/x-www-form-urlencoded`，字段名是 `username`（填邮箱）与 `password`。
-发 JSON 会直接 422，而不是给出「密码错误」这种有意义的提示。
-
-**2. 凭据错误返回 400，不是 401。** detail 为 `LOGIN_BAD_CREDENTIALS`。
-401 的含义是「访问受保护端点时没有有效登录态」，由 `current_active_user` 产生。
-前端区分这两者才能给出正确提示（登录失败 vs 会话过期）。
-
-**3. 注册完全开放，但注册出来的账号没有任何特权。** 直接用 fastapi-users 的注册
-路由：注册只做「建一个 role=user 的账号」，不涉及提权。
-初始超管由 `scripts/seed_admin.py` 播种（管理员是**部署者已知的数据**，不靠公开接口
-抢注），其余账号的提权一律走管理后台的角色接口（见 `app/api/admin.py`）。
-
-## 为什么没有忘记密码 / 邮箱验证路由
-
-这两个流程都要发邮件，当前未配置 SMTP。挂上路由却不发信，用户会以为重置邮件
-已发出而一直等待，比没有该功能更糟。等接上邮件后再一并开启。
-**这也意味着超管密码一旦丢失没有自助恢复路径**——用 `seed_admin.py --force-reset`
-改回即可，那是刻意保留的运维通道。
+登录必须发表单编码（`username` 填邮箱 + `password`），发 JSON 直接 422；凭据错误返回 400，401 专指没有有效登录态。
+没有忘记密码 / 邮箱验证路由：未配 SMTP，挂上却不发信比没有更糟；超管密码丢失只能 `seed_admin.py --force-reset`。
 """
 
 import logging
@@ -47,10 +27,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-#: 框架自动生成的三条路由的中文说明。fastapi-users 给的是
-#: `Auth:Cookie.Login` / `Register:Register` 这类**英文** summary 且没有 description，
-#: 于是 /docs 里只有这三条是英文——其余端点全是中文，看起来像漏翻或半成品。
-#: 生成的路由没有可以直接加装饰器的函数，只能按路径改写。
+#: 框架自动生成的三条路由的中文说明（fastapi-users 给的是英文 summary 且没有 description）。
+#: 生成的路由没有能加装饰器的函数，只能按路径改写。
 _FRAMEWORK_ROUTE_TEXT: dict[str, tuple[str, str]] = {
     "/login": (
         "登录（下发会话 cookie）",
@@ -80,13 +58,9 @@ def _localize_generated_routes(auth_router: APIRouter) -> None:
 
 
 def _limit_login_only(auth_router: APIRouter) -> None:
-    """给 login 路由挂上 IP 限流。
+    """给 login 路由挂上 IP 限流（它与 logout 生成在同一个 router 里，只能按路径挑）。
 
-    fastapi-users 把 login / logout 生成在同一个 router 里，没有可以直接加装饰器的
-    函数，只能按路径挑。
-
-    **不能两个都加**：给登出也限流会造出一个糟糕的失败模式——用户被限流后连登出都
-    做不了；而登出本身已经要求登录，也不是暴力破解的目标。
+    不能两个都加：登出被限流会让用户连登出都做不了，而它也不是暴力破解的目标。
     """
     for route in auth_router.routes:
         if getattr(route, "path", None) == "/login":
@@ -101,20 +75,15 @@ router.include_router(_auth_router)
 
 
 async def enforce_registration_enabled() -> None:
-    """注册开关：私有部署可以完全关闭公开注册（I-04）。
-
-    默认开启以保持「首次使用点注册」的开箱体验；部署者可用
-    `REGISTRATION_ENABLED=false` 关掉，改由种子脚本/管理员建号。
-    """
+    """注册开关：私有部署可用 `REGISTRATION_ENABLED=false` 关掉公开注册，改由种子脚本/管理员建号。"""
     if not settings.registration_enabled:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="注册功能已关闭")
 
 
 # POST /api/auth/register
 #
-# **不用框架自带的注册路由**：它在邮箱已存在时返回 400 + REGISTER_USER_ALREADY_EXISTS，
-# 等于给了一个邮箱枚举接口（I-05）。这里无论新建成功还是邮箱已存在都返回同一个
-# 202 + 空 body；前端随后用同一组凭据登录，成功即注册成功，失败就是通用提示。
+# 不用框架自带的注册路由：它邮箱已存在时返回 400，等于给了邮箱枚举接口；
+# 这里新建成功与邮箱已存在都返回 202 + 空 body，前端随后用同一组凭据登录。
 @router.post(
     "/register",
     status_code=status.HTTP_202_ACCEPTED,
@@ -138,7 +107,7 @@ async def register_account(
         # 不区分「已注册」与「刚创建」：两者响应完全一致
         logger.info("注册请求命中已存在邮箱（返回 202，不泄露存在性）")
     except InvalidPasswordException as exc:
-        # 密码策略不是身份信息，可以如实告诉用户（与注册表单的即时反馈一致）
+        # 密码策略不是身份信息，可以如实告诉用户
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"REGISTER_INVALID_PASSWORD: {exc.reason}",
@@ -146,8 +115,7 @@ async def register_account(
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
-#: 改密限流桶。与登录的 IP 桶分开：这里按**账号**计数，挡的是「拿到会话后
-#: 反复验证当前密码」与「用 Argon2 打满 CPU」。
+#: 改密限流桶，按账号计数（登录是 IP 桶）：挡的是拿到会话后反复试当前密码与用 Argon2 打满 CPU。
 _change_password_limiter: object | None = None
 
 
@@ -193,25 +161,12 @@ async def change_password(
     user: User = Depends(current_active_user),  # noqa: B008
     user_manager: UserManager = Depends(get_user_manager),  # noqa: B008
 ) -> Response:
-    """修改**当前会话所属账号**的密码，成功后该账号的全部会话立即失效。
+    """修改当前会话所属账号的密码，成功后该账号的全部会话（含本次）立即失效。
 
-    三条规则：
-
-    1. **必须验证当前密码**。会话 cookie 可能是别人临时用过的设备；只知道「已登录」
-       不足以改密码，否则拾到一台未锁屏的机器就能永久接管账号。
-    2. **新密码走与注册同一条校验**（`user_manager.update` → `validate_password`），
-       不在路由里复制一份长度规则。
-    3. **成功后踢掉所有会话**（`UserManager.on_after_update` 里的
-       `delete_user_access_tokens`），包括发起请求的这一个：改密的语义就是「之前所有
-       登录态都不再可信」。客户端随后会拿到 401 并回到登录页。
-
-    4. **按账号限流**（`enforce_change_password_rate_limit`），且密码校验放进线程池。
-       此前这个端点没有限流，而每次错误密码验证都是一次约 65ms 的 Argon2 计算、还
-       直接跑在事件循环线程上：任意注册用户都能用它打满 CPU；被盗会话也能绕过登录
-       端点的 IP 限流、以约 15 次/秒爆破当前密码。
+    必须验证当前密码：会话 cookie 可能来自别人临时用过的设备。新密码走与注册同一条校验。
+    密码校验放进线程池：Argon2 约 65ms，跑在事件循环上等于让人拿改密端点打满 CPU。
     """
-    # verify_and_update 是框架自带的校验入口：bcrypt 升级时它还会返回重算后的哈希，
-    # 但本路由马上会整行重写密码，不需要在这里落库。
+    # `verify_and_update` 顺带返回重算后的哈希，但本路由马上整行重写密码，不用在这落库。
     # Argon2 是 CPU 密集调用，必须放进 worker 线程，否则一次改密就能阻塞整个事件循环。
     valid, _ = await anyio.to_thread.run_sync(
         user_manager.password_helper.verify_and_update,
@@ -219,8 +174,7 @@ async def change_password(
         user.hashed_password,
     )
     if not valid:
-        # 400 而不是 401：401 会被前端的全局处理当成「会话过期」直接登出，
-        # 而这里只是表单里填错了当前密码，用户应当留在原地重试。
+        # 400 而非 401：401 会被前端的全局处理当成「会话过期」直接登出，而这里只是填错了当前密码。
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="CHANGE_PASSWORD_BAD_CREDENTIALS",
@@ -248,7 +202,6 @@ async def change_password(
 async def read_current_user(user: User = Depends(current_active_user)) -> User:  # noqa: B008
     """前端用它判断登录态并在启动时取回用户信息；未登录返回 401。
 
-    返回体里的 `role` 决定了前端是否显示管理后台入口。也就是说，**升/降级后用户
-    刷新页面就能看到效果**，不需要重新登录（角色存在库里，每次都由本次请求读出）。
+    `role` 每次请求都从库里读出，所以升降级后刷新页面即生效，不需要重新登录。
     """
     return user

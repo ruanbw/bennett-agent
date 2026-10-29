@@ -11,8 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 DEFAULT_APP_ENV = "development"
 
-#: 合法的环境名白名单。拼错（prod/prd/Productionn）会让 .env.{env} 静默加载不到，
-#: 所以不认识的取值必须报错，而不是悄悄退化成一个跑得起来但配置不对的进程。
+#: 环境名白名单。拼错（prod/Productionn）会让 .env.{env} 静默加载不到，所以不认识的取值必须报错。
 ALLOWED_APP_ENVS = frozenset({"development", "production", "staging", "test"})
 
 #: 认证密钥的占位默认值。生产环境若仍是这个值，启动时直接报错而不是静默放行。
@@ -24,8 +23,7 @@ S3_BUCKET_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 #: 合法 cookie 名（RFC 6265 token）。前缀 `__Host-` / `__Secure-` 也落在这个集合里。
 COOKIE_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
-#: 生产密钥的最小长度与占位词。只挡默认值不够：.env.production 里抄一句
-#: "replace-with-a-strong-random-value" 一样没有任何安全强度。
+#: 最小长度与占位词：只挡默认值不够，抄一句「replace-with-a-strong-random-value」同样没有强度。
 MIN_PRODUCTION_SECRET_LENGTH = 32
 _PLACEHOLDER_SECRET_PATTERN = re.compile(
     r"change-me|replace-with|your-|example|placeholder|insecure",
@@ -40,9 +38,8 @@ def _is_weak_auth_secret(secret: str) -> bool:
     return bool(_PLACEHOLDER_SECRET_PATTERN.search(secret))
 
 
-#: API Key 的占位词。照抄 `.env.example` 的 `tvly-your-api-key` 时，值非空，工具
-#: 会「看起来已配置」并被装配进 Agent；真正调用时才 401，白烧一轮工具调用与 token。
-#: 识别成「未配置」比让它进装配更诚实，也让能力探针（`/api/capabilities`）不会谎报。
+#: API Key 占位词。照抄 `.env.example` 的 `tvly-your-api-key` 时值非空，工具会「看起来已配置」，
+#: 真正调用时才 401；识别成未配置比让它进装配更诚实，能力探针也不会谎报。
 _PLACEHOLDER_API_KEY_PATTERN = re.compile(
     r"your[-_ ]?(?:api[-_]?)?key|your[-_ ]?secret|change[-_]?me|replace[-_]?me|placeholder|example",
     re.IGNORECASE,
@@ -51,9 +48,7 @@ _PLACEHOLDER_API_KEY_PATTERN = re.compile(
 
 def is_usable_api_key(value: str | None) -> bool:
     """配置的 API Key 是否可用：非空白，且不是示例里的占位值。
-
-    只判「有没有配置」，不猜格式或长度——各上游的 key 形状不同，多加校验只会误杀
-    合法密钥。占位值是唯一例外：它非空却在功能上等于没配（见上面的正则）。
+    不猜格式或长度——各上游 key 形状不同，多加校验只会误杀合法密钥。
     """
     if value is None:
         return False
@@ -63,8 +58,7 @@ def is_usable_api_key(value: str | None) -> bool:
     return not _PLACEHOLDER_API_KEY_PATTERN.search(cleaned)
 
 
-# 只有「文件名不依赖 APP_ENV」的文件能参与判定环境名本身：
-# .env.{env} 的文件名由 APP_ENV 决定，读它来选它会形成循环依赖。
+# 只有文件名不依赖 APP_ENV 的文件能参与判定环境名：读 .env.{env} 来选它会形成循环依赖。
 _ENV_NAME_SOURCES = (".env.local", ".env")
 
 
@@ -79,14 +73,8 @@ def _read_app_env_from_file(path: Path) -> str | None:
 
 
 def resolve_app_env(base_dir: Path = BASE_DIR) -> str:
-    """确定当前运行环境名。
-
-    APP_ENV 既可以由 shell 导出，也可以写在 .env / .env.local 里。后者是必需的：
-    get_env_files() 必须在 pydantic-settings 加载任何 dotenv 文件**之前**就知道该
-    加载哪些文件，否则写进 .env 的 APP_ENV 会被静默忽略，而 .env.development 里自带的
-    APP_ENV=development 还会反过来覆盖运维的意图。
-
-    优先级：系统环境变量 > .env.local > .env > "development"
+    """确定当前运行环境名，优先级：系统环境变量 > .env.local > .env > "development"。
+    必须在 pydantic-settings 加载任何 dotenv 之前就知道该加载谁，否则 .env 里的 APP_ENV 会被静默忽略。
     """
     from_process = os.getenv("APP_ENV")
     if from_process and from_process.strip():
@@ -101,12 +89,8 @@ def resolve_app_env(base_dir: Path = BASE_DIR) -> str:
 
 
 def get_env_files(base_dir: Path = BASE_DIR) -> tuple[Path, ...]:
-    """根据 APP_ENV 动态解析环境变量文件加载顺序。
-
-    pydantic-settings 对 env_file 元组采用「靠后者覆盖靠前者」，因此本元组按优先级
-    从低到高排列，系统环境变量始终高于所有文件：
-
-        APP_ENV 环境变量 > .env.{APP_ENV}.local > .env.{APP_ENV} > .env.local > .env
+    """按 APP_ENV 解析 dotenv 加载顺序（靠后者覆盖靠前者，系统环境变量始终最高）。
+    .env > .env.local > .env.{APP_ENV} > .env.{APP_ENV}.local > APP_ENV 环境变量
     """
     env = resolve_app_env(base_dir)
     env_files: list[Path] = [
@@ -165,9 +149,7 @@ class Settings(BaseSettings):
         ),
     )
     # ------------------------------------------------------------------
-    # 沙箱（每会话一台隔离执行环境）。
-    # 默认全关：没有节点池的部署不应该凭空多出四个工具，也不该让模型
-    # 以为它能跑代码。开关只影响工具装配，不影响已有的对话与同步。
+    # 沙箱：默认全关，没有节点池的部署不该凭空多出四个工具。
     # ------------------------------------------------------------------
     sandbox_enabled: bool = Field(
         default=False,
@@ -480,7 +462,7 @@ class Settings(BaseSettings):
         default="pool",
         description=(
             "连接池策略。`pool` = 常驻连接池（服务进程）；`null` = 每次取用都新建连接。"
-            "`null` 用于两种场景：①短命进程（迁移/脚本/CLI），省掉池的初始化与回收；"
+            "`null` 用于两种场景：①短命进程（迁移/脚本），省掉池的初始化与回收；"
             "②测试里的同步 `TestClient`——它在**另一个线程的事件循环**里执行请求，"
             "而池里的 asyncpg 连接绑定在创建它的事件循环上，跨循环复用会抛"
             "`Future attached to a different loop`，报错点与真正原因毫无关系。"
@@ -632,7 +614,7 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # 文件上传（原件 → 对象存储 → 解析 → 知识库）
+    # 认证凭证与出站安全
     # ------------------------------------------------------------------
     auth_secret: str = Field(
         default=DEFAULT_AUTH_SECRET,
@@ -754,12 +736,8 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _require_postgres_driver(cls, value: str) -> str:
-        """只接受 `postgresql+asyncpg://`。
-
-        为什么在配置层硬性拒绝（而不是“跑起来再看”）：SQLite 曾经是支持项，升级后很
-        容易留下一个 `sqlite+aiosqlite://` 的旧 `.env`。它不会报错，会**静默建出一个
-        空库**——表现为“所有账号都没了”，而日志里一切正常。把错误提前到进程启动，
-        比让人事后去查“用户表为什么是空的”便宜得多。
+        """只接受 `postgresql+asyncpg://`：残留的 sqlite 串不会报错，而是静默建出一个空库。
+        所以在配置层硬性拒绝，把错误提到进程启动，而不是让人事后查「用户表为什么是空的」。
         """
         cleaned = value.strip()
         if not cleaned.startswith("postgresql+asyncpg://"):
@@ -772,11 +750,7 @@ class Settings(BaseSettings):
     @field_validator("s3_bucket")
     @classmethod
     def _validate_bucket_name(cls, value: str) -> str:
-        """桶名必须是 S3 兼容的小写 DNS 名。
-
-        带大写/下划线的桶名在 AWS S3 上会被建桶请求直接拒绝，在自建网关上的行为则
-        看实现——属于“只在某些环境炸”的配置错误，因此在启动时就归一化检查。
-        """
+        """桶名必须是 S3 兼容的小写 DNS 名：带大写/下划线的只在部分环境炸，所以启动时就检查。"""
         cleaned = value.strip()
         if not S3_BUCKET_PATTERN.match(cleaned):
             raise ValueError(
@@ -788,11 +762,8 @@ class Settings(BaseSettings):
     @field_validator("app_env", mode="before")
     @classmethod
     def _normalise_app_env(cls, value: object) -> object:
-        """归一化 APP_ENV，并拒绝白名单外的取值。
-
-        生产守卫与 .env.{env} 的选择都拿 app_env 做字符串比较，原始值一旦漏进来，
-        `APP_ENV=Production` 就会绕过 `== "production"` 的判断；拼错的环境名还会
-        静默加载不到对应的 .env 文件。归一化与校验都必须发生在赋值之前。
+        """归一化 APP_ENV 并拒绝白名单外的取值：`APP_ENV=Production` 会绕过 `== "production"` 守卫。
+        归一化与校验都必须发生在赋值之前。
         """
         if not isinstance(value, str):
             return value
@@ -807,9 +778,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _reject_placeholder_secret_in_production(self) -> "Settings":
         """生产环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
-
-        选择启动即报错而不是打日志警告——警告会被忽略，而这个问题的影响是
-        任何人都能接管任意账号。
+        选择启动即报错而不是打日志警告——警告会被忽略，而后果是任意账号可被接管。
         """
         if self.app_env == "production" and _is_weak_auth_secret(self.auth_secret):
             raise ValueError(
@@ -827,16 +796,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_cookie_name_prefix(self) -> "Settings":
-        """`__Host-` / `__Secure-` 前缀有硬性属性要求，不满足时浏览器**静默丢弃** cookie。
-
-        这两类前缀是 RFC 6265bis 的「cookie 作用域锁定」：带 `__Host-` 的 cookie 必须同时
-        有 `Secure`、`Path=/`、且**没有 Domain**，浏览器才肯存。运维看到的是「登录接口
-        204、响应里也确实有 Set-Cookie」，然后下一个请求 401——最难查的那一类。
-
-        所以名称与前缀属性一起校验，启动即时报错并写清修法。
-
-        另：cookie 名必须是 RFC 6265 的 token（不能有空格、分号、逗号等）。带这些字符时
-        浏览器/代理的行为是未定义的，同样属于「配错了但看不出来」。
+        """`__Host-` / `__Secure-` 前缀要求 Secure（`__Host-` 还要 Path=/ 且无 Domain），否则静默丢弃。
+        失败表现是「登录 204、下一个请求 401」，所以名称与前缀属性一起在启动时校验。
         """
         name = self.auth_cookie_name
         if not COOKIE_NAME_PATTERN.match(name):
@@ -858,11 +819,8 @@ class Settings(BaseSettings):
         return self
 
     def resolved_cookie_samesite(self) -> Literal["lax", "strict", "none"]:
-        """实际生效的 SameSite 取值。
-
-        跨域部署（`cors_allow_credentials=true`）必须用 `none`：`lax` 只在同站导航时
-        回传，跨站 `fetch` 一律不带 cookie，表现为「登录成功、下一个请求 401」。
-        显式配置优先，方便同站部署想收紧到 `strict` 的场景。
+        """实际生效的 SameSite：显式配置优先，否则凭据模式取 `none`、其余 `lax`。
+        跨站 `fetch` 用 `lax` 不带 cookie，表现为「登录成功、下一个请求 401」。
         """
         if self.auth_cookie_samesite is not None:
             return self.auth_cookie_samesite
@@ -870,10 +828,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_samesite_none_without_secure(self) -> "Settings":
-        """`SameSite=None` 必须配 `Secure`：否则浏览器直接丢弃 cookie。
-
-        这个组合的失败方式特别难查——登录接口返回 204、响应里也确实带了 Set-Cookie，
-        但下一个请求就是 401，看起来像「会话没存住」。启动即报错比线上猜半天好。
+        """`SameSite=None` 必须配 `Secure`，否则浏览器直接丢弃 cookie。
+        失败表现同样是登录 204 而下一请求 401，所以启动即报错。
         """
         if self.resolved_cookie_samesite() == "none" and not self.auth_cookie_secure:
             raise ValueError(
@@ -886,18 +842,8 @@ class Settings(BaseSettings):
         return self
 
     def get_cors_origins(self) -> list[str]:
-        """解析 CORS 来源列表。
-
-        留空时**只有非 production** 回退本地前端端口。此前默认值直接写死两个
-        localhost，生产环境忘了配置就会允许本地页面带凭据读生产 API；同源部署不需要
-        CORS，让 production 留空返回空列表更安全。
-
-        默认名单覆盖用户端（5173）与管理后台（5174）两个前端 dev server——它们是
-        同源代理方案下仅有的两个需要跨源放行的本地来源。生产环境用
-        `CORS_ALLOWED_ORIGINS` 显式配置，不依赖这份默认值。
-
-        同时把常见的配置笔误收掉：尾斜杠（浏览器 Origin 从不带斜杠）、重复项、
-        `http://` 这种只剩协议的坏值；保留 `*`。
+        """解析 CORS 来源列表；留空时只有非 production 回退本地前端端口（5173 / 5174）。
+        顺带收掉尾斜杠、重复项与只剩协议的坏值，保留 `*`。
         """
         default_origins = [
             "http://localhost:5173",
@@ -926,8 +872,8 @@ class Settings(BaseSettings):
         env_file=get_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
-        # 校验失败时 pydantic 默认把整个输入字典塞进异常/日志，其中含 AUTH_SECRET、
-        # LITELLM_API_KEY、TAVILY_API_KEY；隐藏 input 只保留字段名与原因。
+        # 校验失败时 pydantic 会把整个输入字典塞进异常/日志（含 AUTH_SECRET 与各 API Key），
+        # 隐藏 input 只保留字段名与原因。
         hide_input_in_errors=True,
     )
 

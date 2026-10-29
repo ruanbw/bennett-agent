@@ -17,20 +17,9 @@ from pydantic_ai.tools import (
 
 
 class RiskLevel(str, Enum):
-    """工具风险等级。**这个字段现在有强制力**——见 `app/tools/approval.py`。
-
-    分级与它触发的行为：
-
-    - `READ_ONLY` / `INTERACTIVE`：直接执行，不打断用户；
-    - `SAFE_WRITE` / `DANGEROUS`：**执行前必须拿到用户批准**（HITL）。未批准时工具
-      一次都不会执行，本轮以 `approval_required` 事件结束，用户点完再续跑。
-
-    分界线是「能不能撤销」而不是「有多危险」：本项目的删除是硬删除、没有回收站，
-    所以「低风险的写入」也必须先问一次——可以随时再问，但删完以后没法再问。
-
-    MCP 外部工具默认按 `SAFE_WRITE` 处理（见 `chat_service._describe_tool`）：它们是
-    第三方实现，我们无法确认有没有副作用。这个默认值偏向多问一次，而不是替用户
-    假设安全。
+    """工具风险等级，分级在 `app/tools/approval.py` 真正生效。
+    READ_ONLY / INTERACTIVE 直接执行；SAFE_WRITE / DANGEROUS 执行前必须拿到用户批准（HITL），未批准则工具
+    一次都不执行；分界是「能不能撤销」——本项目删了没有回收站，所以低风险写入也要先问。
     """
 
     READ_ONLY = "read_only"
@@ -47,11 +36,7 @@ class RiskLevel(str, Enum):
 
 
 class ToolCategory(str, Enum):
-    """工具分类。**仍然只是元数据**：没有任何代码按它拦截或改变行为。
-
-    它目前的用途是排障与文档（「这个工具属于哪一类」），不要据此推断「某类工具被
-    限制了」——唯一的执行闸门是 `RiskLevel`。
-    """
+    """工具分类，只是元数据：没有代码按它拦截，唯一执行闸门是 `RiskLevel`。"""
 
     SEARCH = "search"
     """外部检索与信息抓取。"""
@@ -60,17 +45,15 @@ class ToolCategory(str, Enum):
     """与终端用户的意图确认、交互和提示。"""
 
     DATA = "data"
-    """内部数据库、知识库与仓储操作。"""
+    """内部数据库与仓储操作。"""
 
     SYSTEM = "system"
     """系统管理、配置查询与基础设施。"""
 
 
 class ManagedTool(Tool[ToolAgentDepsT]):
-    """基于 PydanticAI 原生 Tool 扩展的受控工具对象。
-
-    保留 PydanticAI 原生 Tool 的强类型签名推导、JSON Schema 生成、超时重试与调用管线，
-    同时补充企业级治理元数据（分类、风险等级、标签、动态激活检查器）以及向后兼容属性。
+    """PydanticAI 原生 `Tool` 的受控扩展：保留原生签名推导 / JSON Schema / 超时重试，
+    另加治理元数据（分类、风险等级、标签、启用检查器）与向后兼容属性。
     """
 
     def __init__(
@@ -123,7 +106,7 @@ class ManagedTool(Tool[ToolAgentDepsT]):
 
     @property
     def __name__(self) -> str:
-        """向后兼容属性：兼容外部代码或测试对 `tool.__name__` 的直接反射。"""
+        """兼容外部代码/测试对 `tool.__name__` 的反射。"""
         return self.name
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -142,11 +125,7 @@ class ManagedTool(Tool[ToolAgentDepsT]):
 
 
 class ToolRegistry:
-    """基于 PydanticAI 的工具注册中心。
-
-    提供工具的统一编目、动态启用检查、多维度过滤（分类/风险等级/标签）
-    以及按环境动态组装给 PydanticAI Agent 的能力。
-    """
+    """工具注册中心：编目、启用检查、按分类 / 风险等级 / 标签过滤与装配。"""
 
     def __init__(self) -> None:
         self._tools: dict[str, ManagedTool[Any]] = {}

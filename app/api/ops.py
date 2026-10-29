@@ -1,43 +1,6 @@
-"""运维端点：健康检查与进程内指标导出。
-
-## 健康检查要分两个层次
-
-- `GET /health`：**存活**。不碰数据库、不碰上游，只证明进程还能处理请求。容器
-  liveness probe 用这个——它一旦失败就该重启进程，而数据库抖动不该触发重启
-  （重启解决不了数据库的问题，只会把在途请求全丢掉）。
-- `GET /health/ready`：**就绪**。探测数据库、Redis、对象存储。readiness probe 用这个。
-
-把两者合成一个端点是最常见的错误：要么数据库抖一下就触发重启风暴，要么进程假活
-着却一直 500。
-
-## 为什么「探到了」不等于「必须摘流量」
-
-`/health/ready` 会报告每一项依赖的状态，但**只有 `READINESS_REQUIRED_DEPENDENCIES`
-里的项失败才返回 503**（默认只有 database）。原因是这些依赖的失败模式完全不同：
-
-- 数据库挂了：登录、历史、知识库全部不可用，实例留着只会制造 500 → 必须摘掉；
-- Redis 挂了：限流退化成进程内计数、缓存 miss、会话回源数据库——服务仍能干活，
-  摘掉实例反而会把一次可恢复的抖动放大成全站故障；
-- 对象存储挂了：只有上传/下载不可用，而对话与检索完全正常。
-
-把三者都设成必需，是「一次 Redis 抖动导致全部实例被摘、然后真的全站 500」的经典成因。
-保留 `degraded` 状态在响应体里，是为了让监控能看见降级，而不必靠摘流量来表达。
-
-## 指标端点为什么不需要登录
-
-`/api/metrics` 暴露的是**聚合计数**（请求数、延迟分桶、错误率），不含任何用户数据、
-没有 URL 与 query、没有用户 id。它需要被 Prometheus 之类的采集器直接抓，加认证会让
-部署多一层凭据管理。
-
-代价是任何人都能看到「这个服务有多少请求、多慢」——这个信息量对攻击者的价值很低，
-而漏掉它会让运维在排障时瞎猜。**如果部署方认为这也算侦察面**，用
-`METRICS_ENABLED=false` 关掉整个端点（默认关闭——见 `settings.metrics_enabled`
-的说明）。
-
-## 输出格式
-
-Prometheus 的文本 exposition 格式：`# HELP` / `# TYPE` 注释加 `name{labels} value`。
-不引 `prometheus_client` 的理由见 `app/services/metrics.py`。
+"""运维端点：健康检查与指标导出；指标端点免登录但默认关闭（`METRICS_ENABLED=false`）。
+`/health` 是存活（不碰 DB/上游，失败就该重启），`/health/ready` 是就绪，只把
+`READINESS_REQUIRED_DEPENDENCIES`（默认 database）的失败判 503，其余降级为 `degraded`。
 """
 
 from __future__ import annotations
@@ -59,8 +22,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ops"])
 
-#: readiness 探测数据库的超时（秒）。不能太长：探针本身有超时，卡住会被判失败，
-#: 而失败原因应当明确是「数据库慢」，不是「探针超时」。
+#: readiness 探测数据库的超时（秒）：太长会被探针判超时，失败原因就变成「探针慢」而不是「数据库慢」。
 READY_DB_TIMEOUT_SECONDS = 2.0
 
 
@@ -70,11 +32,9 @@ READY_DB_TIMEOUT_SECONDS = 2.0
     include_in_schema=False,
 )
 async def health() -> dict[str, object]:
-    """进程是否还能处理请求。
-
-    刻意什么都不检查：这个端点的语义是「进程活着」，不是「服务可用」。真去 ping
-    数据库会让 liveness probe 在数据库抖动时触发重启——重启解决不了数据库的问题，
-    只会把在途请求一起丢掉。就绪判定看 `/health/ready`。
+    """进程是否还能处理请求（不查任何依赖）。
+    真去 ping 数据库会让 liveness 在数据库抖动时触发重启，而重启解决不了它、只会丢掉在途请求；
+    就绪判定看 `/health/ready`。
     """
     from app.version import APP_VERSION
 
@@ -82,10 +42,8 @@ async def health() -> dict[str, object]:
 
 
 def required_dependencies() -> frozenset[str]:
-    """本次部署把哪些依赖视为「必需」。
-
-    未知名字直接忽略并告警：配置里写错一个词（`databse`）不该让服务启动失败，
-    但也不能静默当成「不需要检查」——那会让一个本该被摘流的实例继续接流量。
+    """本次部署把哪些依赖视为必需。
+    未知名字忽略并告警：写错一个词不该让启动失败，也不能静默当成「不用检查」——那会让该摘流的实例继续接流量。
     """
     known = {"database", "redis", "storage", "provider_keys"}
     raw = (settings.readiness_required_dependencies or "").split(",")
@@ -103,17 +61,12 @@ def required_dependencies() -> frozenset[str]:
 )
 async def health_ready(response: Response) -> dict[str, object]:
     """逐项探测依赖，按配置决定是否把实例摘出负载均衡。
-
-    不检查上游模型：它们本来就是「可能失败」的外部依赖，模型挂了不该让整个实例被
-    摘出负载均衡——那样连历史会话都看不了。模型失败由指标与备用模型机制暴露。
-
-    必需依赖失败时返回 503：让编排器把流量摘走，用户就不会撞上一连串 500。
-    非必需依赖失败只降级为 `degraded`（仍 200），理由见模块 docstring。
+    不检查上游模型：模型挂了不该摘掉整个实例（那样连历史会话都看不了）；必需依赖失败返回 503，
+    非必需失败只降级为 `degraded`（仍 200），理由见模块 docstring。
     """
     required = required_dependencies()
 
-    # 用 `wait_for` 而不是 `asyncio.timeout`：后者是 Python 3.11 才有的，本项目最低
-    # 支持 3.10（`chat_service` 与 `mcp_client` 里也都是这个写法）。
+    # 用 `wait_for`：`asyncio.timeout` 是 3.11 才有的，本项目最低支持 3.10。
     async def ping_db() -> None:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
@@ -147,14 +100,8 @@ async def health_ready(response: Response) -> dict[str, object]:
 
 
 async def _provider_keys_health() -> dict[str, object]:
-    """提供商的 API Key 是否都还能解密。
-
-    换过 `AUTH_SECRET` 之后，已落库的密文全部解不开，而下游表现是「上游 401 + 后台
-    显示未设置」——两条线索都指向「key 填错了」。这个探针是唯一能从运维面直接看出
-    「密钥换了」的地方。
-
-    **不参与 `required` 判定**：它不影响对话以外的一切（历史、管理、登录都正常），
-    把它算成不健康会让一个「只有模型调用失败」的实例被整体摘流。
+    """提供商的 API Key 是否都还能解密：换过 `AUTH_SECRET` 后只表现为「上游 401 + 后台显示未设置」。
+    不参与 `required` 判定：它只影响对话，算成不健康会让「只有模型调用失败」的实例被整体摘流。
     """
     try:
         broken = await audit_provider_key_decryption()
@@ -187,11 +134,8 @@ async def _storage_health() -> dict[str, object]:
     include_in_schema=False,
 )
 async def metrics_endpoint() -> Response:
-    """导出计数器与延迟直方图。
-
-    默认**关闭**（`METRICS_ENABLED=false`）：它是一个不需要登录的端点，多开一个
-    就多一分侦察面，而绝大多数部署并没有采集器。关掉时返回 404 而不是 403——
-    「这个端点不存在」比「存在但你不能看」泄露的信息更少。
+    """导出计数器与延迟直方图；关闭时（`METRICS_ENABLED=false`）返回 404 而不是 403。
+    免登录端点默认关闭：多开一个就多一分侦察面；404 比「存在但你不能看」泄露得更少。
     """
     if not settings.metrics_enabled:
         return Response(status_code=status.HTTP_404_NOT_FOUND)

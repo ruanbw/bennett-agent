@@ -1,19 +1,7 @@
 """备用模型（`FALLBACK_MODEL_NAME`）的解析口径。
 
-备用模型的名字来自环境变量，而「能不能真的用上」取决于数据库里的启用状态与提供商
-归属。两处都要做同一个判断：
-
-- `agent_factory`：决定要不要包一层 `FallbackModel`（旧版网关路径）；
-- `model_service.registry`：决定快照里有没有 `fallback_key` / 备用模型窗口。
-
-此前两边各写了一份 `_configured_fallback_name`，注释里互相指着对方说「口径必须一致」
-——这正是最容易漂移的写法。这里收敛成一份。
-
-## 为什么「配了但用不上」必须留日志
-
-`FALLBACK_MODEL_NAME=openai/backup` 但那个模型没启用、或不属于同一提供商时，当前行为是
-**静默不兜底**：主模型 503 时用户直接看到失败，而运维以为自己配了兜底。这种「配置看起来
-生效、实际没生效」的问题在故障现场几乎不可能被发现，所以这里显式记一条 WARNING。
+名字来自环境变量、能否用上却取决于库里的启用状态与提供商归属，`agent_factory` 与
+`model_service.registry` 都调这里。「配了但用不上」必须留 WARNING：静默不兜底时用户直接看到失败。
 """
 
 from __future__ import annotations
@@ -32,8 +20,8 @@ _warned: set[tuple[str, str | None]] = set()
 def configured_fallback_name(primary_name: str) -> str | None:
     """配置里的备用模型名；空值、与主模型相同都视为「不启用」。
 
-    同名时没有必要包 `FallbackModel`：它只会对同一个模型再打一次，还让错误变成异常组
-    （分类文案反而更绕）。大小写不归一：模型 id 由网关定义，后端不做猜测。
+    同名没必要包 `FallbackModel`：只会对同一个模型再打一次，还把错误变成更绕的异常组。
+    大小写不归一：模型 id 由网关定义，后端不做猜测。
     """
     fallback_name = (settings.fallback_model_name or "").strip()
     if not fallback_name or fallback_name == primary_name:
@@ -49,8 +37,8 @@ def reset_fallback_warnings() -> None:
 def warn_fallback_unavailable(primary_name: str, fallback_name: str, reason: str) -> None:
     """「配了备用模型但用不上」的告警，同一组合只记一次。
 
-    `reason` 要具体到能指导动作（例如「同一提供商内没有这个启用模型」），
-    而不是笼统的「备用模型不可用」。
+    `reason` 要具体到能指导动作（例如「同一提供商内没有这个启用模型」），不能是笼统的
+    「备用模型不可用」。
     """
     key = (primary_name, fallback_name)
     if key in _warned:

@@ -1,20 +1,7 @@
-"""HTTP 中间件：请求体大小上限。
+"""HTTP 中间件：请求体大小上限、登录 CSRF 守卫、安全响应头。
 
-## 为什么需要它
-
-Starlette / uvicorn **默认不限制请求体大小**。本项目的 JSON body 校验发生在 Pydantic
-解析**之后**（例如同步接口的单条 payload 上限是 256 KB），也就是说一个 10MB 的请求
-会先被完整读进内存、解析成对象，然后才被告知「这条消息太大了」。注册完全开放，任何
-人都能反复发送超大 body，把单进程的内存打满（H-02）。
-
-这里在 ASGI 层做两道检查：
-
-1. `Content-Length` 声明超限 → 不读 body，直接 413；
-2. 分块传输（没有 Content-Length）→ 边读边累计，超过上限立即中止并 413。
-
-上限是 `settings.max_request_body_bytes`（默认 16 MB），足够容纳对话历史的 400k
-字符与正常的同步批次，同时把「一次请求能占多少内存」变成有界值。反向代理上还应再
-配一层更小的值（见 `.env.example`）。
+Starlette 默认不限制请求体大小，而 body 校验发生在 Pydantic 解析之后，且注册完全开放——
+不在这里挡，任何人都能用超大 body 把单进程内存打满（H-02）。
 """
 
 from __future__ import annotations
@@ -58,8 +45,8 @@ async def _send_413(send: Any) -> None:
 class MaxBodySizeMiddleware:
     """限制单个 HTTP 请求体大小；超限返回 413。
 
-    纯 ASGI 实现（不用 `BaseHTTPMiddleware`）：后者会额外包一层 task，且对 SSE 这类
-    流式响应有已知的缓冲/取消问题，不适合本服务的 `/api/chat`。
+    纯 ASGI 实现而非 `BaseHTTPMiddleware`：后者多包一层 task，且对 SSE 这类流式响应有
+    已知的缓冲/取消问题，不适合 `/api/chat`。
     """
 
     def __init__(self, app: Any, *, max_bytes: int) -> None:
@@ -93,16 +80,15 @@ class MaxBodySizeMiddleware:
             if message.get("type") == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_bytes:
-                    # 抛到本中间件的 try/except；应用（FastAPI/Starlette）不会把它
-                    # 当成正常输入继续处理。
+                    # 抛到本中间件的 try/except，应用不会把它当正常输入继续处理。
                     raise _BodyTooLarge
             return message
 
         try:
             await self.app(scope, limited_receive, tracked_send)
         except _BodyTooLarge:
-            # 只有在响应尚未开始时才能补 413；已经开始写响应说明 body 是在响应
-            # 中途被读的（本服务没有这种端点），此时只能让连接按异常关闭。
+            # 只有响应尚未开始时才能补 413；已开始写说明 body 是响应中途读的（本服务无此
+            # 端点），此时只能让连接按异常关闭。
             if not response_started:
                 await _send_413(send)
 
@@ -146,27 +132,10 @@ def _forbidden() -> tuple[int, bytes]:
 
 
 class OriginGuardMiddleware:
-    """拒绝「浏览器发起的跨站状态变更请求」。
+    """拒绝浏览器发起的跨站状态变更请求（`/api/*` 的非安全方法）。
 
-    ## 为什么不能只靠 SameSite=Lax
-
-    登录是**表单编码**的简单请求，攻击页可以自动提交一个跨站 `<form method=POST>`。
-    `SameSite=Lax` 只限制「是否携带已有 cookie」，并不阻止跨站顶层 POST 的响应
-    **写入新的会话 cookie**——受害者会被静默登入攻击者账号（M-01）。HttpOnly 同样
-    无关。
-
-    ## 规则
-
-    对 `/api/*` 的非安全方法（POST/PUT/PATCH/DELETE）：
-
-    1. 有 `Origin`：必须命中 CORS 允许来源，或与请求 `Host` 同源；
-    2. 没有 `Origin` 但有 `Referer`：按 Referer 的 origin 做同样判断；
-    3. 两者都没有：如果 `Sec-Fetch-Site: cross-site` 则拒绝；否则放行
-       （curl / 服务间调用等非浏览器客户端不带这些头）。
-
-    允许来源来自 `CORS_ALLOWED_ORIGINS`；同源判断只看 host:port（反代下 scheme
-    可能被改写，按 host 比较更稳）。`*` 视为显式放开任意来源（默认不推荐；
-    且 `allow_credentials=true` 时配置层已禁止该组合）。
+    SameSite=Lax 只限制是否携带已有 cookie，不阻止跨站顶层表单 POST 写入新会话 cookie——受害者会被
+    静默登入攻击者账号（M-01）。来源取自 CORS_ALLOWED_ORIGINS；都没有时只拒 cross-site。
     """
 
     def __init__(self, app: Any, *, allowed_origins: list[str]) -> None:
@@ -228,9 +197,8 @@ class OriginGuardMiddleware:
 # 安全响应头 / 缓存策略
 # ---------------------------------------------------------------------
 
-#: 所有响应都带的基线头。API 返回 JSON，但 `X-Content-Type-Options: nosniff`
-#: 能阻止浏览器把错误页/上游内容按 HTML 猜类型；`X-Frame-Options` 防点击劫持
-#: （对 `/docs` 这类页面也有用）。
+#: 所有响应都带的基线头：`nosniff` 阻止浏览器把错误页/上游内容按 HTML 猜类型，
+#: `X-Frame-Options` 防点击劫持（`/docs` 这类页面也需要）。
 _BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"x-content-type-options", b"nosniff"),
     (b"x-frame-options", b"DENY"),
@@ -241,9 +209,8 @@ _BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 class SecurityHeadersMiddleware:
     """给 `/api/*` 响应加安全头，且默认 `Cache-Control: no-store`。
 
-    `/api/auth/me`、`/api/admin/users` 等响应含账号/邮箱/角色信息；没有显式
-    `Cache-Control` 时，浏览器与中间缓存可能把带 cookie 的 GET 响应留在本地缓存
-    （共享电脑/浏览器历史）。SSE 自己已经设了 `no-store`，这里不覆盖已有值。
+    `/api/auth/me`、`/api/admin/users` 的响应含账号与角色信息：没有显式 Cache-Control 时，
+    浏览器与中间缓存会把带 cookie 的 GET 留在本地（共享电脑）。已有值不覆盖。
     """
 
     def __init__(self, app: Any) -> None:

@@ -1,15 +1,7 @@
 """管理后台的请求/响应模型。
 
-几条刻意的边界：
-
-1. **API key 只进不出**：响应里永远只有掩码（`api_key_hint`），编辑时留空表示
-   「不修改」。没有「回显完整 key」的字段，避免它出现在浏览器缓存、日志、
-   截图里。
-2. **base_url 只接受 http(s)**：管理接口本身只有超级管理员能访问，但错误协议
-   （`file://`、`javascript:`）没有任何合法用途，早失败比交给 httpx 报一个难懂的
-   错更好。
-3. 更新用 `None`/缺省表示「不修改」，与 `model_service` 的哨兵语义对齐：
-   `ProviderUpdate` 的字段全部可选，请求里没出现的键不会被写回。
+API key 只进不出：响应里只有掩码，编辑时留空表示不变，避免它出现在浏览器缓存/日志/截图里。
+`base_url` 只接受 http(s)。更新用 `None`/缺省表示「不修改」，与 `model_service` 的哨兵语义对齐。
 """
 
 import uuid
@@ -29,8 +21,7 @@ MAX_MODEL_ID_CHARS = 200
 def mask_api_key(api_key: str | None) -> str | None:
     """把 API key 变成可安全展示的掩码。
 
-    长度很短时不保留任何字符：`sk-1` 本身就没有可打码的余地，露出 2 个字符等于
-    泄露一半。
+    长度很短时不留任何字符：`sk-1` 没有可打码的余地，露出 2 个字符等于泄露一半。
     """
     if not api_key:
         return None
@@ -57,8 +48,7 @@ class ProviderRead(BaseModel):
 class ProviderPresetRead(BaseModel):
     """内置厂商预设（`GET /api/admin/provider-presets`）。
 
-    `note` 说明该厂商模型列表能同步到哪些元数据——大多数 OpenAI 系厂商的
-    `/v1/models` 只给 id，管理员不该对「同步完窗口还是未知」感到意外。
+    `note` 说明该厂商的模型列表能同步到哪些元数据，避免管理员对「同步完窗口还是未知」感到意外。
     """
 
     key: str
@@ -117,8 +107,8 @@ class ProviderCreate(BaseModel):
 class ProviderUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=MAX_NAME_CHARS)
     base_url: str | None = Field(None, min_length=1, max_length=MAX_URL_CHARS)
-    #: None = 不修改；空串 = 清空；非空 = 更新。用 `model_fields_set` 区分
-    #: 「没传」与「显式传 null」，因此路由层只把请求里真正出现的键往下传。
+    #: None = 不修改；空串 = 清空；非空 = 更新。用 `model_fields_set` 区分「没传」与
+    #: 「显式传 null」，路由层只把请求里真正出现的键往下传。
     api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
     enabled: bool | None = None
 
@@ -165,15 +155,8 @@ class ModelCreate(BaseModel):
     description: str | None = Field(None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] = Field(default_factory=list)
-    #: 上下文窗口与输出上限都有**量纲**约束，不只是「正整数」。
-    #:
-    #: 下界 1024 不是拍脑袋：`build_budget` 先扣系统提示词与工具 schema 的固定开销
-    #: （实测约 1.5k token），再乘安全系数。窗口填 1 时算出来的 `limit_tokens` 是 0，
-    #: 于是该模型下**每一条**对话都以 `context_overflow` 收尾，文案是「超过可用上限 0
-    #: （该模型窗口 1）」——管理员不会认为这是自己填错了一个数字。
-    #:
-    #: 上界 10M：列是 PG `INTEGER`，2^31 溢出会让 asyncpg 直接抛 DataError 变成 500，
-    #: 而 10M 已经远超任何真实模型（当前最大约 2M）。
+    #: 下界 1024：`build_budget` 先扣约 1.5k 固定开销再乘安全系数，填 1 会让该模型下每条对话都
+    #: 超限；上界 10M：列是 PG `INTEGER`，2^31 会让 asyncpg 抛 DataError 变 500，而它已远超真实模型。
     context_window: int | None = Field(None, ge=1024, le=10_000_000)
     max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
     enabled: bool = True
@@ -193,8 +176,8 @@ class ModelUpdate(BaseModel):
     description: str | None = Field(None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] | None = None
-    #: 量纲约束与 `ModelCreate` 同一套理由（见那里）：填 1 会让该模型下每条对话
-    #: 都被判超限，填 2^31 会让 PG INTEGER 溢出成 500。
+    #: 量纲约束与 `ModelCreate` 同一套理由：填 1 会让该模型下每条对话都被判超限，
+    #: 填 2^31 会让 PG INTEGER 溢出成 500。
     context_window: int | None = Field(None, ge=1024, le=10_000_000)
     max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
     enabled: bool | None = None
@@ -219,18 +202,15 @@ class UserAdminRead(BaseModel):
     is_active: bool
     is_superuser: bool
     is_verified: bool
-    #: 角色字符串（`user` / `admin` / `superadmin`）。前端展示徒标与按钮禁用状态都靠它。
+    #: 角色字符串（`user` / `admin` / `superadmin`），前端展示角色标识与按钮禁用状态都靠它。
     role: str = ROLE_USER
 
 
 class RoleUpdate(BaseModel):
     """角色变更请求。
 
-    用 `Literal` 而不是裸 `str`：非法值必须在入口就 422，而不是悄悄被
-    `Role.parse` 降级成 `user`——那会让「我把 A 改成 admn 了但没生效」变成一场猜测。
-
-    `superadmin` 刻意**不在**允许值里：最高一档只能经运维通道（`scripts/seed_admin.py`）
-    授予，不能通过 HTTP 接口互相提权。
+    用 `Literal` 而不是裸 `str`：非法值必须在入口就 422，而不是被 `Role.parse` 悄悄降级成
+    `user`。`superadmin` 刻意不在允许值里：最高一档只能经运维通道（`scripts/seed_admin.py`）授予。
     """
 
     role: Literal["user", "admin"]
@@ -238,8 +218,7 @@ class RoleUpdate(BaseModel):
     @field_validator("role")
     @classmethod
     def _known(cls, value: str) -> str:
-        # Literal 已经挡了；这里保留显式检查，让「新增中档位」时忘记同步 ALL_ROLES
-        # 的改动在这里立刻炸掉，而不是静默放过。
+        # Literal 已挡住非法值；显式检查让「新增中档位却忘了同步 ALL_ROLES」在这里立刻炸掉。
         if value not in ALL_ROLES:
             raise ValueError(f"必须是 {list(ALL_ROLES)} 之一")
         return value

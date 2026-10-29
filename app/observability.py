@@ -1,31 +1,7 @@
-"""请求关联 ID 与访问日志。
+"""请求关联 ID 与访问日志：每个请求一个 ID，同时出现在响应头、日志行与错误响应体里。
 
-## 为什么需要它
-
-现在的日志里没有任何能把「一次用户报障」和「一组日志行」连起来的东西：用户说「刚才
-那一下失败了」，运维只能按时间去猜。`chat_service._new_error_id` 已经把内部错误的关联
-ID 回给前端，但它**只覆盖异常分支**——正常请求、慢请求、429、413 都没有 ID，也就没有
-可回查的线索。
-
-这里给每个 HTTP 请求分配一个 ID，并让它同时出现在三个地方：
-
-1. 响应头 `X-Request-ID`（客户端/前端可以记下来，报障时直接给）；
-2. 该请求产生的**所有日志行**（通过 `logging.Filter` 注入 `request_id` 字段）；
-3. 出错时的 JSON 响应体（`error_id` 与请求 ID 是同一个值）。
-
-## 为什么不引入 OpenTelemetry
-
-没有 trace 后端可接；引入 SDK 只会增加启动依赖与配置面，而拿到的东西（span 树）
-在这里没有消费者。一个请求 ID 加结构化日志已经
-能回答「这次失败发生在哪一步」，代价是三行代码和一个 ContextVar。
-
-真要接 OTel 时的落点就在这里：`request_id` 作为 trace id 的来源，`RequestContextMiddleware`
-是天然的 span 边界。这个模块因此刻意不叫 `tracing`——它不假装自己是分布式追踪。
-
-## 为什么用纯 ASGI 中间件
-
-与 `app.middleware` 里其他几个一致：`BaseHTTPMiddleware` 会给 SSE 额外包一层 task，
-而本服务的 `/api/chat` 是长连接流式响应，那层包装有已知的缓冲与取消问题。
+纯 ASGI 中间件：`BaseHTTPMiddleware` 会给 SSE 多包一层 task，长连接有已知的缓冲与取消问题。
+不引入 OpenTelemetry（没有 trace 后端）；真要接就从这里起，`request_id` 直接当 trace id。
 """
 
 from __future__ import annotations
@@ -42,15 +18,14 @@ from app.services.metrics import (
     metrics,
 )
 
-#: 客户端可以自带 ID（链路里已有网关时不必再生成一个）。限制长度与字符集：
-#: 它会进日志与响应头，换行符能伪造日志行，超长值能撑爆日志文件。
+#: 客户端可自带 ID（网关已生成时不必再造）；限长度与字符集，因为换行符能伪造日志行。
 REQUEST_ID_HEADER = "X-Request-ID"
 MAX_REQUEST_ID_CHARS = 64
 
-#: 请求 ID 允许的字符集。ASCII 字母数字加 `._-`（链路追踪 ID 的常见形态）。
+#: 请求 ID 允许的字符集：ASCII 字母数字加 `._-`。
 _ALLOWED_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
-#: 当前请求的 ID。`None` 表示不在请求上下文里（CLI、后台任务、单测直调服务层）。
+#: 当前请求的 ID。`None` 表示不在请求上下文里（后台任务、单测直调服务层）。
 _request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 
@@ -60,42 +35,30 @@ def current_request_id() -> str | None:
 
 
 def new_request_id() -> str:
-    """生成一个新的请求 ID（12 位十六进制，与 `chat_service._new_error_id` 同长度）。
-
-    可读性优先于强度：它只用于关联日志，不是安全令牌。16 位十六进制的碰撞概率在
-    「一天百万请求」的量级下仍然可以忽略。
-    """
+    """生成请求 ID（12 位十六进制，与 `chat_service._new_error_id` 同长度）：只用于关联日志，不是安全令牌。"""
     return uuid.uuid4().hex[:12]
 
 
 def sanitize_request_id(raw: str | None) -> str | None:
-    """校验客户端带来的 ID；不合法返回 None（调用方改为自己生成）。
+    """校验客户端带来的 ID，不合法返回 None（调用方改为自己生成）。
 
-    只允许 `A-Za-z0-9._-`：它会被原样写进日志行与响应头，换行符可以伪造一整条假日志，
-    非 ASCII 在各种网关与日志采集器里会变成乱码。长度也有上限，否则一条 1MB 的头就能
-    把日志文件撑大。
+    它会原样写进日志行与响应头：换行符能伪造一整条假日志，非 ASCII 会在采集器里变乱码。
     """
     if not raw:
         return None
     candidate = raw.strip()
     if not candidate or len(candidate) > MAX_REQUEST_ID_CHARS:
         return None
-    # 显式限定 ASCII：`str.isalnum()` 对中文、全角字符也返回 True，用它做校验会让
-    # 「带中文」这类值通过，然后在真实网关与日志采集器里变成乱码或被截断。
+    # 不能改用 `str.isalnum()`：它对中文与全角字符也返回 True，值会在采集器里变乱码。
     if not all(char in _ALLOWED_ID_CHARS for char in candidate):
         return None
     return candidate
 
 
 class RequestIdFilter(logging.Filter):
-    """把当前请求 ID 注入每条日志记录。
+    """把当前请求 ID 注入每条日志记录，无请求上下文时填 `-`（一眼看出启动日志/后台任务）。
 
-    `-` 而不是空串：日志格式里 `%(request_id)s` 空缺时对齐会乱，而 `-` 一眼能看出
-    「这条不属于任何请求」（启动日志、后台任务）。
-
-    这个 Filter 挂在**根 handler** 上（`configure_logging`），因此所有 logger（含
-    uvicorn 自己的）都会带上这个字段——两条日志流在同一个文件里混排时，这是唯一能把
-    它们分开的东西。
+    Filter 挂在根 handler 上（`configure_logging`），uvicorn 自己的日志也会带这个字段。
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -107,9 +70,7 @@ class RequestIdFilter(logging.Filter):
 class RequestContextMiddleware:
     """给每个请求分配 ID、写进响应头、并在日志里带上。
 
-    纯 ASGI 实现（理由见模块 docstring）。`finally` 里复位 ContextVar：不复位的话，
-    同一个 task 复用（ASGI 服务器会复用 worker task 的一部分上下文）时，下一个请求的
-    日志会带着上一个请求的 ID——比没有 ID 更糟，因为它看起来是对的。
+    `finally` 里必须复位 ContextVar：不复位会让下一个请求的日志带着上一个的 ID，而它看起来是对的。
     """
 
     def __init__(self, app: Any) -> None:  # noqa: ANN401 - ASGI app
@@ -143,26 +104,16 @@ class RequestContextMiddleware:
             _request_id.reset(token)
 
 
-# ---------------------------------------------------------------------
-# HTTP 指标中间件
-# ---------------------------------------------------------------------
-#: 不算进指标的路径：它们由探测/爬虫高频打，混进 HTTP 指标只会稀释真实信号。
-#: 前缀匹配，所以 `/health` 与 `/health/ready` 都算。
+# --- HTTP 指标中间件 ----------------------------------------------------
+#: 不算进指标的路径：探测/爬虫高频打，混进来只会稀释真实信号；前缀匹配。
 _UNMETERED_PREFIXES: tuple[str, ...] = ("/health", "/api/metrics")
 
-#: 路由模板找不到时的兜底标签。
-#:
-#: 用**模板**而不是实际路径：`/api/x/123` 会让每个 id 变成一个标签组合，直接吃光
-#: `MAX_SERIES_PER_METRIC`，然后所有真实指标都变成「被丢弃」（见 metrics 模块）。
+#: 路由模板找不到时的兜底标签；标签必须用模板，实际路径会让每个 id 吃光 `MAX_SERIES_PER_METRIC`。
 _UNMATCHED_ROUTE = "<unmatched>"
 
 
 def _route_label(scope: dict[str, Any]) -> str:
-    """取 FastAPI 解析出的路由模板。
-
-    `scope["route"].path` 只在**路由匹配成功之后**才有，而 ASGI 中间件在匹配之前就
-    被调用了——所以这个函数在 `finally` 里被调用，那时 `scope` 已被路由填充。
-    """
+    """取 FastAPI 解析出的路由模板；`scope["route"]` 只在匹配成功后才有，故必须在 finally 里调。"""
     route = scope.get("route")
     path = getattr(route, "path", None)
     if isinstance(path, str) and path:
@@ -174,12 +125,7 @@ def _route_label(scope: dict[str, Any]) -> str:
 class HttpMetricsMiddleware:
     """统计 HTTP 请求数与耗时。
 
-    纯 ASGI（同 `RequestContextMiddleware`）：`BaseHTTPMiddleware` 会给 SSE 额外包一层
-    task，对长连接有已知的缓冲/取消问题。
-
-    **流式响应的耗时语义**：这里的计时覆盖到「响应发送完毕」，对 `/api/chat` 就是一整
-    条 SSE 流的时长。那正是用户感知的值，但也意味着它远大于普通接口——所以看分位数时
-    要按 `route` 分开看，别把所有路由混在一起。
+    计时覆盖到响应发送完毕，`/api/chat` 就是一整条 SSE 流的时长，看分位数必须按 `route` 分开。
     """
 
     def __init__(self, app: Any) -> None:  # noqa: ANN401 - ASGI app
@@ -207,8 +153,7 @@ class HttpMetricsMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
-            # 记录的时机在 finally：抛异常（客户端断开、内部错误）时也要留下痕迹，
-            # 否则「500 变多了」这件事在指标里完全看不见——而它正是最该被看到的。
+            # 记在 finally：异常/客户端断开时也要留痕迹，否则「500 变多了」在指标里完全看不见。
             elapsed = time.perf_counter() - started
             route = _route_label(scope)
             status = status_holder["status"] or 0
@@ -222,13 +167,9 @@ class HttpMetricsMiddleware:
 
 
 def _status_class(status: int) -> str:
-    """把状态码压成分类（`2xx` / `4xx` / …）。
+    """把状态码压成分类（`2xx`/`4xx`/…）：看板要的是 `5xx` 占比，不是 `503` 与 `502` 的对比。
 
-    具体状态码才是有限集合（十几个值），用它当标签也不会有基数问题；但分类对
-    「错误率」这件事更直接——看板上要的是 `5xx` 占比，不是 `503` 与 `502` 的对比。
-
-    0（没有响应起始消息，客户端在发响应前就断开）单独记为 `none`：混进 `5xx` 会让
-    错误率虚高，而它其实是「用户自己关掉了页面」。
+    0（响应前就断开）单独记为 `none`，混进 `5xx` 会让错误率虚高。
     """
     if status <= 0:
         return "none"

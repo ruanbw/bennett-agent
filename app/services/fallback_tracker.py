@@ -1,12 +1,6 @@
-"""收集本轮生成里「主模型 → 备用模型」的切换。
-
-`FallbackModel` 的切换发生在模型内部（`fallback_on` 回调），那个回调拿不到
-`RunContext`，也没有机会把结果交给对话流。这里用 `ContextVar` 暴露一个「本轮
-收集器」：装配层的回调调用 `record_fallback()`，`chat_service` 在事件循环里把它
-翻译成 `FallbackUsed` 事件。
-
-ContextVar 是 task-local 的：并发请求各持一份，互不串扰；CLI 直接跑 Agent 或
-标题生成没有开启收集器时，`record_fallback()` 静默忽略。
+"""收集本轮「主模型 → 备用模型」的切换：`FallbackModel` 的 `fallback_on` 回调拿不到 `RunContext`，
+只能通过 `ContextVar` 把结果交给对话流。ContextVar 是 task-local 的，并发请求互不串扰；
+没有开启收集器时（CLI / 标题生成）`record_fallback()` 静默忽略。
 """
 
 from collections.abc import Iterator
@@ -19,11 +13,8 @@ from app.services.metrics import FALLBACKS_TOTAL, metrics
 
 @dataclass(frozen=True)
 class FallbackOccurrence:
-    """一次实际发生的模型切换。
-
-    `reason` 是给人和用户看的类别短语（「上游限流」「上游 503」「请求超时」…），
-    由 `upstream_errors.describe_fallback_reason` 生成：只说「已切换」不说为什么，
-    用户与运维都只能猜。
+    """一次实际发生的模型切换；`reason` 由 `upstream_errors.describe_fallback_reason` 生成。
+    只说「已切换」不说为什么，用户与运维都只能猜。
     """
 
     primary_model: str
@@ -37,10 +28,8 @@ _collector: ContextVar[list[FallbackOccurrence] | None] = ContextVar("fallback_c
 
 @contextmanager
 def collect_fallbacks() -> Iterator[list[FallbackOccurrence]]:
-    """在本轮上下文中开始收集切换；退出时复位。
-
-    用 `contextmanager` 而不是手工 `set/reset`：生成器被提前关闭（客户端断开）时
-    `finally` 仍会复位，避免 ContextVar 在 task 里留下脏状态。
+    """在本轮上下文中开始收集切换，退出时复位。
+    用 `contextmanager` 而非手工 `set/reset`：生成器被提前关闭（客户端断开）时 `finally` 仍会复位。
     """
     occurrences: list[FallbackOccurrence] = []
     token = _collector.set(occurrences)
@@ -51,11 +40,8 @@ def collect_fallbacks() -> Iterator[list[FallbackOccurrence]]:
 
 
 def record_fallback(primary_model: str, fallback_model: str, reason: str = "") -> None:
-    """记录一次实际发生的切换；没有收集器时静默忽略。
-
-    同时打一笔指标：切换是**降级信号**——主模型持续限流/挂掉时，用户看到的回答来自
-    一个能力不同的模型，而这件事在日志里只是一条 WARNING。没有指标就无法回答
-    「这个月备用模型被用了几次」，也就看不出上游到底稳不稳。
+    """记录一次实际发生的切换（没有收集器时静默忽略），并打一笔指标。
+    切换是降级信号：没有指标就回答不了「这个月备用模型用了几次」，也就看不出上游稳不稳。
     """
     occurrences = _collector.get()
     if occurrences is not None:

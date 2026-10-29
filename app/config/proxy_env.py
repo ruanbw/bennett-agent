@@ -1,25 +1,7 @@
-"""规范化 no_proxy 环境变量，避免 httpx 解析出非法代理白名单。
+"""规范化 no_proxy：`[::1]` 会被 httpx 拼成 `all://*[::1]`，客户端一构造就抛 `InvalidURL`。
 
-httpx 在 `trust_env=True` 时会把 `no_proxy` 的每一项拼成代理白名单表达式
-（见 `httpx._utils.get_environment_proxies`）：IPv4、localhost、域名分别拼成
-`all://...`。但它只把**裸** IPv6（`::1`）识别成 IP；方括号写法 `[::1]` 会掉进
-域名分支，被拼成 `all://*[::1]` —— 非法 URL。后果是：本进程里任何 httpx 客户端
-（模型列表、聊天上游、Tavily）在构造或首次请求时直接抛
-`InvalidURL: Invalid port: ':1]'`，请求一个字节都没发出去。
-
-坏的是客户端的代理白名单而不是某一条请求，所以表现为“全挂”：`model_service`
-拉不到网关模型列表，静默兜底成配置里的一个模型，最容易被误判成网关或端口问题。
-
-这里做两件事（都只针对「会让 httpx 拼出非法白名单」的条目）：
-
-1. `[IPv6]` / `[IPv6]:端口` 归一化成**裸** `IPv6`（httpx 能正确识别）。带端口的写法
-   同样会炸：`[::1]:8000` 被拼成 `all://*[::1]:8000`，报的同样是 `Invalid port: ':1]:8000'`。
-   归一化时**丢掉端口**——`no_proxy` 的语义就是按主机名绕过代理，curl/browser 也忽略端口。
-2. 其余「含 `[`/`]` 且带冒号」的条目直接丢弃并告警：它们进 httpx 就会让**整个**客户端
-   构造失败（`[a:b]` 也被拼成非法 URL），而删掉一个无法解析的条目的代价只是那个主机
-   仍走代理——比所有上游请求全挂小得多。
-
-刻意不 `trust_env=False` 一刀切：外网请求（Tavily 等）仍需要继承系统代理。
+方括号 IPv6 归一化成裸地址并丢掉端口（no_proxy 不按端口匹配），仍会炸的条目丢弃并告警；
+不设 `trust_env=False`，因为外网请求仍要继承系统代理。
 """
 
 import ipaddress
@@ -44,8 +26,7 @@ _BRACKETED_IPV6 = re.compile(r"^\[(?P<host>[^\]]+)\](?::(?P<port>[0-9]+))?$")
 def _bare_ipv6(token: str) -> str | None:
     """`[::1]` / `[::1]:8000` 转成 `::1`；不是方括号 IPv6 时返回 None。
 
-    带端口的写法丢掉端口：`no_proxy` 是按主机绕过代理，端口不参与匹配
-    （裸 `::1:8000` 会被解析成另一个 IPv6 地址，不能简单去掉方括号）。
+    端口必须丢：裸 `::1:8000` 会被解析成另一个 IPv6 地址，不能简单去掉方括号。
     """
     matched = _BRACKETED_IPV6.match(token)
     if not matched:
@@ -60,24 +41,20 @@ def _bare_ipv6(token: str) -> str | None:
 
 
 def _would_break_httpx(token: str) -> bool:
-    """这个条目会不会让 httpx 拼出非法白名单。
+    """这个条目会不会让 httpx 拼出非法白名单（每项被拼成 `all://*<条目>` 当 URL 解析）。
 
-    httpx 把每个 no_proxy 项拼成 `all://*{条目}`，然后当 URL 解析：条目里只要同时有
-    `[`/`]` 与冒号（`[a:b]`、`[::1]`、`[::1]:8000`），端口解析就会失败并让**整个客户端
-    构造**抛 `InvalidURL`。不含冒号的 `[not-an-ip]` 能正常解析，保持原样。
+    同时带 `[`/`]` 与冒号的条目会让端口解析失败、整个客户端构造抛 `InvalidURL`；
+    `[not-an-ip]` 能正常解析，保持原样。
     """
     has_bracket = "[" in token or "]" in token
     return has_bracket and ":" in token
 
 
 def unsupported_entries(raw: str) -> list[str]:
-    """`no_proxy` 里**看起来像网段**的条目。
+    """`no_proxy` 里看起来像网段的条目。
 
-    httpx 的白名单是 URL 模式（`all://*<条目>`），没有网段语义：`192.168.0.0/16` 会被拼成
-    `all://*192.168.0.0/16`，永远不会匹配真实主机——不报错，只是**默默不生效**。而把它写进
-    `no_proxy` 的人，本意几乎都是「内网直连」（本项目的 LiteLLM 网关常在内网）。
-
-    这类条目改不出来（httpx 不支持），只能告警：让运维知道「你以为绕过了，其实没绕过」。
+    httpx 的白名单是 URL 模式（`all://*<条目>`），没有网段语义：`192.168.0.0/16` 永远不匹配
+    真实主机，不报错只是默默不生效，而写它的人几乎都想「内网直连」。改不出来，只能告警。
     """
     entries: list[str] = []
     for part in raw.split(","):
@@ -135,8 +112,7 @@ def normalize_no_proxy(raw: str) -> str:
 def sanitize_no_proxy_env(environ: MutableMapping[str, str] | None = None) -> list[str]:
     """原地规范化 `no_proxy` / `NO_PROXY`，返回被改写的描述（空列表表示没动）。
 
-    幂等：环境已经干净时不会再改、也不会重复告警。默认作用于 `os.environ`；
-    测试或调用方可以传入自己的映射。
+    幂等：环境已经干净时不会再改、也不会重复告警。默认作用于 `os.environ`，测试可注入映射。
     """
     env = os.environ if environ is None else environ
     rewrites: list[str] = []

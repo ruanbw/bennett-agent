@@ -1,27 +1,7 @@
 """上游「列出模型」响应的统一解析：信封形状与字段别名在这里收敛成一份白名单。
 
-## 为什么要有这一层
-
-「列出模型」没有跨厂商标准，只有**事实上**的约定：
-
-- 信封主流是 OpenAI 的 `{"data": [...]}`（Anthropic、OpenRouter、Groq、Mistral、
-  vLLM……都沿用）；但 Gemini 原生与 Ollama 原生用 `{"models": [...]}`，个别网关
-  干脆返回裸数组。
-- 条目里除 `id` 外，几乎没有两个厂商用同一个字段名表达同一件事：上下文窗口在
-  Groq 叫 `context_window`、OpenRouter/Together 叫 `context_length`、Mistral 叫
-  `max_context_length`、Gemini 原生叫 `inputTokenLimit`；OpenRouter 还把实际生效的
-  上限放在嵌套的 `top_provider.context_length`。
-
-同步（`registry._fetch_remote_models`）与旧版网关（`gateway._parse_models`）都从
-这里拿解析结果，避免两套解析各自漂移。原始条目原样挂在 `UpstreamModel.raw` 上，
-同步时落库（`provider_model.raw`），让后台能回答「上游到底报了什么」。
-
-## 认识字段靠别名表，不认识的字段不猜
-
-窗口/输出上限会被 token 预算拿来截断请求，**编一个数比空着更危险**：别名表之外
-的字段一律不读，解析不出就留 None（前端显示「未知」）。类型不对的 `id` /
-`display_name` 视为坏条目（告警并跳过）；数值字段类型不对只是「这一项未知」，
-不丢整条——上游把窗口写成 `"128k"` 不该让模型从列表里消失。
+同步（`registry._fetch_remote_models`）与旧版网关（`gateway._parse_models`）共用本模块。
+别名表外的字段不读：窗口上限会被 token 预算拿去截断请求，编一个数比留 None 更危险。
 """
 
 import logging
@@ -34,9 +14,7 @@ logger = logging.getLogger(__name__)
 class UpstreamModel:
     """上游返回的一个模型条目：白名单字段 + 原始 JSON。
 
-    `description` 已解析完回退链（配置字段 -> `description` -> `owned_by 展示名`），
-    调用方拿到即可入库，不需要再补兜底文案。`raw` 是上游条目**原样**的 dict，
-    只做展示，永不参与运行时判断——运行时认它就等于把对外行为交给上游的任意字段。
+    `description` 已走完回退链，调用方拿到即可入库。`raw` 只做展示，永不参与运行时判断。
     """
 
     model_id: str
@@ -63,10 +41,9 @@ def _extract_entries(payload: object) -> list[object]:
 
 
 def _parse_int_field(value: object) -> int | None:
-    """宽松解析 int 型字段：int 或数字串；其它（None、'128k'、浮点……）一律 None。
+    """宽松解析 int 型字段：int 或数字串，其余（None、'128k'、浮点）一律 None。
 
-    刻意不做单位换算：把 '128k' 猜成 128000 是伪造数据，前端会拿着编出来的上下文
-    窗口做判断。
+    不做单位换算：把 '128k' 猜成 128000 是伪造数据，前端会拿编出来的窗口做判断。
     """
     if isinstance(value, bool):
         # bool 是 int 的子类，但 True/False 在这两个字段上没有语义
@@ -84,19 +61,16 @@ def _parse_int_field(value: object) -> int | None:
 def _parse_reasoning_flag(item: dict) -> bool | None:  # noqa: ANN001 - 上游条目
     """reasoning 三态：只有上游给出的 bool 才算表态，其余（缺字段、类型不符）为 None。
 
-    None 与 False 必须分开：False 是「上游明确说不支持」，前端据此隐藏思考等级
-    选择器；None 是「上游没说」，按未知处理。
+    None 与 False 必须分开：False 让前端隐藏思考等级选择器，None 是「上游没说」。
     """
     value = item.get("reasoning")
     return value if isinstance(value, bool) else None
 
 
 def _parse_reasoning_levels(raw: object) -> list[str]:
-    """解析模型支持的思考等级。
+    """解析模型支持的思考等级；两种形状都接受（`[{"effort": "high"}]` 或 `["high"]`）。
 
-    返回有两种形状：`[{"effort": "high"}]` 或 `["high"]`。两种都接受，其它形状
-    忽略——伪造等级会让用户选了之后请求失败（`{"effort": null}` 经 `str()` 会
-    变成等级 "None"）。空白串不是等级，照样丢掉。
+    其它形状丢掉：伪造等级会让用户选完请求失败（`{"effort": null}` 经 `str()` 会变成 "None"）。
     """
     if not isinstance(raw, list):
         return []
@@ -127,18 +101,17 @@ def _first_int(item: dict, paths: tuple[tuple[str, ...], ...]) -> int | None:  #
     return None
 
 
-#: 模型 id 的候选键。OpenAI 系是 `id`；Ollama 原生用 `name`/`model`；
-#: Gemini 原生只有 `name`（还带 `models/` 前缀）。
+#: 模型 id 的候选键：OpenAI 系是 `id`，Ollama 原生用 `name`/`model`，Gemini 原生只有
+#: 带 `models/` 前缀的 `name`。
 _ID_KEYS = ("id", "model", "name")
 
-#: 展示名的候选键，按明确程度排序。`name` 排最后：它在 OpenRouter/DeepSeek/
-#: Mistral 是展示名，但在 Ollama/Gemini 原生就是 id 本身——与 id 同源时不算
-#: 展示名（见 `_extract_display_name`）。
+#: 展示名的候选键，按明确程度排序。`name` 排最后：它在 Ollama/Gemini 原生就是 id 本身，
+#: 与 id 同源时不算展示名（见 `_extract_display_name`）。
 _DISPLAY_NAME_KEYS = ("display_name", "displayName")
 _DISPLAY_FALLBACK_KEYS = ("name",)
 
-#: 上下文窗口的别名，按可信度排序。`top_provider.context_length` 是 OpenRouter
-#: 实际生效的上限，比自报的 `context_length` 更保守。
+#: 上下文窗口的别名，按可信度排序：`top_provider.context_length` 是 OpenRouter 实际生效的
+#: 上限，比自报的 `context_length` 更保守。
 _CONTEXT_WINDOW_PATHS: tuple[tuple[str, ...], ...] = (
     ("context_window",),
     ("top_provider", "context_length"),
@@ -168,10 +141,8 @@ _REASONING_PARAMETER_NAMES = frozenset({"reasoning", "include_reasoning", "reaso
 def _extract_model_id(item: dict) -> tuple[str, str]:  # noqa: ANN001
     """取出（上游模型 id, 产生它的原始字符串）；Gemini 原生的 `models/` 前缀在这里剥掉。
 
-    `id` 键存在但不是字符串视为坏条目（抛错交给调用方告警），而不是静默跳过——
-    一个 id 为数字的条目几乎必然意味着解析假设出了问题，值得一行日志。原始字符串
-    随 id 一起返回：`name` 在某些厂商既是 id 又是唯一名称来源，判断展示名时需要
-    与**剥前缀之前**的原值比较。
+    `id` 存在但不是字符串视为坏条目（抛错告警），而不是静默跳过：那几乎必然意味着解析
+    假设出了问题。原始字符串随 id 返回，因为判断展示名要与剥前缀之前的原值比较。
     """
     for key in _ID_KEYS:
         value = item.get(key)
@@ -190,8 +161,7 @@ def _extract_model_id(item: dict) -> tuple[str, str]:  # noqa: ANN001
 def _extract_display_name(item: dict, id_raw_value: str) -> str | None:  # noqa: ANN001
     """展示名；`name` 与 id 同源时不算（Ollama/Gemini 原生的 name 就是 id）。
 
-    `display_name`/`displayName` 键存在但不是字符串视为坏条目（抛错告警）；
-    空串按缺字段处理。
+    `display_name`/`displayName` 存在但不是字符串视为坏条目（抛错）；空串按缺字段处理。
     """
     for key in (*_DISPLAY_NAME_KEYS, *_DISPLAY_FALLBACK_KEYS):
         if key not in item:
@@ -227,8 +197,8 @@ def _extract_description(
 ) -> str | None:
     """描述回退链：配置字段 -> `description` -> `owned_by 展示名`。
 
-    `description_field` 由配置传入（`MODEL_DESCRIPTION_FIELD`）：特定网关提供的
-    展示标签字段名属于网关细节，不该硬编码在这里。
+    `description_field` 由配置传入（`MODEL_DESCRIPTION_FIELD`）：展示标签字段名属于网关细节，
+    不该硬编码在这里。
     """
     for key in (description_field, "description"):
         value = item.get(key)
@@ -238,14 +208,10 @@ def _extract_description(
 
 
 def _extract_reasoning(item: dict) -> bool | None:  # noqa: ANN001
-    """思考能力：显式布尔位优先；其余只在**明确给出证据**时推导为 True，绝不推导 False。
+    """思考能力：显式布尔位优先，其余只在明确给出证据时推导 True，绝不推导 False。
 
-    各家表达「会思考」的方式：OpenAI 系的 `reasoning: true`；OpenRouter 的
-    `supported_parameters` / `reasoning.supported_efforts`；Anthropic 与 LM Studio 的
-    `capabilities.thinking`；Gemini 原生的 `thinking`；Moonshot 的 `supports_reasoning`；
-    DeepSeek 的 `effort.supported_levels`；Ollama 的 `capabilities` 枚举数组。
-    参数列表/能力表不完整是常态——拿「没列出」反推「不支持」，前端就会把思考等级
-    选择器藏起来。
+    各家表达不同（`supported_parameters` / `capabilities.thinking` / `supports_reasoning` /
+    `effort.supported_levels`）；参数列表不完整是常态，拿「没列出」反推 False 会藏掉选择器。
     """
     flagged = _parse_reasoning_flag(item)
     if flagged is not None:
@@ -298,7 +264,7 @@ def _parse_entry(item: dict, description_field: str) -> UpstreamModel:  # noqa: 
 def parse_upstream_models(payload: object, description_field: str) -> list[UpstreamModel]:
     """把上游响应解析成条目列表；无可用条目时返回空列表。
 
-    容错做在**条目级**：某个模型的 id/展示名类型不符只丢那一条并留日志，其余照常。
+    容错做在条目级：某个模型的 id/展示名类型不符只丢那一条并留日志，其余照常。
     """
     parsed: list[UpstreamModel] = []
     for index, entry in enumerate(_extract_entries(payload)):
@@ -314,9 +280,7 @@ def parse_upstream_models(payload: object, description_field: str) -> list[Upstr
 def next_page_cursor(payload: object) -> str | None:
     """读出「还有下一页」时的游标（Anthropic 的 `has_more` + `last_id`）。
 
-    其它厂商的信封要么不分页、要么用 `nextPageToken`（Gemini/Fireworks 原生管控面，
-    不是本项目会对接的 chat 兼容端点），这里刻意只认这一种形状：认错游标等于对
-    不支持分页的上游反复重打第一页。返回 None 表示没有下一页或无法判断。
+    刻意只认这一种形状：认错游标等于对不支持分页的上游反复重打第一页。None 表示没有下一页。
     """
     if not isinstance(payload, dict):
         return None

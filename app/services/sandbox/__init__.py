@@ -1,18 +1,7 @@
 """沙箱子系统的入口：provider 装配点。
 
-## 为什么 provider 通过函数取，而不是模块级单例
-
-工具函数在 import 期就被注册进 `registry`，但 provider 的构造依赖配置（`SANDBOX_ENABLED`
-可能关着、`e2b` 后端需要 token）。在 import 期构造 provider 会让「配置不全」变成
-「整个应用起不来」，而沙箱是可选能力——关掉它不该影响对话、RAG、同步。
-
-`get_provider()` 因此是**惰性 + 带缓存**的：第一次真正要建沙箱时才构造，
-服务端连不上也只在那时暴露。
-
-## 测试怎么注入
-
-`set_provider_for_tests()` 覆盖缓存。工具层只认契约（`SandboxProvider`），
-所以越权、截断、生命周期这些关键行为可以用假 provider 验证，不需要 Docker/KVM。
+provider 惰性构造：import 期构造会让「配置不全」变成整个应用起不来，而沙箱只是可选能力。
+工具层只认 `SandboxProvider` 契约，测试用 `set_provider_for_tests()` 注入假实现，不需要 Docker。
 """
 
 from __future__ import annotations
@@ -43,9 +32,9 @@ def is_sandbox_enabled() -> bool:
 
 
 def build_provider() -> SandboxProvider:
-    """按配置构造 provider。配置不合法时抛 `SandboxError`（不是 ValueError——
+    """按配置构造 provider；配置不合法时抛 `SandboxError` 而不是 `ValueError`。
 
-    工具层会把它翻译成给模型看的中文，而 `ValueError` 的英文消息会原样漏进对话）。
+    工具层会把 `SandboxError` 翻译成给模型看的中文，`ValueError` 的英文消息会原样漏进对话。
     """
     backend = settings.sandbox_provider
     if backend == "opensandbox":

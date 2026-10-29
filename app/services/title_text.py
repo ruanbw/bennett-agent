@@ -1,11 +1,5 @@
-"""会话标题的后处理：清洗模型输出与截断兜底。
-
-为什么单独成模块：标题是模型输出，天然带噪音——引号、「标题：」前缀、换行、尾随句号。
-此前 `generate_title_from_prompt` 只 `strip(_TITLE_QUOTE_CHARS)` 就返回，于是「标题：向量
-数据库选型」这样的结果会被原样存进侧边栏；截断用的是 Python 切片（UTF-16 之外按码点，
-但会把 emoji 后面的组合字符切断），而前端 `clampTitle` 是按码点算的，两端口径不一致。
-
-这里是纯函数，不碰网络与数据库，可以直接单测。
+"""会话标题的后处理：清洗模型输出与截断兜底（纯函数，不碰网络与数据库）。
+截断按 Unicode 码点，与前端 `lib/session-list.ts:clampTitle` 同口径——两端口径不一致会导致长度不同。
 """
 
 #: 模型常见的包裹符号：成对出现时整对剥掉，避免「"标题"」这种残留。
@@ -64,9 +58,7 @@ def _strip_prefix(text: str) -> str:
 
 def clamp_title(raw: str, max_chars: int) -> str:
     """按 Unicode 码点截断，不劈开 emoji / 组合字符。
-
-    与前端 `lib/session-list.ts:clampTitle` 同一口径：两端各自截断时，标题长度不能
-    因为实现语言不同而不同。
+    与前端 `lib/session-list.ts:clampTitle` 同一口径，长度不能因实现语言不同而不同。
     """
     chars = list(raw)
     if len(chars) <= max_chars:
@@ -89,10 +81,8 @@ def normalize_title(raw: str | None, max_chars: int) -> str:
 
 
 def fallback_title(prompt: str, max_chars: int) -> str:
-    """生成失败时用首条消息兜底。
-
-    取首行、折叠空白、去掉 Markdown 标题记号（`# 帮我写个函数` → `帮我写个函数`）：
-    用户的第一条消息常常直接是 Markdown，占位标题不该带着 `#` 出现在侧边栏。
+    """生成失败时用首条消息兜底：取首行、折叠空白、去掉 Markdown 标题记号。
+    用户第一条消息常常直接是 Markdown，占位标题不该带着 `#` 进侧边栏。
     """
     first_line = (prompt or "").strip().split("\n", 1)[0]
     cleaned = " ".join(first_line.split()).lstrip("#").strip()

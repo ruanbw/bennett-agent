@@ -1,29 +1,7 @@
-"""进程内指标：计数器与直方图，挂在 `/api/metrics` 上。
+"""进程内指标：计数器与固定桶直方图，挂在 `/api/metrics` 上。
 
-## 为什么不引 prometheus_client
-
-没有 Prometheus 或任何时序库可接。引入客户端只会多一个依赖和一套配置面，而拿到的
-东西（一个 `/metrics` 文本端点）在这里没有采集方。真正需要的三件事是：
-
-1. 现在这次是不是不正常（错误率、慢请求）；
-2. 比以前慢了吗（延迟分位数）；
-3. 上游/工具/压缩这些子系统各自的失败与耗时。
-
-这三件事用「进程内计数器 + 固定的延迟桶」就能回答，代价约一百行。**边界必须写清楚**：
-多 worker 部署时每个进程各有一份（与 `app/api/rate_limit.py` 的进程内限流同一个取舍），
-所以它是**排障辅助**，不是计费或容量规划的依据。要精确聚合时，把 `snapshot()` 的返回值
-推给真正的时序库即可，统计口径不用改。
-
-## 为什么直方图用固定桶而不是存原始样本
-
-存样本要无界内存（一次流量高峰就能吃掉几百 MB）。固定桶的内存是常数，而且足够回答
-「p95 有没有变差」——精确到毫秒的分位数在排障里没有额外价值。
-
-## 标签基数
-
-每个标签组合都会占一份内存，因此**标签值必须来自有限集合**（状态码、模型名来自配置、
-工具名来自注册表）。绝不把 URL、用户 id、query 这类高基数值放进去——那会变成内存泄漏，
-而且慢到看不出来（这正是「指标把服务拖垮」的经典成因）。
+不引 prometheus_client（没有采集方）；多 worker 时每进程各一份，所以只是排障辅助而非计费依据。
+标签值必须来自有限集合：URL/用户 id 这类高基数会变成几乎看不出来的内存泄漏。
 """
 
 from __future__ import annotations
@@ -32,15 +10,8 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-#: 延迟桶的边界（秒）。覆盖「本地缓存命中」到「上游 60 秒超时」的实际范围。
-#:
-#: 上界取到 **600**：这是 `chat_service.TOTAL_STREAM_BUDGET_SECONDS`（单轮总时长上限），
-#: 也覆盖了 `MODEL_UPSTREAM_TIMEOUT` 的默认 120。此前上界是 60，而它注释里写的
-#: 「TOTAL_STREAM_BUDGET_SECONDS 是 120」也是过期的——真实值是 600。两个错误叠在一起
-#: 的后果是：60~600 秒的长流全部落进 `+Inf`，`chat_first_event_seconds` 的 p95 从此
-#: 不可读，而首字慢恰恰是要看分位数才发现的。
-#:
-#: 跨度用「大致翻倍」而不是等距——延迟分布是长尾的，等距桶会让大多数样本挤进第一个桶。
+#: 延迟桶边界（秒）。上界取 600（`chat_service.TOTAL_STREAM_BUDGET_SECONDS`）：取小了长流全落进
+#: `+Inf`，首字延迟的 p95 从此不可读；跨度按「大致翻倍」而非等距，延迟是长尾分布。
 DEFAULT_BUCKETS: tuple[float, ...] = (
     0.005,
     0.01,
@@ -60,8 +31,8 @@ DEFAULT_BUCKETS: tuple[float, ...] = (
     600.0,
 )
 
-#: 单条指标最多保留多少个标签组合。超出后不再新增（并计数），避免高基数标签把内存吃光。
-#: 正常流量下远达不到这个量级；它防的是「某个标签值其实是用户输入」这类实现失误。
+#: 单条指标最多保留多少个标签组合，超出后不再新增（并计数），避免高基数标签把内存吃光。
+#: 它防的是「某个标签值其实是用户输入」这类实现失误。
 MAX_SERIES_PER_METRIC = 200
 
 
@@ -114,9 +85,8 @@ class MetricSample:
 class MetricsRegistry:
     """计数器与直方图的容器。
 
-    线程安全：FastAPI 的同步端点跑在线程池里，而 SSE 生成器跑在事件循环里，两者可能
-    同时写指标。用一把粗粒度的锁而不是无锁结构——写入频率相对业务量可以忽略，正确性
-    比并发度重要得多。
+    线程安全：同步端点跑在线程池里、SSE 生成器跑在事件循环里，两者可能同时写。写入频率
+    相对业务量可以忽略，所以一把粗粒度锁换正确性。
     """
 
     def __init__(self) -> None:
@@ -163,7 +133,7 @@ class MetricsRegistry:
             return self._counters.get(name, {}).get(_label_key(labels), 0.0)
 
     def reset(self) -> None:
-        """清空全部指标。**只用于测试**：线上清空会让「错误率突增」这个信号消失。"""
+        """清空全部指标。只用于测试：线上清空会让「错误率突增」这个信号消失。"""
         with self._lock:
             self._counters.clear()
             self._histograms.clear()
@@ -180,8 +150,7 @@ class MetricsRegistry:
                 for key, histogram in series.items():
                     cumulative: list[tuple[float, int]] = []
                     running = 0
-                    # 前 len(buckets) 个桶，桶内的样本落在这里；`counts[-1]` 是溢出桶
-                    # （超过最后一个上界的样本），归进 +Inf。
+                    # `counts[-1]` 是溢出桶（超过最后一个上界的样本），归进 +Inf。
                     for index, bound in enumerate(histogram.buckets):
                         running += histogram.counts[index]
                         cumulative.append((bound, running))
@@ -210,8 +179,8 @@ metrics = MetricsRegistry()
 #: HTTP 请求总数。标签：`method`、`route`、`status`（状态码的百位分类）。
 HTTP_REQUESTS_TOTAL = "http_requests_total"
 
-#: HTTP 请求耗时（秒）。标签同上。用**路由模板**而不是实际路径：`/api/x/123` 会让
-#: 每个 id 变成一个标签组合，直接吃光 `MAX_SERIES_PER_METRIC`。
+#: HTTP 请求耗时（秒）。标签同上。用路由模板而不是实际路径：`/api/x/123` 会让每个 id
+#: 变成一个标签组合，直接吃光 `MAX_SERIES_PER_METRIC`。
 HTTP_REQUEST_DURATION = "http_request_duration_seconds"
 
 #: 对话流：完成/失败/中断。标签：`outcome`（done/error/stopped）。

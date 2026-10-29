@@ -1,34 +1,7 @@
 """跨设备同步的服务层：服务端权威日志 + 服务端版本号。
 
-## 为什么是这个形状
-
-会话与消息是**追加式、单写者**的数据：一条消息的 id 由创建它的设备生成
-（`frontend/src/lib/constants.ts:newId`），之后只有那台设备会改它。所以同步
-不需要合并算法，只需要三件事：
-
-1. 服务端给每一次写入发一个**单调版本号**（`sync_counter`），客户端保存不透明游标；
-2. 拉取按 `version > since` 增量返回，客户端按 id 幂等应用（重复送达是正常现象）；
-3. 删除用**会话级墓碑**传播（`conversation.deleted`），消息级不需要墓碑——应用
-   从不删除单条消息，只删整个会话。
-
-这套模式在业界有现成的名字与实现：Microsoft Graph 的 delta query（`deltaLink` +
-410 全量重同步 + 必须容忍 replay）、Matrix 的 `/sync`（`since` → `next_batch`）、
-Discord 的 Snowflake + 分区。差别只在规模组件，不在协议形状。
-
-## 三条不可让步的规则
-
-- **顺序由服务端决定**。消息的 `seq` 在插入时赋值，之后不再变；客户端的
-  `created_at` 只用于展示。客户端时钟跨设备不可比，拿它排序会在换设备后看到乱序。
-- **写入与发号同事务**。否则会出现「版本号已前进、行还没写」的空洞，客户端拉到
-  空页后把游标推过去，从而永久丢数据。
-- **游标只在两路都拉完时前进**。会话与消息是两个数据流，游标取两路的最小停顿
-  位置；同一行被重复返回是可以接受（甚至是被期望）的。
-
-## 并发
-
-`UPDATE ... RETURNING` 是单条语句，PG 在那一行上加行锁，因此并发发号不会撞号。
-同一批 id 被并发推送（首次推送与重试同时在飞）会撞主键，此时整批重放一次即可：
-upsert 本身幂等。更复杂的并发控制在这个部署形态下没有必要。
+顺序由服务端定：`seq` 插入时赋值、之后不变，客户端 `created_at` 只用于展示。写入与发号必须
+同事务，否则会出现「版本前进、行还没写」的空洞并永久丢数据；游标只在两路都拉完时前进。
 """
 
 from __future__ import annotations
@@ -45,9 +18,8 @@ from weakref import WeakValueDictionary
 
 from sqlalchemy import delete, func, select, update
 
-# PostgreSQL 的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。
-# 必须用 PG 方言的 insert：通用 insert 在 PG 上编译期就抛
-# `AttributeError: 'OnConflictDoUpdate' object has no attribute 'constraint_target'`。
+# PostgreSQL 方言的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。必须用它的 insert：
+# 通用 insert 在 PG 上编译期就抛 AttributeError（OnConflictDoUpdate 没有 constraint_target）。
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,23 +106,24 @@ def _event_for(user_id: uuid.UUID) -> asyncio.Event:
 
 
 def notify_change(user_id: uuid.UUID) -> None:
-    """**提交之后**才调用：提交前唤醒会让等待方读到旧版本号，然后白白再等一轮。"""
+    """必须在提交之后调用：提交前唤醒会让等待方读到旧版本号，白等一轮。"""
     event = _events.get(user_id)
     if event is not None:
         event.set()
 
 
 def reset_notifier() -> None:
-    """清空唤醒表（测试与进程关闭用）。asyncio.Event 会绑定创建时的 event loop，
-    跨 loop 复用会抛「is bound to a different event loop」。"""
+    """清空唤醒表（测试与进程关闭用）。
+
+    asyncio.Event 绑定创建时的 event loop，跨 loop 复用会抛「bound to a different event loop」。
+    """
     _events.clear()
 
 
 async def wait_for_change(user_id: uuid.UUID, since: int, timeout: float) -> None:
     """挂住 `timeout` 秒，直到该用户有新的同步版本或超时。
 
-    先 `clear()` 再查版本号是关键顺序：如果反了，一次发生在「查完」与「开始等」
-    之间的写入会把事件设成 set，而我们在它之后才 clear，于是丢掉这次唤醒。
+    必须先 `clear()` 再查版本号：反过来的话，落在「查完」与「开始等」之间的写入会丢掉唤醒。
     """
     if timeout <= 0:
         return
@@ -205,8 +178,7 @@ def _chunks(values: Sequence[str], size: int = _IN_CHUNK) -> Iterable[Sequence[s
 def _dedupe_conversations(rows: Sequence[ConversationIn]) -> list[ConversationIn]:
     """同一批里重复的 id 取 `client_rev` 最大的那条。
 
-    重复出现在重试拼接的批次里（客户端把「本批」和「上次失败的本批」并起来发了），
-    取最大的修订号才是它真正想表达的内容。
+    重复来自重试拼接的批次（本批 + 上次失败的同一批），最大修订号才是客户端真正想表达的。
     """
     latest: dict[str, ConversationIn] = {}
     for row in rows:
@@ -256,10 +228,10 @@ class _MessageMeta:
 
 
 async def _existing_conversations(session: AsyncSession, ids: Sequence[str]) -> dict[str, _ConversationMeta]:
-    """按 id 取现有会话的**元数据**（不读大字段）。
+    """按 id 取现有会话的元数据（不读大字段）。
 
-    刻意不加 `user_id` 过滤：要能发现「这个 id 属于别人」，才能把它按 `not_owned`
-    拒绝，而不是让 upsert 静默失败或误写别人的行。只读 id/属主/状态，不返回内容。
+    刻意不加 `user_id` 过滤：要能发现「这个 id 属于别人」才能按 `not_owned` 拒绝，
+    而不是让 upsert 静默失败或误写别人的行。
     """
     found: dict[str, _ConversationMeta] = {}
     for chunk in _chunks(sorted(set(ids))):
@@ -315,8 +287,7 @@ async def _existing_messages(session: AsyncSession, ids: Sequence[str]) -> dict[
 async def _existing_message_payloads(session: AsyncSession, ids: Sequence[str]) -> dict[str, dict]:
     """只给「修订号相同」的行读 payload（重放批次里通常为零或全批）。
 
-    这是判断「同修订号到底是纯重放，还是客户端漏了 +1」的唯一办法。payload 是整包
-    JSON，读它不便宜，所以只在必要时调用。
+    这是判断「同修订号是纯重放还是客户端漏了 +1」的唯一办法，而读整包 JSON 不便宜。
     """
     found: dict[str, dict] = {}
     for chunk in _chunks(sorted(set(ids))):
@@ -327,10 +298,9 @@ async def _existing_message_payloads(session: AsyncSession, ids: Sequence[str]) 
 
 
 def _conversation_signature(value: ConversationIn | _ConversationMeta) -> tuple:
-    """会话里「可变内容」的指纹，用来区分纯重放与内容变更。
+    """会话里可变内容的指纹，用来区分纯重放与内容变更。
 
-    `deleted` 必须在里面：漏掉它的话，一个「修订号没变但要把会话删掉」的推送会被判成
-    纯重放而**静默丢弃**——墓碑不写、消息不删、版本不前进，删除永久丢失。
+    `deleted` 必须在里面：漏掉它，「要删但修订号没变」的推送会被判成纯重放而静默丢弃。
     """
     return (
         value.title,
@@ -360,12 +330,8 @@ async def _next_seq(session: AsyncSession, conversation_id: str) -> int:
 # push
 # ---------------------------------------------------------------------
 
-#: 单进程内的 push 串行锁。
-#:
-#: 配额（会话数 / 单会话消息数）是「先 COUNT 再 INSERT」，两个并发请求各自在
-#: 自己的事务里读到同一个旧计数，就会同时突破上限。把整个 push 串起来之后，计数与
-#: 插入之间不再有第二个写者。这把锁只覆盖单进程：多 worker 下真正的约束要靠数据库
-#: 行锁或唯一索引实现。
+#: 单进程内的 push 串行锁：配额是「先 COUNT 再 INSERT」，并发请求各自读到旧计数就会同时
+#: 突破上限。只覆盖单进程，多 worker 仍需数据库行锁或唯一索引。
 _push_lock: asyncio.Lock | None = None
 _push_lock_loop: asyncio.AbstractEventLoop | None = None
 
@@ -397,8 +363,8 @@ async def push(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         try:
             return await _push_once(user_id, request)
         except IntegrityError:
-            # 同一批 id 被并发推送（首次推送与重试同时在飞）。upsert 本身幂等，
-            # 整批重放一次就落到已有行上了；第二次还撞就说明是真故障，往上抛。
+            # 同一批 id 被并发推送（首次推送与重试同时在飞）：upsert 幂等，整批重放一次
+            # 就落到已有行上；第二次还撞就是真故障，往上抛。
             logger.warning("并发推送撞主键，整批重放一次 (user=%s rows=%d)", user_id, total)
             return await _push_once(user_id, request)
 
@@ -407,8 +373,8 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     rejected: list[RejectedRow] = []
     accepted_conversations = 0
     accepted_messages = 0
-    #: 是否真的写进了行。纯重放（内容完全相同）不写库也不推进版本，
-    #: 因此不该唤醒该用户其它设备的长轮询——那只会让它们空拉一次再挂回去。
+    #: 是否真的写进了行。纯重放不写库也不推进版本，因此不该唤醒该用户的其它设备，
+    #: 那只会让它们空拉一次再挂回去。
     wrote_rows = False
 
     async with async_session_maker() as session, session.begin():
@@ -423,13 +389,12 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         # --- 会话 -------------------------------------------------
         writable: set[str] = set()
         #: 已删的会话（服务端墓碑 + 本批刚删的）。消息写进来时优先报这个原因，
-        #: 比 conversation_missing 更准确——客户端据此丢掉这些行而不是重试。
+        #: 比 conversation_missing 更准确，客户端据此丢行而不是重试。
         deleted_ids: set[str] = {
             row_id for row_id, meta in existing_conversations.items() if meta.user_id == user_id and meta.deleted
         }
-        # 只统计**未删除**会话：墓碑是删除信号，不该永久占用「会话数」配额。
-        # 新墓碑不再落库（见下面的分支），因此墓碑行数只可能来自「删除已有会话」，
-        # 上限天然被 live 配额约束，不需要单独配额（L-11/H-02）。
+        # 只统计未删除会话：墓碑是删除信号，不该永久占用会话数配额。新墓碑不落库，
+        # 故墓碑行只可能来自「删除已有会话」，其上限天然被 live 配额约束（L-11/H-02）。
         live_count = int(
             await session.scalar(
                 select(func.count())
@@ -456,13 +421,13 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                 if current.client_rev == row.client_rev:
                     if _conversation_signature(current) == _conversation_signature(row):
                         # 完全相同的重放：不写库、不推进版本。否则每次重试都会白白唤醒
-                        # 所有设备的 pull，并把同一行再推一遍。
+                        # 所有设备的 pull 并把同一行再推一遍。
                         accepted_conversations += 1
                         if not row.deleted:
                             writable.add(row.id)
                         continue
-                    # 修订号没变但内容变了：客户端漏了 +1（例如直接改了库）。
-                    # 静默丢弃会让两端永久不一致，所以按内容应用并留下日志。
+                    # 修订号没变但内容变了（客户端漏了 +1，例如直接改库）：静默丢弃会让
+                    # 两端永久不一致，所以按内容应用并留日志。
                     logger.warning(
                         "同步行修订号未变但内容不同，按内容应用 (conversation=%s rev=%d)",
                         row.id,
@@ -474,17 +439,8 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
                     continue
                 quota_left -= 1
             else:
-                # 新墓碑（服务端从来没有这条会话）：**不写库**，记账为已接受。
-                #
-                # 两个理由：
-                # 1. 墓碑的作用是让其他设备删掉它们已经同步过的行；服务端没有这条行时，
-                #    说明没有设备同步过它，墓碑没有传播对象，写下来只是永久垃圾；
-                # 2. 允许为任意新 id 写墓碑，等于让任何用户用自选 id **预占**别人未来的
-                #    会话 id（一旦被占，对方后续同 id 推送永远 not_owned），也能靠
-                #    deleted=true 无限刷行（L-11/H-02）。
-                #
-                # 客户端拿到「已接受」不会重试；之后它若真把这条会话推上来，仍按新建处理。
-                # 同批里引用它的消息仍按「已删除」拒绝（与有墓碑时语义一致）。
+                # 新墓碑（服务端没有这条会话）不写库：没有设备同步过它，墓碑无处传播；
+                # 而允许为任意新 id 写墓碑，等于让别人预占会话 id，也能靠它无限刷行（L-11/H-02）。
                 deleted_ids.add(row.id)
                 accepted_conversations += 1
                 continue
@@ -536,7 +492,6 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
             else:
                 writable.add(row.id)
 
-        # 已存在且属于自己、且没删的会话同样可以写消息
         for row_id, meta in existing_conversations.items():
             if meta.user_id == user_id and not meta.deleted and row_id not in deleted_ids:
                 writable.add(row_id)
@@ -566,9 +521,8 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         for row in ordered:
             current = existing_messages.get(row.id)
             if current is not None and current.user_id != user_id:
-                # 不区分「存在但不是你的」与「会话不存在」：否则可以拿消息 id 探测
-                # 别人的行是否存在（L-11）。消息 id 是 uuid，正常客户端不会碰到；
-                # 真碰到时按不可写入处理即可。
+                # 不区分「存在但不是你的」与「会话不存在」，否则可拿消息 id 探测别人的行
+                # 是否存在（L-11）；消息 id 是 uuid，正常客户端不会碰到。
                 rejected.append(_reject("message", row.id, "conversation_missing"))
                 continue
             if row.conversation_id in deleted_ids:
@@ -641,11 +595,8 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         # 提交之后再唤醒：提交前唤醒会让等待方读到旧版本，然后白等一轮。
         notify_change(user_id)
 
-    # 删除会话**不拆机器**：机器是按用户分的，同一个人的其他会话可能正在用它
-    # （刚才装好的依赖、正在跑的结果都在里面）。它会照常被空闲回收带走。
-    #
-    # 曾经这里按会话拆机器，那是「一会话一台」时代的逻辑；改成按用户之后继续拆就是
-    # 「删一个会话顺手弄丢另一个会话的工作」。隐私上的差别有限：两台机器本来就属于同一个人。
+    # 删除会话不拆机器：机器按用户分，同一人的其他会话可能正靠它跑着（装好的依赖、在跑
+    # 的结果都在里面），它会照常被空闲回收带走。
 
     logger.info(
         "同步推送 user=%s conversations=%d messages=%d rejected=%d version=%d",
@@ -710,8 +661,8 @@ async def pull(user_id: uuid.UUID, since: int, limit: int | None = None) -> Pull
         if messages_more:
             message_rows = message_rows[:max_rows]
 
-        # 行数上限挡不住大响应：500 行 × 256 KB 最坏是 128 MB。再按累计字节截一次。
-        # 至少保留一行（否则超大单行会让游标原地打转），剩下的下一次 pull 继续。
+        # 行数上限挡不住大响应：500 行 × 256 KB 最坏 128 MB，故再按累计字节截一次；
+        # 至少保留一行，否则超大单行会让游标原地打转。
         kept: list[Message] = []
         used_bytes = 0
         for row in message_rows:
@@ -725,8 +676,8 @@ async def pull(user_id: uuid.UUID, since: int, limit: int | None = None) -> Pull
             messages_more = True
         message_rows = kept
 
-        # 游标只能在「两路都拉完」的位置前进。若只截断了一路，就以那一路的最后一行
-        # 为准；两路都截断时取较小的那个。被多返回的行客户端会重复收到一次，无害。
+        # 游标只能前进到「两路都拉完」的位置：只截断一路就取那一路的最后一行，两路都
+        # 截断取较小值。被多返回的行客户端会重复收到一次，无害。
         stops = []
         if conversations_more:
             stops.append(conversation_rows[-1].version)

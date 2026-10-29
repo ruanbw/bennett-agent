@@ -1,15 +1,7 @@
-"""统一工具注册中心与导出列表。
+"""统一工具注册中心与导出列表：集中编目（分类、风险等级、标签）、超时与按环境裁剪。
 
-基于 PydanticAI 原生 Tool 体系进行扩展与治理，提供集中编目、元数据管理
-（分类、风险等级、标签）、超时配置以及按环境动态裁剪装配能力。
-
-## 工具级超时是**外层防线**，必须大于工具内部自己的最坏耗时
-
-pydantic-ai 的 `FunctionToolsetTool.call_tool` 用 `anyio.fail_after(timeout)` 包裹工具，
-超时时抛 `ModelRetry`（不是普通异常，也不是工具能捕获的错误结果）。所以它一旦先于
-工具内部收尾触发，工具里精心写的错误文案全部不可达，还会额外消耗一次模型重试预算。
-具体数字由 `app/tools/tavily_search.py` 的 `TAVILY_TOOL_TIMEOUT_SECONDS` 单点派生——
-不要把常数直接写在这里，那正是之前「外层 25s < 内层最坏 40.5s」的成因。
+工具级超时是外层防线，必须大于工具内部最坏耗时：pydantic-ai 的 `anyio.fail_after` 先触发时
+抛 `ModelRetry`，工具里写的错误文案全部不可达。数字只在 `app/tools/tavily_search.py` 派生。
 """
 
 from app.config import is_usable_api_key, settings
@@ -52,10 +44,9 @@ from app.tools.tavily_search import (
 #: 全局工具注册中心单例
 registry = ToolRegistry()
 
-#: 沙箱工具的**外层防线**超时。必须严格大于工具内部自己能等的最长时间：
-#: 模型可以把 `timeout_s` 调到 `MAX_EXEC_TIMEOUT_S`（900s），再加建机与文件传输的余量。
-#: pydantic-ai 的超时是包在工具外层、抛成 `ModelRetry` 的，一旦先于内部收尾触发，
-#: 工具里写好的中文建议就全部不可达（与 tavily 那段注释同一个坑）。
+#: 沙箱工具的外层防线超时，必须严格大于工具内部能等的最长时间（`MAX_EXEC_TIMEOUT_S` 是
+#: 模型能调的 `timeout_s` 上限，另加建机与传输余量）：pydantic-ai 的超时抛成 `ModelRetry`，
+#: 先于内部收尾触发时工具里的中文建议就全不可达。
 SANDBOX_TOOL_TIMEOUT_SECONDS = MAX_EXEC_TIMEOUT_S + 60.0
 
 # ---------------------------------------------------------------------
@@ -98,15 +89,9 @@ tavily_tool: ManagedTool = registry.register(
 )(_raw_tavily_search)
 
 # ---------------------------------------------------------------------
-# 沙箱：四个工具，**签名里没有任何 id**。
-#
-# 为什么不是 DANGEROUS：审批闸门的分界线是「能不能撤销」而不是「有多危险」
-# （见 `app/tools/approval.py`）。沙箱内的命令全部可撤销——机器可弃、产物在导出后
-# 才销毁——所以逐条命令审批只会让沙箱变成不可用的点选框。真正的风险落在入口：
-# 「机器属于谁」由作用域在构造上保证（`app/tools/sandbox_scope.py`），而不是靠每条命令审批。
-#
-# 唯一需要审批的是 `sandbox_reset`（SAFE_WRITE）：它会销毁当前会话的机器。
-# 产物会先导出，但这个动作不可逆，值得打断用户一次。
+# 沙箱：四个工具，签名里没有任何 id。
+# 分级按「能不能撤销」而非「有多危险」（见 `app/tools/approval.py`）：命令全可撤销，故不逐条
+# 审批；身份由作用域在构造上保证（`app/tools/sandbox_scope.py`），只有 `sandbox_reset` 需审批。
 # ---------------------------------------------------------------------
 
 sandbox_exec_tool: ManagedTool = registry.register(
@@ -163,27 +148,20 @@ sandbox_reset_tool: ManagedTool = registry.register(
     enabled_checker=is_sandbox_enabled,
 )(_raw_sandbox_reset)
 
-#: **全量**工具列表（含当前配置下不可用的工具）。保留本列表供静态全量探针使用。
+#: 全量工具列表（含当前配置下不可用的工具），供静态全量探针使用。
 ALL_TOOLS: list[ManagedTool] = registry.all_tools()
 
 
 def build_tools() -> list[ManagedTool]:
     """按当前配置装配要挂给 Agent 的 PydanticAI 工具列表。
 
-    - `ask_user_clarification` 始终可用：它是交互协议的一部分（服务端会把它翻译成
-      `clarification` 事件），不依赖任何外部服务；
-    - `get_current_time` 始终可用：纯本地计算，没有可失败的分支；模型自己的时间感
-      是过期的，缺了它「今天几号」只能靠猜；
-    - `tavily_search` 只在配置了 `TAVILY_API_KEY` 时才挂：没有 key 时这个工具只会
-      给模型返回「未配置」错误，白占一轮工具调用的 token，还会让模型以为自己能联网；
-
-    每次调用都重新判断配置，因此调用方必须把结果纳入自己的缓存键——见
-    `app/services/agent_factory.py` 的缓存键。
+    `tavily_search` 无 key 就不挂（否则只会白占一轮 token），其余始终可用：clarification 是交互协议
+    的一部分，`get_current_time` 纯本地。每次调用都重新判断配置，调用方须把结果纳入缓存键。
     """
     return registry.build_tools()
 
 
-# 保持底层函数原样导出，确保老代码与直接测试函数调用的兼容性
+# 原样导出底层函数：测试与老代码直接调本体，不走工具包装。
 ask_user_clarification = _raw_ask_clarification
 get_current_time = _raw_get_current_time
 tavily_search = _raw_tavily_search

@@ -15,8 +15,7 @@ TEMPLATE_SUFFIXES = (".jinja", ".jinja2", ".j2", ".txt")
 class PromptTemplateError(ValueError):
     """模板本身有问题（语法错误、找不到、渲染成空）。
 
-    单独一个类型而不是裸 `ValueError`：启动自检要能把这个错误与「数据库连不上」
-    之类的启动故障区分开，日志里也直接点明是提示词的问题。
+    单独一个类型：启动自检要能把它与「数据库连不上」之类的启动故障区分开。
     """
 
 
@@ -27,24 +26,19 @@ class PromptManager:
         self.template_dir = Path(template_dir)
         self.env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(str(self.template_dir)),
-            #: 提示词是纯文本，不是 HTML；开启自动转义会把 `{{ }}` 之外的内容
-            #: （包括正常的引号、尖括号）改写成 HTML 实体，污染提示词。
-            #: 若将来用同一实例渲染 HTML，必须换成 autoescape=True 的新实例。
+            # 提示词是纯文本：开启自动转义会把引号、尖括号改写成 HTML 实体，污染提示词。
             autoescape=False,
-            #: 漏传变量时**报错**，而不是渲染成空串。静默空串会让系统提示词悄悄
-            #: 少掉一整段（例如「当前环境: 」），模型行为随之变化却没有任何痕迹；
-            #: 显式写了 `| default(...)` 的变量不受影响——那是刻意的兜底。
+            #: 漏传变量时报错而不是渲染成空串：静默空串会让系统提示词悄悄少掉一整段；
+            #: 显式写了 `| default(...)` 的变量不受影响。
             undefined=jinja2.StrictUndefined,
             trim_blocks=True,
             lstrip_blocks=True,
         )
 
     def render(self, template_name: str, **kwargs: Any) -> str:
-        """渲染指定的提示词模板文件，例如 'system_prompt.jinja'。
+        """渲染指定模板，例如 'system_prompt.jinja'；结果为空时抛 `PromptTemplateError`。
 
-        渲染结果为空（或只有空白）时抛 `PromptTemplateError`：模型收到一个空系统提示词
-        不会报错，只会「行为莫名其妙地变了」，而这类故障在日志里没有任何痕迹——把
-        「模板把内容全删了 / 全写进 Jinja 注释了」在启动或首次渲染时就挡住。
+        空系统提示词不会报错，只会让模型行为莫名其妙地变，而日志里没有痕迹。
         """
         template = self.env.get_template(template_name)
         rendered = template.render(**kwargs).strip()
@@ -61,12 +55,7 @@ class PromptManager:
         return sorted(names)
 
     def validate_templates(self) -> list[str]:
-        """编译全部模板，返回模板名列表；有语法错误时抛 `PromptTemplateError`。
-
-        `get_template` 会真正 parse 一遍，所以语法错误（少一个 `endif`、过滤器名拼错）
-        在这里就会暴露——而不是等到某位用户发出第一条消息时，在预算预检里炸成一句
-        「请求处理失败」。**启动自检调用它**（见 `app/server.py`）。
-        """
+        """编译全部模板并返回模板名，语法错误则抛 `PromptTemplateError`（启动自检调用它，见 `app/server.py`）。"""
         names = self.template_names()
         errors: list[str] = []
         for name in names:
@@ -79,11 +68,9 @@ class PromptManager:
         return names
 
     def digest(self, template_name: str) -> str:
-        """模板内容的短指纹（12 位十六进制）。
+        """模板内容的短指纹（12 位十六进制），排查「同样的提示词行为变了」时先说清用的是哪一版。
 
-        排查「同样的提示词为什么行为变了」时，先说清楚**当时用的是哪一版**：日志里带一个
-        指纹，比事后翻 git 历史对时间可靠。取源码而不是渲染结果——渲染结果里有环境名、
-        工具清单这些会随配置变化的变量，指纹会失真。
+        取源码而不是渲染结果：渲染结果里有环境名、工具清单，指纹会随配置失真。
         """
         source = (self.template_dir / template_name).read_text(encoding="utf-8")
         return hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]

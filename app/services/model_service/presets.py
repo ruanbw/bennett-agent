@@ -1,30 +1,8 @@
 """内置厂商预设：添加提供商时按厂商填 key 即可，不必手抄 Base URL 与鉴权头。
 
-## 为什么需要预设
-
-`ModelProvider` 里的 `base_url` 是「一个可独立寻址的 OpenAI 兼容端点」，这对自建
-vLLM / LiteLLM 是对的——它们的地址本来就不固定。但对 OpenAI、Anthropic 这类厂商，
-地址、认证头（Anthropic 用 `x-api-key` 还要带 `anthropic-version`）、兼容层路径
-（Gemini 藏在 `/v1beta/openai` 下）都是公开且稳定的常识，让管理员手抄只会制造
-「少一个 /v1 → 404 → 以为服务挂了」这类故障。
-
-## 预设只是「创建时的默认值」，不是运行时依赖
-
-`auth_style` / `extra_headers` 在创建那一刻从预设**抄进库**，之后运行时只读库。
-预设目录随代码更新（厂商改地址、加版本头）不会影响已存在的提供商——那是管理员
-审过、连通过的配置；要跟进新目录，删掉重建一次即可。
-
-## 目录条目的取舍
-
-只收**对话也走 OpenAI 兼容协议**的厂商：`ModelTarget` 用 `AsyncOpenAI` 打
-`{base_url}/chat/completions`，原生协议不兼容的端点（如阿里百炼原生、火山方舟管控面）
-收进来只会造成「列表能同步、对话必失败」。每个条目的 `note` 说明该厂商模型列表
-能同步到哪些元数据——OpenAI 系的 `/v1/models` 大多只有 id，上下文窗口要靠
-DeepSeek / Groq / OpenRouter 这类真正返回元数据的厂商。
-
-`needs_api_key=False` 的本机预设（Ollama、LM Studio）是环回地址：出站守卫默认放行
-私网，开了严格模式（`provider_block_private_targets`）后创建时就会被拒——那是配置
-选择，不是预设的 bug。
+预设只在创建时把 base_url / auth_style / extra_headers 抄进库，运行时只读库，所以目录更新
+不影响已有提供商（要跟进就删掉重建）。只收对话也走 OpenAI 兼容协议的厂商，否则只会
+「列表能同步、对话必失败」；`needs_api_key=False` 的本机预设是环回地址，严格模式会拒掉。
 """
 
 from dataclasses import dataclass, field
@@ -37,9 +15,7 @@ AUTH_STYLES = frozenset({"bearer", "x-api-key", "x-goog-api-key", "none"})
 class ProviderPreset:
     """一个可一键创建的厂商。
 
-    `api_key_url` 是控制台地址——预设解决不了「去哪拿 key」，把它写进提示比让
-    管理员去搜索引擎问强。`group` 用于后台选择界面的分组展示
-    （overseas=海外厂商 / cn=国内厂商 / local=本机网关）。
+    `api_key_url` 是拿 key 的控制台地址（预设解决不了「去哪拿 key」）；`group` 用于后台分组展示。
     """
 
     key: str
