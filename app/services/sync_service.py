@@ -7,14 +7,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
-from weakref import WeakValueDictionary
 
 from sqlalchemy import delete, func, select, update
 
@@ -39,6 +37,7 @@ from app.schemas.sync import (
     RejectedRow,
     RejectReason,
 )
+from app.services import sync_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -92,48 +91,31 @@ def parse_cursor(raw: str | None) -> int:
 # 长轮询唤醒
 # ---------------------------------------------------------------------
 
-#: 每用户一个唤醒事件。WeakValueDictionary：没有请求在等的时候事件会被回收，
-#: 不会因为历史用户数量增长而泄漏内存。
-_events: WeakValueDictionary[uuid.UUID, asyncio.Event] = WeakValueDictionary()
-
-
-def _event_for(user_id: uuid.UUID) -> asyncio.Event:
-    event = _events.get(user_id)
-    if event is None:
-        event = asyncio.Event()
-        _events[user_id] = event
-    return event
+# 唤醒能力走端口：单进程假设只留在 `sync_notifier.InMemoryNotifier` 里，这里只认协议。
 
 
 def notify_change(user_id: uuid.UUID) -> None:
     """必须在提交之后调用：提交前唤醒会让等待方读到旧版本号，白等一轮。"""
-    event = _events.get(user_id)
-    if event is not None:
-        event.set()
+    sync_notifier.get_notifier().notify(user_id)
 
 
 def reset_notifier() -> None:
-    """清空唤醒表（测试与进程关闭用）。
-
-    asyncio.Event 绑定创建时的 event loop，跨 loop 复用会抛「bound to a different event loop」。
-    """
-    _events.clear()
+    """丢掉当前唤醒表，换回全新的单进程实现（测试与进程关闭用的旧入口）。"""
+    sync_notifier.set_notifier_for_tests(None)
 
 
 async def wait_for_change(user_id: uuid.UUID, since: int, timeout: float) -> None:
     """挂住 `timeout` 秒，直到该用户有新的同步版本或超时。
 
-    必须先 `clear()` 再查版本号：反过来的话，落在「查完」与「开始等」之间的写入会丢掉唤醒。
+    必须先订阅（实现里 clear）再查版本号：反过来的话，落在「查完」与「开始等」之间的写入会丢掉唤醒。
     """
     if timeout <= 0:
         return
-    event = _event_for(user_id)
-    event.clear()
-    async with async_session_maker() as session:
-        if await _head_version(session, user_id) > since:
-            return
-    with contextlib.suppress(asyncio.TimeoutError):
-        await asyncio.wait_for(event.wait(), timeout=timeout)
+    async with sync_notifier.get_notifier().subscribe(user_id) as subscription:
+        async with async_session_maker() as session:
+            if await _head_version(session, user_id) > since:
+                return
+        await subscription.wait(timeout)
 
 
 # ---------------------------------------------------------------------

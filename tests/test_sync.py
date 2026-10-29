@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import contextlib
 import time
 import uuid
 
@@ -25,7 +26,7 @@ from sqlalchemy import func, select
 from app.config import settings
 from app.db import Conversation, Message, User, async_session_maker
 from app.schemas.sync import ConversationIn, MessageIn, PushRequest
-from app.services import sync_service
+from app.services import sync_notifier, sync_service
 
 
 class Env:
@@ -43,6 +44,9 @@ async def env(monkeypatch):
 
     `sync_service` 用的是模块级 `async_session_maker`，指向 conftest 配置的测试库，
     所以这里不需要再 monkeypatch 它——以前换掉 maker 是因为用了临时库。
+
+    唤醒表每例换一个新的：`asyncio.Event` 绑定创建它的 loop，共享实例会让上一个用例的挂起
+    事件串到下一个用例（这也正是 `set_notifier_for_tests` 存在的理由）。
     """
     maker = async_session_maker
     alice, bob = uuid.uuid4(), uuid.uuid4()
@@ -60,11 +64,11 @@ async def env(monkeypatch):
             )
         await session.commit()
 
-    sync_service.reset_notifier()
+    sync_notifier.set_notifier_for_tests(sync_notifier.InMemoryNotifier())
     try:
         yield Env(maker, alice, bob)
     finally:
-        sync_service.reset_notifier()
+        sync_notifier.set_notifier_for_tests(None)
 
 
 def conversation(session_id: str, **overrides) -> ConversationIn:
@@ -390,7 +394,52 @@ async def test_message_quota_rejects_new_rows_only(env, monkeypatch):
 # ---------------------------------------------------------------------
 
 
+class _RecordingSubscription:
+    def __init__(self, waited: list[float]) -> None:
+        self._waited = waited
+
+    async def wait(self, timeout: float) -> None:
+        self._waited.append(timeout)
+
+
+class _RecordingNotifier:
+    """记录调用的假 notifier：锁住「服务层只通过端口唤醒，不碰模块级状态」。"""
+
+    def __init__(self) -> None:
+        self.notified: list[uuid.UUID] = []
+        self.waited: list[float] = []
+
+    def notify(self, user_id: uuid.UUID) -> None:
+        self.notified.append(user_id)
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self, user_id: uuid.UUID):
+        yield _RecordingSubscription(self.waited)
+
+
+class _NotifyOnSubscribe(sync_notifier.InMemoryNotifier):
+    """订阅成功的瞬间就通知一次，模拟「写入落在订阅之后、查版本号之前」那个窗口。"""
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self, user_id: uuid.UUID):
+        async with super().subscribe(user_id) as subscription:
+            self.notify(user_id)
+            yield subscription
+
+
+async def test_long_poll_returns_immediately_when_changed_before_waiting(env):
+    """时序一：通知先于等待。版本号已经前进，唤醒表里甚至可能没有事件。"""
+    await sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_a")]))
+    since = await sync_service.head_version(env.alice)
+    await sync_service.push(env.alice, PushRequest(messages=[message("msg_1", "sess_a")]))
+
+    started = time.monotonic()
+    await sync_service.wait_for_change(env.alice, since, timeout=30)
+    assert time.monotonic() - started < 1.0
+
+
 async def test_long_poll_wakes_up_when_another_device_pushes(env):
+    """时序二：等待期间通知。提交后的写入必须唤醒挂起的 pull，而不是让它等到超时。"""
     await sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_a")]))
     since = await sync_service.head_version(env.alice)
 
@@ -402,13 +451,13 @@ async def test_long_poll_wakes_up_when_another_device_pushes(env):
     await asyncio.wait_for(waiter, timeout=5)
 
 
-async def test_long_poll_returns_immediately_when_already_changed(env):
-    await sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_a")]))
+async def test_wakeup_landing_between_subscribe_and_head_check_is_not_lost(env):
+    """订阅之后、版本号查出来之前到的通知不能被清掉，否则只能白等到超时。"""
+    sync_notifier.set_notifier_for_tests(_NotifyOnSubscribe())
     since = await sync_service.head_version(env.alice)
-    await sync_service.push(env.alice, PushRequest(messages=[message("msg_1", "sess_a")]))
 
     started = time.monotonic()
-    await sync_service.wait_for_change(env.alice, since, timeout=30)
+    await sync_service.wait_for_change(env.alice, since, timeout=5)
     assert time.monotonic() - started < 1.0
 
 
@@ -420,6 +469,29 @@ async def test_long_poll_does_not_notify_other_users(env):
     await asyncio.sleep(0.05)
     await sync_service.push(env.alice, PushRequest(messages=[message("msg_1", "sess_a")]))
     await asyncio.wait_for(waiter, timeout=5)  # 靠超时结束，不会被 alice 的写入唤醒
+
+
+async def test_wakeup_goes_through_the_notifier_port(env):
+    """等待与唤醒都只走注入的 notifier：换掉它就能接管（多 worker 实现的前提）。"""
+    notifier = _RecordingNotifier()
+    sync_notifier.set_notifier_for_tests(notifier)
+
+    since = await sync_service.head_version(env.alice)
+    await sync_service.wait_for_change(env.alice, since, timeout=1.5)
+    await sync_service.push(env.alice, PushRequest(conversations=[conversation("sess_a")]))
+
+    assert notifier.waited == [1.5]
+    assert notifier.notified == [env.alice]
+
+
+def test_reset_notifier_puts_a_fresh_single_process_notifier_back():
+    """旧入口仍管用：注入的 notifier 被丢掉，下次取到的是全新的单进程实现。"""
+    injected = sync_notifier.InMemoryNotifier()
+    sync_notifier.set_notifier_for_tests(injected)
+
+    sync_service.reset_notifier()
+
+    assert sync_notifier.get_notifier() is not injected
 
 
 # ---------------------------------------------------------------------
