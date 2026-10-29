@@ -36,7 +36,7 @@ def test_registry_failure_is_logged_and_degrades(monkeypatch, caplog):
 
     monkeypatch.setattr(registry, "get", boom)
 
-    with caplog.at_level(logging.WARNING, logger="app.tools.catalog"):
+    with caplog.at_level(logging.WARNING, logger="app.runtime.catalog"):
         assert tool_catalog.DefaultToolCatalog().describe("sandbox_reset") == ("", None)
 
     assert "读取工具元数据失败" in caplog.text

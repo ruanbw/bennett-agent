@@ -16,10 +16,10 @@ from pydantic_ai import (
 )
 from pydantic_ai.messages import ModelMessage
 
+from app.runtime.approval import DENIED_RESULT, all_deferred_ids
+from app.runtime.catalog import ToolCatalog, get_catalog
 from app.schemas.events import ApprovalRequiredEvent, ApprovalToolCall
 from app.services.event_translation import _serialize_tool_args
-from app.tools.approval import DENIED_RESULT, all_deferred_ids
-from app.tools.catalog import ToolCatalog, get_catalog
 
 logger = logging.getLogger(__name__)
 

@@ -15,6 +15,8 @@ from pydantic_ai.messages import ModelResponse
 from pydantic_ai.run import AgentRunResultEvent
 
 from app.config import settings
+from app.runtime.guard import collect_tool_failures
+from app.runtime.scopes import cache_scope, sandbox_scope
 from app.schemas.chat import ChatMessage, ContextAnchor
 from app.schemas.events import (
     ChatEvent,
@@ -67,9 +69,6 @@ from app.services.upstream_errors import (
     upstream_error_message,
 )
 from app.services.usage import TurnTimer, extract_turn_usage
-from app.tools.cache_scope import cache_scope
-from app.tools.guard import collect_tool_failures
-from app.tools.sandbox_scope import sandbox_scope
 
 logger = logging.getLogger(__name__)
 

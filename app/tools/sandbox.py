@@ -10,6 +10,7 @@ import logging
 from pydantic_ai import RunContext
 
 from app.config import settings
+from app.runtime.scopes import current_sandbox_scope
 from app.services.sandbox import get_provider, lease_service
 from app.services.sandbox.base import (
     DEFAULT_EXEC_TIMEOUT_S,
@@ -24,7 +25,6 @@ from app.services.sandbox.base import (
     owner_tag,
 )
 from app.services.sandbox.lease import STATE_PROVISIONING, LeaseView
-from app.tools.sandbox_scope import current_sandbox_scope
 
 logger = logging.getLogger(__name__)
 

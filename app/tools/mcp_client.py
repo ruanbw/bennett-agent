@@ -15,7 +15,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import ToolsetTool, WrapperToolset
 
 from app.config import settings
-from app.tools.approval import RISK_METADATA_KEY
+from app.runtime.approval import RISK_METADATA_KEY
 
 logger = logging.getLogger(__name__)
 

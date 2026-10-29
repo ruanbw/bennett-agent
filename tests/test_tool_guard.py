@@ -178,7 +178,7 @@ async def test_guard_logs_transient_failures_at_warning(caplog):
 
     guard = ToolErrorIsolation()
 
-    with caplog.at_level(logging.DEBUG, logger="app.tools.guard"), pytest.raises(ToolFailed) as excinfo:
+    with caplog.at_level(logging.DEBUG, logger="app.runtime.guard"), pytest.raises(ToolFailed) as excinfo:
         await guard.on_tool_execute_error(
             None,
             call=ToolCallPart(tool_name="tavily_search", args={}),

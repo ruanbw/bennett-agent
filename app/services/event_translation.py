@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 
+from app.runtime.clarification import normalize_clarification
 from app.schemas.events import (
     ChatEvent,
     ClarificationRequest,
@@ -35,7 +36,6 @@ from app.schemas.events import (
     ToolResult,
 )
 from app.services.metrics import TOOL_EXECUTIONS_TOTAL, metrics
-from app.tools.ask_user_clarification import normalize_clarification
 
 logger = logging.getLogger(__name__)
 

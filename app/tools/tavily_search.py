@@ -8,8 +8,8 @@ import httpx
 from pydantic_ai import RunContext
 
 from app.config import is_usable_api_key, settings
+from app.runtime.scopes import current_cache_scope
 from app.services.http_client import get_http_client
-from app.tools.cache_scope import current_cache_scope
 from app.tools.tavily_cache import search_cache
 
 logger = logging.getLogger(__name__)
