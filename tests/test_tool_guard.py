@@ -79,7 +79,7 @@ def test_repeated_failure_escalates_and_names_the_tool():
 
 
 def test_failure_counter_returns_one_without_a_collector():
-    """CLI 直接跑 Agent、单测直接调钩子时没有收集器：不做升级，但也不能抛。"""
+    """直接跑 Agent、单测直接调钩子时没有收集器：不做升级，但也不能抛。"""
     assert record_tool_failure("t") == 1
 
 

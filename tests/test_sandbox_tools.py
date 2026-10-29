@@ -176,7 +176,7 @@ async def _lease_rows() -> list[SandboxLease]:
 # ① 没有作用域：四个工具都不碰 provider
 # ---------------------------------------------------------------------
 async def test_all_tools_refuse_without_scope(env: Env):
-    """CLI / 未登录没有身份：明确拒绝，且**一次都不碰** provider。
+    """未登录没有身份：明确拒绝，且**一次都不碰** provider。
 
     「不碰」比「回一句拒绝」重要一个量级：任何在检查作用域之前就解析租约的实现，
     都会在最常见的匿名路径上建出一台不属于任何人的机器。

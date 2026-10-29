@@ -33,8 +33,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic_ai.messages import ModelMessage
-
 from app.config import settings
 from app.schemas.chat import ChatMessage, ContextAnchor
 from app.services.agent_factory import render_system_prompt
@@ -497,72 +495,3 @@ __all__ = [
     "resolve_reserve_tokens",
     "usable_anchor",
 ]
-
-
-def estimate_agent_messages_tokens(messages: Sequence[ModelMessage]) -> int:
-    """估算 **pydantic-ai 原生消息**的 token 数。
-
-    为什么需要单独一个函数：`estimate_messages_tokens` 吃的是线上契约
-    `ChatMessage`（Web 路径，客户端全量回放），而 CLI 手里是
-    `AgentRunResult.all_messages()` 的 pydantic-ai 对象。两者形状不同，但**预算
-    口径必须是同一个**——否则 CLI 能用而 Web 会拒的请求会长得越来越不一样。
-
-    覆盖所有会占窗口的部件：正文、思考链、工具调用参数、工具返回内容。工具 schema
-    那部分固定开销由调用的 `build_budget(overhead_tokens=...)` 负责，不在这里算。
-    """
-    total = 0
-    for message in messages:
-        total += MESSAGE_OVERHEAD_TOKENS
-        for part in getattr(message, "parts", ()):
-            content = getattr(part, "content", None)
-            if isinstance(content, str):
-                total += estimate_tokens(content)
-            args = getattr(part, "args", None)
-            if args is not None:
-                # 工具调用参数是 JSON，模型确实要读它
-                total += estimate_tokens(args if isinstance(args, str) else _safe_str(args))
-    return total
-
-
-def _safe_str(value: object) -> str:
-    """`str()` 兜底：估算不该因为某个部件的 `__str__` 抛错而让请求失败。"""
-    try:
-        return str(value)
-    except Exception:  # noqa: BLE001 - 估算是尽力而为
-        return ""
-
-
-async def estimate_agent_messages_tokens_async(messages: Sequence[ModelMessage]) -> int:
-    """`estimate_agent_messages_tokens` 的异步包装：长历史估算不让出线程就卡住循环。
-
-    用途：CLI 的预算计算（`main._budget_for_cli`）目前是同步函数，所以本包装**暂无
-    调用方**；它留给 CLI 那次调用改到事件循环内时接线，届时 Web/CLI 两条路径就都
-    不会再在事件循环上跑百毫秒级的逐字符循环。
-
-    为什么要带阈值：CLI 的历史同样可能是几万 token 的会话，但绝大多数时候只有几千
-    字符——全部走线程等于给小请求白付一次线程调度。阈值与 Web 路径共用同一个常量，
-    两条路径的分流点因此不会漂移。
-
-    结果与同步函数逐位一致（同一个实现，只是调度方式不同）。
-    """
-    if _agent_messages_chars(messages) > THREAD_ESTIMATE_CHARS_THRESHOLD:
-        return await asyncio.to_thread(estimate_agent_messages_tokens, messages)
-    return estimate_agent_messages_tokens(messages)
-
-
-def _agent_messages_chars(messages: Sequence[ModelMessage]) -> int:
-    """pydantic-ai 消息里字符串部件（正文、思考链、工具参数）的总字符数。
-
-    与 `estimate_agent_messages_tokens` 扫的是同一批字段：阈值判定必须量的是
-    马上要算的东西，统计口径不一致时会出现「量小走同步、实际却很慢」的漏网。
-    """
-    total = 0
-    for message in messages:
-        for part in getattr(message, "parts", ()):
-            content = getattr(part, "content", None)
-            if isinstance(content, str):
-                total += len(content)
-            args = getattr(part, "args", None)
-            if args is not None:
-                total += len(args) if isinstance(args, str) else len(_safe_str(args))
-    return total

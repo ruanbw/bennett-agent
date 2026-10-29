@@ -20,8 +20,6 @@ from app.services.token_budget import (
     TOOL_SCHEMA_OVERHEAD_TOKENS,
     ContextBudget,
     build_budget,
-    estimate_agent_messages_tokens,
-    estimate_agent_messages_tokens_async,
     estimate_messages_tokens,
     estimate_tokens,
     overflow_message,
@@ -713,23 +711,6 @@ async def test_off_loop_and_synchronous_estimates_agree(monkeypatch, pattern):
     assert budget.used_tokens == estimate_messages_tokens(messages)
 
 
-async def test_agent_messages_async_wrapper_matches_the_sync_estimate(monkeypatch):
-    """CLI 路径的异步包装与同步函数口径一致，且同样按量分流。"""
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-
-    calls = spy_on_to_thread(monkeypatch)
-    short = [ModelRequest(parts=[UserPromptPart(content="问题" * 100)])]
-    # pydantic-ai 的部件没有长度上限，一条就能超过阈值
-    long = [ModelRequest(parts=[UserPromptPart(content="你" * (THREAD_ESTIMATE_CHARS_THRESHOLD + 1))])]
-
-    assert await estimate_agent_messages_tokens_async(short) == estimate_agent_messages_tokens(short)
-    assert calls == []
-
-    assert await estimate_agent_messages_tokens_async(long) == estimate_agent_messages_tokens(long)
-    assert len(calls) == 1
-    assert calls[0][0] is estimate_agent_messages_tokens
-
-
 # ---------------------------------------------------------------------
 # 已解析的快照优先：对话路径不该为预算再查一遍库
 # ---------------------------------------------------------------------
@@ -764,7 +745,7 @@ async def test_pre_resolved_unknown_window_still_allows_through(monkeypatch):
 
 
 async def test_gateway_path_without_snapshot_still_looks_limits_up(monkeypatch):
-    """不传 `model_limits` 的调用方（CLI / 直接调用）保持原行为。"""
+    """不传 `model_limits` 的调用方（直接调用）保持原行为。"""
     patch_limits(monkeypatch, context_window=64_000, max_output_tokens=4_096)
 
     budget = await resolve_context_budget("m", [msg("user", "abcd")])

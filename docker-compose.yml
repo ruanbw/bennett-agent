@@ -5,21 +5,18 @@
 #   postgres  业务库（用户 / 会话 / 会话同步 / 知识库 / 上传记录）
 #   redis     限流计数、搜索缓存、会话 token 热缓存
 #   rustfs    对象存储（S3 协议），存上传文件的原件
-#   app       FastAPI 后端（只提供 /api/*，启动时执行 sql/init.sql 建表）  [profile: app]
-#   worker    沙箱空闲回收的常驻进程（时间驱动、可重启）  [profile: app]
+#   app       FastAPI 后端（只提供 /api/*，启动时执行 sql/init.sql 建表，并跑沙箱回收）  [profile: app]
 #
 # ## 开发与生产的区别：靠 profile 表达
 #
 # 开发时**只跑依赖**，前后端由开发者自己用命令起（改一行代码立刻生效，不走镜像重建）：
 #
 #   docker compose up -d                 # 只起 postgres / redis / rustfs
-#   uv run python main.py --web         # 启动即建表（sql/init.sql 幂等）
-#   uv run python main.py                # 后端 + 上传解析 + 沙箱回收（一条命令）
+#   uv run python main.py               # 后端 + 沙箱回收（一条命令）
 #
-# 生产里拆成两个容器（见下面的 app / worker 服务），所以 compose 里显式传 --web / --worker。
 #   cd frontend && npm run dev           # 前端
 #
-# 生产的全部服务（含 app / worker）由 `app` profile 打开：
+# 生产的全部服务由 `app` profile 打开：
 #
 #   docker compose --profile app up -d --build
 #
@@ -40,7 +37,7 @@
 #   cp .env.example .env      # 至少填 AUTH_SECRET / LITELLM_API_BASE / LITELLM_API_KEY
 #   docker compose --profile app up -d --build      # 生产：全部服务
 #   docker compose up -d                            # 开发：只起依赖
-#   docker compose logs -f app worker
+#   docker compose logs -f app
 #
 # 数据库/Redis/对象存储的数据都在命名卷里，`docker compose down` 不会删（加 `-v` 才会）。
 # 注意 `down -v` 会同时删掉上传的原件与全部会话——那是不可恢复的。
@@ -231,60 +228,12 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
-    # 单轮 SSE 预算 600s，但优雅关闭最多等 5s（见 main.py 的 uvicorn 参数），
-    # 所以这里给 10s：够它把在飞请求标记完，又不会让 docker stop 等到超时。
-    stop_grace_period: 10s
+    # 单轮 SSE 预算 600s，但优雅关闭最多等 5s（见 main.py 的 uvicorn 参数）；
+    # 之后 `_run_all` 还会等回收循环把手上这一台收尾（最多 10s）。
+    # 给 25s 覆盖这两段，又不会让 docker stop 等到超时。
+    stop_grace_period: 25s
     logging:
       # 默认的 json-file 驱动**没有任何大小上限**，长期运行会把宿主磁盘写满。
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  worker:
-    # 沙箱空闲回收进程：扫租约表 → 心跳判定 → 导出产物 → 销毁机器。
-    # 与 app 同一镜像、不同命令。
-    profiles: ["app"]
-    image: bennett-agent:local
-    container_name: bennett-worker
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bennett}:${POSTGRES_PASSWORD:-bennett}@postgres:5432/${POSTGRES_DB:-bennett}
-      REDIS_URL: redis://redis:6379/0
-      S3_ENDPOINT_URL: http://rustfs:9000
-      # 容器之间的调用必须绕过宿主代理。
-      #
-      # Docker Desktop（以及部分 CI 运行器）会把宿主的 HTTP(S)_PROXY 注入每个容器。
-      # 若 `no_proxy` 里没有内部服务名，`http://rustfs:9000` 会被送到宿主代理，
-      # 而代理当然不知道 `rustfs` 是什么——它返回 502，而应用侧的报错是
-      # 「确保桶存在失败（code=502）」，与「对象存储没起来」看起来一模一样。
-      # TCP 服务的 postgres/redis 不受影响（代理只管 HTTP），列在这里是为了明确语义。
-      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${NO_PROXY:+,$NO_PROXY}"
-      no_proxy: "localhost,127.0.0.1,host.docker.internal,postgres,redis,rustfs${no_proxy:+,$no_proxy}"
-      # 生产容器**强制** production：这里不能用 `${APP_ENV:-production}`。
-      # `.env.example` 里 APP_ENV=development，而 README 的生产部署步骤正是
-      # `cp .env.example .env && docker compose --profile app up`——compose 会用 .env
-      # 做插值，`environment:` 又覆盖 `env_file:`，于是生产容器实际跑在 development，
-      # 而所有生产守卫（拒绝占位 AUTH_SECRET、强制 Secure cookie、关闭 /docs、
-      # 收紧 CORS）全部挂在 `app_env == "production"` 上，一条都没生效。
-      # 要跑非生产环境请显式覆盖这个变量，而不是靠 .env 的默认值。
-      APP_ENV: production
-    command: ["python", "main.py", "--worker"]
-    # 镜像级 HEALTHCHECK 探的是 8000 端口的 /health/ready——worker **不监听 HTTP**，
-    # 继承那个探针会让它永远 unhealthy（编排器会反复重启一个完全正常的进程）。
-    healthcheck:
-      disable: true
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rustfs:
-        condition: service_healthy
-    # 回收一台机器最坏要几十秒（打包 workspace + 上传产物 + 销毁）。
-    # 等它把手上这一台收尾再退：停在 destroying 的租约没有代码能回收。
-    stop_grace_period: 30s
-    logging:
       driver: json-file
       options:
         max-size: "10m"

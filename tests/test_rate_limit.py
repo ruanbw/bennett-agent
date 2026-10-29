@@ -305,7 +305,7 @@ def stub_uvicorn_run(monkeypatch) -> list[dict]:
 def test_out_of_range_port_is_rejected(monkeypatch, port):
     import main as main_module
 
-    monkeypatch.setattr(sys, "argv", ["main.py", "--web", "--port", port])
+    monkeypatch.setattr(sys, "argv", ["main.py", "--port", port])
     calls = stub_uvicorn_run(monkeypatch)
 
     with pytest.raises(SystemExit) as excinfo:

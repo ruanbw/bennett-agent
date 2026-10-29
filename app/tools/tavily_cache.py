@@ -72,7 +72,7 @@ class SearchResultCache:
         """归一化关键词参与 key（大小写与首尾空白不影响命中）。
 
         `scope` 是租户维度（当前实现是用户 id）：不同用户不共享缓存，避免搜索结果里
-        的注入内容在他人上下文里存续（I-03）。空串表示不隔离（CLI / 测试）。
+        的注入内容在他人上下文里存续（I-03）。空串表示不隔离（测试）。
         """
         return (scope, query.strip().lower(), max_results)
 
@@ -127,7 +127,7 @@ class SearchCache:
         {prefix}:search:{scope}:{sha256(query|max_results)}
 
     - `scope` 是租户（用户 id）：不同用户不共享条目，避免搜索结果里的注入内容
-      在他人上下文里存续（I-03）；空 scope（CLI/测试）用 `-` 占位。
+      在他人上下文里存续（I-03）；空 scope（测试）用 `-` 占位。
     - query 进哈希而不是直接拼进键：查询里可能有空格、中文、控制字符，直接当键
       既不可读也不好排查，而哈希还顺便统一了长度。
     - 保留 `max_results` 在哈希输入里：5 条与 10 条是两次不同请求。

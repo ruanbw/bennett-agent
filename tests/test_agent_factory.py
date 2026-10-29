@@ -59,8 +59,8 @@ def test_supported_levels_are_lowercased_and_trimmed(raw, expected):
 # ---------------------------------------------------------------------
 # 唯一工厂（R-3）
 # ---------------------------------------------------------------------
-def test_cli_and_web_share_one_factory():
-    """CLI 与 Web 必须拿到同一个装配函数。
+def test_there_is_exactly_one_factory():
+    """装配点只能有一个。
 
     改动前 `main.create_agent` 与 `chat_service.get_agent_for_model` 各有一份，
     前者少传 reasoning_effort 与 model_settings，于是同一份配置跑出两个不同 agent。

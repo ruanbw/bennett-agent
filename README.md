@@ -36,7 +36,7 @@
 
 ```
 bennett-agent/
-├── main.py             # 运行入口（--web / --worker / --cli / --reload）
+├── main.py             # 运行入口（默认起 API + 沙箱回收；--reload 仅开发用）
 ├── app/                # 后端源码（api/ services/ tools/ config/ db.py）
 ├── sql/                # 建库脚本 init.sql（唯一事实来源）
 ├── prompts/            # 系统提示词模板（Jinja2）
@@ -113,10 +113,10 @@ uvx opensandbox-server --config docker/opensandbox.toml
 ```bash
 cp .env.example .env    # 填生产值（AUTH_SECRET 为占位值时拒绝启动）
 docker compose --profile app up -d --build
-docker compose logs -f app worker
+docker compose logs -f app
 ```
 
-`app` profile 会额外启动：`app`（FastAPI，启动时执行 `sql/init.sql` 建表）、`worker`（沙箱空闲回收进程）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
+`app` profile 会启动 `app`（FastAPI，启动时执行 `sql/init.sql` 建表，并在同一进程里跑沙箱空闲回收）。前端是独立静态产物，`npm run build` 后交由静态服务器 / CDN 托管，不在 compose 内。
 
 所有服务端口只绑定回环地址；数据库与 Redis 无额外防护，远程访问请走 SSH 隧道或带 TLS 的反向代理。`docker compose down -v` 会删除全部数据（含对象存储里的沙箱产物），不可恢复。
 

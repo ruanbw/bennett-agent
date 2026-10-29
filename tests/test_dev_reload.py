@@ -6,7 +6,7 @@
    Postgres，但脚本与临时调试仍可能落下 `*.db` / `-wal` / `-shm`，本地网关也有写入型
    缓存。它们随请求持续变化，当成变更源就等于「一有请求就重启」，而症状是「服务自己
    不停地重启」，很难联想到监听列表上；
-2. 子进程必须走完整的 `main.py --web`，且**不带** `--reload`（否则无限自递归）；
+2. 子进程必须走完整的 `main.py`，且**不带** `--reload`（否则无限自递归）；
 3. production 下要直接拒绝，而不是警告后照跑。
 
 这些都是纯逻辑，不需要真的起服务，因此全部按纯函数 / 参数检查来测。
@@ -155,23 +155,14 @@ def test_declared_scope_matches_import_paths():
 def test_child_command_uses_full_main_entrypoint():
     """子进程必须走 main.py，而不是 uvicorn —— 后者会丢掉 main() 里的启动动作。
 
-    默认不带模式参数：`main.py` 的默认行为就是「全套」（API + 上传解析 + 沙箱回收）。
-    热重启若丢了后台循环，症状是「改完代码后上传不再被解析」，比启动失败更难查。
+    不带模式参数：`main.py` 的唯一行为就是「全套」（API + 沙箱回收）。
     """
     command = build_child_command("127.0.0.1", 8000)
 
     assert command[0] == sys.executable
     assert any(part.endswith("main.py") for part in command)
-    assert "--web" not in command and "--worker" not in command
     assert "--host" in command and "127.0.0.1" in command
     assert "--port" in command and "8000" in command
-
-
-def test_child_command_can_be_web_only():
-    """生产型的 `--web` 拓扑：热重启子进程也必须只起 API（不能顺带跑 worker 循环）。"""
-    command = build_child_command("127.0.0.1", 8000, run_all=False)
-
-    assert "--web" in command
 
 
 def test_child_command_never_passes_reload():
@@ -198,7 +189,7 @@ def test_reload_flag_is_parsed():
     parser = main_module.build_arg_parser()
 
     assert parser.parse_args(["--reload"]).reload is True
-    assert parser.parse_args(["--web"]).reload is False
+    assert parser.parse_args([]).reload is False
 
 
 def test_reload_delegates_to_supervisor_without_starting_uvicorn(monkeypatch, stub_uvicorn_run):
@@ -213,25 +204,8 @@ def test_reload_delegates_to_supervisor_without_starting_uvicorn(monkeypatch, st
 
     main_module.main()
 
-    # 不带模式参数 = 全套：本地开发正是这个意图。
-    assert recorded == [{"host": "127.0.0.1", "port": 8123, "run_all": True}]
+    assert recorded == [{"host": "127.0.0.1", "port": 8123}]
     assert stub_uvicorn_run == [], "热重启模式下不应直接起 uvicorn（会丢掉启动动作）"
-
-
-def test_reload_keeps_web_topology_when_web_is_explicit(monkeypatch, stub_uvicorn_run):
-    """`--reload --web` 是生产型拓扑：子进程也只能起 API。"""
-    monkeypatch.setattr(sys, "argv", ["main.py", "--reload", "--web", "--port", "8123"])
-
-    recorded: list[dict] = []
-    monkeypatch.setattr(
-        main_module,
-        "_run_dev_reload",
-        lambda host, port, **kwargs: recorded.append({"host": host, "port": port, **kwargs}) or 0,
-    )
-
-    main_module.main()
-
-    assert recorded == [{"host": "127.0.0.1", "port": 8123, "run_all": False}]
 
 
 def test_reload_is_rejected_in_production(monkeypatch, stub_uvicorn_run):

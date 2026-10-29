@@ -64,10 +64,6 @@ os.environ.setdefault("APP_ENV", "test")
 #: 而池里的 asyncpg 连接绑定在会话循环上——复用会报「Future attached to a different loop」。
 os.environ.setdefault("DATABASE_POOL_MODE", "null")
 
-#: 关掉上传解析的自动轮询这类后台行为？没有——worker 是显式调用的函数，
-#: 不会在测试里自启动。这里只把轮询间隔调到很小，避免等待型用例真的睡 2 秒。
-os.environ.setdefault("UPLOAD_WORKER_POLL_SECONDS", "0.05")
-
 #: 沙箱默认关：**测试结果不能取决于开发者本地 `.env` 开了什么**。
 #: 之前 `SANDBOX_ENABLED=true` 写在 `.env` 里时，能力探针的「工具清单必须精确相等」
 #: 那条用例会多出四个沙箱工具而失败——失败出现在别人的机器上，而在 CI 上又看不到。

@@ -1,200 +1,25 @@
-"""Bennett Agent 入口：CLI 交互模式与 FastAPI Web 模式。
+"""Bennett Agent 入口：起 API 与后台循环。
 
 Agent 装配不在本文件——它属于 `app.services.agent_factory`。此前这里有一份
 `create_agent()`，与 `chat_service` 里的版本几乎相同但少传 `reasoning_effort`
-与 `model_settings`，导致 CLI 与 Web 用同一份配置跑出不同的 agent（R-3）。
+与 `model_settings`，导致同一份配置跑出不同的 agent（R-3）。
 
-## CLI 与 Web 的差异是刻意的，但不能是**偶然**的
-
-Web 那边有一整套生成守卫：历史长度上限、token 预算预检、总时长预算、工具异常隔离。
-CLI 早期一样都没有，于是「本地跑得通、Web 却拒」这类差异会长得莫名其妙。现在 CLI
-复用同一份预算计算（`token_budget`）与同一个装配点（`agent_factory`），只在
-**展示方式**上保持区别：CLI 只能看文本，看不到工具调用与澄清弹窗。
+一条命令跑全套：API + 沙箱回收共用同一个事件循环，见 `_run_all`。
 """
 
 import argparse
 import asyncio
-import contextlib
 import logging
-import sys
-from typing import Literal
-
-from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage
 
 from app.config import settings
 from app.config.logging_setup import configure_logging
 from app.config.proxy_env import sanitize_no_proxy_env
-from app.db import engine, verify_schema_at_head
-from app.services.agent_factory import build_agent, render_system_prompt
-from app.services.http_client import close_http_client
-from app.services.model_service import (
-    ChatModelSnapshot,
-    get_default_model_key,
-    resolve_chat_model,
-    seed_default_provider,
-)
-from app.services.redis_client import close_redis
-from app.services.token_budget import (
-    TOOL_SCHEMA_OVERHEAD_TOKENS,
-    build_budget,
-    estimate_agent_messages_tokens,
-    estimate_tokens,
-)
 
 logger = logging.getLogger(__name__)
-
-CliCommand = Literal["exit", "clear", "help"]
-
-
-def parse_cli_command(raw: str) -> CliCommand | None:
-    """把一行输入识别成内置命令（大小写不敏感，前后空白忽略）。
-
-    抽成纯函数是为了能单测：命令词与普通提问共用一行输入，误把 "clear" 当消息发给
-    模型会浪费一次调用；反过来把普通提问误判成命令则会丢消息。
-    """
-    match raw.strip().lower():
-        case "exit" | "quit" | "q":
-            return "exit"
-        case "clear":
-            return "clear"
-        case "help" | "?":
-            return "help"
-        case _:
-            return None
-
-
-def format_cli_model_label(env_model: str, resolved_key: str) -> str:
-    """启动横幅里的模型文案。
-
-    只打印 `MODEL_NAME` 会骗人：当环境变量不是后台合法路由键时，CLI 实际用的是数据库
-    默认模型。两者不同时必须同时写出来，否则用户会按错误的名字排查。
-    """
-    requested = env_model.strip()
-    resolved = resolved_key.strip()
-    if not requested:
-        return resolved or "未配置"
-    if not resolved or resolved == requested:
-        return resolved or requested
-    return f"{requested}（实际路由：{resolved}）"
-
-
-def _budget_for_cli(model_key: str, history: list[ModelMessage], context_window: int | None, max_output):
-    """按与 Web 相同的规则算一次预算。
-
-    与 `chat_service` 的差别只在「历史从哪里来」：那边是客户端全量回放的
-    `ChatMessage`，这里是 `AgentRunResult.all_messages()` 的 pydantic-ai 对象。
-    上限公式、预留量、安全系数全部走同一份 `build_budget`。
-    """
-    if context_window is None or context_window <= 0:
-        return None
-    used = estimate_agent_messages_tokens(history)
-    overhead = estimate_tokens(render_system_prompt()) + TOOL_SCHEMA_OVERHEAD_TOKENS
-    return build_budget(
-        model_key,
-        context_window,
-        max_output,
-        used_tokens=used,
-        overhead_tokens=overhead,
-        used_tokens_include_overhead=False,
-    )
-
-
-async def run_interactive_loop(
-    agent: Agent,  # noqa: ANN401
-    model_key: str = "",
-    limits: tuple[int | None, int | None] = (None, None),
-) -> None:
-    """运行终端交互式 Agent Loop，并以流式输出展示。
-
-    `limits` 是 `(context_window, max_output_tokens)`，由 `build_cli_agent` 在一次解析
-    里顺带取到；以前这里在入口处单独 `get_model_limits(model_key)` 再全量扫一遍启用模型。
-    """
-    print("=" * 60)
-    print(" Bennett Agent 启动成功 (流式响应模式)")
-    print(f" [环境] APP_ENV:          {settings.app_env}")
-    print(f" [模型] MODEL_NAME:       {format_cli_model_label(settings.model_name, model_key)}")
-    print(f" [接口] LITELLM_API_BASE: {settings.litellm_api_base}")
-    print("=" * 60)
-    print("提示: 输入你的问题；exit / quit / q 退出，clear 重置上下文，help 查看命令\n")
-
-    message_history: list[ModelMessage] = []
-    context_window, max_output = limits
-
-    while True:
-        try:
-            raw_input = await asyncio.to_thread(input, "User > ")
-            user_input = raw_input.strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\n退出 Agent。")
-            break
-
-        if not user_input:
-            continue
-
-        command = parse_cli_command(user_input)
-        if command == "exit":
-            print("再见！")
-            break
-
-        if command == "help":
-            print("可用命令：exit / quit / q 退出；clear 重置上下文；help / ? 查看本帮助\n")
-            continue
-
-        if command == "clear":
-            message_history.clear()
-            print("[上下文已重置]\n")
-            continue
-
-        # 预算预检：Web 在每轮开头做同样的事。不做的话长会话必然撞上游 400，
-        # 而用户看到的只有一句“模型不可用”。
-        #
-        # 估算放进线程：真分词器不存在，估算是一段纯 Python 循环，长中文历史要几百
-        # 毫秒（见 `token_budget.estimate_tokens` 的性能说明），这期间事件循环里别的
-        # 任务（HTTP、定时器）都会被挡住。
-        budget = await asyncio.to_thread(_budget_for_cli, model_key, message_history, context_window, max_output)
-        if budget is not None and budget.over_limit:
-            print(
-                f"\n[上下文已满] 本会话约 {budget.used_tokens:,} tokens，"
-                f"超出可用上限 {budget.limit_tokens:,}（模型窗口 {budget.context_window:,}）。\n"
-                "请输入 'clear' 重置上下文后继续。\n"
-            )
-            continue
-
-        print("\nAgent > ", end="", flush=True)
-
-        try:
-            async with agent.run_stream(user_input, message_history=message_history) as response:
-                async for delta in response.stream_text(delta=True):
-                    sys.stdout.write(delta)
-                    sys.stdout.flush()
-
-                # 将本轮消息追加到历史上下文
-                message_history = response.all_messages()
-
-            print("\n")
-
-        except KeyboardInterrupt:
-            # Ctrl-C 中断一轮生成（而不是退出程序）：保留已输出的内容与历史
-            print("\n[已中断本轮]\n")
-        except Exception:
-            # 打到日志而不是只 print：CLI 里的失败同样需要 traceback 才能定位
-            logger.exception("CLI 本轮执行失败")
-            print("\n[执行异常] 详见上方日志\n")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bennett Agent 运行入口")
-    parser.add_argument(
-        "--cli",
-        action="store_true",
-        help="终端交互模式（默认不带参数 = 起全套服务）",
-    )
-    parser.add_argument(
-        "--web",
-        action="store_true",
-        help="只起 API（生产型拓扑：后台循环交给 --worker 的另一个进程）",
-    )
     # 默认只监听回环：/api/chat 已要求登录，但注册入口是开放的；绑到 0.0.0.0
     # 等于把注册入口与上游模型额度开放给同网段
     parser.add_argument(
@@ -203,71 +28,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="监听地址（默认仅本机；需局域网访问请显式指定 0.0.0.0）",
     )
     parser.add_argument("--port", type=int, default=8000, help="服务端口（1-65535）")
-    # 开发期热重启。它**隐含 --web** 且**禁止在 production 下使用**（理由见 main() 里的
-    # 拒绝逻辑）；实现不是 uvicorn 的 --reload，而是「重启完整的 main.py --web 子进程」，
+    # 开发期热重启。它**禁止在 production 下使用**（理由见 main() 里的拒绝逻辑）；
+    # 实现不是 uvicorn 的 --reload，而是「重启完整的 main.py 子进程」，
     # 见 `app/dev_reload.py` 的模块 docstring——那边记录了为什么不能直接借 uvicorn 的。
     parser.add_argument(
         "--reload",
         action="store_true",
-        help="开发期热重启：保存 Python / 提示词 / .env 后自动重启（隐含 --web，仅限非 production）",
-    )
-    # 后台循环进程：与 web 进程同一镜像、不同命令（见 docker-compose 的 worker 服务）
-    parser.add_argument(
-        "--worker",
-        action="store_true",
-        help="运行后台循环（沙箱空闲回收；不监听 HTTP）",
+        help="开发期热重启：保存 Python / 提示词 / .env 后自动重启（仅限非 production）",
     )
     return parser
-
-
-async def build_cli_agent() -> tuple[Agent, ChatModelSnapshot]:  # noqa: ANN401
-    """CLI 的装配入口：与 Web 共用管理后台里的提供商配置。
-
-    CLI 不走 FastAPI lifespan，所以自己建表 + 引导一次默认提供商。解析顺序：
-    环境变量里的 `MODEL_NAME` 若是后台的合法路由键就直用它，否则取后台默认模型；
-    数据库还没有任何配置时退回旧版环境变量路径（`target=None`）。
-
-    两个候选键合并成**一次**解析：`resolve_chat_model` 同时给出 target 与窗口上限，
-    调用方不必再为预算预检单独查一遍库（以前 `resolve_model_target` 被调了两次）。
-    返回整个快照而不是 `(agent, key)`：快照里的窗口上限就是 CLI 预算预检要的数字。
-    """
-    await verify_schema_at_head()
-    await seed_default_provider()
-
-    snapshot = await resolve_chat_model(settings.model_name)
-    if snapshot.target is None:
-        default_key = await get_default_model_key()
-        if default_key and default_key != snapshot.key:
-            snapshot = await resolve_chat_model(default_key)
-
-    return build_agent(snapshot.key, target=snapshot.target), snapshot
-
-
-async def _run_cli() -> None:
-    """CLI 主流程：**单一事件循环**，并在退出时释放资源。
-
-    为什么不能拆成两次 `asyncio.run`：Agent 来自 `agent_factory` 的 `lru_cache`，
-    里面捧着 `AsyncOpenAI`→httpx 客户端。httpx 的内部原语绑在创建它们的 loop 上，
-    跨 loop 复用会 `RuntimeError`（`app/services/http_client.py` 记录了同一个坑）。
-
-    之前能跑只是因为 `build_cli_agent` 阶段恰好没有建连——一旦以后加个预热/探活调用，
-    第一个 prompt 就会炸。
-
-    退出时补上 `close_http_client` 与 `engine.dispose`：Web 那边由 lifespan 的
-    finally 做，CLI 不走 lifespan，不补就会留下一批未关闭的 PG 连接。
-    """
-    try:
-        agent, snapshot = await build_cli_agent()
-        await run_interactive_loop(agent, snapshot.key, (snapshot.context_window, snapshot.max_output_tokens))
-    finally:
-        try:
-            await close_http_client()
-        except Exception:  # noqa: BLE001 - 单个资源失败不能遮蔽另一个
-            logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
-        try:
-            await engine.dispose()
-        except Exception:  # noqa: BLE001 - 同上
-            logger.warning("释放数据库连接失败", exc_info=True)
 
 
 def main() -> None:
@@ -293,47 +62,7 @@ def main() -> None:
                 "--reload 是开发期功能，禁止在 APP_ENV=production 下使用；"
                 "生产环境改配置请走重启/重建镜像，并接受在飞请求会被中断。"
             )
-        return _run_dev_reload(host=args.host, port=args.port, run_all=not (args.web or args.worker or args.cli))
-
-    # 默认（不带参数）= 全套：API + 沙箱回收。
-    #
-    # 为什么默认是「全部」：本地只要少起一个循环，症状就是「沙箱机器永远不回收」——
-    # 而它不报错，只是看起来像功能坏了。默认全开、需要时再用 `--web` / `--worker`
-    # 拆开（生产的 compose 就是那样拆的），比反过来要求人记住两个命令正确得多。
-    # 终端交互退到显式的 `--cli`。
-    if args.cli:
-        return asyncio.run(_run_cli())
-
-    if args.worker and not args.web:
-        return asyncio.run(_run_background_loops())
-
-    if args.web and not args.worker:
-        import uvicorn
-
-        print("=" * 60)
-        print(f" Bennett Agent API: http://{args.host}:{args.port}{docs_hint()}")
-        # 前端不在本进程里：只写端口号会让人以为打开 8000 就能看到界面。
-        print(f" {frontend_hint()}")
-        print("=" * 60)
-        uvicorn.run(
-            "app.server:app",
-            host=args.host,
-            port=args.port,
-            reload=False,
-            # 不要 uvicorn 的 dictConfig：它在启动时会把 `uvicorn*` 三个 logger 的 handler
-            # 换成自己那套（`INFO:     ...`），`configure_logging()` 设置的格式与
-            # 「关掉访问日志」都会被覆盖。传 None 表示「日志已经配好了，别动」。
-            log_config=None,
-            # uvicorn 默认 proxy_headers=True 且 forwarded_allow_ips=127.0.0.1：本机连接
-            # （包括反向代理）可以凭 X-Forwarded-For 直接改写 request.client.host，
-            # 于是「只信 app/api/rate_limit.py 里显式配置的 trusted_proxy_headers」的
-            # 模型被绕过，客户端能自选限流键。关掉它，信任判断只留在应用层一处。
-            proxy_headers=False,
-            # 不设宽限：在飞的 SSE 最长 `TOTAL_STREAM_BUDGET_SECONDS`（600s），
-            # 走默认的等所有任务结束会让 Ctrl-C 看起来卡死。
-            timeout_graceful_shutdown=5,
-        )
-        return
+        return _run_dev_reload(host=args.host, port=args.port)
 
     return asyncio.run(_run_all(host=args.host, port=args.port))
 
@@ -345,7 +74,7 @@ async def _run_all(host: str, port: int) -> None:
 
     两个循环必须共用**同一个事件循环**：`app/db.py` 的 engine、限流器、Redis 客户端都是
     进程级单例，而它们内部的 asyncpg / httpx 连接绑在创建它的 loop 上。起子进程就变成
-    「两份连接池 + 两份限流计数」，正是 `docker-compose` 里 app/worker 分离时要靠 Redis
+    「两份连接池 + 两份限流计数」，正是 `docker-compose` 里多容器部署时要靠 Redis
     共享状态来解决的问题——本地没必要背这份复杂度。
 
     ## 停机的顺序
@@ -372,10 +101,17 @@ async def _run_all(host: str, port: int) -> None:
             host=host,
             port=port,
             reload=False,
-            # 与 `--web` 分支保持**逐字一致**：日志、代理头、优雅关闭的取舍都在那边
-            # 解释过，这里复制而不是另发明一套。
+            # 不要 uvicorn 的 dictConfig：它在启动时会把 `uvicorn*` 三个 logger 的 handler
+            # 换成自己那套（`INFO:     ...`），`configure_logging()` 设置的格式与
+            # 「关掉访问日志」都会被覆盖。传 None 表示「日志已经配好了，别动」。
             log_config=None,
+            # uvicorn 默认 proxy_headers=True 且 forwarded_allow_ips=127.0.0.1：本机连接
+            # （包括反向代理）可以凭 X-Forwarded-For 直接改写 request.client.host，
+            # 于是「只信 app/api/rate_limit.py 里显式配置的 trusted_proxy_headers」的
+            # 模型被绕过，客户端能自选限流键。关掉它，信任判断只留在应用层一处。
             proxy_headers=False,
+            # 不设宽限：在飞的 SSE 最长 `TOTAL_STREAM_BUDGET_SECONDS`（600s），
+            # 走默认的等所有任务结束会让 Ctrl-C 看起来卡死。
             timeout_graceful_shutdown=5,
         )
     )
@@ -383,7 +119,6 @@ async def _run_all(host: str, port: int) -> None:
     print("=" * 60)
     print(f" Bennett Agent API: http://{host}:{port}{docs_hint()}")
     print(f" {frontend_hint()}")
-    print(" 后台循环：沙箱回收（生产请改用 --web 与 --worker 分开）")
     print("=" * 60)
 
     try:
@@ -408,53 +143,11 @@ async def _run_all(host: str, port: int) -> None:
             logger.warning("释放数据库连接失败", exc_info=True)
 
 
-async def _run_background_loops() -> None:
-    """后台循环（目前只有沙箱回收）的主流程：**单一事件循环** + 优雅停机。
-
-    为什么单独一个入口而不是塞进 web 进程：沙箱回收是「时间驱动、与请求无关」的长任务
-    （见 `app/services/sandbox/reaper.py` 的模块 docstring），而它一旦抢到 web 事件循环，
-    正在流式输出的对话就要陪它等。
-
-    SIGTERM 转成 `stop` 事件而不是直接退出：回收可能正做到一半（已抢占 `destroying`、
-    产物还没导出、机器还没销毁），要让它把手上这一台处理完再走——停在中途会留下一条
-    永远卡在 `destroying` 的租约。`docker stop` 的超时（compose 里配了 30s）就是给这个
-    窗口的。
-    """
-    import signal
-
-    from app.services.sandbox.reaper import run_reaper
-
-    await verify_schema_at_head()
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        # Windows 的事件循环不支持信号处理器（那边靠 Ctrl-C 的 KeyboardInterrupt）
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
-
-    try:
-        await asyncio.gather(run_reaper(stop))
-    finally:
-        try:
-            await close_redis()
-        except Exception:  # noqa: BLE001 - 收尾失败不遮蔽其他清理
-            logger.warning("关闭 Redis 连接失败", exc_info=True)
-        try:
-            await close_http_client()
-        except Exception:  # noqa: BLE001
-            logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
-        try:
-            await engine.dispose()
-        except Exception:  # noqa: BLE001
-            logger.warning("释放数据库连接失败", exc_info=True)
-
-
-def _run_dev_reload(host: str, port: int, *, run_all: bool = False) -> int:
+def _run_dev_reload(host: str, port: int) -> int:
     """开发期热重启的入口：把 `--host/--port` 原样交给 supervisor。
 
     这里**不做** `configure_logging()` 之外的准备工作：真正干活的是
-    `app/dev_reload.py`，它负责监听文件、起停 `main.py --web` 子进程。父进程只打印一行
+    `app/dev_reload.py`，它负责监听文件、起停 `main.py` 子进程。父进程只打印一行
     横幅，日志由子进程按 `configure_logging()` 的格式输出（父进程自己也配一次，
     是为了让「检测到变更」「子进程没起来」这类 supervisor 日志同样带统一格式）。
     """
@@ -466,7 +159,7 @@ def _run_dev_reload(host: str, port: int, *, run_all: bool = False) -> int:
     print(f" Bennett Agent 开发热重启: http://{host}:{port}{docs_hint()}", flush=True)
     print(f" {frontend_hint()}", flush=True)
     print("=" * 60, flush=True)
-    run_dev_reload(host=host, port=port, run_all=run_all)
+    run_dev_reload(host=host, port=port)
     return 0
 
 

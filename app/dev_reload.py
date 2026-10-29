@@ -15,7 +15,7 @@
 清理，代理头信任模型也回到框架默认。于是「开发用 `--reload`、部署用 `main.py`」两边
 的日志与网络行为不一致——而「本地复现不出线上问题」正是这么来的。
 
-所以这里的做法是：**子进程就是完整的 `python main.py --web`**，supervisor 只负责
+所以这里的做法是：**子进程就是完整的 `python main.py`**，supervisor 只负责
 「看文件 → 发 SIGTERM → 起新进程」。代价是多一个进程，收益是开发与部署走同一条启动路径。
 
 ## 为什么必须监听提示词与 .env
@@ -133,21 +133,16 @@ def watch_paths(extra: Sequence[str] = ()) -> list[Path]:
     return [path for path in candidates if path.exists()]
 
 
-def build_child_command(host: str, port: int, *, run_all: bool = True) -> list[str]:
-    """子进程命令：`main.py --web`（或 `--all`），**不带** `--reload`。
+def build_child_command(host: str, port: int) -> list[str]:
+    """子进程命令：完整的 `main.py`，**不带** `--reload`。
 
     不带 `--reload` 是防止无限自递归（子进程若也开 reload，会再起一个 supervisor）。
     用 `sys.executable` 而不是裸 `python`：在 `uv run` 下它指向当前 venv，换了 shell
     的 PATH 也不会跑到另一套解释器上。
-
-    `run_all=True` 时命令里**不带模式参数**（`main.py` 默认就是全套）；`False` 时显式
-    `--web`。不带它的话，热重启会静默丢掉后台循环——表现是「改完代码后上传不再被解析」，
-    比启动失败更难查。
     """
     return [
         sys.executable,
         str(PROJECT_ROOT / "main.py"),
-        *([] if run_all else ["--web"]),
         "--host",
         host,
         "--port",
@@ -204,7 +199,6 @@ def run_dev_reload(
     host: str = "127.0.0.1",
     port: int = 8000,
     *,
-    run_all: bool = True,
     extra_dirs: Sequence[str] = (),
     debounce_ms: int = DEFAULT_DEBOUNCE_MS,
     graceful_timeout: float = DEFAULT_GRACEFUL_TIMEOUT,
@@ -215,7 +209,7 @@ def run_dev_reload(
     而不是立刻重拉——否则一个必崩的启动错误会把日志刷满并吃满 CPU。
     """
     paths = watch_paths(extra_dirs)
-    command = build_child_command(host, port, run_all=run_all)
+    command = build_child_command(host, port)
 
     # 用日志而不是 print：格式与子进程的应用日志一致（带时间/级别/logger 名），
     # 混在同一个终端里时，supervisor 与子进程两行一眼能分开。

@@ -90,7 +90,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status == 200 else 1)"
 
-# 走 `main.py --web`，**不直接调 uvicorn**。
+# 走 `main.py`，**不直接调 uvicorn**。
 #
 # 这不是偷懒：`main.py` 在 uvicorn.run 之前做了三件容器里同样必需的事——
 # 1. `configure_logging()`：装上带 `[request_id]` 的格式与 RequestIdFilter。直接起
@@ -105,4 +105,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 #
 # 用 exec 形式（JSON 数组）让 python 直接成为 PID 1：shell 形式（CMD "..."）会多一层
 # /bin/sh，SIGTERM 到不了 python，`docker stop` 只能等到超时后 SIGKILL。
-CMD ["python", "main.py", "--web", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]

@@ -19,7 +19,7 @@ def test_records_switches_in_order():
 
 
 def test_recording_outside_a_collector_is_ignored():
-    """CLI 直接跑 Agent、标题生成等路径没有开启收集器，不能因此报错。"""
+    """直接跑 Agent、标题生成等路径没有开启收集器，不能因此报错。"""
     record_fallback("primary", "fallback")
 
     with collect_fallbacks() as occurrences:
