@@ -42,17 +42,17 @@ skills-lock.json
 
 # 演示物料的中间产物（见 scripts/demo/README.md）：
 # 原始录屏与 Playwright 的临时目录都能重录，只有剪好的 mp4/gif/封面需要入库
-docs/demo/raw.webm
-docs/demo/.raw/
-docs/demo-admin/raw.webm
-docs/demo-admin/.raw/
+docs/public/demo/raw.webm
+docs/public/demo/.raw/
+docs/public/demo-admin/raw.webm
+docs/public/demo-admin/.raw/
 
 # 录屏/截图脚本的依赖（scripts/demo/package.json 锁版本，装出来的目录不进库）
 scripts/demo/node_modules/
 
 # 录屏时间轴是一次性的产物（mark 时间只对那一条 raw.webm 有意义）
-docs/demo/timeline.json
-docs/demo-admin/timeline.json
+docs/public/demo/timeline.json
+docs/public/demo-admin/timeline.json
 
 # macOS Finder 产物（仓库根也会生成，不只各子项目）
 .DS_Store
@@ -60,3 +60,8 @@ docs/demo-admin/timeline.json
 # 评测产物（可重跑）
 quality/runs/*
 !quality/runs/.gitkeep
+
+# 文档站（VitePress）：依赖与构建产物都不入库
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/

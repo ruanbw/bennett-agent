@@ -2,25 +2,45 @@
 
 自托管的多租户 AI 对话助手平台：基于 [PydanticAI](https://ai.pydantic.dev/) + [LiteLLM](https://docs.litellm.ai/) 的 Agent 框架，FastAPI SSE 流式后端，React 19 前端，配独立管理后台。
 
+完整文档：**[ruanbw.github.io/bennett-agent](https://ruanbw.github.io/bennett-agent/)**（环境准备、运行方式、功能说明、设计取舍、运维排障）。
+
 ## 演示
 
 **用户端**（63 秒，1920×1080，无声）：换模型 → 提问 → 模型在自己的沙箱里写脚本、执行、贴回真实输出 → 展开工具轨迹看路径/退出码/每步耗时 → 查上下文预算 → 追问确认工作区还在。全程真实链路，没有一幕是剪辑出来的。
 
-[![用户端演示：模型在自己的机器上跑代码](docs/demo/cover.png)](https://ruanbw.github.io/bennett-agent/)
+[![用户端演示：模型在自己的机器上跑代码](docs/public/demo/cover.png)](https://ruanbw.github.io/bennett-agent/demo/)
 
-点封面进 **[播放页](https://ruanbw.github.io/bennett-agent/)**（GitHub Pages）：原生 `<video>`、1080p 原画、可拖进度条与全屏，两段片子都带章节按钮。
+点封面进 **[播放页](https://ruanbw.github.io/bennett-agent/demo/)**（GitHub Pages）：原生 `<video>`、1080p 原画、可拖进度条与全屏，两段片子都带章节按钮。
 
 为什么不直接链仓库里的 mp4：GitHub 的 blob 页对它只给「View raw」（不播放），而 `raw.githubusercontent.com` 返回 `application/octet-stream` + `nosniff`，README 里的 `<video>` 也解不出来。Pages 返回的是 `video/mp4`，所以能播。
 
 下面这段是 **GIF 自动播放预览**，不点任何东西就能看个大概（代价是 880 宽、9fps，正文文字能读但不如 MP4 锐）：
 
-![用户端演示](docs/demo/demo.gif)
+![用户端演示](docs/public/demo/demo.gif)
 
 **管理端 + 后端**（43 秒，1920×1080，无声）：提供商与模型清单（同步、启停、设默认）→ 用户与角色 → `/docs` 的 OpenAPI 接口面 → 就绪探针逐项依赖状态 → Prometheus 指标。
 
-[![管理端与后端演示](docs/demo-admin/cover.png)](https://ruanbw.github.io/bennett-agent/#admin)
+[![管理端与后端演示](docs/public/demo-admin/cover.png)](https://ruanbw.github.io/bennett-agent/demo/#admin)
 
-物料由 `scripts/demo/` 下的脚本产出（Playwright 录真实浏览器 + ffmpeg 按时间轴变速剪辑），重录步骤见 [scripts/demo/README.md](scripts/demo/README.md)。仓库里的 `docs/demo/*.mp4` 是同一份文件的可下载原件。
+物料由 `scripts/demo/` 下的脚本产出（Playwright 录真实浏览器 + ffmpeg 按时间轴变速剪辑），重录步骤见 [scripts/demo/README.md](scripts/demo/README.md)。仓库里的 `docs/public/demo/*.mp4` 是同一份文件的可下载原件。
+
+## 文档
+
+文档站用 VitePress 编写，源码在 `docs/`，与演示播放页同一次构建发布到 GitHub Pages。四个入口：
+
+- **[指南](https://ruanbw.github.io/bennett-agent/guide/)**：环境准备、本地运行、配置手册、前端构建、生产部署。
+- **[功能](https://ruanbw.github.io/bennett-agent/features/)**：对话与 SSE、工具系统、沙箱、上下文预算、模型容灾、账号与同步、管理后台。
+- **[设计](https://ruanbw.github.io/bennett-agent/design/)**：架构分层、一轮对话的完整链路、数据模型、API 契约、安全设计、质量平台。
+- **[运维](https://ruanbw.github.io/bennett-agent/ops/)**：测试体系、可观测性、故障排查。
+
+本地预览（`docs/` 下独立安装，不混入前后端依赖）：
+
+```bash
+cd docs && npm install && npm run dev    # http://localhost:5173/
+npm run build                            # 产物在 docs/.vitepress/dist/
+```
+
+推送到 `master` 且改动落在 `docs/**` 或工作流文件时，`.github/workflows/docs.yml` 会构建并部署到 Pages。
 
 ## 功能特性
 
@@ -42,6 +62,7 @@ bennett-agent/
 ├── prompts/            # 系统提示词模板（Jinja2）
 ├── frontend/           # 用户端（React 19 + Vite，dev 端口 5173）
 ├── admin-frontend/     # 管理后台（React 19 + Vite + react-router，dev 端口 5174）
+├── docs/               # VitePress 文档站（.vitepress/ 配置，public/ 演示物料）
 ├── evals/              # 行为回归评测用例与框架
 ├── scripts/            # 运维 / 评测脚本
 ├── tests/              # pytest 测试
@@ -61,7 +82,7 @@ bennett-agent/
 
 ## 快速开始（本地开发）
 
-前置要求：Docker、[uv](https://docs.astral.sh/uv/)、Node.js >= 20.11。
+前置要求：Docker、[uv](https://docs.astral.sh/uv/)、Node.js >= 20.11。逐步说明、验收清单与常见坑见文档站的 [本地运行](https://ruanbw.github.io/bennett-agent/guide/quickstart)。
 
 ```bash
 # 1. 起依赖服务（PostgreSQL / Redis / RustFS 对象存储）
@@ -151,7 +172,7 @@ uv run ruff format --check .
 cd frontend && npm run lint && npm run test && npm run build
 ```
 
-CI（GitHub Actions）：后端跑 ruff、结构漂移检测、pytest；前端跑 lint、类型检查、测试与构建。
+CI（GitHub Actions）：后端跑 ruff、结构漂移检测、pytest；前端跑 lint、类型检查、测试与构建。文档改动由独立的 `Docs` 工作流构建 VitePress 并部署 GitHub Pages，不占用后端/前端 CI。
 
 ## 行为回归评测
 
@@ -179,7 +200,7 @@ uv run python -m quality tune --suite quality/suites/core-behavior.yaml --iterat
 uv run python -m quality gate --current quality/runs/core-behavior/<new> --baseline quality/runs/core-behavior/<base>
 ```
 
-产物落 `quality/runs/<suite>/<run_id>/`：`report.json`、自包含 `report.html`、逐样本轨迹 `verdicts.jsonl`、append-only `audit.jsonl`。设计口径、指标定义与借自 Claw-Eval / OpenJudge / reflection / A.I.G 的机制见 [`docs/quality-platform.md`](docs/quality-platform.md)。
+产物落 `quality/runs/<suite>/<run_id>/`：`report.json`、自包含 `report.html`、逐样本轨迹 `verdicts.jsonl`、append-only `audit.jsonl`。设计口径、指标定义与借自 Claw-Eval / OpenJudge / reflection / A.I.G 的机制见 [`docs/design/quality-platform.md`](docs/design/quality-platform.md) 与 [文档站的质量平台页](https://ruanbw.github.io/bennett-agent/design/quality-platform)。
 
 `--driver scripted` 与 `--judge none` 用于离线自测；真数字要 `--driver openai`（默认指向本地 OpenAI 兼容代理）。
 

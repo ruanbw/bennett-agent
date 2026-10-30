@@ -1,0 +1,70 @@
+name: Docs
+
+# 文档与演示页同源：VitePress 构建 docs/，docs/public/ 下的演示视频/封面原样进产物。
+# 只监听 docs 与 workflow 自身，避免改后端也重建一次 Pages。
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一 ref 只保留最新一轮：PR 上连续推送不必排长队；
+# 按 ref 分组也避免 PR 的构建取消 master 正在进行的部署。
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 VitePress
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # VitePress 的 lastUpdated 走 git log；浅克隆会让未改动文件显示不出日期。
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建
+        # 死链、frontmatter 错误、未解析的图片都会让 build 非 0 退出。
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: 部署到 GitHub Pages
+    needs: build
+    # PR 只验证构建，不部署：fork 也没有 Pages 写权限。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

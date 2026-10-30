@@ -1,6 +1,6 @@
 """quality 层的冻结契约：所有生产者与消费者只认这里的类型。
 
-冻结的意思：改字段 = 改契约，必须同时改 `docs/quality-platform.md` 与
+冻结的意思：改字段 = 改契约，必须同时改 `docs/design/quality-platform.md` 与
 `tests/test_quality_contracts.py`，否则下游按旧字段读报告会静默丢数据。
 
 设计口径（与开源实现的对应关系）：

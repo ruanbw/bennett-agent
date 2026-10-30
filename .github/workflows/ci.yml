@@ -23,59 +23,9 @@ jobs:
     name: 后端（ruff + pytest）
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # 后端已经**不依赖本地文件**：数据库、限流/缓存、上传原件都是真实服务。
-    # 因此 CI 必须把这三个服务跑起来——这正是「测试基座与生产同构」的代价与收益：
-    # 建表脚本、外键、`FOR UPDATE SKIP LOCKED`、Lua 限流脚本都会在 CI 里真跑一次。
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_DB: bennett_test
-          POSTGRES_USER: bennett
-          POSTGRES_PASSWORD: bennett
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bennett -d bennett_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-      rustfs:
-        image: rustfs/rustfs:latest
-        env:
-          RUSTFS_VOLUMES: /data
-          RUSTFS_ADDRESS: 0.0.0.0:9000
-          RUSTFS_CONSOLE_ENABLE: "false"
-          RUSTFS_ACCESS_KEY: rustfsadmin
-          RUSTFS_SECRET_KEY: rustfsadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -fsS http://127.0.0.1:9000/health || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      # tests/conftest.py 会读这三项：库名/桶名都带 `_test`，与任何开发配置隔离
-      TEST_DATABASE_URL: postgresql+asyncpg://bennett:bennett@127.0.0.1:5432/bennett_test
-      REDIS_URL: redis://127.0.0.1:6379/15
-      S3_ENDPOINT_URL: http://127.0.0.1:9000
-      S3_ACCESS_KEY: rustfsadmin
-      S3_SECRET_KEY: rustfsadmin
-      S3_BUCKET: bennett-test-artifacts
-      S3_PREFIX: test-artifacts
-      S3_USE_PATH_STYLE: "true"
-      # 建库脚本在应用启动时执行；测试由 conftest 自己跑一遍
-      DATABASE_APPLY_SCHEMA: "true"
+    # 零基础设施：用例直接调用函数 / 服务 / 路由处理函数，协作者传替身；
+    # Redis 用进程内 fakeredis，数据库、对象存储、沙箱都不连。
+    # 因此这里**不启动任何 service**——起服务只会掩盖「用例偷偷连了真实依赖」。
     steps:
       - uses: actions/checkout@v4
 
@@ -96,8 +46,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: 测试
-        # 不需要真实模型网关：涉及上游的用例都替换掉了客户端或生成器。
-        # 但**需要** postgres / redis / rustfs（见上面的 services）。
+        # 不需要真实模型网关、数据库、Redis 或对象存储：涉及上游的用例替换掉客户端或生成器，
+        # Redis 用进程内 fakeredis，其余协作者传替身。
         run: uv run pytest
 
   quality:

@@ -10,7 +10,7 @@
     />
     <!-- 演示站，不该被搜到正文（仓库 README 才是入口） -->
     <meta name="robots" content="noindex" />
-    <link rel="icon" href="demo/cover.png" />
+    <link rel="icon" href="cover.png" />
     <style>
       /* 为什么需要这一页：GitHub 的 README 会过滤掉用户写的 <video>，仓库里的 mp4
          在 blob 页也只给「View raw」。这一页用原生 <video>，1080p、可拖进度、可全屏。 */
@@ -155,7 +155,7 @@
         <p>
           两段录像都是真实链路：真实后端、真实模型、真实沙箱执行，没有摆拍。
           源码与文档见
-          <a href="https://github.com/ruanbw/bennett-agent">github.com/ruanbw/bennett-agent</a>。
+          <a href="https://github.com/ruanbw/bennett-agent">github.com/ruanbw/bennett-agent</a>，<a href="../">文档站首页</a>。
         </p>
       </header>
 
@@ -170,11 +170,11 @@
             controls
             playsinline
             preload="metadata"
-            poster="demo/cover.png"
+            poster="cover.png"
           >
-            <source src="demo/demo.mp4" type="video/mp4" />
+            <source src="demo.mp4" type="video/mp4" />
             你的浏览器不支持 <code>&lt;video&gt;</code>，可以直接下载
-            <a href="demo/demo.mp4">demo.mp4</a>。
+            <a href="demo.mp4">demo.mp4</a>。
           </video>
         </div>
         <div class="chapters" data-for="v-user">
@@ -196,11 +196,11 @@
             controls
             playsinline
             preload="metadata"
-            poster="demo-admin/cover.png"
+            poster="../demo-admin/cover.png"
           >
-            <source src="demo-admin/demo.mp4" type="video/mp4" />
+            <source src="../demo-admin/demo.mp4" type="video/mp4" />
             你的浏览器不支持 <code>&lt;video&gt;</code>，可以直接下载
-            <a href="demo-admin/demo.mp4">demo.mp4</a>。
+            <a href="../demo-admin/demo.mp4">demo.mp4</a>。
           </video>
         </div>
         <div class="chapters" data-for="v-admin">

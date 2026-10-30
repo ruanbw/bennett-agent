@@ -64,7 +64,7 @@ function parseArgs(argv) {
     baseUrl: 'http://localhost:5173',
     email: process.env.DEMO_EMAIL,
     password: process.env.DEMO_PASSWORD,
-    out: 'docs/demo',
+    out: 'docs/public/demo',
     prompt:
       '这周一到周五每天的部署次数是 12、9、15、7、11。' +
       '请真的在你那台机器上跑一遍：算出平均值、中位数、标准差，' +

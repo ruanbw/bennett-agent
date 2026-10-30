@@ -4,10 +4,10 @@ README 开头的两段视频都由这里的脚本产出：
 
 | 物料 | 录什么 | 脚本 |
 | --- | --- | --- |
-| `docs/demo/demo.mp4` / `demo.gif` / `cover.png` | 用户端：对话 + 沙箱真跑代码 + 上下文预算 | `record.mjs` + `make-video.py` |
-| `docs/demo-admin/demo.mp4` / `cover.png` | 管理端：提供商/模型、用户与角色；后端：`/docs`、探针、指标 | `record-admin.mjs` + `make-video.py` |
+| `docs/public/demo/demo.mp4` / `demo.gif` / `cover.png` | 用户端：对话 + 沙箱真跑代码 + 上下文预算 | `record.mjs` + `make-video.py` |
+| `docs/public/demo-admin/demo.mp4` / `cover.png` | 管理端：提供商/模型、用户与角色；后端：`/docs`、探针、指标 | `record-admin.mjs` + `make-video.py` |
 
-两组产物都由 `docs/index.html`（GitHub Pages 播放页）引用，README 的封面图链到那一页。
+两组产物都由 `docs/public/demo/index.html`（GitHub Pages 播放页）引用，README 的封面图链到那一页。
 
 **这些不是应用的依赖**：只有想重做物料时才需要 `npm install`。
 
@@ -21,7 +21,7 @@ screenshots.mjs   重拍界面截图（每个场景真的发一次请求）
 ## 前置
 
 - 后端与两个前端都在跑：`uv run python main.py --reload`（:8000）、`cd frontend && npm run dev`（:5173）、`cd admin-frontend && npm run dev`（:5174）；
-- 沙箱在跑（`docs/demo` 那段要真的执行代码）：`OPENSANDBOX_INSECURE_SERVER=YES uvx opensandbox-server --config docker/opensandbox.toml`；
+- 沙箱在跑（`docs/public/demo` 那段要真的执行代码）：`OPENSANDBOX_INSECURE_SERVER=YES uvx opensandbox-server --config docker/opensandbox.toml`；
 - 本机装了 **Google Chrome**（脚本用 `channel: 'chrome'`，不下载 Playwright 自带的 Chromium）；
 - `ffmpeg`（`brew install ffmpeg`）；
 - 两个演示账号。录屏会**真的调用模型**并产生费用，别拿生产账号跑。
@@ -35,7 +35,7 @@ npx playwright install ffmpeg                    # 只有 1.3MB 的静态 ffmpeg
 ## 录用户端（README 的主视频）
 
 ```bash
-DEMO_EMAIL=demo@example.com DEMO_PASSWORD='...' node record.mjs --out docs/demo
+DEMO_EMAIL=demo@example.com DEMO_PASSWORD='...' node record.mjs --out docs/public/demo
 uv run python ../../scripts/demo/make-video.py
 ```
 
@@ -65,8 +65,8 @@ uv run python ../../scripts/demo/make-video.py
 ## 录管理端 + 后端（README 的第二段）
 
 ```bash
-ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' node record-admin.mjs --out docs/demo-admin
-uv run python ../../scripts/demo/make-video.py --dir docs/demo-admin \
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' node record-admin.mjs --out docs/public/demo-admin
+uv run python ../../scripts/demo/make-video.py --dir docs/public/demo-admin \
     --cover-at users --skip-gif
 ```
 
@@ -114,17 +114,18 @@ GitHub 的 Markdown 不支持 `<video>`，只有 GIF 能内联自动播放；而
 
 ## 素材是否入库
 
-- `docs/demo/demo.mp4`、`demo.gif`、`cover.png`、`docs/demo-admin/demo.mp4`、`cover.png` 入库（README 要引用）；
+- `docs/public/demo/demo.mp4`、`demo.gif`、`cover.png`、`docs/public/demo-admin/demo.mp4`、`cover.png` 入库（README 要引用）；
 - `raw.webm`、`.raw/`、`timeline.json`、`scripts/demo/node_modules/` 不入库（见根目录 `.gitignore`）——它们随时能重录，且只对当次录屏有意义。
 
 ## 播放页（GitHub Pages）
 
-README 的封面图链到 **https://ruanbw.github.io/bennett-agent/**，那一页是 `docs/index.html`：
-零依赖单页，两段视频都是原生 `<video>` + 章节按钮，浅色/深色自适应。
+README 的封面图链到 **https://ruanbw.github.io/bennett-agent/demo/**，那一页是
+`docs/public/demo/index.html`：零依赖单页，两段视频都是原生 `<video>` + 章节按钮，浅色/深色自适应。
 
-仓库设置：Pages 走 `master` 分支的 `/docs` 目录（`gh api -X POST repos/<owner>/<repo>/pages`;
-换成本仓库时记得改）。**不需要构建**：`docs/` 目录里就是要发布的静态文件，仓库里的
-mp4 与封面同时也是 Pages 的资源，一份文件两处用。
+文档站是 VitePress：源码在 `docs/`，`npm run build` 后发布到 GitHub Pages（见
+`.github/workflows/docs.yml`）。`docs/public/` 下的文件会原样复制到产物根目录，所以
+`docs/public/demo/` 里的 mp4 与封面在线上就是 `/demo/*.mp4`，也是 README 引用的同一份文件。
+**不要直接改 `docs/.vitepress/dist/`**：它每次构建都会重建。
 
 ### 为什么不能直接链仓库里的 mp4
 
@@ -132,9 +133,9 @@ mp4 与封面同时也是 Pages 的资源，一份文件两处用。
 
 | 地址 | 浏览器行为 |
 | --- | --- |
-| `github.com/…/blob/master/docs/demo/demo.mp4` | 只有「View raw」，**不播放** |
+| `github.com/…/blob/master/docs/public/demo/demo.mp4` | 只有「View raw」，**不播放** |
 | `raw.githubusercontent.com/…/demo.mp4` | `content-type: application/octet-stream` + `nosniff`，`<video>` 解不出来 |
-| `github.com/…/raw/refs/heads/master/docs/demo/demo.mp4` | 302 到上面那条，同样 octet-stream |
+| `github.com/…/raw/refs/heads/master/docs/public/demo/demo.mp4` | 302 到上面那条，同样 octet-stream |
 | `ruanbw.github.io/bennett-agent/demo/demo.mp4` | `content-type: video/mp4`，**能播** |
 
 另外 GitHub 的 README 会过滤用户写的 `<video>` 标签，所以「写个 video 标签指 raw 链接」
@@ -143,7 +144,7 @@ README 里裸链接即可），但它需要网页登录态——`gh` 2.89 还没
 
 ### 章节秒数从哪来
 
-`make-video.py` 结尾会打印「成片章节（秒）」，`docs/index.html` 里按钮上的
+`make-video.py` 结尾会打印「成片章节（秒）」，`docs/public/demo/index.html` 里按钮上的
 `data-seek` 就照它抄。变速档位一改，这些秒数就变，而手算「几段各多少秒相加」
 必然错一格——所以让脚本自己报，别自己算。
 

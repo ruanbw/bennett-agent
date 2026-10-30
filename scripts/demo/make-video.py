@@ -21,12 +21,12 @@
 
 同一份脚本也用来剪管理端 + 接口那段（`record-admin.mjs` 的产物）：
 
-    uv run python scripts/demo/make-video.py --dir docs/demo-admin \
+    uv run python scripts/demo/make-video.py --dir docs/public/demo-admin \
         --cover-at users --gif-from users --gif-to docs --skip-gif
 
 用法：
 
-    uv run python scripts/demo/make-video.py                    # 默认读 docs/demo
+    uv run python scripts/demo/make-video.py                    # 默认读 docs/public/demo
     uv run python scripts/demo/make-video.py --speed tool=1.5   # 调某一段速度
     uv run python scripts/demo/make-video.py --cut blank        # 整段丢掉
 """
@@ -239,7 +239,7 @@ def export_poster(src: Path, dst: Path, spans, *, at_mark: str, width: int = MP4
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="把录屏剪成 README 用的 MP4 + GIF + 封面")
-    parser.add_argument("--dir", default="docs/demo", help="录屏与产物的目录")
+    parser.add_argument("--dir", default="docs/public/demo", help="录屏与产物的目录")
     parser.add_argument("--speed", action="append", default=[], metavar="段=倍速", help="覆盖某段速度")
     parser.add_argument("--cut", action="append", default=[], metavar="段", help="整段丢掉（默认已丢 blank）")
     parser.add_argument("--gif-from", default=GIF_FROM, help="GIF 从哪个 mark 开始")
@@ -300,7 +300,7 @@ def main() -> None:
         path = out / name
         print(f"  {path}  {path.stat().st_size / 1024 / 1024:.2f} MB")
 
-    # 成片时间轴：每段在**成片里**的起始秒。docs/index.html 的章节按钮就照这个写，
+    # 成片时间轴：每段在**成片里**的起始秒。docs/public/demo/index.html 的章节按钮就照这个写，
     # 手算一遍相加必然算错一格（段数与变速档位都改过）。
     print("成片章节（秒）：")
     cursor = 0.0

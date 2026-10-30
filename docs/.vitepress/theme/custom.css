@@ -1,0 +1,57 @@
+/**
+ * 只覆盖品牌色与中文排版，不重写默认主题的布局。
+ * 品牌色取演示页同一套祖母绿（#10b981 / #047857），深浅两套都保证正文对比度。
+ */
+:root {
+  --vp-c-brand-1: #047857;
+  --vp-c-brand-2: #059669;
+  --vp-c-brand-3: #10b981;
+  --vp-c-brand-soft: rgba(16, 185, 129, 0.14);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #047857 20%, #34d399 90%);
+
+  --vp-c-tip-1: #047857;
+  --vp-c-tip-soft: rgba(16, 185, 129, 0.12);
+}
+
+.dark {
+  --vp-c-brand-1: #34d399;
+  --vp-c-brand-2: #10b981;
+  --vp-c-brand-3: #059669;
+  --vp-c-brand-soft: rgba(52, 211, 153, 0.16);
+
+  --vp-home-hero-name-background: linear-gradient(120deg, #34d399 20%, #a7f3d0 90%);
+}
+
+/* 中文正文比默认值更需要行距；代码块保持紧凑，避免长文件看起来松散。 */
+.vp-doc {
+  line-height: 1.78;
+}
+
+.vp-doc h2 {
+  margin-top: 44px;
+  padding-top: 20px;
+}
+
+.vp-doc h3 {
+  margin-top: 28px;
+}
+
+.vp-doc table {
+  font-size: 14px;
+}
+
+.vp-doc td,
+.vp-doc th {
+  padding: 8px 12px;
+}
+
+.vp-doc blockquote {
+  border-left-width: 3px;
+}
+
+/* 首页特性卡片：默认主题的卡片在中文长文案下容易高低不齐，统一最小高度。 */
+.VPFeature {
+  min-height: 100%;
+}

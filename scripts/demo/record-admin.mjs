@@ -13,7 +13,7 @@
  *   <out>/timeline.json   时间轴（剪辑用）
  *
  * 用法：
- *   ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' node record-admin.mjs --out docs/demo-admin
+ *   ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' node record-admin.mjs --out docs/public/demo-admin
  */
 
 import path from 'node:path';
@@ -43,7 +43,7 @@ function parseArgs(argv) {
     apiUrl: 'http://127.0.0.1:8000',
     email: process.env.ADMIN_EMAIL || process.env.DEMO_EMAIL,
     password: process.env.ADMIN_PASSWORD || process.env.DEMO_PASSWORD,
-    out: 'docs/demo-admin',
+    out: 'docs/public/demo-admin',
     state: '',
     headless: false,
     width: 1920,
