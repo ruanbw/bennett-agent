@@ -18,7 +18,7 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 客户端
   │ POST /api/chat {model, reasoning_effort, messages, session_id, approvals}
   ▼
-[1] 中间件：请求体上限(413) → Origin 守卫(403) → CORS → 请求 ID → 安全头
+[1] 中间件（由外到内）：安全头 → 请求 ID → 指标 → CORS → Origin 守卫(403) → 请求体上限(413)
   ▼
 [2] Cookie 认证：current_active_user → 无效/停用 401
   ▼
@@ -34,7 +34,7 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
   ▼
 [7] 历史转换 convert_chat_history → 非法序列 → error（无 code，retryable=false）
   ▼
-[8] Agent 装配 build_agent（lru_cache）→ 失败 → error(internal_error)
+[8] Agent 装配 build_agent（lru_cache）→ 失败 → error（无 code，retryable=true）
   ▼
 [9] 流式生成 agent.run_stream_events
   │     ├─ 工具调用：作用域注入 → 审批闸门 → 异常隔离
@@ -54,18 +54,22 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 
 请求先过 `app/middleware.py`：`MaxBodySizeMiddleware` 按 `Content-Length` 预检、
 按实际读取字节数兜底，超限返回 413；`OriginGuardMiddleware` 拒绝跨站的状态变更请求；
-`SecurityHeadersMiddleware` 给 `/api/*` 加 `Cache-Control: no-store` 与安全头。
-顺序在 `app/server.py` 里固定：越晚注册越外层，所以安全头在最外层，413/403 也带 CORS 头。
+`SecurityHeadersMiddleware` 给所有响应加 `nosniff` / `X-Frame-Options` / `Referrer-Policy`，
+并额外给 `/api/*` 加 `Cache-Control: no-store`。
+`app/server.py` 的注册顺序是「请求体上限 → Origin 守卫 → CORS → 指标 → 请求 ID → 安全头」，
+而 FastAPI/Starlette 把**最后注册的放在最外层**，所以实际执行顺序是倒序：安全头 → 请求 ID →
+指标 → CORS → Origin 守卫 → 请求体上限。把 413 与 403 两个中间件放在 CORS 之前注册是刻意的：
+它们在外层中间件之内、CORS 之外，响应才带 CORS 头，浏览器里的前端才读得到错误。
 
 ### [2] Cookie 认证
 
 `current_active_user`（`app/services/auth.py`）从 HttpOnly cookie 取会话 token，查
-`access_token` 表（库里存的是 SHA-256 摘要），未登录或 `is_active=False` 返回 401。
+`accesstoken` 表（库里存的是 SHA-256 摘要），未登录或 `is_active=False` 返回 401。
 它刻意不声明数据库 `Depends`：SSE 与长轮询会长时间占着请求级连接，连接池会被耗尽。
 
 ### [3] 账号限流
 
-`enforce_chat_rate_limit` 按 `user:<id>` 计数（`app/api/rate_limit.py`）。
+`enforce_chat_rate_limit`（`app/api/chat.py`）按 `user:<id>` 计数。
 按账号而不是按 IP：反代后面只剩代理地址，NAT 用户还会互相挤占。IP 维度留给认证端点。
 
 ### [4] 模型快照
@@ -76,6 +80,7 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 关键决定：**显式传入的 `model` 必须在白名单里**。`model` 只是转发给上游的字符串，
 不校验就等于任何登录用户都能用服务端 key 调任意模型。库已接管但一个启用模型都没有时返回
 503，而不是回退 `MODEL_NAME`——否则「停用全部模型」看起来像「没生效」。
+白名单为 `None` 表示库没接管（走环境变量网关），此时显式 `model` 不校验。
 
 出站地址在这一步校验：`outbound_guard.reject_private_target` 拒绝链路本地、未指定、
 组播与云元数据地址。
@@ -83,22 +88,36 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 ### [5] reasoning_effort
 
 `normalize_reasoning_effort` 把 `off/none/false/disabled` 归一化成 `"none"`，
-再校验它是否在该模型声明的 `supported_reasoning_levels` 内。模型没声明等级时放行
-（无法判定不等于拒绝）。归一化必须在进 Agent 缓存之前做，否则 `"HIGH"`、`"high"`、
-`" high "` 各占一个缓存槽。
+再校验它是否在该模型的 `snapshot.reasoning_levels` 内（值来自数据库列的
+`supported_reasoning_levels`）。模型没声明等级时放行（无法判定不等于拒绝）。
+归一化必须在进 Agent 缓存之前做，否则 `"HIGH"`、`"high"`、`" high "` 各占一个缓存槽。
+
+### 前置分支的失败形态
+
+下面三步（[6]–[8]）的任何失败都不会变成 HTTP 状态码：
+
+| 失败点 | 事件 | retryable | code |
+|---|---|---|---|
+| 目标为 `None` 且库已接管 | `error` | false | `model_unavailable` |
+| 预算解析自身抛异常（如读库失败） | `error` | true | `internal_error` |
+| 历史序列非法 | `error` | false | 无 |
+| Agent 装配失败 | `error` | true | 无 |
+
+前两行必须分开：`model_unavailable` 是「模型确实不存在」的确定结论，与第二行的「查不出来」
+混为一谈，一次数据库抖动就会被报成「模型已下架」。
 
 ### [6] 预算与压缩
 
 `resolve_context_budget`（`app/services/token_budget.py`）按窗口算上限：
 
 ```text
-可用上限 = (窗口 − 预留 − 固定开销) × 安全系数(0.9)
+可用上限 = (窗口 − 预留 − 固定开销) × 安全系数
 ```
 
 - 预留优先用上游声明的 `max_output_tokens`，否则用 `CONTEXT_RESERVE_TOKENS`（默认 8192），
   两者都会被压在窗口的一半以内。
 - 固定开销 = 系统提示词 token + 工具 schema 估算（512）。
-- 客户端给了 `context_anchor` 时只估算锚点之后的消息，但锚点会被核对：明显低于前缀真实规模
+- 客户端给了 `context_anchor` 时只估算锚点那条起之后的消息（含锚点那条 assistant），但锚点会被核对：明显低于前缀真实规模
   就退回全量估算（否则填个小值就能绕过预检）。
 - 窗口未知（网关没报）一律放行，不猜。
 
@@ -107,7 +126,12 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 再折叠早期轮次成摘要；摘要超时（`SUMMARY_TIMEOUT_SECONDS = 20s`）或失败就退回确定性的抽取式摘要。
 压完仍超限则发 `error`（`code=context_overflow`，`retryable=false`）。
 
-压缩改变了模型看到的上下文，所以必然发一条 `compaction` 事件（只给数字与策略，不下发摘要正文）。
+安全系数是 `CONTEXT_SAFETY_RATIO`（默认 0.9）。固定开销只在「从零估算」这条路上扣：
+走 `context_anchor` 时锚点值已是完整 prompt 的规模，再扣就扣两次
+（`build_budget` 的 `used_tokens_include_overhead`）。
+
+压缩改变了模型看到的上下文，所以只要 `strategy` 不是 `none` 就必定发一条 `compaction` 事件
+（只给数字与策略，不下发摘要正文）。
 
 ### [7] 历史转换
 
@@ -119,6 +143,7 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 
 `build_agent`（`app/services/agent_factory.py`）是**唯一**的装配点，对话、标题、摘要都走这里。
 缓存键 = 归一化后的模型名 + 归一化后的 effort + settings 派生值 + 调用目标。
+装配失败不是 HTTP 错误：响应头早已发出，只能发 `error`（`retryable=true`，无 code，文案带错误编号）。
 
 装配出来的东西：主模型（配了备用模型时包一层 `FallbackModel`）、工具列表、系统提示词、
 MCP toolsets、两个 capability（审批闸门 + 异常隔离）。
@@ -194,7 +219,8 @@ with (
 
 `usage` 事件在正文之后、`done` 之前发出，用的是上游回报的真实值而不是估算。
 `context_window` 取自本轮快照（备用模型接手时报备用模型的窗口）；
-`context_limit_tokens` 是后端判超限时用的上限，与窗口不是一回事。
+`context_limit_tokens` 是给前端画进度条用的 prompt 口径上限（含系统提示词与工具 schema 开销、乘过安全系数），
+与后端判超限用的 `budget.limit_tokens`、以及 `compaction` 事件里的 `limit_tokens` 都不是同一个数。
 量不到就不发这个事件，绝不补 0（`0 tok/s` 会被读成模型卡住）。
 
 ### [11] SSE 序列化

@@ -18,6 +18,21 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 
 客户端的 `created_at` / `updated_at` 只用于展示排序，**不能作为同步判据**——两台设备的时钟本来就不一致。
 
+## 线上形状
+
+两个端点的载荷都是 JSON（pull 的入参走 query string），字段名 snake_case，定义在 `app/schemas/sync.py`。
+
+`POST /api/sync/push` 请求体：
+
+- `conversations[]`：`id`、`title`、`model`、`reasoning_effort`、`is_pinned`、`deleted`、`client_rev`、`created_at`、`updated_at`。
+- `messages[]`：`id`、`conversation_id`、`role`（只接受 `user` / `assistant`）、`payload`（任意 JSON 对象，正文、思考链、工具调用与结果整包透传）、`client_rev`、`created_at`。
+
+响应：`version`（本次 push 之后的用户同步版本，纯重放时不变）、`accepted.conversations` / `accepted.messages`、`rejected[]`（每项 `kind` + `id` + `reason`）。
+
+`GET /api/sync/pull` 响应：`cursor`（必须原样回传）、`has_more`、`conversations[]`、`messages[]`。消息行比会话行多一个 `seq`。
+
+两个行模型（`ConversationIn` / `MessageIn`）与 `PushRequest` 都是 `extra="forbid"`：多传一个字段就 422，而不是静默丢掉。行 id 只允许 `[A-Za-z0-9_-]{1,64}`；`client_rev` 上限 2³¹−1、时间戳上限 9999 年——超界在入口变 422，否则会是 PG 整数溢出后的 500。
+
 ## 写路径：push（行级幂等 upsert）
 
 `POST /api/sync/push` 一次提交会话行与消息行。服务端逐行判定，整批不会因为某一行坏掉而失败。
@@ -36,6 +51,8 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 
 同一个 id 在一批里出现多次时，取 `client_rev` 最大的那条（重试拼接的批次会这样）。
 
+整批写入在一个事务里；进程内另有一把 push 串行锁，因为配额判定是「先 COUNT 再 INSERT」，并发批次各自读到旧计数就会一起突破上限（只覆盖单进程）。万一撞主键——首次推送与它的重试同时在飞——整批重放一次，而不是把半批结果告诉客户端。
+
 ### 幂等的两个前提
 
 1. **id 由客户端生成**。服务端发主键会让「重试」变成多一行。
@@ -45,12 +62,14 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 
 | `reason` | 含义 | 客户端该做什么 |
 |---|---|---|
-| `not_owned` | 这个 id 属于另一个用户 | 丢弃，不再重试 |
+| `not_owned` | 这个 id 属于另一个用户（只会出现在会话行上） | 丢弃，不再重试 |
 | `stale` | 服务端已有更新的 `client_rev` | 丢弃，等下一轮 pull 用服务端版本覆盖；面板单独计数提示「本机修改被覆盖」 |
-| `too_large` | payload 序列化后超过 `SYNC_PAYLOAD_MAX_BYTES`（默认 256 KB） | 停止重试，标 error；用户要自己删掉或导出那条内容 |
-| `conversation_missing` | 会话不存在（不在本批，也不是自己名下的行） | 会话重新标 pending、消息留 pending，下一批先推会话 |
+| `too_large` | 消息 `payload` 序列化后超过 `SYNC_PAYLOAD_MAX_BYTES`（默认 256 KB）。只对消息行生效，会话行没有 payload | 停止重试，标 error；用户要自己删掉或导出那条内容 |
+| `conversation_missing` | 会话不存在（不在本批，也不是自己名下的行）；消息行属于别人时也报这个原因 | 会话重新标 pending、消息留 pending，下一批先推会话 |
 | `conversation_deleted` | 会话已被删除（墓碑已存在） | 丢弃，不再重试 |
 | `quota_exceeded` | 触到单用户会话数或单会话消息数上限 | 标 error，等用户清理旧内容后手动「重新上传」 |
+
+消息行不区分「这个 id 不是你的」与「这个 id 不存在」：两种都报 `conversation_missing`，否则可以拿消息 id 探测别人的行是否存在。会话行可以区分，因为 id 是 uuid v4，猜不出来。
 
 拒绝是**逐行**的：同批其它行照常接受。前端把「永远不会成功」的原因（`stale` / `not_owned` / `conversation_deleted`）直接标成 synced，把「可能成功」的原因（`conversation_missing`）留在队列里重试，把「数据本身放不进去」的原因（`too_large` / `quota_exceeded`）标成 error 并给用户一个显式入口。
 
@@ -58,13 +77,13 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 
 单次 push 的行数上限是 `SYNC_PUSH_MAX_ROWS`（默认 200，会话 + 消息合计）。超了整批返回 400（`code=too_many_rows`），客户端按这个上限分批。客户端一次取 150 行，给服务端留余量。
 
-批次组装还有一条约束：**会话必须先于它的消息到达服务端**（服务端按 id 校验会话归属）。会话数超出一批时，引用这些会话的消息不能塞进同一批——那只会换回一堆 `conversation_missing`。
+批次组装还有一条约束：**消息所属的会话必须已经在服务端，或在同一批的会话列表里**（服务端先处理会话、再按 id 校验消息的会话归属，所以批内顺序不重要）。会话数超出一批时，引用这些会话的消息不能塞进同一批——那只会换回一堆 `conversation_missing`。
 
 ## 发号与空洞
 
 `seq`（会话内消息顺序）与 `version`（拉取游标用的版本号）都由服务端赋值，客户端不能自己填。
 
-- **会话内顺序**：`conversation.seq_counter` 自增，与消息插入同事务。回滚时序号一起回滚。
+- **会话内顺序**：`conversation.seq_counter` 自增，与消息插入同事务。回滚时序号一起回滚。`message.seq` 只在插入时赋值，之后内容再改（流式助手消息）也不动它——否则消息会在列表里跳位。
 - **同步版本号**：每个用户一行 `sync_counter`，用 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING version` 一条语句发号，行锁保证并发 push 不会拿到同一个号。
 
 写入与发号**必须同事务**。分开就会出现「版本前进、行还没写」的空洞：客户端拉到的游标已经越过那条还没写的行，之后永远不会拉到它，数据静默丢失。
@@ -75,9 +94,11 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 
 `GET /api/sync/pull?cursor=...&limit=...&timeout=...`
 
-游标是不透明字符串（`v1:<version>`），客户端不许解析，服务端可以随时换格式——换编码时旧游标会被识别为「不认识」并触发 410。
+`limit` 与 `timeout` 都只能把服务端的默认值**调小**：`limit` 取 `min(limit, SYNC_PULL_MAX_ROWS)`，`timeout` 取 `min(timeout, SYNC_LONG_POLL_SECONDS)`。客户端不能靠传大值把一次请求拉成无限长。
 
-拉的是两路数据：会话行与消息行，各自有独立的行数上限（`SYNC_PULL_MAX_ROWS`，默认 500）。响应还受累计字节上限约束（`SYNC_PULL_MAX_BYTES`，默认 8 MB）：500 行 × 256 KB 最坏是 128 MB，一次就能把序列化与浏览器主线程一起拖死。
+游标是不透明字符串（`v1:<version>`），客户端不许解析，服务端可以随时换格式——换了前缀之后旧游标会被当成「不认识」，返回 400 `invalid_cursor`（对客户端的动作与 410 相同：丢掉游标重拉）。
+
+拉的是两路数据：会话行与消息行，各自有独立的行数上限（`SYNC_PULL_MAX_ROWS`，默认 500；前端每次取 300）。响应还受累计字节上限约束（`SYNC_PULL_MAX_BYTES`，默认 8 MB）：500 行 × 256 KB 最坏是 128 MB，一次就能把序列化与浏览器主线程一起拖死。字节截断至少保留一行，否则超大单行会让游标原地打转。
 
 ### 游标只在两路都拉完时才前进
 
@@ -135,6 +156,7 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 - 拉下来的行必须走内部的同步写入路径，否则会被表级 hook 标成 pending 又推回去，形成拉/推无限循环。
 - 长轮询超时**不算失败**：单次超时静默重试，连续 3 次才上报。浏览器冻结标签页会让定时器停走，恢复时立刻到期，把它当失败会误报「同步没保存」。
 - 断网时停止发请求，等 `online` 事件重新排队；面板把断网显示成「会自动恢复」而不是「同步失败」。
+- 标签页隐藏时不发长轮询（`timeout` 传 0）：挂一个 25 秒的请求，只会在切回来时立刻作废。
 - 登出前有一次最后推送（2 秒预算），返回仍未推上去的行数，界面据此提示「这些内容会丢」。
 
 ## 相关源码
@@ -146,3 +168,5 @@ description: IndexedDB 本地优先 + 服务端权威日志的同步协议：行
 - `app/db/models/sync.py` — conversation / message / sync_counter 表
 - `frontend/src/lib/sync/engine.ts` — 同步引擎主循环
 - `frontend/src/lib/sync/mapping.ts` — 批次组装与远端覆盖判定
+- `frontend/src/lib/sync/cursor-reset.ts` — 游标连续失效的计数与停止条件
+- `frontend/src/lib/sync/long-poll.ts` — 长轮询超时的静默重试判定

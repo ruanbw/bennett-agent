@@ -48,6 +48,10 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 校验文档
+        # frontmatter、相对链接、标题层级、占位符与代码围栏，零依赖脚本，见 docs/scripts/check-docs.mjs。
+        run: npm run check
+
       - name: 构建
         # 死链、frontmatter 错误、未解析的图片都会让 build 非 0 退出。
         run: npm run build

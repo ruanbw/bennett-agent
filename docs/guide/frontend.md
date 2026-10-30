@@ -12,7 +12,7 @@ description: 说明两个 React 应用的分工、开发期代理、构建产物
 | 应用 | 目录 | dev 端口 | 面向 |
 |---|---|---|---|
 | 用户端 | `frontend/` | 5173 | 聊天、会话列表、模型选择、沙箱状态、账号设置、跨设备同步 |
-| 管理后台 | `admin-frontend/` | 5174 | 提供商与模型、用户与角色、就绪探针、运维视图 |
+| 管理后台 | `admin-frontend/` | 5174 | 概览（统计与待处理项）、提供商与模型、用户与角色 |
 
 两者的技术差异：
 
@@ -26,18 +26,21 @@ description: 说明两个 React 应用的分工、开发期代理、构建产物
 
 管理后台的路由是真实的 URL 路径，刷新任意子页面都需要服务器把未知路径回落到 `index.html`（SPA fallback）。静态托管时这一条必须配。
 
+两边的构建配置同构，所以下文的大部分规则对两个应用都成立：Vite + `@vitejs/plugin-react` + `@tailwindcss/vite`，别名 `@` 指向各自的 `src`。样式是 Tailwind CSS 4，**没有 `tailwind.config.js` 也没有 `postcss.config.js`**：设计令牌与应用样式写在各自的 `src/index.css` 里（`@import "tailwindcss"` 加 `@theme inline` 块），两份主题是复制关系而非共享文件——两个前端独立发版，样式各自演进。Node 版本要求写在各自的 `package.json`（`engines.node >= 20.11`）。
+
 ## 开发期：/api 代理与同源
 
-两个 Vite 配置都把 `/api` 代理到 `http://127.0.0.1:8000`：
+两个 Vite 配置的 `server` 段只有端口不同，代理规则一字不差（`frontend/vite.config.js`、`admin-frontend/vite.config.js`）：
 
 ```js
 server: {
-  port: 5173,              // admin-frontend 是 5174
   proxy: {
     '/api': 'http://127.0.0.1:8000',
   },
-}
+},
 ```
+
+端口见上表（用户端 5173、管理后台 5174）：两个 dev server 同时开着是常态，端口必须分开。
 
 代理的意义不只是转发：它让开发期的页面与接口**同源**，于是
 
@@ -50,10 +53,10 @@ server: {
 
 ## VITE_API_BASE_URL
 
-前端 API 基址来自各应用目录下的 `.env`：
+前端 API 基址由 Vite 在构建时内联 `import.meta.env.VITE_API_BASE_URL`（`frontend/src/lib/constants.ts`、`admin-frontend/src/lib/api.ts`）。用户端仓库里带一份值为空的 `frontend/.env`；管理后台只提交 `.env.example`，本地覆盖要自己新建 `admin-frontend/.env.local`（Vite 会加载，`.gitignore` 忽略）。
 
 ```text
-# frontend/.env 或 admin-frontend/.env
+# 值留空即可；要覆盖时写进 frontend/.env.local 或 admin-frontend/.env.local
 VITE_API_BASE_URL=
 ```
 
@@ -65,7 +68,7 @@ VITE_API_BASE_URL=https://api.example.com
 
 此时后端必须同步配置 `CORS_ALLOWED_ORIGINS`、`CORS_ALLOW_CREDENTIALS=true`，并把 cookie 设为 `AUTH_COOKIE_SAMESITE=none` + `AUTH_COOKIE_SECURE=true`（跨站部署的完整要求见[生产部署](deployment.md)）。
 
-值末尾的 `/` 会被去掉，避免拼出 `//api/chat`——FastAPI 会把它当成另一个路径返回 404。
+值末尾的 `/` 会被去掉，避免拼出 `//api/chat`——FastAPI 会把它当成另一个路径返回 404。两个应用各有一份实现，都是同一行 `.replace(/\/+$/, '')`。
 
 ## npm scripts
 
@@ -90,12 +93,12 @@ cd frontend && npm run build
 cd admin-frontend && npm run build
 ```
 
-产物落在各应用的 `dist/`（`.gitignore` 已忽略 `dist/`），是纯静态文件：
+`npm run build` 先跑 `tsc --noEmit`（类型错误直接中断构建），再由 Vite 产出静态文件。产物落在各应用的 `dist/`（各目录的 `.gitignore` 已忽略 `dist/`）：
 
 - `dist/index.html` 与带 hash 的 JS/CSS 资源；
 - `public/` 下的静态资源（图标等）被原样拷入。
 
-前端构建需要一个后端可达吗？不需要。构建过程不访问后端，所以可以在 CI 里独立完成。
+构建过程不访问后端，可以在 CI 里独立完成。
 
 用户端的版本号只有一个来源：`vite.config.js` 在构建时从 `package.json` 读 `version` 并注入 `__APP_VERSION__`，避免设置面板里出现第二份手写版本信息。
 
@@ -118,7 +121,7 @@ TanStack Query 承担服务端状态：缓存、去重、失效、后台重取�
 - 401 / 403 / 404 不重试——重试一个权限错误只会拖慢错误呈现；
 - mutations 一律不重试。
 
-两条约定值得保留：**不做乐观更新**（管理动作失败必须让人看见真实状态），以及**写操作成功后只失效受影响的那几个 query key**。
+两条约定：**不做乐观更新**（管理动作失败必须让人看见真实状态），以及**写操作成功后只失效受影响的那几个 query key**。
 
 ## 生产：前端是独立的静态产物
 
@@ -138,15 +141,19 @@ TanStack Query 承担服务端状态：缓存、去重、失效、后台重取�
 1. SPA fallback：未知路径回落到 `index.html`（管理后台的 `react-router` 需要）；
 2. `dist/` 里的资源是不可变文件，可以配长缓存；`index.html` 必须不缓存，否则发版后用户拿到旧的资源引用。
 
-两个应用可以部署在同一个静态服务器的不同路径下（各自一份 `dist/`），也可以分成两个子域。
+两个应用可以分别用两个子域，也可以放同一个静态服务器的两个路径下——后一种要在构建时给 Vite 传 `--base`：两份配置都没有预设 `base`，而资源引用默认是根路径 `/assets/...`。
 
 ## 相关源码
 
 - `frontend/vite.config.js`
 - `frontend/src/lib/constants.ts`
+- `frontend/src/lib/api.ts`
+- `frontend/src/lib/app-info.ts`
 - `frontend/src/db/index.ts`
 - `frontend/src/lib/sync/engine.ts`
 - `admin-frontend/vite.config.js`
 - `admin-frontend/src/lib/api.ts`
+- `admin-frontend/src/lib/nav.ts`
+- `admin-frontend/src/lib/query.tsx`
 - `admin-frontend/src/lib/query-client.ts`
 - `admin-frontend/src/App.tsx`

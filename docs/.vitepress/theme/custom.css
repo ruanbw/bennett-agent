@@ -1,6 +1,7 @@
 /**
  * 只覆盖品牌色与中文排版，不重写默认主题的布局。
  * 品牌色取演示页同一套祖母绿（#10b981 / #047857），深浅两套都保证正文对比度。
+ * 对比度按 WCAG 相对亮度公式粗算，阈值取 AA 正文 4.5:1。
  */
 :root {
   --vp-c-brand-1: #047857;
@@ -11,8 +12,16 @@
   --vp-home-hero-name-color: transparent;
   --vp-home-hero-name-background: linear-gradient(120deg, #047857 20%, #34d399 90%);
 
-  --vp-c-tip-1: #047857;
-  --vp-c-tip-soft: rgba(16, 185, 129, 0.12);
+  /* 默认主题的品牌按钮是「白字 + brand-3 底色」（vars.css 的 --vp-button-brand-bg/text），
+     白字压 #10b981 只有 2.54:1，首页主 CTA 不达 AA。按钮单独换成祖母绿深色档：
+     白字在 #047857 上 5.48:1、hover #065f46 上 7.68:1、active #064e3b 上 9.72:1。 */
+  --vp-button-brand-bg: #047857;
+  --vp-button-brand-hover-bg: #065f46;
+  --vp-button-brand-active-bg: #064e3b;
+
+  /* 这里不覆盖 --vp-c-tip-1 / --vp-c-tip-soft：vars.css 已把它们指到 brand-1 / brand-soft，
+     能跟着模式自动换档。在 :root 写死会把暗色模式一起写死，tip 块里的链接与行内代码
+     会拿到 #047857，在暗色 tip 底色上只有 2.52:1（走默认映射是 7.19:1）。 */
 }
 
 .dark {
@@ -22,36 +31,139 @@
   --vp-c-brand-soft: rgba(52, 211, 153, 0.16);
 
   --vp-home-hero-name-background: linear-gradient(120deg, #34d399 20%, #a7f3d0 90%);
+
+  /* brand-1 当正文链接色在暗色下足够：bg #1b1b1f 上 8.93:1、侧栏 bg-alt #161618 上 9.40:1、
+     表格斑马纹 bg-soft #202127 上 8.35:1，侧栏选中态与正文链接都不用动。
+     出问题的是按钮——默认白字压在 brand-3 #059669 上只有 3.77:1，
+     所以暗色下把按钮文字改成深色：底 brand-3 / brand-2 / brand-1 分别是 4.56:1、6.77:1、8.93:1。 */
+  --vp-button-brand-text: #1b1b1f;
+  --vp-button-brand-hover-text: #1b1b1f;
+  --vp-button-brand-active-text: #1b1b1f;
 }
 
-/* 中文正文比默认值更需要行距；代码块保持紧凑，避免长文件看起来松散。 */
-.vp-doc {
-  line-height: 1.78;
+/* 中文正文比默认值更需要行距。默认 CSS 把 `p` 的行高写死成 28px（vp-doc.css 的
+   Paragraph 段），会盖掉写在 `.vp-doc` 上的继承值，所以必须直接命中 `p` 与 `li` 才生效。 */
+.vp-doc p,
+.vp-doc li {
+  line-height: 1.8;
 }
 
+/* h2 自带一条上分隔线，48px 上外边距在中文长文里偏松，收到 44px。
+   上内距保持默认 24px 不动：默认的 `.vp-doc h2 .header-anchor { top: 24px }` 是跟它对齐的，
+   改内距会让鼠标悬停时的锚点图标上下错位。 */
 .vp-doc h2 {
   margin-top: 44px;
-  padding-top: 20px;
 }
 
+/* 默认 32px；中文小标题密度高，28px 已能拉开层级，长文里少一点空白。 */
 .vp-doc h3 {
   margin-top: 28px;
 }
 
-.vp-doc table {
-  font-size: 14px;
-}
-
+/* 7 列的宽表（design/quality-platform.md）和 6 列的（features/tools.md）在 688px 正文宽里很挤：
+   默认单元格左右内距 16px（vp-doc.css 的 Table 段），收到 12px 把宽度让给内容。
+   横向滚动不用补：`.vp-doc table` 默认就是 `display: block; overflow-x: auto`，
+   再声明一次只会多套一个滚动容器。 */
 .vp-doc td,
 .vp-doc th {
   padding: 8px 12px;
 }
 
+/* 2px 竖线在中文长引用里太细，3px 才有明显的引用区隔。 */
 .vp-doc blockquote {
   border-left-width: 3px;
 }
 
-/* 首页特性卡片：默认主题的卡片在中文长文案下容易高低不齐，统一最小高度。 */
-.VPFeature {
-  min-height: 100%;
+/* 打印：设计、运维两组页面常被打印出来对照，纸面上侧栏、导航、页脚都是噪音。
+   组件样式都带 scoped 的 [data-v-*] 属性选择器，比这里的单类选择器高一级，
+   所以隐藏与布局复位这几条必须 !important。 */
+@media print {
+  .VPNav,
+  .VPSidebar,
+  .VPLocalNav,
+  .VPDocAside,
+  .VPDocFooter,
+  .VPFooter {
+    display: none !important;
+  }
+
+  /* 打印版面按窄屏档套样式，默认的 32px 上间距 / 96px 底部留白只挤纸面宽度。 */
+  .VPDoc {
+    padding: 0 !important;
+  }
+
+  /* 正文容器的 688px / 992px 上限按屏幕宽度设置，打印时只会留下大片空白。 */
+  .VPDoc .content,
+  .VPDoc .content-container,
+  .VPDoc .container {
+    padding: 0 !important;
+    max-width: none !important;
+  }
+
+  /* 暗色模式下正文是 #dfdfd6、分隔线是 #2e2e32（vars.css 的 .dark 档），
+     打印到白纸上几乎看不见；这里把背景、文字、分隔线、brand 回退成浅色档取值
+     （#ffffff / #f6f6f7、#3c3c43 / #67676c / #929295、#e2e2e3、#047857）。
+     代码高亮的 token 颜色由 shiki 主题决定，CSS 改不到，暗色模式打印仍会偏浅。 */
+  html.dark {
+    color-scheme: light;
+  }
+
+  .dark {
+    --vp-c-bg: #ffffff;
+    --vp-c-bg-alt: #f6f6f7;
+    --vp-c-bg-soft: #f6f6f7;
+    --vp-c-text-1: #3c3c43;
+    --vp-c-text-2: #67676c;
+    --vp-c-text-3: #929295;
+    --vp-c-divider: #e2e2e3;
+    --vp-c-brand-1: #047857;
+  }
+
+  /* 代码块默认 `white-space: pre` + 横向滚动（vp-doc.css 的 Code 段），
+     纸面没有滚动条，超出部分会被直接裁掉；打印时改成折行，让整段代码落在纸上。 */
+  .vp-doc div[class*='language-'],
+  .vp-doc [class*='language-'] pre {
+    overflow: visible;
+  }
+
+  .vp-doc [class*='language-'] pre,
+  .vp-doc [class*='language-'] code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* 复制按钮和语言标签是屏幕交互控件，纸上只会印出残留边框。 */
+  .vp-doc [class*='language-'] > button.copy,
+  .vp-doc [class*='language-'] > span.lang {
+    display: none;
+  }
+
+  /* 表格默认 `display: block` 是为了横向滚动；打印时恢复表格布局并允许长 token 折行，
+     否则宽表只印出左边一半。 */
+  .vp-doc table {
+    display: table;
+    width: 100%;
+    overflow: visible;
+  }
+
+  .vp-doc td,
+  .vp-doc th {
+    overflow-wrap: anywhere;
+  }
+
+  /* 标题别孤零零停在页底，表格行与提示块别被分页切开。 */
+  .vp-doc h2,
+  .vp-doc h3 {
+    break-after: avoid;
+  }
+
+  .vp-doc tr,
+  .vp-doc .custom-block {
+    break-inside: avoid;
+  }
+}
+
+/* 打印机不可打印区：A4 上留 16mm / 14mm，比浏览器默认边距稳。 */
+@page {
+  margin: 16mm 14mm;
 }

@@ -1,0 +1,6 @@
+# Bennett Agent 文档站：https://ruanbw.github.io/bennett-agent/
+# sitemap.xml 由 VitePress 的 sitemap.hostname 生成，随站点一起发布。
+User-agent: *
+Allow: /
+
+Sitemap: https://ruanbw.github.io/bennett-agent/sitemap.xml

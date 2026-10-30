@@ -1,0 +1,59 @@
+# Bennett Agent
+
+> 自托管、多租户的 AI 对话平台：后端是 FastAPI + PydanticAI + LiteLLM 的 SSE 流式服务，前端是 React 19 + Vite 的用户端与管理后台，数据落在 PostgreSQL / Redis / S3 兼容对象存储，代码执行交给 OpenSandbox 沙箱。它把 Agent 应用里最容易出错的部分显式做出来：服务端无状态、工具是受管能力、上下文有预算、权限由服务端注入。
+
+文档正文为中文，按「指南 / 功能 / 设计 / 运维」组织，每页只讲一个主题，页末列出相关源码路径。仓库：https://github.com/ruanbw/bennett-agent
+
+## 指南
+
+- [文档首页](https://ruanbw.github.io/bennett-agent/): 站点入口。顶部三个按钮指向快速开始、功能总览与在线演示，正文回答「这套系统解决什么问题」。
+- [文档导览](https://ruanbw.github.io/bennett-agent/guide/): 按角色给出阅读路径（首次运行、部署、改后端、改前端、评估质量），附文档地图、仓库目录职责与「不在本仓库的部分」。
+- [环境准备](https://ruanbw.github.io/bennett-agent/guide/prerequisites): 需要哪些工具链与版本、哪些外部依赖、占用哪些端口，每项都给验证命令。
+- [本地运行](https://ruanbw.github.io/bennett-agent/guide/quickstart): 从起依赖到能登录对话的完整命令序列，每步给出预期结果与失败时的排查方向。
+- [配置手册](https://ruanbw.github.io/bennett-agent/guide/configuration): 按配置组讲每个变量的作用、边界与启动期守卫，以及 dotenv 文件的五级加载优先级。
+- [前端开发与构建](https://ruanbw.github.io/bennett-agent/guide/frontend): 两个 React 应用的分工与技术差异、开发期 `/api` 代理规则、构建产物与生产托管要求。
+- [生产部署](https://ruanbw.github.io/bennett-agent/guide/deployment): 用 compose 的 `app` profile 部署后端与依赖服务，覆盖生产 `.env`、反向代理、沙箱、备份与上线清单。
+
+## 功能
+
+- [功能总览](https://ruanbw.github.io/bennett-agent/features/): 能力矩阵（每项默认是否开启、依赖什么）、四条贯穿全局的设计约定，以及一轮对话的核心链路。
+- [对话与流式事件](https://ruanbw.github.io/bennett-agent/features/chat): `POST /api/chat` 的请求体硬约束、SSE 分帧与全部事件类型、审批续跑、三段超时边界。
+- [工具系统](https://ruanbw.github.io/bennett-agent/features/tools): 工具注册表的编目与惰性装配、七个内置工具、按可撤销性分级的审批闸门、异常隔离与 MCP 动态发现。
+- [沙箱执行](https://ruanbw.github.io/bennett-agent/features/sandbox): 每用户一台而非每会话一台的租约状态机、心跳与回收、容量、命令审计、reset 审批与 provider 契约。
+- [上下文预算与压缩](https://ruanbw.github.io/bennett-agent/features/context): 字符上限为什么挡不住 token 溢出、估算公式、三种模式、两级压缩与摘要失败降级。
+- [模型接入与容灾](https://ruanbw.github.io/bennett-agent/features/models): 提供商与模型两层数据、预设与只增不删的模型同步、密钥加密、出站 SSRF 防护与备用模型切换矩阵。
+- [账号、认证与 RBAC](https://ruanbw.github.io/bennett-agent/features/accounts): fastapi-users 的 Cookie 会话（状态存 `access_token` 表而非 JWT）、三档角色边界、限流、封禁与播种脚本。
+- [跨设备同步](https://ruanbw.github.io/bennett-agent/features/sync): IndexedDB 本地优先加服务端权威日志：push 行级幂等 upsert、pull 不透明游标长轮询、`client_rev` 与 `seq` 的分工。
+- [管理后台](https://ruanbw.github.io/bennett-agent/features/admin): 独立管理后台的路由、四态角色守卫、前后端两道权限闸、接口清单，以及每条后台操作落到哪张表。
+
+## 设计
+
+- [架构总览](https://ruanbw.github.io/bennett-agent/design/): 分层图、包边界与依赖方向、六条关键设计决定、进程级单例清单。
+- [一轮对话的链路](https://ruanbw.github.io/bennett-agent/design/request-lifecycle): 从 `POST /api/chat` 到 `done` / `error` 的完整时序，含失败重试路径与三处时间预算。
+- [后端分层与装配](https://ruanbw.github.io/bennett-agent/design/backend): api / services / runtime / tools / db / config / prompts 各层职责，为什么抽出 runtime，以及启动与停机顺序。
+- [数据模型](https://ruanbw.github.io/bennett-agent/design/data-model): 十张表的职责、关键列、索引与状态机，以及 `sql/init.sql` 单脚本、启动期漂移检测与删除语义。
+- [API 与 SSE 契约](https://ruanbw.github.io/bennett-agent/design/api): 按 router 列出的端点总表（含认证与限流桶）、请求响应 schema 要点、SSE 分帧、错误映射与兼容策略。
+- [安全设计](https://ruanbw.github.io/bennett-agent/design/security): 威胁模型与信任边界、会话 Cookie、RBAC、出站 SSRF、沙箱隔离、审批分级、密钥与日志脱敏，以及已知限制。
+- [质量平台](https://ruanbw.github.io/bennett-agent/design/quality-platform): 评测、调优与安全管控三段闭环：改完是变好还是变坏、该改什么、能不能放行；判分只读 Trace。
+
+## 运维
+
+- [运维总览](https://ruanbw.github.io/bennett-agent/ops/): 三条运行回路（请求、沙箱回收、同步长轮询）各自的边界，以及「症状 → 先看哪里」对照表。
+- [测试体系](https://ruanbw.github.io/bennett-agent/ops/testing): 零基础设施的功能测试原则（不连库、不连真实 Redis、不打真实模型）、`tests/` 组织、pytest 配置与常用命令。
+- [可观测性](https://ruanbw.github.io/bennett-agent/ops/observability): 探针、指标清单、请求关联 ID、结构化日志、审计与质量报告产物，四层靠请求 ID 串起来。
+- [故障排查](https://ruanbw.github.io/bennett-agent/ops/troubleshooting): 按症状分组的排查表（启动与配置、认证与跨域、模型与对话、沙箱、同步、限流），每条给验证命令与处理办法。
+
+## 参考
+
+- [HTTP 端点目录](https://ruanbw.github.io/bennett-agent/reference/api): 32 个端点的方法、路径、鉴权、限流桶与请求响应字段。
+- [配置项参考](https://ruanbw.github.io/bennett-agent/reference/config): `Settings` 89 个字段的变量名、类型、默认值与启动期校验。
+- [错误码与失败模式](https://ruanbw.github.io/bennett-agent/reference/errors): 每条错误的触发条件、状态码、错误标识与处理动作。
+
+## Optional
+
+深入阅读。按这个顺序读四页可以建立系统全貌，跳过其余页面也不影响理解主干：
+
+- [架构总览](https://ruanbw.github.io/bennett-agent/design/): 先看系统长什么样、为什么这样切、哪些东西是进程级单例。
+- [一轮对话的链路](https://ruanbw.github.io/bennett-agent/design/request-lifecycle): 再跟一条请求走完整个服务端，看清每一步的判定点与失败路径。
+- [功能总览](https://ruanbw.github.io/bennett-agent/features/): 然后核对每项能力的默认开关与依赖，避免按「默认都开着」假设部署行为。
+- [安全设计](https://ruanbw.github.io/bennett-agent/design/security): 最后看信任边界与已知限制，判断一处改动落在哪条边界上。

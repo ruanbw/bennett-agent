@@ -3,7 +3,7 @@ title: 上下文预算与压缩
 description: 字符上限为什么挡不住 token 溢出；预算公式、两级压缩、摘要失败降级，以及每个参数怎么调。
 ---
 
-每轮生成前先估算 token 用量，超限就压缩，压不下去才拒绝。判定与压缩都在服务端，客户端不参与。
+每轮生成前先估算 token 用量，超限就压缩，压不下去才拒绝。判定与压缩都在服务端；客户端唯一能影响判定的是可选的真实用量锚点。
 
 ## 为什么字符上限挡不住 token 溢出
 
@@ -42,7 +42,7 @@ description: 字符上限为什么挡不住 token 溢出；预算公式、两级
 {"message_index": 7, "context_tokens": 18240}
 ```
 
-有了它只需估算锚点之后的新消息，精度高于纯估算。锚点要连同「截止到哪一条」一起给——单给数字无从知道从哪条开始累加。
+有了它只需估算锚点那条及其之后的消息，精度高于纯估算。锚点要连同「截止到哪一条」一起给——单给数字无从知道从哪条开始累加。
 
 锚点来自客户端，不能无条件相信。`usable_anchor()` 有三道检查，缺一不可：
 
@@ -61,14 +61,13 @@ description: 字符上限为什么挡不住 token 溢出；预算公式、两级
 预算快照是 `ContextBudget`（纯数据，不在属性里读 settings，否则同一对象两次读得到两个值）。
 
 ```text
-reserve_tokens = min(声明的 max_output_tokens 或 CONTEXT_RESERVE_TOKENS, context_window // 2)
-overhead_tokens = 系统提示词的 token 数 + 512（工具 schema 的固定开销）
-
-limit_tokens        = (context_window - reserve_tokens - overhead_tokens) × CONTEXT_SAFETY_RATIO
+reserve_tokens      = min(声明的 max_output_tokens 或 CONTEXT_RESERVE_TOKENS, context_window // 2)
+overhead_tokens     = 系统提示词的 token 数 + 512（工具 schema 的固定开销）
 prompt_limit_tokens = (context_window - reserve_tokens) × CONTEXT_SAFETY_RATIO
+limit_tokens        = (context_window - reserve_tokens - 未计入 used_tokens 的固定开销) × CONTEXT_SAFETY_RATIO
 ```
 
-两条上限的区别：`limit_tokens` 是「历史能占多少」，`prompt_limit_tokens` 是「整个 prompt 能占多少」（含系统提示词与工具 schema）。前端画进度条只能用后者当分母。
+两条上限的区别：`limit_tokens` 是「历史能占多少」，`prompt_limit_tokens` 是「整个 prompt 能占多少」（含系统提示词与工具 schema）。前端画进度条只能用后者当分母。`limit_tokens` 里扣不扣 `overhead_tokens`，取决于 `used_tokens` 是否已经包含它，见下节。
 
 `reserve_tokens` 为什么要再压一道 `context_window // 2`：部分网关把最大输出报成与窗口同量级（32k 窗口报 32k 输出），照扣会把可用历史压成 0，所有请求都判超限。
 
@@ -121,7 +120,7 @@ prompt_limit_tokens = (context_window - reserve_tokens) × CONTEXT_SAFETY_RATIO
 
 保留多少原文由 `CONTEXT_COMPACT_KEEP_RECENT_TURNS`（默认 4 轮，一轮 = user + assistant 两条）决定。切点必须落在 user 消息上——否则保留的历史以 assistant 开头，历史转换会拒绝。
 
-保留轮数从配置值开始依次减半重试（4 轮 → 2 轮 → 1 条），直到装得下。最温和的切点先试，能不丢就不丢。
+保留条数从 `2 × 配置值`（默认 8 条 = 4 轮）开始依次减半重试（8 → 4 → 2 → 1 条），直到装得下。最温和的切点先试，能不丢就不丢。
 
 摘要的生成输入与输出都有上限：
 
@@ -145,7 +144,7 @@ prompt_limit_tokens = (context_window - reserve_tokens) × CONTEXT_SAFETY_RATIO
 - 它不理解内容，但远好过什么都不留。
 - 超时（20 秒）、异常、返回空串三条路径都走这里。
 
-还有一层：摘要器**装配失败时返回 `None`**（`_build_summarizer`），`compact_history` 收到 `None` 就只做截断 + 抽取式摘要，完全不调上游。
+还有一层：`compact_history` 的 `summarizer` 参数允许为 `None`，那时只做截断 + 抽取式摘要、完全不调上游（测试与「模型不可用」都走这条）。
 
 摘要有进程内缓存（上限 128 条），key 是「模型 + 待摘要内容的指纹」。同一会话连续几轮都会触发压缩，而每轮要丢掉的早期消息高度重合——缓存把「每轮一次摘要调用」降到「首次一次」。key 含模型名：不同模型对同一段历史会给出不同摘要，混用会让风格跳变无从解释。
 

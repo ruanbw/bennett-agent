@@ -1,6 +1,6 @@
 ---
 title: 后端分层与装配
-description: api/services/runtime/tools/db/config/prompts 各层的职责、runtime 解耦的理由、启动与停机顺序。
+description: 各层职责与禁止边界、抽出 runtime 的理由、启动与停机顺序、--reload 的实现。
 ---
 
 # 后端分层与装配
@@ -15,7 +15,7 @@ description: api/services/runtime/tools/db/config/prompts 各层的职责、runt
 只做四件事：路由、SSE 分帧、把服务层异常映射成 HTTP 状态码、声明认证与限流依赖。
 
 - 不写业务逻辑。`app/api/chat.py` 里没有一行「怎么算预算」「怎么切备用模型」。
-- 不直接碰数据库（除管理端列表这类只读查询）。
+- 不直接碰数据库（管理后台的列表与角色 UPDATE、沙箱三端点查租约例外：就是一层薄查询）。
 - SSE 的序列化只在 `app/api/chat.py` 一处发生：事件形状定义在 `app/schemas/events.py`，
   但「怎么变成 `data: ...`」只有这一行代码。
 
@@ -32,9 +32,11 @@ description: api/services/runtime/tools/db/config/prompts 各层的职责、runt
 | `chat_history.py` | 客户端回放历史 → pydantic-ai 消息序列 |
 | `event_translation.py` | pydantic-ai 流事件 → 聊天事件 |
 | `approval_flow.py` | 待审批请求 → 前端事件；客户端决定 → 续跑结果 |
+| `auth.py` | cookie 会话后端与 `current_active_user` / `current_admin` 依赖（唯一 import FastAPI 的服务模块）|
 | `model_service/*` | 提供商与模型的读写、上游同步、模型解析、出站守卫 |
 | `sandbox/*` | 租约状态机、provider 适配、回收循环、产物导出 |
 | `sync_service.py` | 服务端权威版本号、push/pull |
+| `storage/*` | 对象存储：沙箱产物导出与产物直链（`base.py` / `s3.py`） |
 | `http_client.py` / `redis_client.py` | 进程级共享连接池 |
 
 ### `app/runtime/` — 工具执行面
@@ -60,6 +62,7 @@ description: api/services/runtime/tools/db/config/prompts 各层的职责、runt
 
 ORM 模型、异步引擎、会话热缓存、结构守卫。表结构的唯一事实来源是 `sql/init.sql`：
 启动时执行一次（幂等），再逐列比对模型与库，漂移就拒绝启动并给出可复制的 `ALTER TABLE`。
+`DATABASE_APPLY_SCHEMA=false` 时这两步都跳过（只记一条 warning），迁移交给外部工具时用。
 
 `app/db/__init__.py` 是唯一对外面：`from app.db import User` 到处都能用，
 调用方不需要知道名字在哪个子模块。
@@ -77,9 +80,11 @@ Jinja2 模板加载与渲染。`prompts/system_prompt.jinja` 按实际装配的�
 
 ## 为什么抽出 runtime
 
-没有 runtime 时，`services` 要让工具接受审批、要拿到沙箱归属、要兜住工具异常，
-就得 import `app/tools`；而 `app/tools` 要按配置决定挂不挂某个工具，又得回头问
-「这一轮是谁在跑」。两边互相 import 就是**包级环**。
+没有 runtime 时，审批闸门、沙箱归属、工具异常隔离这三种「规则」只能长在 `app/tools` 里，
+而 `app/tools` 依赖 `app.services.sandbox`（租约）与 `app.services.http_client`/`redis_client`，
+于是 `app/services` 的编排模块一旦为了拿规则而 import `app.tools`，就形成包级环。
+现在服务层的编排模块（`chat_service`、`approval_flow`、`event_translation`）只 import
+`app.runtime`，不 import `app.tools`。
 
 拆出 `app/runtime/` 之后：
 
@@ -97,8 +102,9 @@ runtime 只定义规则与最小接口（`ToolCatalog` 就是一个 `describe(na
    运行时才知道。
 2. **规则可单测**。`requires_approval`、`all_deferred_ids`、`normalize_clarification`
    都是纯函数或接近纯函数，不需要起 FastAPI、不需要连库。
-3. **旧路径仍可用**。`app/tools/approval.py` 只做 re-export，老调用点与测试按旧路径 import
-   不会断，新代码一律写 `app.runtime`。
+3. **旧路径仍可用**。`app/tools/approval.py`、`guard.py`、`catalog.py`、`registry.py`、
+   `sandbox_scope.py`、`cache_scope.py` 六个垫片模块都还在，只做 re-export：老调用点与测试
+   按旧路径 import 不会断，新代码一律写 `app.runtime`。
 
 ## 工具惰性装配
 

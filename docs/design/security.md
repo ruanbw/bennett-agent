@@ -1,6 +1,6 @@
 ---
 title: 安全设计
-description: 威胁模型与信任边界、认证会话、RBAC、SSRF 与沙箱隔离、审批边界、密钥与日志、已知限制。
+description: 威胁模型与信任边界、认证会话、RBAC、SSRF、沙箱与 SQL 注入防护、审批、密钥与日志、已知限制。
 ---
 
 # 安全设计
@@ -24,7 +24,7 @@ description: 威胁模型与信任边界、认证会话、RBAC、SSRF 与沙箱�
 1. **用户内容**——聊天消息、粘贴的代码、网页正文。
 2. **模型输出**——工具入参、模型引用的外部文本。
 3. **外部服务**——Tavily 结果、MCP server 的返回、上游模型网关。
-4. **管理员配置**——提供商 base_url、MCP server 地址、沙箱命令。
+4. **部署与管理配置**——提供商 base_url、`MCP_SERVERS` 里的 server 地址。
 
 对应的四条边界：
 
@@ -41,9 +41,11 @@ description: 威胁模型与信任边界、认证会话、RBAC、SSRF 与沙箱�
 
 ## 认证与会话 Cookie
 
-- 会话是服务端状态（`access_token` 表），不是 JWT：登出、改密、封禁、改角色立即生效。
-- `token` 列存 SHA-256 摘要，库被读也无法直接回放。
-- Cookie 是 HttpOnly：脚本读不到，XSS 拿不到会话。
+- 会话是服务端状态（`accesstoken` 表），不是 JWT：登出、改密、封禁、改角色立即生效。
+- `token` 列存 SHA-256 摘要，库被读也无法直接回放；表上没有过期列，过期由
+  `created_at + SESSION_LIFETIME_SECONDS` 推导（见[数据模型](./data-model.md#用户与会话)）。
+- Cookie 是 HttpOnly：脚本读不到，XSS 拿不到会话。cookie 名默认 `bennett_session`，
+  `Max-Age` 取 `SESSION_LIFETIME_SECONDS`（默认 30 天）。
 - `SameSite` 默认 `lax`；`cors_allow_credentials=true` 时取 `none`（跨站部署下 `lax`
   的 cookie 根本不会被浏览器回传）。
 - `SameSite=None` 必须配 `Secure`，否则浏览器直接丢弃 cookie，表现为「登录 204、
@@ -149,11 +151,35 @@ MCP 工具的风险等级默认 `safe_write`（第三方实现，无法确认有
 其他隔离措施：
 
 - 工作目录固定 `/home/sandbox/workspace`；文件读写路径必须以它开头的绝对路径。
-- 输出截断保留头 4000 + 尾 2000 字符，避免一次 `npm install` 把 token 成本推高一个数量级。
-- 出站策略生产默认 `proxy`（白名单代理）；`open` 只给本地自用——
+- stdout 截断保留头 4000 + 尾 2000 字符（stderr 各 1500），避免一次 `npm install` 把 token
+  成本推高一个数量级。
+- 出站策略生产默认白名单代理；`open` 只给本地自用——
   多租户下自由联网等于把「上传件可能被外带」交给模型决定。
 - 空闲回收 10 分钟、硬 TTL 4 小时：只靠空闲回收的话，一个挂着不动的标签页可以永远占机。
 - 产物导出有 200MB 上限，超限只留文件清单。
+
+## SQL 注入与数据访问
+
+数据面只有一层入口：API 层。装配给模型的工具里没有「写 SQL 再执行」这一类
+（`app/tools/__init__.py` 只有联网搜索、时间、澄清、四个沙箱工具与 MCP），
+所以模型拿不到数据库句柄，注入面只剩 HTTP 入参。
+
+三层保证：
+
+1. **参数化查询**。读写一律由 SQLAlchemy 的 Core / ORM 构造（`where` / `values`），值作为绑定参数
+   下发，全仓库没有 `execute(f"...")` 这种拼接写法。`text()` 只用于常量 SQL：启动执行仓库里的
+   `sql/init.sql`（`app/db/schema.py`）、`app/db/maintenance.py` 逐条试解 API Key 的
+   `SELECT id, api_key FROM model_provider`、就绪探针的 `SELECT 1`，以及模型定义里的默认值与索引谓词。
+2. **LIKE 元字符转义**。管理后台的邮箱搜索是唯一「用户输入进模式串」的地方：
+   `escape_like_pattern`（`app/api/admin.py`）转义 `\`、`%`、`_`，且必须与 `escape="\\"` 一起用——
+   不转义时搜 `%` 会列出全部账号。
+3. **标识符不来自输入**。表名、列名、排序字段都写死在模型与语句里；DDL 源文件固定，
+   不经任何请求参数。
+
+沙箱里跑的代码碰不到这套库：建机只传镜像、资源与 `metadata`
+（`app/services/sandbox/opensandbox.py:create`），不往沙箱注入环境变量或数据库凭据；
+出站默认走白名单代理。这条策略由 OpenSandbox server 侧的 `[egress]` 配置执行
+（本地样例见 `docker/opensandbox.toml`），本服务的 `SANDBOX_EGRESS` 只是声明、不被业务代码读取。
 
 ## 审批按可撤销性分级
 
@@ -343,17 +369,20 @@ Redis 不可用时的三种降级都会告警并计入 `redis_unavailable_total`
    旧明文行不受影响。
 9. **注册默认开放**。私有部署必须设 `REGISTRATION_ENABLED=false`，
    否则任何人可以批量注册并绕过按账号限流。
-10. **管理端与用户端共用同一套会话与 RBAC**。没有独立的「后台身份」。
+10. **管理后台与用户端共用同一套会话与 RBAC**。没有独立的「后台身份」。
 
 ## 相关源码
 
 - `app/middleware.py` — 请求体上限、跨站守卫、安全头
+- `app/api/rate_limit.py` — 限流桶、客户端 IP 解析与 429 响应头
 - `app/services/auth.py` — 会话后端与认证依赖
 - `app/roles.py` — 角色定义与等级排序
 - `app/services/model_service/outbound_guard.py` — 出站 SSRF 守卫
 - `app/runtime/approval.py` — 审批闸门与悬空调用判定
 - `app/runtime/scopes.py` — 作用域注入
 - `app/services/sandbox/base.py` — provider 契约与 `owner_tag`
+- `app/tools/mcp_client.py` — MCP 传输、超时与结果定界
+- `app/services/chat_service.py` — 摘要的「是数据不是指令」声明
 - `app/config/secret_box.py` — API Key 落库加密
 - `app/config/settings.py` — 配置项与启动期校验
 - `app/observability.py` — 请求关联 ID

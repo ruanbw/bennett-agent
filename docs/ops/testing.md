@@ -1,6 +1,6 @@
 ---
 title: 测试体系
-description: 后端与前端的测试怎么跑、测什么、不测什么。
+description: 零基础设施的后端测试怎么跑、tests/ 与 quality/tests/ 的分工、CI 四个 job。
 ---
 
 # 测试体系
@@ -26,14 +26,18 @@ description: 后端与前端的测试怎么跑、测什么、不测什么。
 `tests/conftest.py` 是唯一的全局装配点，三件事：
 
 1. **环境变量在导入 `app` 之前设好**（模块级，不是 fixture 里）。`Settings` 与 `engine` 都在导入时构造，晚一步设置就来不及了：`APP_ENV=test`、`SANDBOX_ENABLED=false`、`SEARCH_CACHE_BACKEND=memory`。
-2. **fakeredis 注入进程内 Redis 客户端**。限流的 Lua 脚本走 `fakeredis[lua]`（依赖 `lupa`），否则 `eval` 会报 unknown command。
-3. **每个用例前后复位进程级单例**：限流告警节流状态与搜索缓存 LRU。`close_redis()` 被替换成空操作——它会把 `_client` 置 `None`，下一次 `get_redis()` 就会去连真实端口。
+2. **fakeredis 注入进程内 Redis 客户端**，并把 `close_redis()` 换成空操作。限流的 Lua 脚本走 `fakeredis[lua]`（依赖 `lupa`），否则 `eval` 会报 unknown command。`close_redis()` 原实现会把 `_client` 置 `None`，下一次 `get_redis()` 就会去连真实端口。
+3. **每个用例前后复位进程级单例**：限流告警节流状态与搜索缓存 LRU。
+
+并行时环境变量 `REDIS_KEY_PREFIX` 会带上 pytest-xdist 的 worker 名（`bennett-test_gw0` 这类），避免多个 worker 撞同一个键空间。
 
 `pyproject.toml` 里三条 pytest 配置值得记住：
 
-- `addopts = "-q -n auto"`：默认并行（pytest-xdist）。并行时 `REDIS_KEY_PREFIX` 会带上 worker 名，避免多个 worker 撞同一个键空间。
+- `addopts = "-q -n auto"`：默认并行（pytest-xdist）。调试单个用例或要用 `--pdb` 时加 `-n0`。
 - `asyncio_mode = "auto"`：异步用例直接写 `async def`，不用逐个包 `asyncio.run`。
-- `asyncio_default_*_loop_scope = "session"`：整个会话共用一个事件循环。`app/db.py` 的 engine 是模块级单例，连接池里的 asyncpg 连接绑在创建它的事件循环上；「每个测试一个循环」会让第二个用例拿到上一个循环的连接，报 `Future attached to a different loop`——而那个报错发生在任何断言之前，看起来像「测试框架坏了」。
+- `asyncio_default_*_loop_scope = "session"`：整个会话共用一个事件循环。`app/db/base.py` 的 engine 是模块级单例，连接池里的 asyncpg 连接绑在创建它的事件循环上；「每个测试一个循环」会让第二个用例拿到上一个循环的连接，报 `Future attached to a different loop`——而那个报错发生在任何断言之前，看起来像「测试框架坏了」。
+
+`testpaths = ["tests"]`，所以裸跑 `uv run pytest` **不会**收集 `quality/tests`；评测框架自测必须显式传路径。
 
 ### 常用命令
 

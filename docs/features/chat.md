@@ -30,9 +30,10 @@ description: 一轮对话怎么跑：服务端无状态、SSE 分帧、全部事
 - 必须以 `user` 开头、`user`/`assistant` 严格交替、正常请求以 `user` 结尾。续跑审批时允许以带 `tool_calls` 的 `assistant` 结尾。
 - `tool_calls` 只能挂在 `assistant` 消息上，且只接受 `tool_call_id` / `tool_name` / `args` 三个字段——**不接受结果**。回放结果等于允许伪造「删除已成功」。
 - 单条消息 ≤ 32000 字符、单条 thinking ≤ 64000 字符、消息条数 ≤ 100、历史总量 ≤ 400000 字符、单个工具入参 ≤ 64000 字符。
+- 单条 assistant 消息最多 50 个工具调用、单个 `tool_call_id` ≤ 200 字符、单次请求最多 50 条审批决定（`MAX_REPLAYED_TOOL_CALLS`、`MAX_TOOL_CALL_ID_CHARS`）。
 - 非文本内容分片直接拒绝，而不是静默丢弃：用户以为图片传上去了、模型只看到一句文字，比报错更糟。
 
-所有校验失败都是 422，请求体不进对话流。
+请求体校验失败一律 422，请求体不进对话流。`approvals` 里的 id 还必须能在历史里找到，否则同样 422——不在历史里的 id 会让 pydantic-ai 抛内部错误。历史转换层（`app/services/chat_history.py`）保留了一组等价检查作防御，它失败时下发 `error` 事件而不是 422。
 
 ## SSE 分帧
 
@@ -53,10 +54,11 @@ data: {"type":"done"}
 | `X-Accel-Buffering: no` | 否则反向代理会把流式输出攒成一整块，用户看不到逐字输出 |
 | 删掉 `Connection: keep-alive` | sse-starlette 在合并响应头后仍无条件写入该头，HTTP/2 禁止它，网关会重置流 |
 
-另外两个传输层约束：
+另外三个传输层约束：
 
 - **单次 send 超时 30 秒**。半开连接下 `await send` 会无限阻塞，一直占着上游额度。
 - **前端 60 秒空闲看门狗**。连续 60 秒没收到任何字节就中止请求并按「回复可能不完整」收尾。sse-starlette 默认每 15 秒发一条 `: ping` 注释帧，活着的连接不会真的静默这么久。
+- **客户端单帧 1MB 上限**（`frontend/src/lib/chat-transport.ts:MAX_FRAME_BYTES`）。只发字节不发空行的坏上游会让缓冲区无界增长；超限时结束读取、把这一轮标成不完整，已收到的内容照常显示。
 
 ## 全部事件类型
 
@@ -67,7 +69,7 @@ data: {"type":"done"}
 | `thinking` | `delta` | 追加到思考块；第一次收到时记思考起点 |
 | `content` | `delta` | 追加到正文；正文与思考是两块，不混排 |
 | `tool_call` | `tool_call_id`、`tool_name`、`args` | 插入一条「运行中」的工具记录；同 id 不重复插入 |
-| `tool_result` | `tool_call_id`、`result`、`outcome` | 把同 id 记录改成完成态；`outcome` 决定显示成功还是失败 |
+| `tool_result` | `tool_call_id`、`tool_name`、`result`、`outcome` | 把同 id 记录改成完成态；`outcome` 决定显示成功还是失败 |
 | `clarification` | `tool_call_id`、`question`、`options`、`allow_custom_input` | 弹出选项卡片；允许时带自定义输入框 |
 | `approval_required` | `tool_calls[]`（含 `args`、`description`、`risk_level`） | 渲染审批卡片，**本轮到此结束**，等用户决定后续跑 |
 | `fallback` | `from_model`、`to_model`、`reason` | 显示一行「已切换到备用模型」；不拼进正文 |
@@ -83,14 +85,16 @@ data: {"type":"done"}
 ### 三个字段的口径陷阱
 
 - `context_tokens` 是**最后一次请求**的 prompt token，不是本轮累加。
-- `context_limit_tokens` 才是后端判超限时用的上限，与 `context_window` 不是一回事。
+- `context_limit_tokens` 才是后端判超限时用的上限，与 `context_window` 不是一回事；预算按主模型算，备用模型接手的轮次它为空，前端退回窗口口径。
 - `cache_read_tokens` 是 `context_tokens` 的子集，不是额外开销。
 
-计时（`usage.timing`）七个字段是同一个块：没量到就整块缺席，前端绝不补 0——`0 tok/s` 会被读成模型卡住。`tool_ms` 无工具时是真实的 0，`ttft_ms` / `decode_ms` / `decode_tokens` 只在真实解码窗口里成对出现。
+计时（`usage.timing`）七个字段是同一个块：没量到就整块缺席，前端绝不补 0——`0 tok/s` 会被读成模型卡住。`tool_ms` 无工具时是真实的 0；`ttft_ms` 是各步首字延迟的平均值，一步都没量到就为空；`decode_ms` 与 `decode_tokens` 成对出现，只统计至少两个分片的步——单分片等于整段一次到达，拿它当分母会算出无穷 tok/s。
 
 ## 审批：只能分两段
 
 SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠阻塞。pydantic-ai 的机制是：需要批准的调用不执行，本轮输出变成 `DeferredToolRequests`，服务端把它翻成 `approval_required` 事件（`app/services/approval_flow.py`），**本轮到此结束**。
+
+拦下调用的闸门是 `app/runtime/approval.py` 的 `ApprovalGate.before_tool_execute`：风险等级为 `safe_write` 与 `dangerous` 的调用在执行前抛 `ApprovalRequired`；`ctx.tool_call_approved is True` 时直接放行，不再看等级（否则「批准了仍被拦」会让续跑死循环）。事件里的 `description` 与 `risk_level` 由 `app/services/approval_flow.py` 向 `ToolCatalog` 查得——参数常常看不出后果。
 
 客户端要做的：
 
@@ -100,12 +104,14 @@ SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠�
 
 服务端怎么认这是续跑：**看历史形状**——`approvals` 非空且历史最后一条是 assistant。只看 `approvals` 不够：客户端可能顺手带上旧审批记录，那种应按普通请求处理。
 
+真正决定「要补哪些结果」的也是历史：`all_deferred_ids()`（`app/runtime/approval.py`）扫出「有调用、没有对应结果」的 `tool_call_id`，逐个从 `approvals` 取值，缺的填 `ToolDenied`。带了决定但历史里没有悬空调用时按普通请求处理，只记一条 WARNING。
+
 两条硬规则：
 
 - **缺失的决定一律按拒绝处理。** 关掉页面不能等于同意删除。
 - 拒绝也要显式回灌 `ToolDenied`，并附一句「是用户拒绝、不是工具坏了」——否则模型会重试同一个调用（再弹一次审批框），或者编一个「已完成」的回答。
 
-审批续跑是分段续跑：批准后服务端只执行那批被拦下的调用，模型接着往下走。
+审批续跑是分段续跑：批准后服务端只执行那批被拦下的调用，模型接着往下走。审批轮次的帧顺序是 `usage` → `approval_required` → `done`：先说本轮用量，再确认要做什么。
 
 ## 澄清提问
 
@@ -127,7 +133,7 @@ SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠�
 | `model_unavailable` | 模型已停用或不存在 | false |
 | `internal_error` | 服务端自身出错（附错误编号） | true |
 
-`code` 为空（`null`）的旧服务端路径，`retryable` 由上游状态码决定：400/401/403/404 为 false（同一个请求再发结果不变），其余为 true。
+`code` 为空的路径是「没有归类结论」的失败：上游异常时 `retryable` 由状态码决定（400/401/403/404 为 false——同一个请求再发结果不变，其余为 true）；超出单轮总时长时为 true；历史非法时为 false。
 
 内部异常原文只进日志，回给用户的只有一个 12 位错误编号（`_new_error_id()`）——异常原文可能含上游 URL、provider 上下文乃至密钥。
 
@@ -143,7 +149,7 @@ SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠�
 
 ## 标题生成
 
-`POST /api/chat/title` 单独一个端点：把首条提示词（≤ 500 字符，`MAX_TITLE_INPUT_CHARS`）交给一个不挂工具的专用 agent，产出 ≤ 20 字的标题。
+`POST /api/chat/title` 单独一个端点：把首条提示词交给一个不挂工具的专用 agent，产出 ≤ 20 字的标题。请求体允许 8000 字符（`MAX_TITLE_PROMPT_CHARS`），进模型前先截到 500 字符（`MAX_TITLE_INPUT_CHARS`）。
 
 - 标题是装饰：上游超时只有 10 秒（`TITLE_TIMEOUT_SECONDS`），远小于流式的 120 秒空闲超时。
 - 失败一律退回首行截断（15 字），再不行就是「新对话」，不冒泡给用户。
@@ -159,7 +165,7 @@ SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠�
 
 600 秒这一道是必要的外层上界：上游超时只管「多久没收到数据」，叠加 SDK 与网关的重试后，单轮仍可能拖到十几分钟。
 
-重试规则：只在**还没向客户端产出任何事件**时才重试（最多 2 次，退避 0.5 秒），只针对 5xx / 超时 / 连接类错误。产出过事件再重试会让正文重复、有副作用的工具跑两次。
+重试规则：只在**还没向客户端产出任何事件**时才重试，`MAX_STREAM_ATTEMPTS = 2`（共 2 次尝试，即 1 次重试），退避 0.5 秒；只针对 5xx / 超时 / 连接类错误，429 不重试——再打一次只会加深限流。产出过事件再重试会让正文重复、有副作用的工具跑两次。
 
 ## 相关源码
 

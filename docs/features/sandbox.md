@@ -32,25 +32,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sandbox_lease_one_per_user
 
 ## 租约状态机
 
-状态取值与 DB 里的字符串一致，历史行不会跟着迁移：
+状态取值与 DB 里的字符串一致，历史行不会跟着迁移。七个取值定义在 `app/services/sandbox/lease.py` 顶部，迁移只有这五条：
 
-```text
-                    create 成功
-   provisioning ──────────────────▶ ready
-        │                            │  │
-        │ 建机失败                    │  │ mark_destroying
-        ▼                            │  ▼
-      failed                    paused ┌──────────────┐
-                                     │  destroying   │
-                                     └──────┬────────┘
-                                            │ destroy 成功
-                                            ▼
-                                       destroyed
-                                            ▲
-                              destroy 失败 ───┘  (destroy_failed 会被重抢)
-```
-
-实际的状态集合：`provisioning` / `ready` / `paused` / `destroying` / `destroyed` / `failed` / `destroy_failed`。
+| 迁移 | 触发 |
+|---|---|
+| `provisioning → ready` | 建机成功，同一条条件 UPDATE 写入 `provider_ref` |
+| `provisioning → failed` | 建机失败或被取消 |
+| `ready` / `paused` / `destroy_failed → destroying` | `mark_destroying` 抢到销毁权 |
+| `destroying → destroyed` | 销毁成功，同时落 `destroy_reason` 与 `artifact_uri` |
+| `destroying` / `provisioning → destroy_failed` | 销毁失败；或建机残留被回收循环标记 |
 
 | 状态 | 含义 | 是否占容量 |
 |---|---|---|
@@ -61,6 +51,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sandbox_lease_one_per_user
 | `destroyed` | 已销毁，终态 | 否 |
 | `failed` | 建机失败（终态） | 否 |
 | `destroy_failed` | 销毁失败，等重试 | 否 |
+
+`paused` 目前没有代码路径写入：`mark_destroying`、`find_destroyable` 与容量计数都认它，但没有任何接口会把机器挂起。它是预留取值，但读取侧必须继续认它——否则带这个值的行既不会被回收、也不会被复用。
 
 `destroying` 也算占容量：provider 确认之前那台机器的 CPU/内存还没还给节点池，按它不占容量放行会打爆节点池。
 
@@ -106,7 +98,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sandbox_lease_one_per_user
 
 | 时钟 | 存在哪 | 记什么 |
 |---|---|---|
-| `last_activity` | PostgreSQL | 服务端观察到的工作（exec / 文件读写的开始与结束） |
+| `last_activity` | PostgreSQL | 服务端观察到的工作：每次 exec 与文件读写成功后刷新一次 |
 | 心跳 | Redis TTL 键 `sbx:hb:<lease_id>` | 客户端还在看这个会话 |
 
 心跳走 Redis 是因为它是纯写放大：每 30 秒一次数据库 UPDATE，而键没了就等于心跳断了。TTL 取 `sandbox_idle_seconds`——一次心跳等于再给一个空闲窗口。
@@ -133,7 +125,9 @@ mark_destroyed   →  落终态
 
 候选集只给「可能该杀的」，调用方必须逐个复核心跳后再动手。心跳在 Redis、候选在数据库，两处时钟不共用一个 `now`，所以回收原因随候选一起返回（`DestroyCandidate.reason`），不在判定时重算——重算会让归因写错。
 
-回收原因：`idle` / `hard_ttl` / `session_deleted` / `user_banned` / `user_reset` / `error`。
+回收原因：`idle` / `hard_ttl` / `session_deleted` / `user_banned` / `user_reset` / `error`。其中 `session_deleted` 目前是保留取值：会话被删不会单独拆机器，因为机器按用户分，删一个会话不等于用户不用了。
+
+同一轮还会扫 `provisioning` 超过 `sandbox_idle_seconds` 的残留行（控制面在建机中途被硬杀），把它们标成 `destroy_failed` 并告警——机器可能已经建出来了，但只有 provider 知道，所以不猜着销毁，留给人工核对。
 
 销毁失败**不是终态**：落成 `destroy_failed`，下一轮回收会重新抢它（`mark_destroying` 允许重抢、`find_destroyable` 放进候选）。少一条路径就永久泄漏机器。
 
@@ -148,6 +142,18 @@ Redis 故障时回收会保守跳过这一轮：返回 `False` 会让回收循�
 
 只靠空闲回收的话，一个挂着不动的标签页可以永远占机。
 
+## 客户端端点
+
+三个端点都在 `app/api/sandbox.py`，都要求登录；**没有直接 exec 的接口**——那会多一个必须与工具层同等严格、却只服务「自己敲命令」的授权面。
+
+| 端点 | 行为 |
+|---|---|
+| `POST /api/sandbox/heartbeat` | 永远 204。没有活动租约、Redis 写失败（只告警）、`SANDBOX_ENABLED=false` 也都是 204：有没有机器必须无法区分，心跳失败也不该在界面上冒错误 |
+| `GET /api/sandbox/status` | 返回该用户最近一条租约（含已销毁的），界面据此说「已回收，产物在这里」；404 只有两种意思：「从来没有过环境」与「未启用执行环境」 |
+| `GET /api/sandbox/artifacts` | 把 `artifact_uri` 同目录下的 `workspace.tar.gz` / `manifest.txt` 探测成预签名直链，白名单写死是为了不要 `s3:ListBucket`。启用时永远 200：没产物与对象存储未配置都返回空列表 |
+
+两个读端点都接收 `session_id`，但都不参与查询：`/status` 只按 `Query(pattern=...)` 校验形状、不回显；`/artifacts` 原样回显。机器按用户分。
+
 ## 容量
 
 两个上限，都是**容量保护**而不是付费分级：
@@ -159,7 +165,7 @@ Redis 故障时回收会保守跳过这一轮：返回 `False` 会让回收循�
 
 超限直接抛 `SandboxCapacityError`，**不静默排队**。全局锁会「节点池慢」升级成所有人排队；并发可能少量超发，这是有意的取舍。
 
-给模型的文案是「当前执行环境资源已满，请稍后再试。」——池满与「另一路正在建机」共用这一句，因为对模型来说下一步都是「稍后再试」。
+两种上限抛的是同一个异常，工具层也都翻成同一句文案：「当前执行环境资源已满，请稍后再试。」——模型看不到是「你自己已有一台」还是「全站满了」，因为对它来说下一步都是「稍后再试」。
 
 ## 命令超时与输出截断
 
@@ -184,6 +190,12 @@ stderr 阈值比 stdout 短：几万行 stderr 多是重复报错，对新信息
 
 截断在渲染层做，provider 返回的是未截断原文。阈值来源在 `app/services/sandbox/base.py`，是成本控制——一次 `npm install` 就能把一轮对话的 token 成本推高一个数量级。
 
+### 路径与输入校验
+
+读写文件只接受 `sandbox_workdir`（默认 `/home/sandbox/workspace`）下的绝对路径，`..` 按路径段拒绝（`a..b.txt` 是合法文件名，子串匹配会误杀）。越界不猜模型意图——猜错会读到无关的宿主内容，所以直接回「路径不可用：…只允许执行环境工作目录下的绝对路径」。
+
+空命令同样在发请求前拦下：它会建一台机器然后什么也不做，第一次调用就白付一次冷启动。
+
 ## 命令审计
 
 每次 exec 都写一条审计（`sandbox_command` 表）：
@@ -193,8 +205,8 @@ stderr 阈值比 stdout 短：几万行 stderr 多是重复报错，对新信息
 | `seq` | 租约内的序号，靠先锁租约行再取 `max(seq)+1` 保证并发唯一 |
 | `command` | 清理后的命令原文 |
 | `exit_code` / `duration_ms` / `output_bytes` | 执行元信息 |
-| `output_head` | **渲染后的**截断文本（模型当时看到的就是这个） |
-| `truncated` | 是否发生了截断 |
+| `output_head` | stdout 的截断文本（头 4000 + 尾 2000，中间标省略字数）；不含 stderr 与退出码 |
+| `truncated` | 本次是否发生了截断（stdout 或 stderr 任一） |
 
 审计不参与任何金额计算——计量只有 token。审计写失败只记日志：命令已经跑完，统计写入失败不该变成「环境不可用」。
 
@@ -202,18 +214,18 @@ stderr 阈值比 stdout 短：几万行 stderr 多是重复报错，对新信息
 
 `sandbox_reset` 的风险等级是 `safe_write`，执行前需要用户批准——它会销毁现有机器，下次执行时重新创建一个干净的，已安装的依赖与工作目录里的文件全丢。
 
-流程（`app/tools/sandbox.py:sandbox_reset`）：
+流程（`app/tools/sandbox.py:sandbox_reset` → `app/services/sandbox/lease_service.py`）：
 
 ```text
 claim_for_reset(user_id)
-   ├─ lease is None  → 「还没有创建执行环境，无需重置」
-   ├─ 没抢到销毁权    → 「正在创建或回收中，本次没有执行重置」
+   ├─ lease is None  → 「当前会话还没有创建执行环境，无需重置。下次执行时会自动创建。」
+   ├─ 没抢到销毁权    → 「当前执行环境正在创建或回收中，本次没有执行重置。请稍后重试；下一次执行会使用或创建环境。」
    └─ 抢到了
-        ├─ provider.destroy() 成功 → mark_destroyed → 「已重置，下次执行会创建新环境」
-        └─ 销毁失败              → mark_failed（destroy_failed）→ 失败文案
+        ├─ provider.destroy() 成功 → finish_reset → mark_destroyed(reason=user_reset)
+        └─ 销毁失败              → mark_failed → mark_destroy_failed(reason=user_reset)
 ```
 
-销毁要求**幂等**：机器已经没了就是成功，不该让用户看到一次失败。停在 `destroying` 的租约既不被回收循环重试、也不是活动租约，是最容易永久泄漏机器的中间态——所以失败必须落成 `destroy_failed`，告警与重试才有东西可查。
+销毁要求**幂等**：机器已经没了就是成功，不该让用户看到一次失败。停在 `destroying` 的租约在 `DESTROYING_STALE_SECONDS`（15 分钟）之内既不是活动租约、也不会被回收循环接手，是最容易永久泄漏机器的中间态——所以失败必须当场落成 `destroy_failed`，告警与重试才有东西可查，不用等那 15 分钟。
 
 reset 不当场重建新机器：连续两次重置才不会白开两台。
 
@@ -225,12 +237,20 @@ reset 不当场重建新机器：连续两次重置才不会白开两台。
 class SandboxProvider(Protocol):
     name: str
 
-    async def create(spec: SandboxSpec) -> SandboxHandle: ...
-    async def exec(ref, command, *, timeout_s, workdir, owner_tag) -> ExecResult: ...
-    async def put_file(ref, path, data, *, owner_tag) -> None: ...
-    async def get_file(ref, path, *, max_bytes, owner_tag) -> bytes: ...
-    async def destroy(ref, *, owner_tag) -> None: ...
-    async def is_alive(ref) -> bool: ...
+    async def create(self, spec: SandboxSpec) -> SandboxHandle: ...
+    async def exec(
+        self,
+        ref: str,
+        command: str,
+        *,
+        timeout_s: int = DEFAULT_EXEC_TIMEOUT_S,
+        workdir: str | None = None,
+        owner_tag: str | None = None,
+    ) -> ExecResult: ...
+    async def put_file(self, ref: str, path: str, data: bytes, *, owner_tag: str | None = None) -> None: ...
+    async def get_file(self, ref: str, path: str, *, max_bytes: int, owner_tag: str | None = None) -> bytes: ...
+    async def destroy(self, ref: str, *, owner_tag: str | None = None) -> None: ...
+    async def is_alive(self, ref: str) -> bool: ...
 ```
 
 几条约定：
@@ -268,8 +288,10 @@ OpenSandbox 实现里有两个实测坑：
 | `SANDBOX_ENABLED=false` | 四个工具不装配，模型看不到；提示词改写成「本轮没有隔离执行环境……不要假装跑过，也不要编造运行结果」 |
 | 沙箱服务不可达 | 工具返回「执行环境暂时不可用，请稍后再试。」，对话其余部分照常 |
 | 租约不存在或已回收 | 「执行环境不存在或已回收，请重试；下次执行会自动创建新环境。」 |
+| 租约还在建机（`provisioning`，没有 `provider_ref`） | 「执行环境正在启动，请稍后再试。」——与「已回收」分开，因为下一步是等而不是重试重建 |
 | 池满 | 「当前执行环境资源已满，请稍后再试。」 |
 | 命令超时 | 「命令超时（可调大 timeout_s 或缩小范围）。」 |
+| 路径越界 | 「路径不可用：…未执行任何操作；请改用工作目录下的绝对路径重试。」 |
 | 没有登录 / 没有会话标识 | 「当前会话没有关联用户（未登录），无法使用执行环境。请直接依据对话内容回答，并说明你没有可用的执行环境。」 |
 
 沙箱工具的失败**永远是返回文案，不抛异常**——工具契约是「永远返回文案，不把异常抛给模型」。
@@ -282,6 +304,7 @@ OpenSandbox 实现里有两个实测坑：
 - `app/services/sandbox/reaper.py` — 回收循环与强制销毁入口
 - `app/services/sandbox/opensandbox.py` — OpenSandbox 后端实现
 - `app/services/sandbox/artifacts.py` — 销毁前的产物导出
+- `app/api/sandbox.py` — 心跳 / 状态 / 产物三个客户端端点
 - `app/tools/sandbox.py` — 四个工具的契约与渲染
 - `app/runtime/scopes.py` — 沙箱作用域的注入与读取
 - `sql/init.sql` — `sandbox_lease` / `sandbox_command` 表与唯一索引

@@ -1,21 +1,21 @@
 ---
 title: 账号、认证与 RBAC
-description: fastapi-users 的 HttpOnly Cookie 会话、user/admin/superadmin 三档权限边界、限流与封禁，以及超级管理员播种脚本。
+description: fastapi-users 的 HttpOnly Cookie 会话、三档 RBAC 边界、限流与封禁、超管播种脚本。
 ---
 
-认证用 [fastapi-users](https://fastapi-users.info/) 的 Cookie 后端：会话状态存在 `access_token` 表而不是 JWT，所以登出、改密、封禁、改角色都是立即生效——不需要等 token 自然过期。密码用 Argon2 哈希（`hashed_password` 列），会话 token 在库里只存 SHA-256 摘要，库被读也无法直接回放。
+认证用 [fastapi-users](https://fastapi-users.info/) 的 Cookie 后端：会话状态存在 `accesstoken` 表（`sql/init.sql`）而不是 JWT，所以登出、改密、封禁、改角色都是立即生效——不需要等 token 自然过期。密码用 Argon2 哈希（`user.hashed_password`），会话 token 在库里只存 SHA-256 的 base64url 摘要（43 字符，正好填满 `token VARCHAR(43)`），库被读也无法直接回放。
 
 ## 路由
 
 | 方法与路径 | 作用 | 关键细节 |
 |---|---|---|
-| `POST /api/auth/register` | 注册 | **JSON 体**（邮箱 + 密码，至少 8 位）；无论邮箱是否已存在都返回 202，避免变成邮箱枚举器；`REGISTRATION_ENABLED=false` 时 403 |
+| `POST /api/auth/register` | 注册 | **JSON 体**（邮箱 + 密码，至少 8 位）；无论邮箱是否已存在都返回 202，避免变成邮箱枚举器；`REGISTRATION_ENABLED=false` 时 403；密码不合规 400 `REGISTER_INVALID_PASSWORD` |
 | `POST /api/auth/login` | 登录 | **必须表单编码**（`username` 填邮箱 + `password`），发 JSON 直接 422；成功 204 并下发会话 cookie |
 | `POST /api/auth/logout` | 登出 | 删除服务端会话行（不是「只让客户端忘掉」），幂等 |
 | `GET /api/auth/me` | 当前登录用户 | 未登录 401；`role` 每次请求都从库里读出，升降级后刷新即生效 |
-| `POST /api/auth/change-password` | 改密 | 必须验证当前密码；成功后该账号全部会话（含本次）立即失效 |
+| `POST /api/auth/change-password` | 改密 | 必须验证当前密码；成功后该账号全部会话（含本次）立即失效；当前密码错返回 400 `CHANGE_PASSWORD_BAD_CREDENTIALS`，新旧相同 400 `CHANGE_PASSWORD_SAME` |
 
-注册返回 202 而不是 201 是刻意的：框架自带的注册路由在邮箱已存在时返回 400，等于给了邮箱枚举接口。新建成功与已存在都返回同样的 202 + 空 body，前端随后用同一组凭据登录。
+注册返回 202 而不是 201 是刻意的：框架自带的注册路由在邮箱已存在时返回 400，等于给了邮箱枚举接口。新建成功与已存在都返回同样的 202 + 空 body，前端随后用同一组凭据登录。改密的错误码统一用 400 而不是 401：401 会被前端的全局处理当成「会话过期」直接登出，而填错当前密码不该有这种后果。
 
 没有忘记密码与邮箱验证路由：项目未配 SMTP，挂上却不发信比没有更糟。超管密码丢失的恢复通道是 `scripts/seed_admin.py --force-reset`。
 
@@ -28,7 +28,9 @@ description: fastapi-users 的 HttpOnly Cookie 会话、user/admin/superadmin �
 | `AUTH_COOKIE_SAMESITE` | 自动 | CORS 带凭据时取 `none`，否则 `lax`；跨站部署写死 `lax` 会让 cookie 根本不被回传 |
 | `SESSION_LIFETIME_SECONDS` | 30 天（下限 60） | 0 会让 fastapi-users 认为「不设过期」，与服务端语义矛盾，配置层直接拒绝 |
 
-会话 token 入库前先摘要，读取时 Redis 做 cache-aside 热缓存：库是权威，撤销先删库再删缓存，缓存残留由短 TTL（默认 60 秒）兜住，所以撤销的传播延迟有界。
+`HttpOnly` 写死为 true（`CookieTransport(cookie_httponly=True)`），没有配置项；cookie 的 `Max-Age` 直接取 `SESSION_LIFETIME_SECONDS`。启动期还有三道校验，因为它们的失败症状都是「登录 204，下一个请求 401」：`SameSite=None` 必须同时开 `AUTH_COOKIE_SECURE`；cookie 名必须是合法的 RFC 6265 token；`AUTH_COOKIE_NAME` 用 `__Host-` / `__Secure-` 前缀时要求 Secure（浏览器会静默丢弃这类 cookie）。
+
+会话 token 入库前先摘要，读取时 Redis 做 cache-aside 热缓存：库是权威，撤销先删库再删缓存，缓存残留由短 TTL（`REDIS_SESSION_CACHE_TTL_SECONDS`，默认 60 秒，且不超过会话剩余寿命）兜住，所以撤销的传播延迟有界。缓存键是摘要而不是原文，Redis 被读也拿不到可回放的令牌。
 
 ## 三档角色
 
@@ -54,10 +56,12 @@ description: fastapi-users 的 HttpOnly Cookie 会话、user/admin/superadmin �
 
 | 端点 | 维度 | 配置项 | 默认 |
 |---|---|---|---|
-| 注册、登录 | 来源 IP | `AUTH_RATE_LIMIT_PER_MINUTE` | — |
-| 对话（`/api/chat`、标题生成） | 账号 | `CHAT_RATE_LIMIT_PER_MINUTE` | — |
+| 注册、登录 | 来源 IP | `AUTH_RATE_LIMIT_PER_MINUTE` | 10 |
+| 对话（`/api/chat`、`/api/chat/title` 共用一个桶） | 账号 | `CHAT_RATE_LIMIT_PER_MINUTE` | 30 |
 | 跨设备同步（push + pull 共用一个桶） | 账号 | `SYNC_RATE_LIMIT_PER_MINUTE` | 120 |
-| 改密码 | 账号 | `CHANGE_PASSWORD_RATE_LIMIT_PER_MINUTE` | — |
+| 改密码 | 账号 | `CHANGE_PASSWORD_RATE_LIMIT_PER_MINUTE` | 5 |
+
+四项都是 `ge=0`，配成 0 表示关掉该桶（不是「一律拒绝」）；窗口固定 60 秒。登出不在限流范围内——它既不是暴力破解目标，被限流还会让人连登出都做不了。
 
 认证按 IP、对话与同步按账号，是因为攻击面不同：暴力破解与批量注册的目标是常量账号，所以按来源 IP；对话消耗上游额度，同步只消耗本机数据库，两者分开才不会被互相拖累。认证端点还按路径末段分桶（`login` 与 `register` 各自一个），共用一桶时有人在同一 NAT 出口猛试密码会把正常注册一起打掉。
 
@@ -65,17 +69,18 @@ IP 取值只采信受信代理标头：直连对端必须落在 `TRUSTED_PROXY_I
 
 ## 封禁与解封
 
-封禁 = `is_active = false` + 删除该用户的全部 `access_token` 行，并回收其沙箱租约。不能只改 `is_active`：留着旧会话的话，被改过的客户端仍能继续用已有租约烧算力。租约回收失败只告警——封禁本身已生效，剩下的机器最迟被空闲回收带走。
+封禁 = `is_active = false` + 删除该用户的全部 `accesstoken` 行，并回收其沙箱租约。不能只改 `is_active`：留着旧会话的话，被改过的客户端仍能继续用已有租约烧算力。租约回收失败只告警——封禁本身已生效，剩下的机器最迟被空闲回收带走。
 
-封禁与解封的等级校验完全对称：不能封自己，也不能封禁或解封同级与更高级账号（按 `role` 判，不按 `is_superuser`）。不对称就等于任意 admin 都能放回被超管封掉的 admin。
+封禁与解封的等级校验完全对称：目标 `role` 不低于自己就拒绝（按 `role` 判，不按 `is_superuser`）。不对称就等于任意 admin 都能放回被超管封掉的 admin。封禁另外拒绝封自己；解封不需要这一条——被封着的人本来就登录不上。
 
 ## 改角色
 
-`PATCH /api/admin/users/{id}/role` 只允许 superadmin 调用，且有三个额外约束：
+`PATCH /api/admin/users/{id}/role` 只允许 superadmin 调用，且有四条额外约束：
 
 - 不能改自己的角色。
 - 不能改已封禁账号（先解封）。
 - 不能降级最后一个 superadmin。用一条带子查询的 `UPDATE` 守卫完成计数与写入——先 count 再写会让并发的 A、B 互降都通过。
+- 提交与当前角色相同的值视为幂等：直接返回 200，不写库也不踢会话。
 
 角色变更成功后删除该用户的全部会话：旧 token 还能用等于「权限变更要等下次登录才生效」。
 
@@ -89,7 +94,7 @@ uv run python scripts/seed_admin.py --email admin@example.com --promote
 uv run python scripts/seed_admin.py --email admin@example.com --force-reset
 ```
 
-密码来源优先级：命令行 `--password` > 环境变量 `SEED_ADMIN_PASSWORD` > 交互输入。
+邮箱取自 `--email`，缺省时读 `SEED_ADMIN_EMAIL`。密码来源优先级：命令行 `--password` > 环境变量 `SEED_ADMIN_PASSWORD` > 交互输入（非 TTY 环境下没有可用密码就直接失败，不会卡在提示上）。
 
 | 场景 | 默认行为 | 加了什么参数 |
 |---|---|---|

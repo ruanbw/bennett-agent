@@ -27,22 +27,22 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 
 | 工具 | 工具级超时 | 内部最坏耗时 |
 |---|---|---|
-| `tavily_search` | `TAVILY_TOOL_TIMEOUT_SECONDS` = 最坏耗时 + 3.5s | 2 次尝试 × 8 秒 + 1 次 0.5 秒退避 |
+| `tavily_search` | `TAVILY_TOOL_TIMEOUT_SECONDS` = 最坏耗时 + 3.5s = 20 秒 | 2 次尝试 × 8 秒 + 1 次 0.5 秒退避 |
 | `sandbox_exec` | `MAX_EXEC_TIMEOUT_S + 60` = 960 秒 | 模型能调的 `timeout_s` 上限 900 秒，另加建机与传输余量 |
 
 ## 内置工具清单
 
-七个内置工具，全部在 `app/tools/__init__.py:_register_all` 登记：
+七个内置工具，全部在 `app/tools/__init__.py:_register_all` 登记。工具名就是实现函数的名字（`registry.register` 不传 `name`），所以模型看到的是 `ask_user_clarification`、`get_current_time`，不是 `ask_user`、`current_time`；`clarification_tool`、`tavily_tool` 这类旧导出名只是兼容别名，不进工具清单。
 
 | 工具名 | 分类 | 风险等级 | 超时 | 启用条件 | 说明 |
 |---|---|---|---|---|---|
 | `ask_user_clarification` | `interaction` | `interactive` | 无 | 始终 | 意图模糊时向用户提问，选项 2~10 个 |
 | `get_current_time` | `system` | `read_only` | 无 | 始终 | 当前日期、时间、星期、时区与 UTC |
-| `tavily_search` | `search` | `read_only` | 派生 | `TAVILY_API_KEY` 可用 | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
+| `tavily_search` | `search` | `read_only` | 派生 | `TAVILY_API_KEY` 可用（非空且不是占位值） | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
 | `sandbox_exec` | `data` | `read_only` | 960 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
 | `sandbox_write_file` | `data` | `read_only` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
 | `sandbox_read_file` | `data` | `read_only` | 60 秒 | `SANDBOX_ENABLED` | 读文件，≤ 200000 字节，超限**报错**而非截断 |
-| `sandbox_reset` | `data` | `safe_write` | 120 秒 | `SANDBOX_ENABLED` | 销毁并重建用户的执行环境 |
+| `sandbox_reset` | `data` | `safe_write` | 120 秒 | `SANDBOX_ENABLED` | 销毁现有执行环境，下次执行时重建（不当场重建） |
 
 两个反直觉的分类：
 
@@ -66,21 +66,22 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 | 未知风险等级字符串 | 按**需要审批**处理：新等级默认从严，漏审比多问一次代价大得多 |
 | 已批准过的调用（`ctx.tool_call_approved is True`） | 放行，不再看风险等级——否则「批准了仍被拦」会让续跑死循环 |
 
-审批分两段的完整流程见 [对话与流式事件](./chat.md#审批只能分两段)。缺失的决定一律按拒绝处理。
+审批分两段的完整流程见 [对话与流式事件](./chat.md) 的「审批：只能分两段」一节。缺失的决定一律按拒绝处理。
 
-MCP 工具统一标为 `safe_write`（`MCP_TOOL_RISK_LEVEL`）：第三方实现，无法确认有无副作用。这条元数据由 `RiskAnnotatingToolset` 在包装层补上——远端 `ToolDefinition` 没有 metadata，闸门取到 `None` 就静默放行。
+MCP 工具统一标为 `safe_write`（`MCP_TOOL_RISK_LEVEL`）：第三方实现，无法确认有无副作用。也就是说每个 MCP 工具调用都要先拿到用户批准。这条元数据由 `RiskAnnotatingToolset` 在包装层补上——远端 `ToolDefinition` 没有 metadata，闸门取到 `None` 就静默放行。
 
 ## 异常隔离
 
 隔离层在 `app/runtime/guard.py`（`ToolErrorIsolation`）。工具抛出的意外异常被转成一条失败结果，本轮对话继续。
 
 - **`ModelRetry` 原样上抛**：它是控制流，携带给模型看的整改文案。
-- **失败文案分三档**：第一次是基础版；同一工具本轮累计失败 ≥ 2 次（`ESCALATE_AFTER_FAILURES`）后换成「请立即停止调用这个工具」——模型换个参数再试，而 bug 与参数无关。
-- **网络 / 超时是另一档**：文案是「可以再试一次」，不说「停止调用这个工具」——那会让模型放弃一个还能用的工具。
+- **失败文案按确定性 / 暂时性分两套**：工具 bug 第一次是基础版；同一工具本轮累计失败 ≥ 2 次（`ESCALATE_AFTER_FAILURES`）后换成「请立即停止调用这个工具」——模型换个参数再试，而 bug 与参数无关。
+- **网络 / 超时只在第一次更宽松**：回「可以再试一次」而不是「停止调用这个工具」，后者会让模型放弃一个还能用的工具。累计到 2 次后与确定性故障一样强硬。
+- **以 `ToolFailed` 抛出，不是 `return` 一段文字**：字符串会被标成 success，前端就拿不到失败信号。
 - **异常原文只进日志**，不回灌模型（可能含 URL、密钥）。
 - 指标不在这里记：失败最终会落成 `ToolResultEvent`，由事件翻译层打点，重复记会翻倍。
 
-沙箱工具是另一条路径：它**永远返回文案，不把异常抛给模型**（`app/tools/sandbox.py`）。所有失败回同一句口径，不透传 `str(exc)`——异常文案含容器名与沙箱 id，且会随后端变化。
+沙箱工具是另一条路径：它**永远返回文案，不把异常抛给模型**（`app/tools/sandbox.py`）。文案按异常类型分四五句（找不到租约 / 超时 / 容量满 / 通用失败，另加无作用域与路径被拒两条），**从不透传 `str(exc)`**——异常文案含容器名与沙箱 id，且会随后端变化。
 
 ## 按用户隔离
 
@@ -89,7 +90,9 @@ MCP 工具统一标为 `safe_write`（`MCP_TOOL_RISK_LEVEL`）：第三方实现
 | 作用域 | 注入点 | 作用 |
 |---|---|---|
 | `cache_scope(user_id)` | `app/api/chat.py` 传 `cache_scope_key=str(user.id)` | Tavily 结果缓存按用户 id 隔离 |
-| `sandbox_scope(user_id, session_id)` | 同上 | 决定沙箱租约归属 |
+| `sandbox_scope(user_id, session_id)` | 同上，另传 `user_id` 与请求体里的 `session_id` | 决定沙箱租约归属 |
+
+两个作用域都由 `app/services/chat_service.py` 在起流时套上（`cache_scope(...)` / `sandbox_scope(...)`），工具实现只读不写。
 
 缓存隔离的理由是注入内容会跨请求存续：搜索结果里可能带「忽略以上指令」，若缓存 key 只有 `(query, max_results)`，这段内容会在**别人**的上下文里继续存在直到 TTL 结束。缓存 TTL 是 10 分钟。
 
@@ -161,6 +164,7 @@ MCP_SERVERS=filesystem=url:https://mcp.example.com/mcp;local=stdio:/usr/local/bi
 
 1. 改 `MCP_SERVERS` 配置。工具清单是动态发现的，代码不用改。
 2. 确认 server 名合法且唯一——它就是工具名前缀。
+3. 改完要重启进程：`get_mcp_registry()` 是进程级单例，配置只在首次构建时读一次（`reset_mcp_registry()` 才能让它按新配置重建）。
 
 不需要改的地方：注册表本身（`ToolRegistry` 是通用的）、事件层（工具结果统一走 `tool_result` 事件）、前端（工具轨迹是通用的）。
 

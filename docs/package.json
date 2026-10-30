@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "VITEPRESS_BASE=/ vitepress dev",
     "build": "vitepress build",
+    "check": "node scripts/check-docs.mjs",
     "preview": "vitepress preview"
   },
   "devDependencies": {

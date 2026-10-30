@@ -5,7 +5,7 @@ description: Bennett Agent 的分层结构、包边界、六条关键设计决�
 
 # 架构总览
 
-Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户端、管理端）共享一个 FastAPI 后端，
+Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户端、管理后台）共享一个 FastAPI 后端，
 后端把「对话编排」「工具执行」「沙箱」「同步」四件事放在同一个进程里，但用包边界隔开。
 
 本页只回答三件事：系统长什么样、为什么这样切、哪些东西是进程级单例。单个组件的细节去
@@ -15,9 +15,9 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
 
 ```text
 ┌────────────────────┐   ┌────────────────────┐
-│  用户端 React 19   │   │  管理端 React 19   │
+│  用户端 React 19   │   │  管理后台 React 19 │
 │  frontend/ :5173   │   │ admin-frontend/    │
-│  IndexedDB 本地优先 │   │      :5174         │
+│ IndexedDB 本地优先 │   │      :5174         │
 └─────────┬──────────┘   └─────────┬──────────┘
           │  Cookie 会话              │  Cookie 会话
           │  /api/*                   │  /api/admin/*
@@ -25,13 +25,13 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
                        ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ FastAPI（app/server.py）                                     │
-│  中间件：请求体上限 → Origin 守卫 → CORS → 指标 → 请求 ID → 安全头 │
+│  中间件 6 层（由外到内，顺序见下文）                        │
 │  路由：auth / chat / capabilities / sandbox / sync / admin / ops│
 └───────────────┬──────────────────────────────────────────────┘
                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ services（编排层）                                            │
-│  chat_service 一轮对话的编排、context_compaction 预算与压缩、   │
+│  chat_service 编排、token_budget 预算、context_compaction 压缩、 │
 │  agent_factory 唯一的 Agent 装配点、model_service/* 模型解析、   │
 │  sandbox/* 租约与回收、sync_service 同步、title_service 标题    │
 └───────┬──────────────────────────────────┬───────────────────┘
@@ -56,14 +56,22 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
 前端不进后端进程：`app/server.py` 只挂 `/api/*`，不挂前端构建产物。前端是独立的静态产物，
 经 `VITE_API_BASE_URL` 直连后端（同源反代时相对路径即可）。
 
+图里 services 只列了主线模块；还有 `storage/*`（对象存储，只服务沙箱产物导出与产物直链）和
+`title_service`（会话标题，失败时回退到首行截断）。
+
+中间件在 `create_app()` 里按「请求体上限 → Origin 守卫 → CORS → 指标 → 请求 ID → 安全头」注册，
+而 Starlette 把**最后注册的放在最外层**，所以实际执行顺序是倒序：安全头 → 请求 ID → 指标 →
+CORS → Origin 守卫 → 请求体上限。注册顺序是刻意的：请求体上限与 Origin 守卫早于 CORS 注册，
+413/403 才会带上 CORS 头（`app/server.py` 的注释就写在注册处）。
+
 ## 包边界与依赖方向
 
 依赖只允许自上而下，同层之间靠接口而不是互相 import：
 
 | 层 | 包 | 职责 | 不允许知道 |
 |---|---|---|---|
-| 接口层 | `app/api/` | HTTP 路由、SSE 分帧、限流与认证依赖 | 工具实现细节、SQL |
-| 编排层 | `app/services/` | 一轮对话的编排、预算、压缩、重试、容灾 | FastAPI 的 Request/Response |
+| 接口层 | `app/api/` | HTTP 路由、SSE 分帧、限流与认证依赖 | 工具实现细节、预算与容灾规则 |
+| 编排层 | `app/services/` | 一轮对话的编排、预算、压缩、重试、容灾 | Request/Response（`auth.py` 例外，它实现的是 FastAPI 依赖）|
 | 执行面 | `app/runtime/` | 工具风险闸门、异常隔离、作用域、注册表 | 数据库、上游模型 |
 | 装配层 | `app/tools/` | 工具实现与注册表，产出可挂载的 Tool 列表 | Agent 装配细节 |
 | 数据层 | `app/db/` | ORM 模型、引擎、会话缓存、结构守卫 | 业务用例 |
@@ -72,14 +80,18 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
 
 两条硬约束：
 
-1. **`app/runtime/` 是 services 与 tools 之间的解耦层**。审批闸门、异常隔离、作用域注入都放在
-   runtime，services 与 tools 都只依赖 runtime，不互相依赖。详见
-   [后端分层与装配](./backend.md#为什么抽出-runtime)。
+1. **`app/runtime/` 是 services 与 tools 之间的解耦层**。审批闸门、异常隔离、作用域注入这三类
+   「规则」都放在 runtime，两边都只从 runtime 取规则。注意这并不等于「互不依赖」：
+   `app/tools/` 仍然 import `app.services.sandbox`（租约）与 `app.services.http_client` /
+   `redis_client`（共享连接池），而 services 一侧只在
+   `agent_factory._default_tool_builder()` 的函数体内 import `app.tools`——规则单向、装配走端口。
+   详见 [后端分层与装配](./backend.md#为什么抽出-runtime)。
 2. **`app/api/` 是唯一的序列化点**。`ChatEvent` 只在 `app/api/chat.py` 一处变成 SSE 帧；
    `app/schemas/` 是请求与响应的形状定义，`app/schemas/events.py` 用 `type` 作判别键。
 
-`app/tools/approval.py`、`app/tools/sandbox_scope.py` 这类旧路径垫片只做 re-export，实现已经搬到
-`app/runtime/`：老调用点与测试按旧路径 import 仍然可用，新代码一律写 `app.runtime`。
+`app/tools/` 下的 `approval.py`、`guard.py`、`catalog.py`、`registry.py`、`sandbox_scope.py`、
+`cache_scope.py` 六个模块都还在，只做 re-export，实现已经搬到 `app/runtime/`：老调用点与测试
+按旧路径 import 仍然可用，新代码一律写 `app.runtime`。
 
 ## 六条关键设计决定
 
@@ -100,7 +112,9 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
 与业务写入同事务，避免「版本前进、行还没写」的空洞。
 
 客户端的 `client_rev` 只用于拒绝更旧的重放，不参与排序也不当游标。拉取用不透明游标
-（`v1:<version>`），服务端可以随时换编码格式，旧游标会被识别为不认识并回 410 让客户端重拉。
+（`v1:<version>`，前缀定义在 `app/schemas/sync.py`），服务端可以随时换编码。两种坏游标分开返回：
+格式不认识回 `400`（`code=invalid_cursor`）；游标指向当前数据之外（服务端回滚 / 旧库恢复）回
+`410`（`code=resync_required`）。对客户端动作相同：丢掉游标重新全量拉。
 
 ### 3. 工具受管，执行前有闸门
 
@@ -127,7 +141,7 @@ provider 层还有一道 `owner_tag`（`sha256(user_id)[:16]`）核对：库里�
 
 每轮生成前先估算 token 用量并判定是否超限（`app/services/token_budget.py`）。超限时按
 `CONTEXT_GUARD_MODE` 处理，默认 `compact`：先截断超长单条，再折叠早期轮次成摘要，
-压不下去才拒绝。压缩会改模型看到的上下文，所以必然发一条 `compaction` 事件告诉用户。
+压不下去才拒绝。压缩会改模型看到的上下文，所以只要真压了（`strategy` 不是 `none`）就发一条 `compaction` 事件告诉用户。
 
 ### 6. 质量平台与生产共用一份 Trace
 
@@ -142,7 +156,7 @@ provider 层还有一道 `owner_tag`（`sha256(user_id)[:16]`）核对：库里�
 
 | 单例 | 位置 | 为什么必须是单例 |
 |---|---|---|
-| 数据库引擎 | `app/db/base.py` | 连接池绑定创建它的事件循环，换 loop 复用会抛 `attached to a different loop` |
+| 数据库引擎 | `app/db/base.py` | 连接池绑定创建它的事件循环，换 loop 复用会抛 `Future attached to a different loop` |
 | Redis 客户端 | `app/services/redis_client.py` | 共享连接池；每请求建连会让 TLS 握手与连接数成为瓶颈 |
 | httpx 客户端 | `app/services/http_client.py` | 同上；池上限 20，防止上游挂掉时句柄堆积 |
 | 工具注册表 | `app/tools/__init__.py` | 惰性构造：import 期注册会把整条实现栈拉进每个进程 |

@@ -1,11 +1,11 @@
 ---
 title: 可观测性
-description: 探针、指标、关联日志与审计分别看什么，怎么组合起来定位问题。
+description: 健康探针、Prometheus 指标名与标签、请求 ID 传递、日志格式与审计产物。
 ---
 
 # 可观测性
 
-可观测性分四层：探针（服务还能不能干活）、指标（趋势与分布）、日志（单条请求发生了什么）、审计（谁做了什么）。四层的关联键是请求 ID。
+可观测性分四层：探针（服务还能不能干活）、指标（趋势与分布）、日志（单条请求发生了什么）、审计（谁做了什么）。四层的关联键不同：日志行与 500 响应体靠请求 ID 串起来，指标按 `method` / `route` / `status` 聚合，审计行按 `actor` / `tenant` 独立成流。
 
 ## 探针
 
@@ -22,17 +22,17 @@ description: 探针、指标、关联日志与审计分别看什么，怎么组�
 | 检查项 | 怎么判 | 失败时 |
 |---|---|---|
 | `database` | `SELECT 1`，超时 `READY_DB_TIMEOUT_SECONDS = 2.0` 秒 | `{"status": "unavailable", "reason": "timeout"｜"unavailable"}` |
-| `redis` | `redis_health_detail(timeout=2.0)`，不泄露连接串 | `{"status": "unavailable", "reason": ...}` |
+| `redis` | `redis_health_detail(timeout=2.0)`，不泄露连接串 | `{"status": "unavailable", "reason": "timeout"｜异常类名}` |
 | `storage` | 对象存储健康检查；未开沙箱时显式报 `disabled` | `{"status": "unavailable", "reason": "not_configured"｜"error"}` |
-| `provider_keys` | 逐条试解提供商 API Key | `{"status": "degraded", "reason": "undecryptable", "providers": [...]}` |
+| `provider_keys` | 逐条试解提供商 API Key | `{"status": "degraded", "reason": "undecryptable", "providers": [...]}`；自检抛异常时是 `{"status": "unknown", "reason": "error"}` |
 
 判定规则：
 
 - `required` 里的依赖（`READINESS_REQUIRED_DEPENDENCIES`，默认 `database`）有任一失败 → **503**，整体 `not_ready`。
-- 其余依赖失败 → 整体 `degraded`，**仍然返回 200**。
+- 其余依赖失败 → 整体 `degraded`，**仍然返回 200**。`storage` 的 `disabled` 不算失败。
 - 全部正常 → `ready`。
 
-`provider_keys` 不参与 `required` 判定：它只影响对话，算成不健康会让「只有模型调用失败」的实例被整体摘流。`READINESS_REQUIRED_DEPENDENCIES` 里写错名字会被忽略并打一条 WARNING——写错一个词不该让启动失败，但也不能静默当成「不用检查」。
+`provider_keys` 不参与 `required` 判定：它只影响对话，算成不健康会让「只有模型调用失败」的实例被整体摘流。`READINESS_REQUIRED_DEPENDENCIES` 认 `database`/`redis`/`storage`/`provider_keys` 四个名字，写错名字会被忽略并打一条 WARNING——写错一个词不该让启动失败，但也不能静默当成「不用检查」。
 
 ```bash
 curl -s http://127.0.0.1:8000/health/ready | python -m json.tool
@@ -40,11 +40,11 @@ curl -s http://127.0.0.1:8000/health/ready | python -m json.tool
 
 ## 指标端点
 
-`GET /api/metrics` 输出 Prometheus 文本格式（`text/plain; version=0.0.4`）。
+`GET /api/metrics` 输出 Prometheus 文本格式（`text/plain; version=0.0.4; charset=utf-8`）。
 
 **默认关闭**（`METRICS_ENABLED=false`），关闭时返回 **404 而不是 403**：免登录端点多开一个就多一分侦察面，404 比「存在但你不能看」泄露得更少。打开后建议同时用反向代理把它挡在内网或白名单后面——它没有认证。
 
-指标是**进程内**的：多 worker 时每个进程各一份，不能当计费依据。采集时要按实例分别抓，否则同一次请求在两个进程里各记一半。
+指标是**进程内**的：多 worker 时每个进程各一份，不能当计费依据。采集时要按实例分别抓再汇总，单个实例的数字只代表它自己处理的那部分流量。
 
 ```bash
 curl -s http://127.0.0.1:8000/api/metrics | head -20
@@ -52,18 +52,18 @@ curl -s http://127.0.0.1:8000/api/metrics | head -20
 
 ### 指标清单
 
-以 `app/services/metrics.py` 的定义为准：
+指标名常量集中在 `app/services/metrics.py`（唯一例外是 `redis_unavailable_total`，字面量写在 `app/services/redis_client.py` 的 `warn_throttled` 里）：
 
 | 指标名 | 类型 | 标签 | 含义 |
 |---|---|---|---|
-| `http_requests_total` | counter | `method`、`route`、`status` | HTTP 请求数。`route` 是路由模板不是实际路径；`status` 是分类（`2xx`/`4xx`/`5xx`/`none`），`none` 是响应前就断开 |
+| `http_requests_total` | counter | `method`、`route`、`status` | HTTP 请求数。`route` 是路由模板不是实际路径；`status` 是分类（`2xx`/`4xx`/`5xx`/`none`），`none` 是响应前就断开。`/health*` 与 `/api/metrics` 本身不统计 |
 | `http_request_duration_seconds` | histogram | `method`、`route` | 请求耗时。计时覆盖到响应发送完毕，`/api/chat` 是整条 SSE 流的时长 |
-| `chat_streams_total` | counter | `outcome`（`done`/`error`/`stopped`） | 对话流终态数。早期拒绝路径单独补记，否则错误率永远是 0 |
+| `chat_streams_total` | counter | `outcome` | 对话流终态数。正常收尾是 `done`/`error`/`stopped`/`timeout`/`approval_required`；没进流式循环就被拒的轮次另记 `model_unavailable`/`context_overflow`/`invalid_history`，否则错误率永远算不出来 |
 | `chat_first_event_seconds` | histogram | 无 | 首字节耗时——用户感知的「卡不卡」主要就是这一段 |
 | `context_compactions_total` | counter | `result`（`compacted`/`rejected`） | 上下文压缩次数，是「会话还能用多久」的先行指标 |
-| `tool_executions_total` | counter | `tool`、`outcome`（`success`/`failed`） | 工具执行。失败率 = `failed` / (`success` + `failed`)，审批与中断不算故障 |
+| `tool_executions_total` | counter | `tool`、`outcome` | 工具执行。`outcome` 取 `success`/`failed`/`denied`/`interrupted`；失败率 = `failed` / (`success` + `failed`)，审批与中断不算故障 |
 | `model_fallbacks_total` | counter | `from`、`to` | 备用模型切换次数 |
-| `redis_unavailable_total` | counter | `reason` | Redis 降级次数（`rate_limit` / `session_cache` / `search_cache`） |
+| `redis_unavailable_total` | counter | `reason` | Redis 降级次数。当前代码里只发 `rate_limit` / `search_cache` 两个值；会话热缓存失败只记 warning，不打这个指标 |
 
 延迟直方图的桶固定在 `DEFAULT_BUCKETS`：0.005s 到 600s，跨度按「大致翻倍」而非等距——延迟是长尾分布。上界取 600 秒（对话流的总预算），取小了长流全落进 `+Inf`，首字延迟的 p95 从此不可读。
 
@@ -112,7 +112,7 @@ curl -i -s http://127.0.0.1:8000/health | grep -i x-request-id
 有 N 个提供商的 API Key 解密失败（AUTH_SECRET 可能已更换）：...
 ```
 
-`/health/ready` 里也有同样信息（`provider_keys` 项）。改密不需要重建库：到管理后台重新填写密钥即可。
+`/health/ready` 里也有同样信息（`provider_keys` 项）。换 `AUTH_SECRET` 不需要重建库：到管理后台重新填写密钥即可。
 
 ### quality 平台的审计
 
@@ -138,7 +138,7 @@ tail -n 20 quality/runs/core-behavior/<run_id>/audit.jsonl
 
 报告记录了**指纹**：suite 指纹（用的是哪一版用例）与目标指纹（提示词 sha + 驱动 + 工具集 + 步数上限 + 温度）。指纹不同意味着两份报告不可比——门禁会把 suite 指纹不一致判成不放行。
 
-报告还记 `partial` 标记：预算（token / 美元 / 墙钟）耗尽时运行会提前停，标 `partial: true`，门禁据此拒绝放行。
+报告还在 `report.config` 里记 `partial` 标记：预算（token / 美元 / 墙钟）耗尽时运行会提前停，写 `partial: true` 与 `stopped_reason`，门禁据此拒绝放行。
 
 指标口径与调优闭环的完整说明见 [质量平台](../design/quality-platform.md)。
 
@@ -147,7 +147,8 @@ tail -n 20 quality/runs/core-behavior/<run_id>/audit.jsonl
 | 告警 | 判据 | 严重级建议 |
 |---|---|---|
 | 实例不就绪 | `/health/ready` 返回 503 持续 1 分钟 | 严重 |
-| 上游 5xx 激增 | `http_requests_total{route="/api/chat", status="5xx"}` 占比上升 | 严重 |
+| 对话错误率上升 | `chat_streams_total{outcome="error"}` 与 `{outcome="timeout"}` 占比上升 | 严重 |
+| 请求被服务端拒绝 | `http_requests_total{status="5xx"}` 上升（对话的上游失败不走 5xx，走 `chat_streams_total`） | 严重 |
 | 首字节变慢 | `chat_first_event_seconds` 的 p95 明显抬高 | 警告 |
 | 模型容灾频繁 | `model_fallbacks_total` 增速上升 | 警告 |
 | 限流降级 | `redis_unavailable_total` 增长 | 警告（配额会乘以实例数） |
@@ -155,7 +156,7 @@ tail -n 20 quality/runs/core-behavior/<run_id>/audit.jsonl
 | 回收失败 | 日志里出现 `回收：销毁失败` 或 `回收：租约卡在 provisioning` | 警告（容量位会一直被占） |
 | 压缩频繁 | `context_compactions_total` 增速上升 | 提示 |
 | API Key 解不开 | 启动日志的 `API Key 解密失败` | 严重 |
-| 预算中断 | 报告里 `partial: true` | 严重（结论不可用） |
+| 预算中断 | 报告里 `report.config.partial` 为 true | 严重（结论不可用） |
 
 ## 相关源码
 

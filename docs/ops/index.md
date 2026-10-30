@@ -5,13 +5,13 @@ description: 这个服务在后台跑着哪几条回路，出了症状先看哪�
 
 # 运维总览
 
-Bennett Agent 是一个长驻进程：一条 HTTP 服务 + 两条常驻后台回路。真正需要盯的只有三处——健康与指标、沙箱回收、同步长轮询。本页给出这三条回路的边界，以及「症状 → 先看哪里」的对照表；动手改代码前先看 [测试体系](testing.md)，线上出问题时查 [可观测性](observability.md) 与 [故障排查](troubleshooting.md)。
+Bennett Agent 是一个长驻进程：一条 HTTP 服务 + 一条常驻后台回路（沙箱回收），外加一条会挂起的请求路径（同步长轮询）。真正需要盯的只有三处——健康与指标、沙箱回收、同步长轮询。本页给出这三条回路的边界，以及「症状 → 先看哪里」的对照表；动手改代码前先看 [测试体系](testing.md)，线上出问题时查 [可观测性](observability.md) 与 [故障排查](troubleshooting.md)。
 
 ## 三条运行回路
 
 ### 1. 请求回路：健康、指标与关联日志
 
-每个 HTTP 请求都会经过两层纯 ASGI 中间件：`RequestContextMiddleware` 分配请求 ID 并写进响应头与日志行，`HttpMetricsMiddleware` 记请求数与耗时。探针与指标端点挂在同一进程上：
+每个 HTTP 请求都会经过两层纯 ASGI 中间件：`RequestContextMiddleware` 分配请求 ID 并写进响应头与日志行，`HttpMetricsMiddleware` 记请求数与耗时。`/health*` 与 `/api/metrics` 本身不计入 HTTP 指标（`app/observability.py` 的 `_UNMETERED_PREFIXES`）：探针按固定频率打，混进来只会稀释真实流量。探针与指标端点挂在同一进程上：
 
 | 端点 | 作用 | 依赖 |
 |---|---|---|
@@ -27,11 +27,13 @@ Bennett Agent 是一个长驻进程：一条 HTTP 服务 + 两条常驻后台回
 
 这条回路必须常驻。触发条件是「没人发请求了」，挂在请求路径上就永远不会触发。销毁失败不是终态：租约落成 `destroy_failed`，下一轮回收会重新抢它；只有机器真的被 provider 确认销毁才写 `destroyed`。
 
+它跑在 `python main.py` 起的那个进程里。直接 `uvicorn app.server:app` 只会起 API，回收循环不存在——`/health` 仍然是 200，症状要等机器堆满才出现。
+
 ### 3. 同步长轮询回路
 
-`GET /api/sync/pull` 在没有新数据时挂起，最多 `SYNC_LONG_POLL_SECONDS`（默认 25 秒）。唤醒靠 `InMemoryNotifier`——每用户一个进程内 `asyncio.Event`。
+`GET /api/sync/pull` 在没有新数据时挂起，最多 `SYNC_LONG_POLL_SECONDS`（默认 25 秒）。唤醒靠 `InMemoryNotifier`：每用户一个 `asyncio.Event`，存在 `WeakValueDictionary` 里（没人在等时被回收）。
 
-这是**单进程实现**。`uvicorn --workers 2` 以上时，A 进程的写入唤不醒 B 进程的等待方：不报错、不告警，只会静默等到长轮询超时。挂起的连接还各占一个协程与一条 HTTP 连接，所以默认挂起时间给得短。
+这是**单进程实现**。多进程/多实例部署时，A 进程的写入唤不醒 B 进程的等待方：不报错、不告警，只会静默等到长轮询超时。挂起的连接还各占一个协程与一条 HTTP 连接，所以默认挂起时间给得短。
 
 ## 症状 → 先看哪里
 
@@ -41,10 +43,10 @@ Bennett Agent 是一个长驻进程：一条 HTTP 服务 + 两条常驻后台回
 | 服务活着但一直 503 | `/health/ready` 的 `status` 与 `required` | `curl -s http://127.0.0.1:8000/health/ready` |
 | 对话流式输出卡住不推进 | 指标里的 `chat_first_event_seconds` + 该请求的日志行 | 日志里的 `[request_id]` 字段，与响应头 `X-Request-ID` 同值 |
 | 上游报 401，模型像是没配 key | 启动日志里的 API Key 解密自检 | `API Key 解密失败（AUTH_SECRET 可能已更换）` |
-| 沙箱机器没被回收 | 回收循环每轮的那行汇总 | `沙箱回收一轮：候选=… 已销毁=… 失败=…` |
-| 用户报「执行环境资源已满」 | 容量位（`sandbox_max_concurrent` / `sandbox_max_per_user`）与租约状态 | `回收：租约卡在 provisioning` / `回收：销毁失败` |
+| 沙箱机器没被回收 | 回收循环每轮的那行汇总 | `沙箱回收一轮：候选=… 心跳存活=… 已销毁=… 失败=… 残留=…` |
+| 用户报「执行环境资源已满」 | 容量位（`sandbox_max_concurrent` / `sandbox_max_per_user`）与租约状态 | `沙箱命令执行失败 (user=…): SandboxCapacityError` / `回收：租约卡在 provisioning` / `回收：销毁失败` |
 | 跨设备同步迟迟不更新 | 长轮询挂起与游标版本 | `code=resync_required` / `code=invalid_cursor` |
-| 频繁 429 | 限流桶（对话按账号、认证按来源 IP、同步单独一个桶） | 响应头 `Retry-After` 与 `X-RateLimit-Remaining` |
+| 频繁 429 | 限流桶（对话按账号、认证按来源 IP、同步与改密各自一个桶） | 响应头 `Retry-After` 与 `X-RateLimit-Remaining` |
 | 指标端点 404 | `METRICS_ENABLED` | `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/metrics` |
 | 前端空白页 / 请求 404 | Vite dev server 的 `/api` 代理与后端端口 | `cd frontend && npm run dev`，代理目标 `http://127.0.0.1:8000` |
 
