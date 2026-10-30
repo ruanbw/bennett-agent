@@ -139,9 +139,9 @@ docker compose logs -f app
 ## 测试与代码质量
 
 ```bash
-# 后端测试（需要先起依赖服务；测试库 / 桶由测试基座自动准备）
-docker compose up -d postgres redis rustfs
+# 后端测试：零基础设施，不需要 docker，Redis 是进程内 fakeredis
 uv run pytest
+uv run pytest -n0 tests/test_xxx.py  # 串行调试单个文件
 
 # Lint 与格式检查（CI 同款）
 uv run ruff check .

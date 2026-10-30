@@ -2,7 +2,14 @@
 
 import pytest
 
+from app.config import settings
 from app.tools.tavily_cache import SearchResultCache, reset_search_cache, search_cache
+
+
+@pytest.fixture(autouse=True)
+def _use_redis_backend(monkeypatch):
+    """本文件验外观层的 Redis 后端；conftest 默认是进程内 LRU。"""
+    monkeypatch.setattr(settings, "search_cache_backend", "redis")
 
 
 def test_hit_returns_the_cached_text():

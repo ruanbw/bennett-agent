@@ -27,8 +27,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "fakeredis[lua]>=2.40.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.8.0",
     "pyyaml>=6.0",
     "ruff>=0.9",
 ]
@@ -38,7 +40,8 @@ testpaths = ["tests"]
 # 让测试能 import app.*：tests/ 下没有 __init__.py，pytest 默认只把 tests/ 自己
 # 放进 sys.path，仓库根需要显式声明。
 pythonpath = ["."]
-addopts = "-q"
+addopts = "-q -n auto"
+# 默认并行；调试单个用例或 --pdb 用 `pytest -n0 ...`
 # 异步用例直接写 async def，不用逐个包 asyncio.run
 asyncio_mode = "auto"
 # **整个测试会话共用一个事件循环**。

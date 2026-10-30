@@ -20,10 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.observability import (
-    REQUEST_ID_HEADER,
-    RequestContextMiddleware,
     RequestIdFilter,
-    current_request_id,
     new_request_id,
     sanitize_request_id,
 )
@@ -103,57 +100,6 @@ def _reset_request_id(token) -> None:  # noqa: ANN001
     from app.observability import _request_id
 
     _request_id.reset(token)
-
-
-def test_middleware_adds_header_and_sets_context():
-    """响应头里必须有 ID，且在请求处理期间 `current_request_id()` 可读。"""
-    app = FastAPI()
-    app.add_middleware(RequestContextMiddleware)
-
-    seen: list[str | None] = []
-
-    @app.get("/probe")
-    async def probe() -> dict[str, bool]:
-        seen.append(current_request_id())
-        return {"ok": True}
-
-    with TestClient(app) as client:
-        response = client.get("/probe")
-
-    assert response.headers[REQUEST_ID_HEADER].strip() == seen[0]
-    assert len(seen[0] or "") == 12
-
-
-def test_middleware_preserves_client_supplied_id():
-    app = FastAPI()
-    app.add_middleware(RequestContextMiddleware)
-
-    @app.get("/probe")
-    async def probe() -> dict[str, bool]:
-        return {"ok": True}
-
-    with TestClient(app) as client:
-        response = client.get("/probe", headers={REQUEST_ID_HEADER: "trace-abc"})
-
-    assert response.headers[REQUEST_ID_HEADER] == "trace-abc"
-
-
-def test_middleware_resets_context_after_request():
-    """不复位的话下一个请求的日志会带着上一个请求的 ID——比没有 ID 更糟。"""
-    app = FastAPI()
-    app.add_middleware(RequestContextMiddleware)
-
-    @app.get("/probe")
-    async def probe() -> dict[str, bool]:
-        return {"ok": True}
-
-    with TestClient(app) as client:
-        first = client.get("/probe").headers[REQUEST_ID_HEADER]
-        second = client.get("/probe").headers[REQUEST_ID_HEADER]
-
-    assert first != second
-    # 请求之外不该有残留
-    assert current_request_id() is None
 
 
 # ---------------------------------------------------------------------

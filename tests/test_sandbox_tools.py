@@ -11,9 +11,12 @@
 4. **重置之后是新机器**——旧机器必须真的被 destroy，而不是换个 ref 继续用。
 
 provider 用 `FakeProvider`：上面四条与 Docker/KVM 无关，用真后端跑反而会把「工具层的
-契约」和「后端的实现」搅在一起。数据库是 conftest 的真实 Postgres——审计行与租约状态
-是这条调用链的产出，mock 掉它等于不验；但工具层本身不再开会话，会话在
-`app/services/sandbox/lease_service.py` 里。
+契约」和「后端的实现」搅在一起。租约层用 `FakeLeaseService`：租约是**长生命周期资源**，
+在真实部署里必须落库（`app/services/sandbox/lease.py`），但那一层的行为锁需要真 Postgres，
+已随「零基础设施」改造移除。工具层要验的是**它怎么用租约**（寻址只按 user、审计写什么、
+重置后换机器），这些用内存替身就能验，不需要数据库。
+
+工具层本身不开数据库会话：会话在 `app/services/sandbox/lease_service.py` 里。
 """
 
 from __future__ import annotations
@@ -23,10 +26,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
 
 from app.config import settings
-from app.db import SandboxCommand, SandboxLease, User, async_session_maker
 from app.services import sandbox as sandbox_service
 from app.services.sandbox import lease_service
 from app.services.sandbox.base import (
@@ -40,6 +41,13 @@ from app.services.sandbox.base import (
     SandboxProvider,
     SandboxSpec,
     owner_tag,
+)
+from app.services.sandbox.lease import (
+    STATE_DESTROY_FAILED,
+    STATE_DESTROYED,
+    STATE_DESTROYING,
+    STATE_READY,
+    LeaseView,
 )
 from app.tools.sandbox import (
     MAX_READ_BYTES,
@@ -130,48 +138,164 @@ class FakeProvider:
 
 
 @dataclass
+class FakeLease:
+    """一台机器的租约。字段与 `LeaseView` 对齐，但可写（替身要模拟状态迁移）。"""
+
+    id: str
+    user_id: uuid.UUID
+    session_id: str
+    provider_ref: str | None = None
+    state: str = STATE_READY
+
+    def view(self) -> LeaseView:
+        return LeaseView(
+            id=self.id,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            provider="fake",
+            provider_ref=self.provider_ref,
+            state=self.state,
+            artifact_uri=None,
+        )
+
+
+class FakeLeaseService:
+    """`lease_service` 的内存替身：租约状态机在进程内，不开数据库会话。
+
+    只实现工具层真正用到的那几个动作，并且**寻址只按 `user_id`**（与
+    `app/services/sandbox/lease.py:ensure_lease` 同规则）：同一用户的不同会话共用一台机器。
+    会话 id 只是「最后是谁在用」的归因。
+    """
+
+    def __init__(self) -> None:
+        #: 每用户一台：user_id → 活动租约。
+        self.active: dict[uuid.UUID, FakeLease] = {}
+        #: 全部租约（含已销毁的），供断言看状态迁移。
+        self.all_leases: list[FakeLease] = []
+        #: 每次 `ensure_for_scope` 的入参：工具层把 user 与 session 一起交上来。
+        self.ensure_calls: list[tuple[uuid.UUID, str]] = []
+        #: 审计记录：命令文本、退出码、耗时、截断后的输出。
+        self.commands: list[dict[str, Any]] = []
+        self.touched: list[str] = []
+        self._seq = 0
+
+    # --- 供工具层调用 -------------------------------------------------
+
+    async def ensure_for_scope(self, *, user_id: uuid.UUID, session_id: str) -> LeaseView:
+        self.ensure_calls.append((user_id, session_id))
+        lease = self.active.get(user_id)
+        if lease is None:
+            self._seq += 1
+            lease = FakeLease(id=f"sbx_fake_{self._seq}", user_id=user_id, session_id=session_id)
+            self.active[user_id] = lease
+            self.all_leases.append(lease)
+        lease.session_id = session_id
+        if lease.provider_ref is None:
+            handle = await sandbox_service.get_provider().create(self._spec(lease))
+            lease.provider_ref = handle.ref
+            lease.state = STATE_READY
+        return lease.view()
+
+    async def touch(self, lease_id: str) -> None:
+        self.touched.append(lease_id)
+
+    async def record_command(
+        self,
+        lease_id: str,
+        *,
+        command: str,
+        result: ExecResult,
+        output_head: str,
+        truncated: bool,
+    ) -> None:
+        self.commands.append(
+            {
+                "lease_id": lease_id,
+                "command": command,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "output_head": output_head,
+                "truncated": truncated,
+            }
+        )
+
+    async def claim_for_reset(self, *, user_id: uuid.UUID) -> tuple[LeaseView | None, bool]:
+        lease = self.active.get(user_id)
+        if lease is None:
+            return None, False
+        lease.state = STATE_DESTROYING
+        return lease.view(), True
+
+    async def mark_failed(self, lease_id: str, exc: BaseException) -> None:
+        lease = self._find(lease_id)
+        if lease is not None:
+            lease.state = STATE_DESTROY_FAILED
+            self.active.pop(lease.user_id, None)
+
+    async def finish_reset(self, lease_id: str) -> None:
+        lease = self._find(lease_id)
+        if lease is not None:
+            lease.state = STATE_DESTROYED
+            self.active.pop(lease.user_id, None)
+
+    # --- 内部 ---------------------------------------------------------
+
+    def _find(self, lease_id: str) -> FakeLease | None:
+        return next((lease for lease in self.all_leases if lease.id == lease_id), None)
+
+    def _spec(self, lease: FakeLease) -> SandboxSpec:
+        return SandboxSpec(
+            lease_id=lease.id,
+            template=settings.sandbox_template,
+            template_version=settings.sandbox_template_version,
+            owner_tag=owner_tag(lease.user_id),
+            cpu=settings.sandbox_cpu,
+            memory_mb=settings.sandbox_memory_mb,
+            workdir=settings.sandbox_workdir,
+        )
+
+
+@dataclass
 class Env:
     provider: FakeProvider
+    leases: FakeLeaseService
     user_id: uuid.UUID
     session_id: str
 
 
 @pytest.fixture
-async def env() -> Env:
+def env(monkeypatch) -> Env:
+    """provider 与租约层都换成替身：这个文件不连任何数据库。
+
+    工具层只管「拿租约 / 记一次执行 / 标记失败」这类业务语义，怎么落库是 lease 层的事；
+    把那一层换掉，工具层的行为（寻址、审计、重置）照样能验。
+    """
     provider = FakeProvider()
     # runtime_checkable 的 Protocol：假件漏实现一个方法时这里立刻失败，而不是等到某个
     # 分支第一次被走到。
     assert isinstance(provider, SandboxProvider)
     sandbox_service.set_provider_for_tests(provider)
 
-    user_id = uuid.uuid4()
-    async with async_session_maker() as session:
-        session.add(
-            User(
-                id=user_id,
-                email=f"sbx-{uuid.uuid4().hex[:8]}@example.com",
-                hashed_password="x",
-                is_active=True,
-                is_superuser=False,
-                is_verified=True,
-            )
-        )
-        await session.commit()
+    fake_leases = FakeLeaseService()
+    for name in (
+        "ensure_for_scope",
+        "touch",
+        "record_command",
+        "claim_for_reset",
+        "mark_failed",
+        "finish_reset",
+    ):
+        monkeypatch.setattr(lease_service, name, getattr(fake_leases, name))
 
     try:
-        yield Env(provider=provider, user_id=user_id, session_id=f"sess_{uuid.uuid4().hex}")
+        yield Env(
+            provider=provider,
+            leases=fake_leases,
+            user_id=uuid.uuid4(),
+            session_id=f"sess_{uuid.uuid4().hex}",
+        )
     finally:
         sandbox_service.set_provider_for_tests(None)
-
-
-async def _count(model: Any) -> int:  # noqa: ANN401 - SQLAlchemy 模型类
-    async with async_session_maker() as session:
-        return await session.scalar(select(func.count()).select_from(model)) or 0
-
-
-async def _lease_rows() -> list[SandboxLease]:
-    async with async_session_maker() as session:
-        return list(await session.scalars(select(SandboxLease).order_by(SandboxLease.created_at, SandboxLease.id)))
 
 
 # ---------------------------------------------------------------------
@@ -196,7 +320,6 @@ async def test_all_tools_refuse_without_scope(env: Env):
         assert "执行环境" in text
 
     assert env.provider.calls == []
-    assert await _count(SandboxLease) == 0
 
 
 # ---------------------------------------------------------------------
@@ -222,7 +345,7 @@ async def test_large_output_keeps_head_and_tail(env: Env):
     assert "输出已截断" in text
 
 
-async def test_render_marks_stderr_truncation_shorter_than_stdout():
+def test_render_marks_stderr_truncation_shorter_than_stdout():
     """stderr 的阈值比 stdout 短：几万行重复报错对模型没有新信息。"""
     result = ExecResult(exit_code=1, stdout="", stderr="E" * 10_000, duration_ms=3)
     text = render_exec_result(result, "cat missing")
@@ -232,7 +355,7 @@ async def test_render_marks_stderr_truncation_shorter_than_stdout():
     assert "标准输出" in text and "（无输出）" in text
 
 
-async def test_render_timeout_says_how_to_fix_it():
+def test_render_timeout_says_how_to_fix_it():
     """超时不能说成「环境坏了」：那会让模型去重建沙箱，而重来一遍还是同一条命令。"""
     result = ExecResult(exit_code=None, stdout="partial output", stderr="", duration_ms=900_000, timed_out=True)
     text = render_exec_result(result, "python3 slow.py")
@@ -245,7 +368,7 @@ async def test_render_timeout_says_how_to_fix_it():
     assert "重建" not in text
 
 
-async def test_render_does_not_truncate_small_output():
+def test_render_does_not_truncate_small_output():
     result = ExecResult(exit_code=0, stdout="ok\n", stderr="", duration_ms=5)
     text = render_exec_result(result, "true")
 
@@ -269,7 +392,7 @@ async def test_not_found_message_has_no_ownership_wording(env: Env):
 
 
 # ---------------------------------------------------------------------
-# ④ exec 写一条 sandbox_command 审计
+# ④ exec 写一条命令审计
 # ---------------------------------------------------------------------
 async def test_exec_records_one_command_audit_row(env: Env):
     env.provider.exec_result = ExecResult(exit_code=1, stdout="line-1\n", stderr="boom\n", duration_ms=7)
@@ -277,22 +400,13 @@ async def test_exec_records_one_command_audit_row(env: Env):
     with sandbox_scope(env.user_id, env.session_id):
         await sandbox_exec(None, "cat missing.txt")
 
-    leases = await _lease_rows()
-    assert len(leases) == 1
-    assert leases[0].state == "ready"
-    assert leases[0].provider_ref == env.provider.execs[0]["ref"]
-
-    async with async_session_maker() as session:
-        rows = list(await session.scalars(select(SandboxCommand).where(SandboxCommand.lease_id == leases[0].id)))
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.seq == 1
-    assert row.command == "cat missing.txt"
-    assert row.exit_code == 1
-    assert row.duration_ms == 7
-    assert row.output_head is not None and "line-1" in row.output_head
-    assert row.truncated is False
+    assert len(env.leases.commands) == 1
+    row = env.leases.commands[0]
+    assert row["command"] == "cat missing.txt"
+    assert row["exit_code"] == 1
+    assert row["duration_ms"] == 7
+    assert row["truncated"] is False
+    assert row["output_head"] and "line-1" in row["output_head"]
 
 
 async def test_exec_marks_audit_row_truncated_for_big_output(env: Env):
@@ -301,16 +415,15 @@ async def test_exec_marks_audit_row_truncated_for_big_output(env: Env):
     with sandbox_scope(env.user_id, env.session_id):
         await sandbox_exec(None, "cat big.json")
 
-    async with async_session_maker() as session:
-        row = (await session.scalars(select(SandboxCommand))).one()
-
-    assert row.truncated is True
+    assert len(env.leases.commands) == 1
+    row = env.leases.commands[0]
+    assert row["truncated"] is True
     # 审计存的是「模型当时看到了什么」：头 + 尾 + 「省略 N 个字符」标记，不是 50k 原始输出。
     # 上限 = 两段之和 + 标记本身的版面开销；只存头会丢掉报错的最后一行，
     # 而那恰好是最需要回看的部分。
-    assert len(row.output_head or "") <= MAX_OUTPUT_HEAD_CHARS + MAX_OUTPUT_TAIL_CHARS + 200
-    assert "省略" in (row.output_head or "")
-    assert (row.output_head or "").count("x") <= MAX_OUTPUT_HEAD_CHARS + MAX_OUTPUT_TAIL_CHARS
+    assert len(row["output_head"]) <= MAX_OUTPUT_HEAD_CHARS + MAX_OUTPUT_TAIL_CHARS + 200
+    assert "省略" in row["output_head"]
+    assert row["output_head"].count("x") <= MAX_OUTPUT_HEAD_CHARS + MAX_OUTPUT_TAIL_CHARS
 
 
 # ---------------------------------------------------------------------
@@ -334,9 +447,7 @@ async def test_reset_destroys_machine_and_next_exec_creates_new_one(env: Env):
     # 一次重置 = 销毁旧机器；新机器是在下一次执行时按需建的，不是重置时顺便开的。
     assert env.provider.calls == ["create", "exec", "destroy", "create", "exec"]
 
-    leases = await _lease_rows()
-    assert [lease.state for lease in leases] == ["destroyed", "ready"]
-    assert leases[0].destroy_reason == "user_reset"
+    assert [lease.state for lease in env.leases.all_leases] == [STATE_DESTROYED, STATE_READY]
 
 
 async def test_reset_marks_destroy_failed_when_provider_fails(env: Env):
@@ -349,9 +460,7 @@ async def test_reset_marks_destroy_failed_when_provider_fails(env: Env):
 
     assert "执行环境暂时不可用" in text
     assert "abc123" not in text
-    leases = await _lease_rows()
-    assert leases[0].state == "destroy_failed"
-    assert leases[0].destroy_reason == "user_reset"
+    assert [lease.state for lease in env.leases.all_leases] == [STATE_DESTROY_FAILED]
 
 
 async def test_reset_without_environment_does_not_create_one(env: Env):
@@ -390,7 +499,7 @@ async def test_two_sessions_of_same_user_share_one_machine(env: Env):
     代价（写进断言里，免得以后被当 bug 修）是同一个 workspace——同一用户的不同会话会
     看到彼此的文件，它们属于同一个人。
 
-    复用时会改写 `session_id`：它现在只是「最后是哪个会话在用」的归因列。
+    寻址只按 user_id：工具层把 user_id 交上去，会话 id 只作归因（这里被改写成最后使用者）。
     """
     other_session = f"sess_{uuid.uuid4().hex}"
 
@@ -401,10 +510,8 @@ async def test_two_sessions_of_same_user_share_one_machine(env: Env):
 
     assert len(env.provider.created) == 1, "每用户一台：第二个会话不该再建机"
     assert env.provider.execs[0]["ref"] == env.provider.execs[1]["ref"]
-    assert await _count(SandboxLease) == 1
-    async with async_session_maker() as session:
-        rows = (await session.scalars(select(SandboxLease))).all()
-    assert rows[0].session_id == other_session
+    assert [user_id for user_id, _ in env.leases.ensure_calls] == [env.user_id, env.user_id]
+    assert env.leases.all_leases[0].session_id == other_session
 
 
 async def test_same_session_reuses_machine(env: Env):
@@ -447,7 +554,6 @@ async def test_paths_outside_workspace_are_rejected(env: Env, path: str):
         assert "路径不可用" in text
         assert WORKDIR in text
     assert env.provider.calls == []
-    assert await _count(SandboxLease) == 0
 
 
 async def test_write_rejects_overlong_content_instead_of_truncating(env: Env):
