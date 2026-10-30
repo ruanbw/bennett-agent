@@ -138,8 +138,7 @@ def _rejected_path_message(path: str | None) -> str:
 
 
 def _clamp_timeout(timeout_s: int | None) -> int:
-    """把模型给的超时夹到 `[1, MAX_EXEC_TIMEOUT_S]`；夹紧而不是拒绝，越界值多是模型随手写的大数。
-    """
+    """把模型给的超时夹到 `[1, MAX_EXEC_TIMEOUT_S]`；夹紧而不是拒绝，越界值多是模型随手写的大数。"""
     try:
         value = int(timeout_s) if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_S
     except (TypeError, ValueError):

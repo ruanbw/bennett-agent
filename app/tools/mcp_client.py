@@ -69,8 +69,7 @@ class McpServerConfig:
 
     @property
     def prefix(self) -> str:
-        """工具的最终名字前缀（例如 `demo__`）；不是 `PrefixedToolset.prefix` 参数，见 `_exposed_prefix`。
-        """
+        """工具的最终名字前缀（例如 `demo__`）；不是 `PrefixedToolset.prefix` 参数，见 `_exposed_prefix`。"""
         return f"{self.name}{NAME_SEPARATOR}"
 
     @property

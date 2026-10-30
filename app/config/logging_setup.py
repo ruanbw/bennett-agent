@@ -64,8 +64,7 @@ def access_log_enabled(env: dict[str, str] | None = None) -> bool:
 
 
 def quiet_third_party_loggers(level: int, names: Iterable[str] = NOISY_THIRD_PARTY) -> None:
-    """把第三方库压到 WARNING（除非全局级别更高）：DEBUG 下 httpx 会打印 `Authorization: Bearer <key>`。
-    """
+    """把第三方库压到 WARNING（除非全局级别更高）：DEBUG 下 httpx 会打印 `Authorization: Bearer <key>`。"""
     floor = max(level, logging.WARNING)
     for name in names:
         logging.getLogger(name).setLevel(floor)
