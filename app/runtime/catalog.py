@@ -42,11 +42,13 @@ class DefaultToolCatalog:
         # MCP 工具的名字带 `server__` 前缀，来自远端工具定义。函数内 import：MCP 客户端要连远端，
         # 读一次元数据不该把它拉进 import 期（发现由 `app/server.py` 的 lifespan 负责）。
         try:
-            from app.tools.mcp_client import get_mcp_registry
+            from app.tools.mcp_client import MCP_TOOL_RISK_LEVEL, get_mcp_registry
 
             for info in get_mcp_registry().cached_tools():
                 if info.qualified_name == name:
-                    return (info.description or "", RiskLevel.SAFE_WRITE)
+                    # 读那一份常量而不是再写一次字面量：审批框上的等级与闸门实际拦不拦必须同源，
+                    # 否则上调任一处就变成「显示写入、实际危险」的 UI 系统性低报。
+                    return (info.description or "", RiskLevel(MCP_TOOL_RISK_LEVEL))
         except Exception:  # noqa: BLE001 - 同上
             logger.debug("读取 MCP 工具元数据失败 (tool=%s)", name, exc_info=True)
         return ("", None)

@@ -7,8 +7,13 @@ Starlette 默认不限制请求体大小，而 body 校验发生在 Pydantic 解
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from urllib.parse import urlsplit
+
+from app.services.metrics import metrics
+
+logger = logging.getLogger(__name__)
 
 
 #: 请求体超限时抛出的内部异常；只在本模块内用于中断读取。
@@ -136,18 +141,23 @@ class OriginGuardMiddleware:
 
     SameSite=Lax 只限制是否携带已有 cookie，不阻止跨站顶层表单 POST 写入新会话 cookie——受害者会被
     静默登入攻击者账号（M-01）。来源取自 CORS_ALLOWED_ORIGINS；都没有时只拒 cross-site。
+
+    `*` 只影响 CORS 响应头（浏览器侧的可读性），**不**在这里短路：两者目标不同——CORS 控的是
+    「页面能不能读响应」，本中间件控的是「请求能不能改变服务端状态」。任意源都要放行时必须显式开
+    `csrf_allow_any_origin`，否则写方法仍要求 Origin 同 host 或命中显式列表。
     """
 
-    def __init__(self, app: Any, *, allowed_origins: list[str]) -> None:
+    def __init__(self, app: Any, *, allowed_origins: list[str], allow_any_origin: bool = False) -> None:
         self.app = app
         self.allowed_origins = {origin.rstrip("/").lower() for origin in allowed_origins}
-        self.allow_any = "*" in self.allowed_origins
+        self.allow_any_origin = allow_any_origin
 
     def _allowed(self, origin: str, request_host: str | None) -> bool:
         candidate = origin.rstrip("/").lower()
+        # `null`（沙箱 iframe / data: 页面）永远拒绝，即使开了任意源：它拿不到真实来源信息。
         if not candidate or candidate == "null":
             return False
-        if self.allow_any:
+        if self.allow_any_origin:
             return True
         if candidate in self.allowed_origins:
             return True
@@ -168,14 +178,30 @@ class OriginGuardMiddleware:
         sec_fetch_site = (_header(scope, b"sec-fetch-site") or "").strip().lower()
 
         if origin is not None:
+            candidate_origin = origin
             allowed = self._allowed(origin, request_host)
+            reason = "origin_not_allowed"
         elif referer is not None:
-            referer_origin = _origin_of(referer)
-            allowed = bool(referer_origin and self._allowed(referer_origin, request_host))
+            # Referer 的 path/query 可能带令牌或邮箱，只记归一化后的 scheme://host。
+            candidate_origin = _origin_of(referer)
+            allowed = bool(candidate_origin and self._allowed(candidate_origin, request_host))
+            reason = "referer_not_allowed"
         else:
+            candidate_origin = None
             allowed = sec_fetch_site != "cross-site"
+            reason = "sec_fetch_site_cross_site"
 
         if not allowed:
+            # 拒绝路径必须留痕：反代改写 Host 或漏配来源时，生产所有写请求 403 而服务端零线索，
+            # 真实跨站探测也看不见。不记 cookie（日志会进集中式日志系统）。
+            logger.warning(
+                "跨站请求被拒绝：reason=%s origin=%s host=%s path=%s",
+                reason,
+                candidate_origin,
+                request_host,
+                scope.get("path", ""),
+            )
+            metrics.increment("csrf_rejected_total", reason=reason)
             status_code, body = _forbidden()
             await send(
                 {
@@ -205,16 +231,25 @@ _BASE_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"referrer-policy", b"no-referrer"),
 )
 
+#: 只在 cookie 标了 Secure（即部署确实走 HTTPS）时追加。`max-age` 取一年：太短起不到
+#: 「首次明文请求之后全部强制 HTTPS」的作用，太长又会让回退 HTTPS 的部署难以恢复。
+_HSTS_HEADER: tuple[bytes, bytes] = (b"strict-transport-security", b"max-age=31536000")
+
 
 class SecurityHeadersMiddleware:
     """给 `/api/*` 响应加安全头，且默认 `Cache-Control: no-store`。
 
     `/api/auth/me`、`/api/admin/users` 的响应含账号与角色信息：没有显式 Cache-Control 时，
     浏览器与中间缓存会把带 cookie 的 GET 留在本地（共享电脑）。已有值不覆盖。
+
+    `hsts` 由 `settings.auth_cookie_secure` 驱动：HSTS 只在真走 HTTPS 时有意义，也给
+    「用户手敲 http://」与中间人换证书两类问题兜底。不写 `includeSubDomains`——域范围
+    属于部署侧决策，写死会把无关子域一起锁死，事后无法回退。
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, *, hsts: bool = False) -> None:
         self.app = app
+        self.hsts = hsts
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -232,6 +267,8 @@ class SecurityHeadersMiddleware:
                         headers.append((name, value))
                 if is_api and b"cache-control" not in existing:
                     headers.append((b"cache-control", b"no-store"))
+                if self.hsts and _HSTS_HEADER[0] not in existing:
+                    headers.append(_HSTS_HEADER)
                 message = {**message, "headers": headers}
             await send(message)
 

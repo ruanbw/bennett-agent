@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -13,8 +14,8 @@ from typing import Any
 
 import httpx
 from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
+from pydantic_ai.capabilities import AbstractCapability, WrapToolExecuteHandler
+from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
@@ -34,6 +35,34 @@ TRANSIENT_FAILURE_RESULT = (
     "工具暂时失败（网络或上游超时），本次没有取得结果。可以再试一次；"
     "若仍然失败，请换一种方式继续，或如实告知用户该步骤没有完成。"
 )
+
+#: 工具级超时的文案。pydantic-ai 把 `anyio.fail_after` 的超时抛成英文 `ModelRetry`，模型会原样
+#: 重试同一调用并烧掉自动重试次数；这里统一换成与 `DENIED_RESULT` 同风格的中文，明确「已超时、
+#: 不要原样重试」，并给出缩小范围/换工具的下一步。
+TOOL_TIMEOUT_RESULT = (
+    "工具执行超时（超过该工具允许的时限），本次没有取得结果。不要重试同一个调用；"
+    "请缩小范围、换一种方式或换用其它工具继续，若做不到就如实告知用户这一步没有完成。"
+)
+
+#: pydantic-ai 的超时 `ModelRetry` 唯一稳定的可识别特征（`toolsets/function.py:call_tool`）。
+#: 只匹配这一种形状，绝不把工具自己抛的 `ModelRetry` 当前超时改写——那是它写给模型的整改建议。
+_TOOL_TIMEOUT_RETRY = re.compile(r"^Timed out after \S+ seconds\.$")
+
+
+def is_tool_timeout_retry(error: BaseException) -> bool:
+    """这次重试是不是 pydantic-ai 的工具级超时（英文、无重试指引）。
+
+    两种形状都要认：`ModelRetry` 是工具层最初抛的，而 `_raw_execute` 会在到达这一层之前把它
+    转成带 `RetryPromptPart` 的 `ToolRetryError`（内容原样保留）。只认这一种固定文本，
+    绝不把工具自己写的 `ModelRetry`（那是整改建议）当成超时。
+    """
+    if isinstance(error, ModelRetry):
+        message = error.message
+    elif isinstance(error, ToolRetryError):
+        message = error.tool_retry.content
+    else:
+        return False
+    return isinstance(message, str) and bool(_TOOL_TIMEOUT_RETRY.match(message.strip()))
 
 
 def is_transient_tool_error(error: BaseException) -> bool:
@@ -90,6 +119,36 @@ def failure_result_message(tool_name: str, failures: int, *, transient: bool = F
 
 class ToolErrorIsolation(AbstractCapability[None]):
     """把工具的意外异常转成「失败结果」，让本轮对话继续。"""
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[None],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: Any,  # noqa: ANN401
+        handler: WrapToolExecuteHandler,
+    ) -> Any:  # noqa: ANN401
+        """把工具级超时从 `ModelRetry` / `ToolRetryError` 改成 `ToolFailed`。
+
+        超时由 `anyio.fail_after` 抛出、在 `FunctionToolset.call_tool` 里被转成英文 `ModelRetry`；
+        而 `_raw_execute` 又会在到达能力层之前把它换成 `ToolRetryError`（并记一次 retry 计数）。
+        两种都不进 `on_tool_execute_error`（`tool_manager` 把它们当控制流原样上抛），只有包住执行的
+        这一层看得到。改成 `ToolFailed` 后模型收到的是一条中文 failed 结果，不会再被要求原样重试。
+        """
+        try:
+            return await handler(args)
+        except (ModelRetry, ToolRetryError) as error:
+            if not is_tool_timeout_retry(error):
+                raise
+            failures = record_tool_failure(call.tool_name)
+            logger.warning(
+                "工具执行超时 (tool=%s, tool_call_id=%s, 本轮第 %d 次)",
+                call.tool_name,
+                call.tool_call_id,
+                failures,
+            )
+            raise ToolFailed(TOOL_TIMEOUT_RESULT) from error
 
     async def on_tool_execute_error(
         self,

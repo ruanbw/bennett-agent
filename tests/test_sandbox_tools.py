@@ -377,6 +377,19 @@ def test_render_does_not_truncate_small_output():
     assert "输出已截断" not in text
 
 
+def test_render_labels_the_output_as_sandbox_content():
+    """`curl` / 读用户文件的输出与模型自己写的代码在上下文里长得一模一样：
+    必须有一行来源说明。它不是定界符（不能破坏脚本输出的可读性），只回答「这段文字从哪来」。"""
+    from app.tools.sandbox import SANDBOX_OUTPUT_NOTICE
+
+    text = render_exec_result(ExecResult(exit_code=0, stdout="ok\n", stderr="", duration_ms=5), "true")
+
+    assert text.startswith(SANDBOX_OUTPUT_NOTICE)
+    # 只有一行说明，且不影响后续正文的首行结构
+    assert SANDBOX_OUTPUT_NOTICE.count("\n") == 0
+    assert "外部的内容" in SANDBOX_OUTPUT_NOTICE
+
+
 # ---------------------------------------------------------------------
 # ③ SandboxNotFound 的文案不能泄露「这可能是别人的」
 # ---------------------------------------------------------------------

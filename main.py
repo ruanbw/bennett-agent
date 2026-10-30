@@ -83,6 +83,9 @@ async def _run_all(host: str, port: int) -> None:
             log_config=None,
             # 关掉：默认 proxy_headers 让本机连接凭 X-Forwarded-For 改写 client.host，绕开应用层的限流键信任配置。
             proxy_headers=False,
+            # 关掉 `Server: uvicorn` 指纹头：它只能告诉扫描器「这是个 Python 服务」，
+            # 对运维没有任何价值（版本号服务端自己知道）。
+            server_header=False,
             # 不设宽限：在飞 SSE 最长 600s（`TOTAL_STREAM_BUDGET_SECONDS`），等所有任务结束会让 Ctrl-C 像卡死。
             timeout_graceful_shutdown=5,
         )

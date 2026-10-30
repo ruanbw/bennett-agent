@@ -29,7 +29,7 @@ export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\
  * 数字；让纯校验模块去 import auth 会把一整条网络/存储链路拖进单元测试。
  * 前端校验只是**即时反馈**，不是安全边界——真正的校验在服务端。
  */
-export const MIN_PASSWORD_LENGTH = 8
+export const MIN_PASSWORD_LENGTH = 12
 
 // ---------------------------------------------------------------------
 // 对话上下文

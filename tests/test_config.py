@@ -9,8 +9,9 @@ pydantic-settings 尚未加载任何 dotenv 文件。后果有两层——
    位于加载序列靠后位置（优先级更高），于是反过来覆盖运维的意图，且全程静默。
 
 下面的用例覆盖进程环境变量、`.env.local`、`.env` 三条来源与加载顺序。
-本文件同时锁住配置守卫的新语义：app_env 归一化与白名单、生产强密钥、生产 Secure
-cookie、数值下限、CORS 解析，以及校验失败时不把密钥输入打进异常文本。
+本文件同时锁住配置守卫的新语义：app_env 归一化与白名单、生产级环境（production/staging）
+的强密钥与 Secure cookie、/docs 开关、数值下限、CORS 解析、密钥目录，以及校验失败时
+不把密钥输入打进异常文本。
 """
 
 import pytest
@@ -19,9 +20,11 @@ from pydantic import ValidationError
 from app.config.settings import (
     DEFAULT_APP_ENV,
     DEFAULT_AUTH_SECRET,
+    SECRETS_DIR_ENV,
     Settings,
     get_env_files,
     resolve_app_env,
+    secrets_dir_from_env,
 )
 
 
@@ -136,7 +139,11 @@ def test_env_specific_file_lookup_lowercases_app_env(project_dir, monkeypatch):
 def test_settings_applies_env_file_order(project_dir):
     """env_file 元组靠后者覆盖靠前者：.env.staging 必须压过 .env。"""
     (project_dir / ".env").write_text("APP_ENV=staging\nASSISTANT_NAME=from-base\n", encoding="utf-8")
-    (project_dir / ".env.staging").write_text("ASSISTANT_NAME=from-staging\n", encoding="utf-8")
+    # staging 现在是生产级环境，启动守卫要求强密钥与 Secure cookie。
+    (project_dir / ".env.staging").write_text(
+        f"ASSISTANT_NAME=from-staging\nAUTH_SECRET={STRONG_TEST_SECRET}\nAUTH_COOKIE_SECURE=true\n",
+        encoding="utf-8",
+    )
 
     config = Settings(_env_file=get_env_files(project_dir))
 
@@ -152,7 +159,15 @@ def test_settings_applies_env_file_order(project_dir):
     [("  STAGING  ", "staging"), ("Test", "test"), ("DEVELOPMENT", "development")],
 )
 def test_app_env_is_stripped_and_lowercased(raw, expected):
-    assert Settings(app_env=raw, _env_file=None).app_env == expected
+    # staging 属生产级环境：构造时得给一套过守卫的密钥/cookie 配置。
+    config = Settings(
+        app_env=raw,
+        auth_secret=STRONG_TEST_SECRET,
+        auth_cookie_secure=True,
+        _env_file=None,
+    )
+
+    assert config.app_env == expected
 
 
 def test_production_app_env_is_normalised_before_guard():
@@ -577,3 +592,102 @@ def test_illegal_cookie_name_is_rejected(name):
         _settings(auth_cookie_name=name)
 
     assert "不是合法的 cookie 名" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------
+# 生产级环境（production / staging）的守卫
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize("app_env", ["production", "staging"])
+def test_production_like_envs_reject_placeholder_auth_secret(app_env):
+    """staging 通常也能被公网访问：守卫只认字面量 production 时，它会接受仓库里的
+    占位密钥 → 任何人都能用公开密钥伪造重置密码令牌，接管任意账号。
+    """
+    with pytest.raises(ValidationError) as exc:
+        Settings(
+            app_env=app_env,
+            auth_secret=DEFAULT_AUTH_SECRET,
+            auth_cookie_secure=True,
+            _env_file=None,
+        )
+
+    assert "AUTH_SECRET" in str(exc.value)
+
+
+@pytest.mark.parametrize("app_env", ["production", "staging"])
+def test_production_like_envs_require_secure_cookie(app_env):
+    """明文 HTTP 上会话 token 可被链路上任意一跳截获。"""
+    with pytest.raises(ValidationError) as exc:
+        Settings(
+            app_env=app_env,
+            auth_secret=STRONG_TEST_SECRET,
+            auth_cookie_secure=False,
+            _env_file=None,
+        )
+
+    assert "AUTH_COOKIE_SECURE" in str(exc.value)
+
+
+def test_staging_accepts_a_hardened_config():
+    """收紧必须落在「占位密钥 / 明文 cookie」上，而不是让 staging 根本起不来。"""
+    config = Settings(
+        app_env="staging",
+        auth_secret=STRONG_TEST_SECRET,
+        auth_cookie_secure=True,
+        _env_file=None,
+    )
+
+    assert config.app_env == "staging"
+
+
+@pytest.mark.parametrize("app_env", ["development", "test"])
+def test_non_production_like_envs_keep_local_defaults(app_env):
+    """本地开发 / 测试必须继续接受占位密钥与非 Secure cookie，否则起服务就得先配密钥。"""
+    config = Settings(app_env=app_env, auth_secret=DEFAULT_AUTH_SECRET, auth_cookie_secure=False, _env_file=None)
+
+    assert config.auth_cookie_secure is False
+
+
+@pytest.mark.parametrize(
+    "app_env,expected",
+    [("production", False), ("staging", False), ("development", True), ("test", True)],
+)
+def test_api_docs_follow_the_same_production_like_rule(monkeypatch, app_env, expected):
+    """/docs 与 openapi.json 同属侦察面：staging 不能落回开发的「全开」默认值。"""
+    from app import server
+
+    monkeypatch.setattr(server.settings, "app_env", app_env)
+    monkeypatch.setattr(server.settings, "enable_api_docs", None)
+
+    assert server._api_docs_enabled() is expected
+
+
+# ---------------------------------------------------------------------
+# CSRF 任意源开关
+# ---------------------------------------------------------------------
+def test_csrf_allow_any_origin_is_off_by_default():
+    """`*` 只影响 CORS 响应头；放开任意源写请求必须显式打开这个开关。"""
+    assert Settings(_env_file=None).csrf_allow_any_origin is False
+
+
+# ---------------------------------------------------------------------
+# 从文件读密钥（Docker / K8s secrets）
+# ---------------------------------------------------------------------
+def test_secrets_dir_env_var_is_optional(monkeypatch):
+    """未设置（或全空白）= 不启用该来源，以免目录不存在时每进程刷一条 warning。"""
+    monkeypatch.delenv(SECRETS_DIR_ENV, raising=False)
+    assert secrets_dir_from_env() is None
+
+    monkeypatch.setenv(SECRETS_DIR_ENV, "  ")
+    assert secrets_dir_from_env() is None
+
+    monkeypatch.setenv(SECRETS_DIR_ENV, " /run/secrets ")
+    assert secrets_dir_from_env() == "/run/secrets"
+
+
+def test_secret_files_supply_field_values(tmp_path):
+    """`/run/secrets` 挂载的是文件：目录下与字段同名的文件内容必须真的被读进来。"""
+    (tmp_path / "auth_secret").write_text(STRONG_TEST_SECRET + "\n", encoding="utf-8")
+
+    config = Settings(_env_file=None, _secrets_dir=str(tmp_path))
+
+    assert config.auth_secret == STRONG_TEST_SECRET

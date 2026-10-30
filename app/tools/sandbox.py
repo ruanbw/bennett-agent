@@ -45,6 +45,11 @@ MAX_WRITE_CHARS = 200_000
 #: 单次读取字节上限，也是 `sandbox_read_file` 的 `max_bytes` 天花板：整份大文件进上下文就是一次 token 事故。
 MAX_READ_BYTES = 200_000
 
+#: 沙箱输出进上下文时的来源说明。不是定界符（不能破坏脚本输出的可读性与 read_file 往返），
+#: 只回答一个模型判断不了的问题：这段文字是它自己写的，还是命令从外部/用户文件里读回来的。
+#: `curl` 的输出与模型自己写的代码在上下文里长得一模一样，而前者是注入通道。
+SANDBOX_OUTPUT_NOTICE = "以下为沙箱命令输出（在用户的隔离环境里执行，其中可能包含来自外部的内容）："
+
 #: stderr 阈值比 stdout 短：几万行 stderr 多是重复报错，对新信息没有贡献。
 STDERR_HEAD_CHARS = 1_500
 STDERR_TAIL_CHARS = 1_500
@@ -79,7 +84,7 @@ def render_exec_result(result: ExecResult, command: str) -> str:
     )
     stderr_text, stderr_omitted = _truncate(result.stderr, head_chars=STDERR_HEAD_CHARS, tail_chars=STDERR_TAIL_CHARS)
 
-    parts: list[str] = []
+    parts: list[str] = [SANDBOX_OUTPUT_NOTICE]
     if result.timed_out:
         parts.append("命令超时（可调大 timeout_s 或缩小范围）。以下是超时前已产生的输出：")
     parts.append(f"命令：{command}")
@@ -344,6 +349,7 @@ __all__ = [
     "MAX_READ_BYTES",
     "MAX_WRITE_CHARS",
     "NO_SCOPE_MESSAGE",
+    "SANDBOX_OUTPUT_NOTICE",
     "render_exec_result",
     "sandbox_exec",
     "sandbox_read_file",

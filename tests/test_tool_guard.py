@@ -1,7 +1,7 @@
-"""工具异常隔离（`ToolErrorIsolation`）的纯逻辑与装配锁。
+"""工具异常隔离（`ToolErrorIsolation`）的纯逻辑、装配与超时改写锁。
 
-行为层用例（真实 Agent + TestModel 跑一轮）已随全量/端到端层移除；这里保留两件事：
-生产装配确实挂上了隔离能力，以及钩子对 `ModelRetry` 的早退分支——控制流不能被降级。
+这里保留三件事：生产装配确实挂上了隔离能力；钩子对 `ModelRetry` 的早退分支——控制流不能被降级；
+以及「工具级超时以失败结果回到模型、且不消耗自动重试」这一条只能靠真实 Agent 验证的行为。
 """
 
 import pytest
@@ -9,6 +9,7 @@ from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
+from app.runtime.guard import TOOL_TIMEOUT_RESULT, is_tool_timeout_retry
 from app.services.agent_factory import build_agent
 from app.tools.guard import (
     ESCALATE_AFTER_FAILURES,
@@ -60,6 +61,111 @@ async def test_guard_turns_unexpected_error_into_tool_failed():
         )
 
     assert excinfo.value.message == TOOL_FAILURE_RESULT
+
+
+# ---------------------------------------------------------------------
+# 工具级超时：pydantic-ai 的英文 ModelRetry 要变成中文失败结果，且不烧自动重试
+# ---------------------------------------------------------------------
+async def test_tool_timeout_model_retry_becomes_a_chinese_failure():
+    """`anyio.fail_after` 的超时被抛成 `ModelRetry('Timed out after N seconds.')`：
+    模型收到英文、没有「不要原样重试」的指引，还会消耗掉一次自动重试。"""
+    guard = ToolErrorIsolation()
+
+    async def handler(args):  # noqa: ANN001 - 模拟 pydantic-ai 内部 `do_execute`
+        raise ModelRetry("Timed out after 30.0 seconds.")
+
+    with pytest.raises(ToolFailed) as excinfo:
+        await guard.wrap_tool_execute(
+            None,
+            call=ToolCallPart(tool_name="tavily_search", args={}),
+            tool_def=ToolDefinition(name="tavily_search"),
+            args={},
+            handler=handler,
+        )
+
+    assert excinfo.value.message == TOOL_TIMEOUT_RESULT
+    assert "超时" in TOOL_TIMEOUT_RESULT
+    assert "不要重试" in TOOL_TIMEOUT_RESULT
+
+
+async def test_other_model_retry_is_passed_through_untouched():
+    """工具自己抛的 `ModelRetry` 是写给模型的整改建议，一个字都不能改写。"""
+    guard = ToolErrorIsolation()
+    retry = ModelRetry("参数格式不对，请用 YYYY-MM-DD")
+
+    async def handler(args):  # noqa: ANN001
+        raise retry
+
+    with pytest.raises(ModelRetry) as excinfo:
+        await guard.wrap_tool_execute(
+            None,
+            call=ToolCallPart(tool_name="t", args={}),
+            tool_def=ToolDefinition(name="t"),
+            args={},
+            handler=handler,
+        )
+
+    assert excinfo.value is retry
+
+
+def test_only_the_pydantic_ai_timeout_shape_is_recognised():
+    """只认 pydantic-ai 那一条固定形状，避免把碰巧带 Timeout 字样的重试建议当成超时。"""
+    from pydantic_ai.exceptions import ToolRetryError
+    from pydantic_ai.messages import RetryPromptPart
+
+    def as_retry_error(content: str) -> ToolRetryError:
+        return ToolRetryError(RetryPromptPart(content=content, tool_name="t", tool_call_id="c"))
+
+    assert is_tool_timeout_retry(ModelRetry("Timed out after 30.0 seconds."))
+    assert is_tool_timeout_retry(ModelRetry("Timed out after 0.5 seconds."))
+    assert is_tool_timeout_retry(as_retry_error("Timed out after 30.0 seconds."))
+    assert not is_tool_timeout_retry(ModelRetry("Timed out after 30 seconds"))
+    assert not is_tool_timeout_retry(ModelRetry("请求超时，请缩小范围后重试"))
+    assert not is_tool_timeout_retry(RuntimeError("Timed out after 30.0 seconds."))
+
+
+async def test_tool_timeout_reaches_the_model_without_an_automatic_retry():
+    """端到端：超时必须以**中文 failed 结果**回到模型，且模型只被请求两次。
+
+    单元用例只能证明钩子会把 `ModelRetry` 改写掉；真正要锁的是 pydantic-ai 的执行顺序
+    （`wrap_tool_execute` 包着 `FunctionToolset.call_tool`）与「`ToolFailed` 不消耗重试次数」。
+    这条一旦退化，一次超时在模型侧会变成两次调用，耗时翻倍且文案回到英文。
+    """
+    import asyncio
+
+    from pydantic_ai import Agent, Tool
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    seen: list[list] = []
+
+    def model_fn(messages, info):  # noqa: ANN001 - pydantic-ai 的模型函数签名
+        parts = [part for message in messages for part in message.parts]
+        seen.append(parts)
+        if any(getattr(part, "part_kind", "") == "tool-return" for part in parts):
+            return ModelResponse(parts=[TextPart("完成")])
+        return ModelResponse(parts=[ToolCallPart("slow_tool", {}, tool_call_id="call-1")])
+
+    async def slow_tool() -> str:
+        """永远跑不完的工具。"""
+        await asyncio.sleep(1.0)
+        return "never"
+
+    agent = Agent(
+        FunctionModel(model_fn),
+        tools=[Tool(slow_tool, name="slow_tool", timeout=0.01)],
+        capabilities=[ToolErrorIsolation()],
+        output_type=str,
+    )
+
+    result = await agent.run("go")
+
+    assert result.output == "完成"
+    assert len(seen) == 2, "超时不该再触发一次自动重试"
+    failed = [part for part in seen[1] if getattr(part, "part_kind", "") == "tool-return"]
+    assert len(failed) == 1
+    assert failed[0].outcome == "failed"
+    assert failed[0].content == TOOL_TIMEOUT_RESULT
 
 
 # ---------------------------------------------------------------------

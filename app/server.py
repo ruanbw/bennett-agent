@@ -19,6 +19,7 @@ from app.api.ops import router as ops_router
 from app.api.sandbox import router as sandbox_router
 from app.api.sync import router as sync_router
 from app.config import settings
+from app.config.settings import is_production_like
 from app.db import audit_provider_key_decryption, cleanup_expired_access_tokens, engine, verify_schema_at_head
 from app.middleware import MaxBodySizeMiddleware, OriginGuardMiddleware, SecurityHeadersMiddleware
 from app.observability import HttpMetricsMiddleware, RequestContextMiddleware
@@ -225,10 +226,11 @@ async def _discover_mcp_tools() -> None:
 def _api_docs_enabled() -> bool:
     """是否暴露 /docs、/redoc 与 /openapi.json。
 
-    `None` 表示按环境决定：production 下这些页面把端点结构白送给未认证访客，其余环境保留。
+    `None` 表示按环境决定：生产级环境（production/staging）下这些页面把端点结构白送给未认证访客，
+    其余环境保留。staging 与 production 用同一套判定——它能被公网访问，漏关等于少了一道侦察面。
     """
     if settings.enable_api_docs is None:
-        return settings.app_env != "production"
+        return not is_production_like(settings.app_env)
     return settings.enable_api_docs
 
 
@@ -328,12 +330,15 @@ def _install_unhandled_error_handler(app: FastAPI) -> None:
     from fastapi import Request
     from fastapi.responses import JSONResponse
 
-    from app.observability import current_request_id
+    from app.observability import REQUEST_ID_HEADER
 
     @app.exception_handler(Exception)
     async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:  # noqa: ARG001
-        # 与响应头的 `X-Request-ID` 同值，用户从 devtools 也能拿到，不必等错误文案。
-        error_id = current_request_id() or "-"
+        # 从 scope 取而不是 `current_request_id()`：本处理器被 FastAPI 装进最外层 `ServerErrorMiddleware`，
+        # 跑到这里时 `RequestContextMiddleware` 的 finally 已把 ContextVar 复位，原来取到的是 None，
+        # 500 于是永远带 `error_id="-"`——用户报障给的这个编号在日志里一条也搜不到。
+        # `request.state` 读的就是同一个 `scope["state"]`，而 scope 对象在整条链路里是同一个。
+        error_id = getattr(request.state, "request_id", None) or "-"
         logger.exception("未处理异常 (error_id=%s, path=%s)", error_id, request.url.path)
         return JSONResponse(
             status_code=500,
@@ -341,6 +346,8 @@ def _install_unhandled_error_handler(app: FastAPI) -> None:
                 "detail": f"服务器内部错误，请重试（错误编号 {error_id}）",
                 "error_id": error_id,
             },
+            # 之前的 500 没有这个头：「ID 同时出现在响应头 / 日志 / 错误体」的承诺只在这一条路径上不成立。
+            headers={REQUEST_ID_HEADER: error_id},
         )
 
 
@@ -351,7 +358,7 @@ def create_app() -> FastAPI:
         description=(
             "基于 FastAPI + PydanticAI + LiteLLM 的对话助手服务。\n\n"
             "除注册与登录外，所有 `/api/*` 都要求 HttpOnly cookie 会话；"
-            "接口文档默认只在非 production 环境暴露，可用 `ENABLE_API_DOCS=true` 显式打开。"
+            "接口文档默认只在非生产环境（development/test）暴露，可用 `ENABLE_API_DOCS=true` 显式打开。"
         ),
         # 版本号只有这一个来源（已安装包的元数据），不与 pyproject 各说各话
         version=APP_VERSION,
@@ -375,7 +382,16 @@ def create_app() -> FastAPI:
 
     # 请求体上限 / 跨站守卫必须在 CORS 之前注册（后注册的更外层），这样 413/403 也带 CORS 头。
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
-    app.add_middleware(OriginGuardMiddleware, allowed_origins=cors_origins)
+    app.add_middleware(
+        OriginGuardMiddleware,
+        allowed_origins=cors_origins,
+        # `*` 在 cors_origins 里只影响 CORS 响应头；要真的放开写请求必须显式开这个开关。
+        allow_any_origin=settings.csrf_allow_any_origin,
+    )
+
+    # 指标放在 CORS 之内：后注册的更外层，所以它必须在 CORS 之前注册，才能给业务响应计时
+    # 又不把被 CORS 短路的 OPTIONS 预检算进请求率（那会让错误率分母虚高、还混进 `<unmatched>`）。
+    app.add_middleware(HttpMetricsMiddleware)
 
     app.add_middleware(
         CORSMiddleware,
@@ -387,13 +403,12 @@ def create_app() -> FastAPI:
         expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
-    # 指标放在 CORS 之内：要给所有响应计时，但统计 OPTIONS 预检只会让请求数虚高。
-    app.add_middleware(HttpMetricsMiddleware)
     # 请求 ID 要在最外层之一：连外层中间件产生的 413/403 也带 X-Request-ID。
     app.add_middleware(RequestContextMiddleware)
 
     # 最后注册 = 最外层：连 CORS/限流产生的错误响应也带上安全头。
-    app.add_middleware(SecurityHeadersMiddleware)
+    # HSTS 跟随 auth_cookie_secure：cookie 标了 Secure 才说明部署确实走 HTTPS。
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.auth_cookie_secure)
 
     app.include_router(auth_router)
     app.include_router(api_router)

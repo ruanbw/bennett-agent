@@ -62,7 +62,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bennett}
       POSTGRES_USER: ${POSTGRES_USER:-bennett}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bennett}
+      # 没有回退默认值（`:-bennett`）了：那份口令是公开的、写在仓库里，而 compose 网络内
+      # 任何被攻陷的容器都能拿它直接连库。缺失时让 compose 直接报错，比静默用一个已知口令好。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须在 .env 里显式设置 POSTGRES_PASSWORD（见 .env.example）}
       # 初始化时就用 scram-sha-256，而不是默认的 trust/peer：
       # 不然容器网络内任何进程都能无密码连库。
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
@@ -179,17 +181,30 @@ services:
     image: bennett-agent:local
     container_name: bennett-agent
     restart: unless-stopped
+    # 最小权限：丢掉全部 Linux capabilities（应用只需监听 8000 与向外建连，都用不到特权），
+    # 并禁止通过 setuid/setgid 二进制提权（no-new-privileges）。被 RCE 后攻击者拿到的
+    # 只是一个普通用户加零特权——横向移动与内核面利用的成本高很多。
+    # 没有加 `read_only`：运行期确实不写应用目录（镜像里有 PYTHONDONTWRITEBYTECODE=1），
+    # 但第三方库/子进程是否写 `~/.cache` 无法在本次验收中实测，而漏挂 tmpfs 的症状是
+    # 「启动正常、某个功能静默失败」，比不加更难查。
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
     ports:
       # 默认只绑回环：注册入口是开放的，绑到 0.0.0.0 等于把注册与上游模型额度
       # 开放给同网段。要对外提供就在前面放一个带 TLS 的反向代理。
       - "127.0.0.1:8000:8000"
     env_file:
-      # 环境变量全部从这里来。**不用 environment 逐条列密钥**：那样 AUTH_SECRET 之类的
-      # 值会出现在 docker inspect 里，而 env_file 的内容不会被打进容器元数据。
+      # 环境变量从 .env 加载（注意：env_file 只是把文件里的键值设成容器环境变量）。
+      # 这与逐条写在 `environment:` 里没有区别——两者都会出现在 `docker inspect`、
+      # `docker exec env`、崩溃转储里，也都会被容器内任意子进程继承。
+      # 真正不能进环境的只有密钥：那部分请用 secret 文件挂载（把 SETTINGS_SECRETS_DIR
+      # 指向挂载目录，见 .env.example），不要写进 .env。
       - .env
     environment:
       # 服务地址与宿主机直跑不同，只能在这里覆盖。
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bennett}:${POSTGRES_PASSWORD:-bennett}@postgres:5432/${POSTGRES_DB:-bennett}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bennett}:${POSTGRES_PASSWORD:?必须在 .env 里显式设置 POSTGRES_PASSWORD（见 .env.example）}@postgres:5432/${POSTGRES_DB:-bennett}
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT_URL: http://rustfs:9000
       # 容器之间的调用必须绕过宿主代理。

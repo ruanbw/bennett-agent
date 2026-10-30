@@ -14,6 +14,17 @@ DEFAULT_APP_ENV = "development"
 #: 环境名白名单。拼错（prod/Productionn）会让 .env.{env} 静默加载不到，所以不认识的取值必须报错。
 ALLOWED_APP_ENVS = frozenset({"development", "production", "staging", "test"})
 
+#: 需要按生产标准收紧的环境名。`staging` 通常能被公网访问，且用的是同一套镜像与配置模板，
+#: 所以「非开发环境」一律 fail closed；只在 development/test 才允许占位密钥与非 Secure cookie，
+#: 否则 staging 会落回开发行为，用仓库里公开的占位 AUTH_SECRET 即可伪造重置令牌。
+PRODUCTION_LIKE_APP_ENVS = frozenset({"production", "staging"})
+
+
+def is_production_like(app_env: str) -> bool:
+    """该环境是否按生产标准校验（守卫条件与 /docs 开关共用，避免各处各写一份字面量比较）。"""
+    return app_env in PRODUCTION_LIKE_APP_ENVS
+
+
 #: 认证密钥的占位默认值。生产环境若仍是这个值，启动时直接报错而不是静默放行。
 DEFAULT_AUTH_SECRET = "dev-insecure-secret-change-me"
 
@@ -100,6 +111,22 @@ def get_env_files(base_dir: Path = BASE_DIR) -> tuple[Path, ...]:
         base_dir / f".env.{env}.local",
     ]
     return tuple(f for f in env_files if f.is_file())
+
+
+#: 密钥目录（Docker/K8s 把 secret 挂到 `/run/secrets`）的环境变量名。
+SECRETS_DIR_ENV = "SETTINGS_SECRETS_DIR"
+
+
+def secrets_dir_from_env() -> str | None:
+    """读取密钥目录路径；未设置或为空时返回 None。
+
+    不默认指向 `/run/secrets`：目录不存在时 pydantic-settings 会每进程打一条 warning，
+    本地开发会变成噪音。返回 None 才是「不启用该来源」。
+    只能从**进程环境变量**设置，不能写进 `.env`：`secrets_dir` 在类定义时就求值，
+    那时 dotenv 还没加载（与 `resolve_app_env` 同一个先有鸡还是先有蛋的问题）。
+    """
+    raw = (os.getenv(SECRETS_DIR_ENV) or "").strip()
+    return raw or None
 
 
 class Settings(BaseSettings):
@@ -259,6 +286,16 @@ class Settings(BaseSettings):
         description=(
             "逗号分隔的 CORS 允许来源；留空时开发环境回退本地前端端口，production 不回退"
             "（跨域部署必须显式配置）。设为 * 时允许任意源，但不能与凭据同开。"
+            "* 只影响 CORS 响应头，**不**放开跨站请求守卫（见 csrf_allow_any_origin）。"
+        ),
+    )
+    csrf_allow_any_origin: bool = Field(
+        default=False,
+        description=(
+            "**危险开关**：允许任意 Origin 的 /api/* 状态变更请求通过跨站守卫，即关掉这层 CSRF 防护。"
+            "默认关闭。CORS_ALLOWED_ORIGINS=* 只决定 CORS 响应头，不再连带放行写请求——"
+            "否则配了 * 的部署里，跨站顶层表单 POST 能把受害者静默登入攻击者账号（M-01）。"
+            "只有确实需要任意浏览器来源写请求时才显式打开。"
         ),
     )
     cors_allow_credentials: bool = Field(
@@ -786,21 +823,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_placeholder_secret_in_production(self) -> "Settings":
-        """生产环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
+        """生产级环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
         选择启动即报错而不是打日志警告——警告会被忽略，而后果是任意账号可被接管。
         """
-        if self.app_env == "production" and _is_weak_auth_secret(self.auth_secret):
+        if is_production_like(self.app_env) and _is_weak_auth_secret(self.auth_secret):
             raise ValueError(
-                "生产环境必须设置强随机 AUTH_SECRET：不能是默认/占位值，且至少 32 个字符。"
+                "生产环境（production/staging）必须设置强随机 AUTH_SECRET：不能是默认/占位值，且至少 32 个字符。"
                 "生成方式：python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
         return self
 
     @model_validator(mode="after")
     def _reject_insecure_cookie_in_production(self) -> "Settings":
-        """生产必须走 HTTPS cookie：明文 HTTP 下会话 token 可被链路上任意一跳直接截获。"""
-        if self.app_env == "production" and not self.auth_cookie_secure:
-            raise ValueError("生产环境必须设置 AUTH_COOKIE_SECURE=true，否则会话 cookie 会在明文 HTTP 上被截获。")
+        """生产级环境必须走 HTTPS cookie：明文 HTTP 下会话 token 可被链路上任意一跳直接截获。"""
+        if is_production_like(self.app_env) and not self.auth_cookie_secure:
+            raise ValueError(
+                "生产环境（production/staging）必须设置 AUTH_COOKIE_SECURE=true，"
+                "否则会话 cookie 会在明文 HTTP 上被截获。"
+            )
         return self
 
     @model_validator(mode="after")
@@ -880,6 +920,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
         env_file_encoding="utf-8",
+        # 让 `/run/secrets` 这类挂载式密钥源可用（Docker/K8s secrets）：目录下与字段同名的文件
+        # 内容会被当作该字段的值（大小写不敏感），优先级高于 env_file。默认关闭，理由见
+        # `secrets_dir_from_env`。
+        secrets_dir=secrets_dir_from_env(),
         extra="ignore",
         # 校验失败时 pydantic 会把整个输入字典塞进异常/日志（含 AUTH_SECRET 与各 API Key），
         # 隐藏 input 只保留字段名与原因。

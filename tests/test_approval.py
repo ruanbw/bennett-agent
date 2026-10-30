@@ -55,9 +55,51 @@ def test_read_only_levels_run_without_asking(level):
     assert requires_approval(level) is False
 
 
-def test_missing_level_does_not_require_approval():
-    """没有分级信息的工具（例如旧注册路径）不拦：拦了就等于默认全部不可用。"""
-    assert requires_approval(None) is False
+def test_missing_level_requires_approval():
+    """没有分级信息 → 拦。
+
+    未知即拦是唯一正确的默认值：metadata 在装配链上任何一处丢失（新的 toolset 包装层、
+    pydantic-ai 升级后 `ToolDefinition.replace()` 丢字段、MCP 分支不再补注解）都会走到这里。
+    反过来的话，HITL 会静默失效且没有任何报错。
+    """
+    assert requires_approval(None) is True
+
+
+async def test_gate_blocks_a_tool_without_risk_metadata():
+    """闸门层的落点：`ToolDefinition` 没有 metadata 也必须拦，而不是当只读放行。"""
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import RunContext, ToolDefinition
+
+    from app.tools.approval import ApprovalGate, ApprovalRequired
+
+    gate = ApprovalGate()
+    ctx = RunContext(deps=None, model=None, usage=None)
+
+    with pytest.raises(ApprovalRequired):
+        await gate.before_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name="unlabeled_tool", args={}),
+            tool_def=ToolDefinition(name="unlabeled_tool"),
+            args={},
+        )
+
+
+def test_every_builtin_tool_declares_a_valid_risk_level():
+    """所有内置工具必须显式带合法 `risk_level`：漏标时必须红，而不是静默变成「不拦」。
+
+    这条用例的存在意义就是让「新增工具忘了写分级」在 CI 里失败：`requires_approval(None)`
+    现在会拦，但一个永远弹审批框的工具同样是 bug，发现它的地方应该是这里。
+    """
+    from app.runtime.approval import RISK_METADATA_KEY
+    from app.tools import build_tools
+
+    tools = build_tools()
+    assert tools, "内置工具装配为空，这条用例就失去意义"
+    valid_levels = {level.value for level in RiskLevel}
+    for tool in tools:
+        raw = (tool.metadata or {}).get(RISK_METADATA_KEY)
+        assert raw, f"工具 {tool.name} 没有 risk_level 元数据"
+        assert raw in valid_levels, f"工具 {tool.name} 的 risk_level={raw!r} 不是合法等级"
 
 
 def test_unknown_level_is_conservative():

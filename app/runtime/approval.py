@@ -36,12 +36,17 @@ DENIED_RESULT = (
 
 
 def requires_approval(risk_level: RiskLevel | str | None) -> bool:
-    """这个风险等级是否需要用户批准。
+    """这个风险等级是否需要用户批准；**未知即拦**（含缺失）。
 
-    接受 `str`：MCP 工具的风险等级来自配置（字符串），本地工具来自枚举。
+    接受 `str`：MCP 工具的风险等级来自配置（字符串），本地工具来自枚举。`None` 与未知字符串
+    走同一条「拦下」分支：只有这一种默认值才能覆盖 metadata 在装配链上丢失的路径（新的 toolset
+    包装层、pydantic-ai 升级后 `ToolDefinition.replace()` 丢字段、MCP 分支不再补注解）。反过来默认
+    放行时，HITL 会静默失效且不报警——漏审一次不可撤销的写入比多问一次代价大得多。
     """
     if risk_level is None:
-        return False
+        # 缺失不是「只读」：调用方拿不到分级时唯一安全的假设是「它可能需要批准」。
+        logger.warning("工具缺少风险等级，按需要审批处理")
+        return True
     if isinstance(risk_level, str):
         try:
             risk_level = RiskLevel(risk_level)
@@ -63,6 +68,7 @@ class ApprovalGate(AbstractCapability[None]):
 
     用 `before_tool_execute` 而非 `Tool(requires_approval=True)`：工具动态装配，MCP 的风险等级
     运行时才知道。`ctx.tool_call_approved` 用 `is not True` 判断——`None`（无审批记录）也必须拦。
+    风险等级缺失同样拦（见 `requires_approval`）：这是「未知即拦」在闸门里的落点。
     """
 
     async def before_tool_execute(

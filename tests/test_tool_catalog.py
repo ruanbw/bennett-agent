@@ -42,7 +42,7 @@ def test_registry_failure_is_logged_and_degrades(monkeypatch, caplog):
     assert "读取工具元数据失败" in caplog.text
 
 
-def test_mcp_tools_fall_back_to_safe_write(monkeypatch):
+def test_mcp_tools_use_the_configured_risk_level(monkeypatch):
     """MCP 工具不在本地注册表里；它的风险等级只能按最保守的可撤销口径给。"""
     info = SimpleNamespace(qualified_name="demo__echo", description="回声")
 
@@ -52,9 +52,27 @@ def test_mcp_tools_fall_back_to_safe_write(monkeypatch):
 
     monkeypatch.setattr(mcp_client, "get_mcp_registry", lambda: _McpRegistry())
 
-    assert tool_catalog.DefaultToolCatalog().describe("demo__echo") == ("回声", RiskLevel.SAFE_WRITE)
+    expected = RiskLevel(mcp_client.MCP_TOOL_RISK_LEVEL)
+    assert tool_catalog.DefaultToolCatalog().describe("demo__echo") == ("回声", expected)
     # 已发现但名字对不上：仍是查不到，不能顺手把别的 MCP 工具的元数据借过来
     assert tool_catalog.DefaultToolCatalog().describe("demo__other") == ("", None)
+
+
+def test_mcp_risk_level_is_the_same_single_constant_as_the_gate(monkeypatch):
+    """catalog 不得再存一份字面量：上调 `MCP_TOOL_RISK_LEVEL` 时审批框必须同步跟上。
+
+    分叉的后果是 UI 低报风险（显示「写入」而闸门按 dangerous 拦），前端「危险操作二次确认」
+    永远触发不了。"""
+    info = SimpleNamespace(qualified_name="demo__echo", description="回声")
+
+    class _McpRegistry:
+        def cached_tools(self):
+            return [info]
+
+    monkeypatch.setattr(mcp_client, "get_mcp_registry", lambda: _McpRegistry())
+    monkeypatch.setattr(mcp_client, "MCP_TOOL_RISK_LEVEL", RiskLevel.DANGEROUS.value)
+
+    assert tool_catalog.DefaultToolCatalog().describe("demo__echo") == ("回声", RiskLevel.DANGEROUS)
 
 
 def test_catalog_is_injectable_and_resettable():
