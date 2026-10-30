@@ -247,8 +247,14 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_history_budget(self) -> "ChatRequest":
-        """约束历史总长度：逐字段 max_length 只是把「无限」变成「很大」。"""
-        total = sum(len(m.content) + len(m.thinking or "") for m in self.messages)
+        """约束历史总长度：逐字段 max_length 只是把「无限」变成「很大」。
+
+        回放的 `tool_calls[].args` 也要计入：它会原样发给模型，而单条 64k × 最多 50 个
+        就是 320 万字符——只算 `content`/`thinking` 的话，这笔开销完全绕过总预算。
+        """
+        total = sum(
+            len(m.content) + len(m.thinking or "") + sum(len(call.args) for call in m.tool_calls) for m in self.messages
+        )
         if total > MAX_HISTORY_CHARS:
             raise ValueError(f"对话历史总长度 {total} 字符超出上限 {MAX_HISTORY_CHARS} 字符，请精简输入或开始新会话")
         return self

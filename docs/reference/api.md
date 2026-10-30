@@ -92,7 +92,7 @@ X-RateLimit-Reset: 12
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---|---|
 | `email` | EmailStr | 是 | 登录名，同时是账号唯一键 |
-| `password` | str | 是 | 至少 8 个字符（`MIN_PASSWORD_LENGTH`），只设下限 |
+| `password` | str | 是 | 12–128 个字符（`MIN_PASSWORD_LENGTH` / `MAX_PASSWORD_LENGTH`） |
 | `is_active` | bool \| null | 否 | 默认 `true`。落库前被 `safe=True` 的 `create_update_dict()` 剔除，传了也不生效 |
 | `is_superuser` | bool \| null | 否 | 默认 `false`，同上被剔除：注册接口无法自封管理员 |
 | `is_verified` | bool \| null | 否 | 默认 `false`，同上被剔除 |

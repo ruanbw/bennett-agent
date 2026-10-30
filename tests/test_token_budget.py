@@ -11,7 +11,13 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from app.config import settings
-from app.schemas.chat import MAX_HISTORY_CHARS, MAX_MESSAGE_CHARS, ChatMessage
+from app.schemas.chat import (
+    MAX_HISTORY_CHARS,
+    MAX_MESSAGE_CHARS,
+    MAX_REPLAYED_TOOL_CALLS,
+    MAX_TOOL_ARGS_CHARS,
+    ChatMessage,
+)
 from app.services import token_budget
 from app.services.token_budget import (
     ASCII_CHARS_PER_TOKEN,
@@ -46,6 +52,17 @@ def _isolate_module_state(monkeypatch):
 
 def msg(role="user", content="", thinking=None):
     return ChatMessage(role=role, content=content, thinking=thinking)
+
+
+def msg_with_tool_calls(chars, count=1, role="assistant", content=""):
+    """造一条带 `count` 个各 `chars` 字符入参的工具调用消息（只有 assistant 能带）。"""
+    return ChatMessage(
+        role=role,
+        content=content,
+        tool_calls=[
+            {"tool_call_id": f"call_{index}", "tool_name": "write_file", "args": "a" * chars} for index in range(count)
+        ],
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +183,37 @@ def test_estimate_messages_counts_thinking_and_per_message_overhead():
     # 两条消息的结构性开销 + 1 + 1 + 2
     assert estimate_messages_tokens(messages) == 2 * MESSAGE_OVERHEAD_TOKENS + 4
     assert estimate_messages_tokens([]) == 0
+
+
+def test_estimate_messages_counts_replayed_tool_call_args():
+    """工具入参会变成真实的 `ToolCallPart` 发给模型，不估算等于给客户端留一条绕路。"""
+    messages = [msg("user", "abcd"), msg_with_tool_calls(4_000)]
+
+    # 两条消息的结构性开销 + 1（正文）+ 1000（4000 字符入参 / 4）
+    assert estimate_messages_tokens(messages) == 2 * MESSAGE_OVERHEAD_TOKENS + 1 + 1_000
+
+
+async def test_history_of_only_huge_tool_args_is_judged_over_limit(monkeypatch):
+    """正文只有几个字符、超限全部来自 `tool_calls[].args` 的历史也必须被拦下。
+
+    单条入参 64k、每条消息最多 50 个：漏算这一项时，估算说「远未超限」，真实 prompt
+    却多出几十万 token，直接撞上游 400，而 400 的文案是「请更换模型」——用户被引向
+    完全错误的方向。
+    """
+    patch_limits(monkeypatch, context_window=32_000, max_output_tokens=0)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    messages = [
+        msg("user", "q"),
+        msg_with_tool_calls(MAX_TOOL_ARGS_CHARS, count=MAX_REPLAYED_TOOL_CALLS),
+        msg("user", "再问"),
+    ]
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    # 前提：正文侧加起来只有几个字符，判定完全靠 args
+    assert sum(len(message.content) for message in messages) < 10
+    assert budget.over_limit
 
 
 # ---------------------------------------------------------------------
@@ -651,6 +699,19 @@ async def test_thinking_counts_toward_the_thread_threshold(monkeypatch):
     assert budget.used_tokens == estimate_messages_tokens(messages)
 
 
+async def test_tool_args_count_toward_the_thread_threshold(monkeypatch):
+    """阈值同样要算上 `tool_calls[].args`：正文一个字符的历史也可能带着十几万字符的入参。"""
+    patch_limits(monkeypatch, context_window=10_000_000, max_output_tokens=8_000)
+    calls = spy_on_to_thread(monkeypatch)
+    messages = [msg("user", "q"), msg_with_tool_calls(MAX_TOOL_ARGS_CHARS, count=2)]
+
+    budget = await resolve_context_budget("m", messages)
+
+    assert budget is not None
+    assert len(calls) == 1
+    assert budget.used_tokens == estimate_messages_tokens(messages)
+
+
 def long_assistant_turn():
     """一条字符数超过阈值的 assistant 消息（正文 + 思考链一起算）。
 
@@ -812,3 +873,30 @@ async def test_credible_anchor_is_still_used(monkeypatch):
     budget = await resolve_context_budget("m", messages, anchor(1, 40_000))
 
     assert budget is not None and budget.basis == "anchor"
+
+
+async def test_a_realistic_anchor_on_a_long_prefix_is_trusted(monkeypatch):
+    """锚点是上游回报的真实 prompt token，而估算按 4 字符/token 取的是**上界**。
+
+    英文实测约 5.47 字符/token（见审计事实 20），所以 4 条 3 万字符的消息真实约 2.2 万
+    token、前缀估算却是 3 万——旧的「锚点 ≥ 估算 × 0.9」口径会把这个完全合法的锚点拒掉，
+    于是一过约一万 token 的长会话就永远走全量估算。
+    """
+    patch_limits(monkeypatch, context_window=200_000, max_output_tokens=8_000)
+    messages = [
+        msg("user", "a" * 30_000),
+        msg("assistant", "b" * 30_000),
+        msg("user", "c" * 30_000),
+        msg("assistant", "d" * 30_000),
+        msg("user", "新问题"),
+    ]
+    anchor_index = 3
+    prefix_estimate = estimate_messages_tokens(messages[: anchor_index + 1])
+    realistic = int(120_000 / 5.47) + 1_192  # 真实前缀 token + 系统提示词/工具 schema
+
+    assert realistic < int(prefix_estimate * 0.9), "前提：旧口径的 0.9 会拒掉这个锚点"
+
+    budget = await resolve_context_budget("m", messages, anchor(anchor_index, realistic))
+
+    assert budget is not None and budget.basis == "anchor"
+    assert budget.used_tokens == realistic + estimate_messages_tokens(messages[anchor_index:])

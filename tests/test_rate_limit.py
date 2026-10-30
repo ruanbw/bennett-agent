@@ -12,6 +12,7 @@ import sys
 import threading
 
 import pytest
+from fastapi import HTTPException
 
 from app.api.rate_limit import SlidingWindowLimiter, bucket_ip_address, client_key, resolve_client_ip
 from app.config import settings
@@ -393,3 +394,153 @@ async def test_redis_limiter_fail_closed_mode(monkeypatch):
 
     assert allowed is False
     assert retry_after == 60
+
+
+# ---------------------------------------------------------------------
+# 在途流上限（并发维度）
+#
+# 滑动窗口只能回答「每分钟发了多少次」，而一条 SSE 最长挂 600s：单账号每分钟 30 次全部
+# 合法，却可以让 30 条流同时占着上游配额与连接池，失败的是别人的请求。并发必须单独限。
+# 这里锁住三件事：超限拒绝（429 + Retry-After）、正常结束后名额归还、Redis 挂了仍有限制。
+# ---------------------------------------------------------------------
+async def test_inflight_limiter_blocks_beyond_the_limit_and_frees_on_release():
+    import uuid
+
+    from app.api.rate_limit import InFlightStreamLimiter
+
+    limiter = InFlightStreamLimiter(limit=2)
+    key = f"user:{uuid.uuid4().hex}"
+
+    assert await limiter.acquire(key) is True
+    assert await limiter.acquire(key) is True
+    assert await limiter.acquire(key) is False
+
+    await limiter.release(key)
+    assert await limiter.acquire(key) is True
+
+
+async def test_inflight_stream_slot_returns_429_for_the_next_stream():
+    """超限的第 N+1 条流拿 429（带 Retry-After），正常结束的流要还回名额。"""
+    import uuid
+    from contextlib import AsyncExitStack
+
+    from app.api.rate_limit import (
+        CHAT_MAX_INFLIGHT_STREAMS,
+        INFLIGHT_RETRY_AFTER_SECONDS,
+        inflight_stream_slot,
+    )
+
+    # 唯一账号：用例之间不互相污染，也不必依赖 reset()
+    user_id = uuid.uuid4().hex
+
+    held = AsyncExitStack()
+    for _ in range(CHAT_MAX_INFLIGHT_STREAMS):
+        await held.enter_async_context(inflight_stream_slot(user_id))
+
+    with pytest.raises(HTTPException) as excinfo:
+        async with inflight_stream_slot(user_id):
+            pass
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.headers["Retry-After"] == str(INFLIGHT_RETRY_AFTER_SECONDS)
+    assert "同时进行的对话太多" in excinfo.value.detail
+
+    await held.aclose()
+    # 名额已归还：同一账号可以再开一条
+    async with inflight_stream_slot(user_id):
+        pass
+
+
+async def test_inflight_stream_slot_is_per_account():
+    """一个账号占满自己的名额，不能把别人的对话也堵死。"""
+    import uuid
+    from contextlib import AsyncExitStack
+
+    from app.api.rate_limit import CHAT_MAX_INFLIGHT_STREAMS, inflight_stream_slot
+
+    hog = uuid.uuid4().hex
+    other = uuid.uuid4().hex
+
+    async with AsyncExitStack() as held:
+        for _ in range(CHAT_MAX_INFLIGHT_STREAMS):
+            await held.enter_async_context(inflight_stream_slot(hog))
+
+        async with inflight_stream_slot(other):
+            pass
+
+
+async def test_inflight_stream_slot_releases_on_error():
+    """流里抛异常也必须归还名额，否则一次失败把账号锁到 TTL 过期。"""
+    import uuid
+
+    from app.api.rate_limit import (
+        CHAT_MAX_INFLIGHT_STREAMS,
+        get_inflight_limiter,
+        inflight_stream_slot,
+    )
+
+    user_id = uuid.uuid4().hex
+    limiter = get_inflight_limiter()
+
+    with pytest.raises(RuntimeError):
+        async with inflight_stream_slot(user_id):
+            raise RuntimeError("流里炸了")
+
+    # 归还后还能再占满整个配额，说明上面那条确实还回去了
+    for _ in range(CHAT_MAX_INFLIGHT_STREAMS):
+        assert await limiter.acquire(f"user:{user_id}") is True
+    for _ in range(CHAT_MAX_INFLIGHT_STREAMS):
+        await limiter.release(f"user:{user_id}")
+
+
+async def test_inflight_limiter_degrades_to_local_counting(monkeypatch):
+    """Redis 不可用时仍有上限约束（配额乘以实例数，但不会变成无限制）。"""
+    import uuid
+
+    import app.services.redis_client as redis_client
+    from app.api.rate_limit import InFlightStreamLimiter
+
+    class BrokenRedis:
+        async def incr(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: BrokenRedis())
+
+    limiter = InFlightStreamLimiter(limit=1)
+    key = f"user:{uuid.uuid4().hex}"
+
+    assert await limiter.acquire(key) is True
+    assert await limiter.acquire(key) is False
+
+    await limiter.release(key)
+    assert await limiter.acquire(key) is True
+
+
+async def test_inflight_limiter_releases_through_the_same_backend(monkeypatch):
+    """降级路径的归还不走 Redis：降级期间占的名额必须能减回去。"""
+    import uuid
+
+    import app.services.redis_client as redis_client
+    from app.api.rate_limit import InFlightStreamLimiter
+
+    class BrokenRedis:
+        async def incr(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: BrokenRedis())
+
+    limiter = InFlightStreamLimiter(limit=2)
+    key = f"user:{uuid.uuid4().hex}"
+    assert await limiter.acquire(key) is True
+
+    await limiter.release(key)
+
+    assert limiter._local == {}
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_inflight_limit_must_be_positive(limit):
+    from app.api.rate_limit import InFlightStreamLimiter
+
+    with pytest.raises(ValueError):
+        InFlightStreamLimiter(limit=limit)

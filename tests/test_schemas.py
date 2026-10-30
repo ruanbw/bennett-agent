@@ -14,8 +14,10 @@ from app.schemas.chat import (
     MAX_MESSAGE_CHARS,
     MAX_MODEL_ID_CHARS,
     MAX_REASONING_EFFORT_CHARS,
+    MAX_REPLAYED_TOOL_CALLS,
     MAX_THINKING_CHARS,
     MAX_TITLE_PROMPT_CHARS,
+    MAX_TOOL_ARGS_CHARS,
     ChatMessage,
     ChatRequest,
     TitleGenerateRequest,
@@ -184,6 +186,21 @@ def test_total_history_budget_counts_thinking():
         else assistant("x" * MAX_MESSAGE_CHARS, thinking="t" * MAX_THINKING_CHARS)
         for index in range(count)
     ]
+    assert reject(ChatRequest, messages=messages) == "value_error"
+
+
+def test_total_history_budget_counts_replayed_tool_call_args():
+    """回放的 `tool_calls[].args` 会原样发给模型：不计入总长度就能用一条消息绕过 40 万上限。
+
+    单条入参 64k × 最多 50 个 = 320 万字符，而正文侧只占两个字符。
+    """
+    calls = [
+        {"tool_call_id": f"call_{index}", "tool_name": "write_file", "args": "a" * MAX_TOOL_ARGS_CHARS}
+        for index in range(MAX_REPLAYED_TOOL_CALLS)
+    ]
+    messages = [user("hi"), assistant("ok", tool_calls=calls), user("再问")]
+
+    assert sum(len(message["content"]) for message in messages) < 10, "前提：正文远未超限"
     assert reject(ChatRequest, messages=messages) == "value_error"
 
 

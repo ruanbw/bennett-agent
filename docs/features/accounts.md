@@ -9,7 +9,7 @@ description: fastapi-users 的 HttpOnly Cookie 会话、三档 RBAC 边界、限
 
 | 方法与路径 | 作用 | 关键细节 |
 |---|---|---|
-| `POST /api/auth/register` | 注册 | **JSON 体**（邮箱 + 密码，至少 8 位）；无论邮箱是否已存在都返回 202，避免变成邮箱枚举器；`REGISTRATION_ENABLED=false` 时 403；密码不合规 400 `REGISTER_INVALID_PASSWORD` |
+| `POST /api/auth/register` | 注册 | **JSON 体**（邮箱 + 密码，至少 12 位、至多 128 位）；无论邮箱是否已存在都返回 202，避免变成邮箱枚举器；`REGISTRATION_ENABLED=false` 时 403；密码不合规 400 `REGISTER_INVALID_PASSWORD` |
 | `POST /api/auth/login` | 登录 | **必须表单编码**（`username` 填邮箱 + `password`），发 JSON 直接 422；成功 204 并下发会话 cookie |
 | `POST /api/auth/logout` | 登出 | 删除服务端会话行（不是「只让客户端忘掉」），幂等 |
 | `GET /api/auth/me` | 当前登录用户 | 未登录 401；`role` 每次请求都从库里读出，升降级后刷新即生效 |

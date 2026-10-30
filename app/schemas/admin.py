@@ -4,6 +4,7 @@ API key 只进不出：响应里只有掩码，编辑时留空表示不变，避
 `base_url` 只接受 http(s)。更新用 `None`/缺省表示「不修改」，与 `model_service` 的哨兵语义对齐。
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -11,11 +12,56 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.roles import ALL_ROLES, ROLE_USER
+from app.services.model_service.presets import AUTH_STYLES
 
 MAX_NAME_CHARS = 80
 MAX_URL_CHARS = 500
 MAX_API_KEY_CHARS = 1000
 MAX_MODEL_ID_CHARS = 200
+
+#: 自定义请求头（`extra_headers`）的名字白名单：字母/数字/连字符，覆盖 Azure 的 `api-key`
+#: 与私有网关的 `x-tenant-id`，同时挡掉空格、冒号这类会让 httpx 自己抛 `InvalidHeader` 的写法。
+EXTRA_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+#: 固定请求头是配置而不是数据面：超过这个数量说明用法错了，而每一项都会进每条出站请求。
+MAX_EXTRA_HEADERS = 20
+
+#: 控制字符（含 CR/LF/TAB 与控制台转义序列）。它能伪造一整行日志：这些名字会进 `provider_sync`
+#: 的文本日志，而日志正是目前唯一的管理动作审计证据。
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _reject_control_chars(value: str) -> str:
+    """拒绝名字/值里的控制字符（两端 strip 挡不住名字中间的 CR/LF）。"""
+    if CONTROL_CHARS.search(value):
+        raise ValueError("不能包含控制字符（含换行）")
+    return value
+
+
+def _validate_auth_style(value: str | None) -> str | None:
+    """白名单来自 `presets.AUTH_STYLES`（单一真源）：拼错一个认证方式会让出站请求无凭据、上游 401。"""
+    if value is None:
+        return None
+    if value not in AUTH_STYLES:
+        raise ValueError(f"认证方式必须是 {sorted(AUTH_STYLES)} 之一")
+    return value
+
+
+def _validate_extra_headers(value: dict[str, str] | None) -> dict[str, str] | None:
+    """自定义请求头的入口校验：名字形状、值里不得有 CR/LF、条数上限。
+
+    值里带换行时 httpx 会抛 `LocalProtocolError`（变成 502），既不告诉管理员是哪个头，
+    也让「上游挂了」与「配置错了」在日志里无法区分。
+    """
+    if value is None:
+        return None
+    if len(value) > MAX_EXTRA_HEADERS:
+        raise ValueError(f"自定义请求头最多 {MAX_EXTRA_HEADERS} 项")
+    for name, header_value in value.items():
+        if not EXTRA_HEADER_NAME.match(name or ""):
+            raise ValueError(f"请求头名不合法：{name!r}（只允许字母、数字与连字符，1-64 位）")
+        _reject_control_chars(header_value or "")
+    return value
 
 
 def mask_api_key(api_key: str | None) -> str | None:
@@ -68,6 +114,11 @@ class ProviderCreate(BaseModel):
     base_url: str | None = Field(None, max_length=MAX_URL_CHARS)
     preset_key: str | None = Field(None, max_length=40)
     api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
+    #: API Key 放进哪个头。不传时跟随预设/默认 `bearer`；Azure OpenAI 必须选 `api-key`
+    #: （它不收 `Authorization: Bearer`，头名也不是 `x-api-key`）。
+    auth_style: str | None = None
+    #: 固定请求头：需要额外头（如 Azure 的私有网关头）的提供商靠它接入。
+    extra_headers: dict[str, str] | None = None
     enabled: bool = True
 
     @model_validator(mode="after")
@@ -84,7 +135,7 @@ class ProviderCreate(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("不能为空白")
-        return cleaned
+        return _reject_control_chars(cleaned)
 
     @field_validator("base_url")
     @classmethod
@@ -103,6 +154,16 @@ class ProviderCreate(BaseModel):
         cleaned = value.strip()
         return cleaned or None
 
+    @field_validator("auth_style")
+    @classmethod
+    def _known_auth_style(cls, value: str | None) -> str | None:
+        return _validate_auth_style(value)
+
+    @field_validator("extra_headers")
+    @classmethod
+    def _clean_extra_headers(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return _validate_extra_headers(value)
+
 
 class ProviderUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=MAX_NAME_CHARS)
@@ -110,6 +171,9 @@ class ProviderUpdate(BaseModel):
     #: None = 不修改；空串 = 清空；非空 = 更新。用 `model_fields_set` 区分「没传」与
     #: 「显式传 null」，路由层只把请求里真正出现的键往下传。
     api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
+    auth_style: str | None = None
+    #: 与 `api_key` 一样是凭据配置：传 `{}` 表示清空全部固定头，不传则保持不变。
+    extra_headers: dict[str, str] | None = None
     enabled: bool | None = None
 
     @field_validator("name", "base_url")
@@ -120,7 +184,17 @@ class ProviderUpdate(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("不能为空白")
-        return cleaned
+        return _reject_control_chars(cleaned)
+
+    @field_validator("auth_style")
+    @classmethod
+    def _known_auth_style(cls, value: str | None) -> str | None:
+        return _validate_auth_style(value)
+
+    @field_validator("extra_headers")
+    @classmethod
+    def _clean_extra_headers(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return _validate_extra_headers(value)
 
     @field_validator("base_url")
     @classmethod

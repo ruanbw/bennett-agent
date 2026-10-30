@@ -7,8 +7,10 @@
 
 from dataclasses import dataclass, field
 
-#: 认证方式：API Key 放进哪个请求头。与 `ModelProvider.auth_style` 对应。
-AUTH_STYLES = frozenset({"bearer", "x-api-key", "x-goog-api-key", "none"})
+#: 认证方式：API Key 放进哪个请求头。与 `ModelProvider.auth_style` 对应，也是管理后台的白名单来源。
+#: `api-key` 是 Azure OpenAI 的固定头（它既不收 `Authorization: Bearer`，也不用 x-api-key 拼写），
+#: 缺了它这条企业最常见的自建通道根本接不进来。
+AUTH_STYLES = frozenset({"bearer", "x-api-key", "x-goog-api-key", "api-key", "none"})
 
 
 @dataclass(frozen=True, slots=True)

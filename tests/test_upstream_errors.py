@@ -15,11 +15,13 @@ from pydantic_ai.exceptions import (
 
 from app.services.upstream_errors import (
     GENERIC_STREAM_ERROR_MESSAGE,
+    LOCAL_CAPACITY_MESSAGE,
     SERVICE_UNAVAILABLE_MESSAGE,
     describe_fallback_reason,
     is_fallback_eligible,
     is_retryable_for_user,
     is_retryable_upstream_error,
+    upstream_error_class,
     upstream_error_message,
 )
 
@@ -154,3 +156,87 @@ def test_fallback_reason_recognises_timeouts_and_transport_failures():
 
 def test_fallback_reason_has_a_fallback_of_its_own():
     assert describe_fallback_reason(ValueError("boom")) == "上游错误"
+
+
+# ---------------------------------------------------------------------
+# 本地连接池耗尽（httpx.PoolTimeout）
+#
+# `PoolTimeout` 的 MRO 是 `PoolTimeout → TimeoutException → TransportError`：不单独认出来，
+# 它会被判成「上游故障」，于是既重试同模型又切备用模型，把一次本地过载放大成最多 4 次
+# 上游尝试。它是本进程资源不足，不是上游不健康。
+# ---------------------------------------------------------------------
+def pool_timeout():
+    return httpx.PoolTimeout("connection pool exhausted")
+
+
+def test_pool_timeout_is_not_retried():
+    assert is_retryable_upstream_error(pool_timeout()) is False
+
+
+def test_pool_timeout_is_not_fallback_eligible():
+    assert is_fallback_eligible(pool_timeout()) is False
+
+
+def test_wrapped_pool_timeout_is_also_local_not_upstream():
+    """pydantic-ai 把传输层异常包进没有 status_code 的 ModelAPIError，原因只在 __cause__ 链上。"""
+    error = wrapped("pool timeout")
+    error.__cause__ = pool_timeout()
+
+    assert is_retryable_upstream_error(error) is False
+    assert is_fallback_eligible(error) is False
+
+
+def test_pool_timeout_message_points_at_concurrency():
+    """文案必须指向「并发太高」：说成上游故障会让人去查提供商，方向完全错了。"""
+    assert upstream_error_message(pool_timeout()) == LOCAL_CAPACITY_MESSAGE
+    assert "并发" in LOCAL_CAPACITY_MESSAGE
+
+
+def test_pool_timeout_does_not_mask_a_real_upstream_failure():
+    """异常组里同时有 5xx 与池超时时，该由 5xx 决定：上游确实不健康，值得重试/切换。"""
+    group = FallbackExceptionGroup("all models failed", [http_error(503), pool_timeout()])
+
+    assert is_retryable_upstream_error(group) is True
+    assert upstream_error_class(group) == "5xx"
+
+
+# ---------------------------------------------------------------------
+# Retry-After：用户要知道「等多久」，否则会立刻重打、撞同一个限流窗口
+# ---------------------------------------------------------------------
+def test_retry_after_seconds_are_surfaced_in_the_message():
+    error = ModelHTTPError(status_code=429, model_name="openai/gpt-4o", headers={"Retry-After": "17"})
+
+    assert upstream_error_message(error) == "上游限流，请约 17 秒后重试"
+
+
+@pytest.mark.parametrize("headers", [None, {}, {"Retry-After": "soon"}, {"Retry-After": "-3"}])
+def test_missing_or_invalid_retry_after_keeps_the_plain_message(headers):
+    """拿不到（或无法解析）就保持原文案，不编造一个数字。"""
+    error = ModelHTTPError(status_code=429, model_name="openai/gpt-4o", headers=headers)
+
+    assert upstream_error_message(error) == "上游限流，请稍后重试"
+
+
+# ---------------------------------------------------------------------
+# 指标分类：标签值必须是有限集合
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (http_error(400), "4xx"),
+        (http_error(429), "4xx"),
+        (http_error(502), "5xx"),
+        (httpx.ReadTimeout("slow"), "timeout"),
+        (httpx.ConnectError("refused"), "transport"),
+        (pool_timeout(), "pool"),
+        (ValueError("boom"), "other"),
+    ],
+)
+def test_upstream_error_class_is_a_small_finite_set(error, expected):
+    assert upstream_error_class(error) == expected
+
+
+def test_upstream_error_class_reads_the_first_status_in_a_group():
+    group = FallbackExceptionGroup("all models failed", [http_error(503), http_error(401)])
+
+    assert upstream_error_class(group) == "5xx"

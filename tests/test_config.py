@@ -691,3 +691,57 @@ def test_secret_files_supply_field_values(tmp_path):
     config = Settings(_env_file=None, _secrets_dir=str(tmp_path))
 
     assert config.auth_secret == STRONG_TEST_SECRET
+
+
+# ---------------------------------------------------------------------
+# 提供商 API Key 的加密密钥（与签名密钥分开）
+# ---------------------------------------------------------------------
+def test_provider_key_secret_defaults_to_fallback():
+    """不设 = 回退 AUTH_SECRET：旧部署升级后不必改配置，密文仍按原密钥解。
+
+    两个都必须是 None（而不是空串）：`secret_box` 用「空 = 没配」决定是否回退。
+    """
+    config = Settings(_env_file=None)
+
+    assert config.provider_key_secret is None
+    assert config.provider_key_secret_previous is None
+
+
+def test_provider_key_secret_accepts_a_strong_value():
+    """显式设置的值要原样读到，否则轮换后新旧进程会算出不同的密钥。"""
+    key = "k" * 48
+
+    config = Settings(provider_key_secret=key, provider_key_secret_previous=key + "x", _env_file=None)
+
+    assert config.provider_key_secret == key
+    assert config.provider_key_secret_previous == key + "x"
+
+
+@pytest.mark.parametrize("app_env", ["production", "staging"])
+def test_production_like_envs_reject_weak_provider_key_secret(app_env):
+    """弱加密密钥的症状是「一切正常」：库里的 API Key 可被离线爆破，没有任何报错。
+
+    所以与 AUTH_SECRET 一样在启动时拒绝，而不是打一条会被忽略的警告。
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            app_env=app_env,
+            auth_secret=STRONG_TEST_SECRET,
+            provider_key_secret="short",
+            auth_cookie_secure=True,
+            _env_file=None,
+        )
+
+    assert "PROVIDER_KEY_SECRET" in str(excinfo.value)
+
+
+def test_production_accepts_fallback_without_provider_key_secret():
+    """没设 PROVIDER_KEY_SECRET 时用 AUTH_SECRET（已校验过强度），不能因此起不来。"""
+    config = Settings(
+        app_env="production",
+        auth_secret=STRONG_TEST_SECRET,
+        auth_cookie_secure=True,
+        _env_file=None,
+    )
+
+    assert config.provider_key_secret is None

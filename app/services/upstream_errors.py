@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import math
 from collections.abc import Iterator
 
 import httpx
@@ -18,6 +19,11 @@ _STATUS_ERROR_MESSAGES: dict[int, str] = {
 
 SERVICE_UNAVAILABLE_MESSAGE = "服务暂时不可用，请重试"
 GENERIC_STREAM_ERROR_MESSAGE = "生成异常，请重试"
+
+#: 本地连接池耗尽（`httpx.PoolTimeout`）的文案。
+#: 必须指向「并发太高」而不是「上游坏了」：此时上游根本没收到请求，用户关掉另一条对话或
+#: 稍等就能恢复；说成上游故障会把人和排障都引向反方向。
+LOCAL_CAPACITY_MESSAGE = "当前对话并发过高，服务繁忙，请稍后重试"
 
 
 def _group_members(exc: BaseException) -> tuple[BaseException, ...]:
@@ -64,11 +70,27 @@ def _status_code(exc: BaseException) -> int | None:
     return None
 
 
+def is_pool_timeout(exc: BaseException) -> bool:
+    """异常链里是否有本地连接池耗尽（`httpx.PoolTimeout`）。
+
+    `PoolTimeout` 的 MRO 是 `PoolTimeout → TimeoutException → TransportError`，不单独认出来
+    就会被下面两条分支当成上游故障。它描述的是本进程资源不足，不是上游的健康状况。
+    """
+    return any(isinstance(item, httpx.PoolTimeout) for item in iter_exception_chain(exc))
+
+
 def is_retryable_upstream_error(exc: BaseException) -> bool:
     """是否值得立即用同一个模型重试一次：只认 5xx、超时、连接类错误。
     429 不在此列——再打一次只会加深限流，文案已经让用户稍后重试。
+
+    `PoolTimeout` 也不在此列：池是本地的，立刻重试只会排在同一条枯竭的池子后面，而重试又会
+    连带触发切备用模型，把「一次本地过载」放大成最多 4 次上游尝试。
     """
     for item in iter_exception_chain(exc):
+        if isinstance(item, httpx.PoolTimeout):
+            # 跳过而不是整条链返回 False：异常组里可能既有 pool timeout 又有真的 5xx，
+            # 后者仍然说明上游不健康，该由它决定。
+            continue
         status = _status_code(item)
         if status is not None and 500 <= status < 600:
             return True
@@ -121,6 +143,44 @@ def is_retryable_for_user(exc: BaseException) -> bool:
     return True
 
 
+def _retry_after_seconds(exc: BaseException) -> int | None:
+    """取上游 `Retry-After` 建议的等待秒数（向上取整到整秒）；拿不到返回 `None`。
+
+    只有 pydantic-ai 的 `ModelHTTPError` 会把这个头解出来（其它异常没有该属性）。
+    不把值写进文案时，用户读到「稍后重试」就会立刻重打，撞的是同一个限流窗口。
+    """
+    raw = getattr(exc, "retry_after", None)
+    # bool 是 int 的子类，`True` 会被算成 1 秒，不是上游给的信号
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if raw <= 0:
+        return None
+    return max(1, math.ceil(raw))
+
+
+def upstream_error_class(exc: BaseException) -> str:
+    """把上游异常压成一个**有限集合**的类别，只用于指标标签。
+
+    不把原始状态码当标签：`MAX_SERIES_PER_METRIC` 的额度要留给真正有区分度的维度，
+    而排障要回答的是「4xx 变多了还是超时变多了」，不是「418 出现了一次」。
+    """
+    chain = tuple(iter_exception_chain(exc))
+    for item in chain:
+        # 与重试判定同一优先级：池耗尽是本地资源问题，不该冒充上游 5xx
+        if isinstance(item, httpx.PoolTimeout):
+            continue
+        status = _status_code(item)
+        if status is not None:
+            return "5xx" if status >= 500 else "4xx"
+    if is_pool_timeout(exc):
+        return "pool"
+    if any(isinstance(item, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)) for item in chain):
+        return "timeout"
+    if any(isinstance(item, httpx.TransportError) for item in chain):
+        return "transport"
+    return "other"
+
+
 def upstream_error_message(exc: BaseException) -> str:
     """把上游异常映射成可以推给用户的中文文案，只看状态码与「是否超时」。
     异常组按成员顺序取第一个带状态码的异常（通常就是主模型的真实失败原因）。
@@ -129,10 +189,19 @@ def upstream_error_message(exc: BaseException) -> str:
         status = _status_code(item)
         if status is None:
             continue
+        if status == 429:
+            # 上游给了 `Retry-After` 就照它的数字说，用户才不会在同一秒里反复撞墙
+            seconds = _retry_after_seconds(item)
+            if seconds is not None:
+                return f"上游限流，请约 {seconds} 秒后重试"
         if status in _STATUS_ERROR_MESSAGES:
             return _STATUS_ERROR_MESSAGES[status]
         if 500 <= status < 600:
             return SERVICE_UNAVAILABLE_MESSAGE
+
+    # 池超时排在「是否超时」之前：它也是 TimeoutException，笼统说「服务暂时不可用」会让人去查上游
+    if is_pool_timeout(exc):
+        return LOCAL_CAPACITY_MESSAGE
 
     if is_timeout_error(exc):
         return SERVICE_UNAVAILABLE_MESSAGE

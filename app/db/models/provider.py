@@ -13,7 +13,7 @@ from app.db.base import Base, EncryptedText, enum_check
 #: `auth_style` 的全部取值。必须与 `app/services/model_service/presets.AUTH_STYLES` 逐字一致；
 #: 不 import 它是因为该包初始化时会反过来 import `app.db`（模型层面不能反向依赖服务层）。
 #: 两份取值的对齐由 `tests/test_schema_guard.py` 盯着。
-AUTH_STYLES: tuple[str, ...] = ("bearer", "none", "x-api-key", "x-goog-api-key")
+AUTH_STYLES: tuple[str, ...] = ("bearer", "none", "x-api-key", "x-goog-api-key", "api-key")
 
 
 class ModelProvider(Base):

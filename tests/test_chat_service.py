@@ -13,6 +13,8 @@
 且它允许调用方往历史里注入 `SystemPromptPart`。此处锁住现状以便后续改动可见，该分支的去留尚未定论。
 """
 
+import asyncio
+
 import httpx
 import pydantic
 import pytest
@@ -613,3 +615,319 @@ def test_resuming_prompt_none_produces_no_extra_user_message():
     asyncio.run(run(""))
     with_empty = seen[-1].count("UserPromptPart")
     assert with_empty == with_none + 1, f"空串会多产出一条 content 为空的 user 消息：{seen[-1]}"
+
+
+# ---------------------------------------------------------------------
+# 流式编排：结局记账与可聚合指标（P1）
+#
+# `stream_chat_events` 此前零覆盖。两件事是这次改动的关键：
+#
+# 1. 结局计数器原先写在重试循环之后，而取消分支先 `raise`，于是 `outcome="stopped"`
+#    一次都没被记到——「有多少轮被用户/网络放弃」这个问题答不了。
+# 2. TTFT 与 token 数原先没有模型维度（甚至完全不落服务端），备用模型接手的成本
+#    与「哪个模型变慢了」都无法交叉分析。
+#
+# 这里用假 agent 驱动真实编排：不联网、不读库，锁住的是「记账发生在哪条路径上」。
+# ---------------------------------------------------------------------
+def _stream_snapshot(
+    *,
+    context_window=None,
+    max_output_tokens=None,
+    fallback_key=None,
+    fallback_context_window=None,
+):
+    """构造一份已解析的模型快照；`target` 非空表示走网关路径（不会因白名单被拒）。"""
+    from app.services.model_service import ChatModelSnapshot
+    from app.services.model_target import ModelTarget
+
+    return ChatModelSnapshot(
+        key="openai/gpt-4o",
+        target=ModelTarget(
+            key="openai/gpt-4o",
+            upstream_model="gpt-4o",
+            provider_name="openai",
+            base_url="https://api.example.com/v1",
+        ),
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
+        fallback_key=fallback_key,
+        fallback_context_window=fallback_context_window,
+        known_ids=None,
+        registry_managed=False,
+    )
+
+
+def _content_event(text="你"):
+    """一个会翻译成 `content` 事件的分片起始事件（即「首字节」）。"""
+    from pydantic_ai.messages import PartStartEvent, TextPart
+
+    return PartStartEvent(index=0, part=TextPart(content=text))
+
+
+def _result_event(run_result):
+    from pydantic_ai.run import AgentRunResultEvent
+
+    return AgentRunResultEvent(result=run_result)
+
+
+class _FakeStream:
+    """`agent.run_stream_events(...)` 的最小替身：async 上下文管理器 + 异步迭代器。
+
+    脚本项里混进异常对象表示「迭代到这里时抛出」，用来模拟取消与上游失败。
+    """
+
+    def __init__(self, script):
+        self._script = list(script)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+    async def __aiter__(self):
+        for item in self._script:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+
+class _FakeAgent:
+    """按尝试次数取脚本的假 agent；第 N 次尝试用第 N 份脚本，超出则复用最后一份。"""
+
+    def __init__(self, scripts):
+        self._scripts = scripts
+        self.attempts = 0
+
+    def run_stream_events(self, *_args, **_kwargs):
+        script = self._scripts[min(self.attempts, len(self._scripts) - 1)]
+        self.attempts += 1
+        return _FakeStream(script)
+
+
+async def _drive_stream(monkeypatch, scripts, *, snapshot=None):
+    """驱动一轮 `stream_chat_events`，返回 `(产出的事件, 假 agent)`。
+
+    `pytest.raises` 由调用方负责：取消路径要断言异常真的抛了出去。
+    """
+    agent = _FakeAgent(scripts)
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_args, **_kwargs: agent)
+    produced = []
+    async for event in chat_service.stream_chat_events(
+        snapshot or _stream_snapshot(),
+        [ChatMessage(role="user", content="你好")],
+    ):
+        produced.append(event)
+    return produced, agent
+
+
+def _histogram_count(name, **labels):
+    """读直方图某个标签组合的观测次数（不存在算 0）。"""
+    from app.services.metrics import metrics
+
+    for sample in metrics.snapshot():
+        if sample.name == name and sample.labels == labels:
+            return sample.count
+    return 0
+
+
+async def test_cancelled_stream_is_counted_as_stopped(monkeypatch):
+    """客户端断开必须记成 `stopped`，而不是漏计或记成 `error`。
+
+    `CancelledError` 会直接抛穿函数，写在重试循环之后的计数对它永远不可达。
+    """
+    from app.services.metrics import CHAT_STREAMS_TOTAL, metrics
+
+    before = metrics.counter_value(CHAT_STREAMS_TOTAL, outcome="stopped")
+    scripts = [[_content_event("你"), asyncio.CancelledError()]]
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_args, **_kwargs: _FakeAgent(scripts))
+
+    produced = []
+    with pytest.raises(asyncio.CancelledError):
+        async for event in chat_service.stream_chat_events(
+            _stream_snapshot(), [ChatMessage(role="user", content="你好")]
+        ):
+            produced.append(event)
+
+    assert metrics.counter_value(CHAT_STREAMS_TOTAL, outcome="stopped") == before + 1
+    # 取消不能翻成一帧 error：连接已断，而且「用户关页面」不是服务端失败
+    assert [event.type for event in produced] == ["content"]
+
+
+async def test_completed_stream_is_counted_as_done(monkeypatch):
+    """正常收尾同样只记一笔（try/finally 不能变成双计）。"""
+    from app.services.metrics import CHAT_STREAMS_TOTAL, metrics
+
+    before = metrics.counter_value(CHAT_STREAMS_TOTAL, outcome="done")
+    scripts = [[_result_event(_FakeRunResult([_response()]))]]
+
+    produced, _ = await _drive_stream(monkeypatch, scripts)
+
+    assert metrics.counter_value(CHAT_STREAMS_TOTAL, outcome="done") == before + 1
+    assert produced[-1].type == "done"
+
+
+async def test_token_usage_is_aggregated_per_answered_model(monkeypatch):
+    """真实 token 数要落进服务端计数器，标签是真正回答的模型。"""
+    from app.services.metrics import metrics
+
+    before_prompt = metrics.counter_value(chat_service.CHAT_PROMPT_TOKENS_TOTAL, model="openai/gpt-4o")
+    before_completion = metrics.counter_value(chat_service.CHAT_COMPLETION_TOKENS_TOTAL, model="openai/gpt-4o")
+
+    scripts = [[_result_event(_FakeRunResult([_response(output_tokens=7)]))]]
+    produced, _ = await _drive_stream(monkeypatch, scripts)
+
+    assert [event.type for event in produced].count("usage") == 1
+    assert metrics.counter_value(chat_service.CHAT_PROMPT_TOKENS_TOTAL, model="openai/gpt-4o") == before_prompt + 100
+    assert metrics.counter_value(chat_service.CHAT_COMPLETION_TOKENS_TOTAL, model="openai/gpt-4o") == (
+        before_completion + 7
+    )
+
+
+async def test_missing_usage_does_not_increment_token_counters(monkeypatch):
+    """上游没回 usage 时整块跳过：给 0 会让「本月花了多少 token」永远偏低。"""
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.usage import RequestUsage
+
+    from app.services.metrics import metrics
+
+    before_prompt = metrics.counter_value(chat_service.CHAT_PROMPT_TOKENS_TOTAL, model="openai/gpt-4o")
+    before_completion = metrics.counter_value(chat_service.CHAT_COMPLETION_TOKENS_TOTAL, model="openai/gpt-4o")
+
+    silent = ModelResponse(parts=[TextPart(content="答")], usage=RequestUsage(input_tokens=0, output_tokens=0))
+    scripts = [[_result_event(_FakeRunResult([silent]))]]
+    produced, _ = await _drive_stream(monkeypatch, scripts)
+
+    assert [event.type for event in produced].count("usage") == 0
+    assert metrics.counter_value(chat_service.CHAT_PROMPT_TOKENS_TOTAL, model="openai/gpt-4o") == before_prompt
+    assert metrics.counter_value(chat_service.CHAT_COMPLETION_TOKENS_TOTAL, model="openai/gpt-4o") == before_completion
+
+
+async def test_first_event_latency_carries_the_model_label(monkeypatch):
+    """TTFT 必须带模型标签：否则备用模型接手时的慢与主模型的慢分不开。"""
+    before = _histogram_count(chat_service.CHAT_FIRST_EVENT_DURATION, model="openai/gpt-4o")
+
+    scripts = [[_content_event("你"), _result_event(_FakeRunResult([_response()]))]]
+    await _drive_stream(monkeypatch, scripts)
+
+    assert _histogram_count(chat_service.CHAT_FIRST_EVENT_DURATION, model="openai/gpt-4o") == before + 1
+
+
+async def test_retry_is_counted_and_reuses_the_same_model(monkeypatch):
+    """重试要能被计数（每次重试是一次额外计费），退避由 `_retry_backoff_seconds` 决定。"""
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    from app.services.metrics import metrics
+
+    monkeypatch.setattr(chat_service, "_retry_backoff_seconds", lambda attempt: 0.0)
+    before = metrics.counter_value(chat_service.CHAT_STREAM_RETRIES_TOTAL, model="openai/gpt-4o")
+
+    scripts = [
+        [ModelHTTPError(status_code=503, model_name="openai/gpt-4o")],
+        [_result_event(_FakeRunResult([_response()]))],
+    ]
+    produced, agent = await _drive_stream(monkeypatch, scripts)
+
+    assert agent.attempts == 2
+    assert metrics.counter_value(chat_service.CHAT_STREAM_RETRIES_TOTAL, model="openai/gpt-4o") == before + 1
+    assert produced[-1].type == "done"
+
+
+async def test_terminal_upstream_error_is_counted_by_provider_and_class(monkeypatch):
+    """终态上游错误按 provider + 有限类别计数；标签值必须是有限集合。"""
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    from app.services.metrics import metrics
+
+    before = metrics.counter_value(chat_service.MODEL_UPSTREAM_ERRORS_TOTAL, provider="openai", status_class="4xx")
+
+    scripts = [[ModelHTTPError(status_code=400, model_name="openai/gpt-4o")]]
+    produced, agent = await _drive_stream(monkeypatch, scripts)
+
+    # 400 不重试也不同模型之外切换
+    assert agent.attempts == 1
+    assert [event.type for event in produced] == ["error"]
+    assert (
+        metrics.counter_value(chat_service.MODEL_UPSTREAM_ERRORS_TOTAL, provider="openai", status_class="4xx")
+        == before + 1
+    )
+
+
+def test_budget_limits_take_the_smaller_fallback_window():
+    """备用模型窗口更小时，预算必须按更小的那个算。
+
+    否则主模型故障切到小窗口备用模型时，长上下文必然 400 `context_length_exceeded`，
+    而 400 不可再切——最需要兜底的长会话直接硬失败。
+    """
+    snapshot = _stream_snapshot(
+        context_window=200_000,
+        max_output_tokens=8_192,
+        fallback_key="openai/gpt-4o-mini",
+        fallback_context_window=32_000,
+    )
+
+    assert chat_service._budget_model_limits(snapshot) == (32_000, 8_192)
+
+
+def test_budget_limits_ignore_a_larger_fallback_window():
+    """备用模型窗口更大时不该放宽主模型的预算：主模型才是默认执行者。"""
+    snapshot = _stream_snapshot(
+        context_window=128_000,
+        max_output_tokens=4_096,
+        fallback_key="openai/large",
+        fallback_context_window=200_000,
+    )
+
+    assert chat_service._budget_model_limits(snapshot) == (128_000, 4_096)
+
+
+@pytest.mark.parametrize(
+    "context_window,fallback_context_window,fallback_key",
+    [
+        (200_000, None, "openai/gpt-4o-mini"),  # 备用模型没报窗口
+        (None, 32_000, "openai/gpt-4o-mini"),  # 主模型窗口未知：不能因此突然开始拒绝
+        (200_000, 32_000, None),  # 没配备用模型
+    ],
+)
+def test_budget_limits_stay_with_the_primary_model(context_window, fallback_context_window, fallback_key):
+    """缺任何一半信息就退回主模型那一套，不猜。"""
+    snapshot = _stream_snapshot(
+        context_window=context_window,
+        max_output_tokens=4_096,
+        fallback_key=fallback_key,
+        fallback_context_window=fallback_context_window,
+    )
+
+    assert chat_service._budget_model_limits(snapshot) == (context_window, 4_096)
+
+
+async def test_stream_passes_the_fallback_aware_limits_to_the_budget(monkeypatch):
+    """接线：编排层真的把「更保守的那组」交给了预算判定。"""
+    captured = {}
+
+    async def fake_budget(model_name, messages, anchor=None, *, model_limits=None):
+        captured["model_limits"] = model_limits
+        return None
+
+    monkeypatch.setattr(chat_service, "resolve_context_budget", fake_budget)
+    snapshot = _stream_snapshot(
+        context_window=200_000,
+        max_output_tokens=8_192,
+        fallback_key="openai/gpt-4o-mini",
+        fallback_context_window=32_000,
+    )
+
+    await _drive_stream(monkeypatch, [[_result_event(_FakeRunResult([_response()]))]], snapshot=snapshot)
+
+    assert captured["model_limits"] == (32_000, 8_192)
+
+
+def test_retry_backoff_is_capped_exponential_with_full_jitter():
+    """退避必须是「封顶指数 + 全部抖动」：固定间隔会让同时失败的实例同时重打。"""
+    samples = [chat_service._retry_backoff_seconds(1) for _ in range(200)]
+
+    assert all(0.0 <= value <= chat_service.STREAM_RETRY_BACKOFF_SECONDS for value in samples)
+    # 抖动要真的散开：200 次采样全落在同一个值上说明 uniform 没生效
+    assert len(set(samples)) > 1
+    # 上界随尝试次数增长但不能超过封顶值
+    assert chat_service._retry_backoff_seconds(10) <= chat_service.STREAM_RETRY_BACKOFF_CAP_SECONDS

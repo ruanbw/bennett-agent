@@ -28,7 +28,7 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 | 工具 | 工具级超时 | 内部最坏耗时 |
 |---|---|---|
 | `tavily_search` | `TAVILY_TOOL_TIMEOUT_SECONDS` = 最坏耗时 + 3.5s = 20 秒 | 2 次尝试 × 8 秒 + 1 次 0.5 秒退避 |
-| `sandbox_exec` | `MAX_EXEC_TIMEOUT_S + 60` = 960 秒 | 模型能调的 `timeout_s` 上限 900 秒，另加建机与传输余量 |
+| `sandbox_exec` | `MAX_EXEC_TIMEOUT_S + 60` 秒 | 模型能调的 `timeout_s` 上限 300 秒，另加建机与传输余量（整轮总预算 600 秒） |
 
 ## 内置工具清单
 
@@ -39,15 +39,14 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 | `ask_user_clarification` | `interaction` | `interactive` | 无 | 始终 | 意图模糊时向用户提问，选项 2~10 个 |
 | `get_current_time` | `system` | `read_only` | 无 | 始终 | 当前日期、时间、星期、时区与 UTC |
 | `tavily_search` | `search` | `read_only` | 派生 | `TAVILY_API_KEY` 可用（非空且不是占位值） | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
-| `sandbox_exec` | `data` | `read_only` | 960 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
-| `sandbox_write_file` | `data` | `read_only` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
+| `sandbox_exec` | `data` | `safe_write` | `MAX_EXEC_TIMEOUT_S + 60` 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
+| `sandbox_write_file` | `data` | `safe_write` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
 | `sandbox_read_file` | `data` | `read_only` | 60 秒 | `SANDBOX_ENABLED` | 读文件，≤ 200000 字节，超限**报错**而非截断 |
 | `sandbox_reset` | `data` | `safe_write` | 120 秒 | `SANDBOX_ENABLED` | 销毁现有执行环境，下次执行时重建（不当场重建） |
 
-两个反直觉的分类：
+分类的依据是**能不能撤销**，不是「有多危险」。所以四个沙箱工具里三个是 `safe_write`（要审批）：一条任意 shell 命令能删文件、能联网外带、能改工作目录之外的东西，标成 `read_only`（定义是「无外部副作用」）等于给唯一的执行闸门喂一条假事实——将来任何「按等级限流 / 按等级强制审计」的策略都会把它当只读放过去。只有 `sandbox_read_file` 真的是 `read_only`。
 
-- 四个沙箱工具里三个是 `read_only`。分级看的是**能不能撤销**，不是「有多危险」——`sandbox_exec` 跑的命令全都可以撤销，命令本身不审批；`sandbox_reset` 会丢掉已装的依赖与工作目录里的文件，撤不回来，所以要审批。
-- `sandbox_write_file` 是 `read_only` 但写文件。因为工作目录里写进去的东西可以删掉、也可以重置后重建，撤销成本近似为零。
+代价是这些调用执行前会先弹一次审批框。这也是本项目的取舍：宁可多问一次，也不让风险等级与实际能力不一致。
 
 「写文件超限拒绝、读文件超限报错」的共同理由：静默截断会让模型在坏数据上继续推理——半截脚本要到下一次执行才炸，而模型不自知。
 

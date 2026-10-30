@@ -2,12 +2,13 @@
 所有端点都要求登录（它们消耗上游额度或暴露模型清单），认证接口在 `app/api/auth.py`。
 """
 
+from contextlib import AsyncExitStack
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
-from app.api.rate_limit import make_limiter, too_many
+from app.api.rate_limit import inflight_stream_slot, make_limiter, too_many
 from app.config import settings
 from app.db import User
 from app.schemas.chat import (
@@ -150,22 +151,32 @@ async def chat_stream(request: ChatRequest, user: User = Depends(current_active_
     snapshot = await resolve_request_model(request.model)
     validate_reasoning_effort(snapshot, request.reasoning_effort)
 
+    # 在途名额必须在返回响应之前占到：SSE 响应头一发出，超限就只能变成 200 + 断流（见
+    # `inflight_stream_slot`）。进入在处理器、退出在生成器的 finally——中间隔着 return，
+    # `async with` 包不住，用 `AsyncExitStack` 把两者连起来，收尾点仍然只有一处。
+    capacity = AsyncExitStack()
+    await capacity.enter_async_context(inflight_stream_slot(str(user.id)))
+
     async def event_generator():
-        async for event in stream_chat_events(
-            snapshot,
-            request.messages,
-            reasoning_effort=request.reasoning_effort,
-            context_anchor=request.context_anchor,
-            cache_scope_key=str(user.id),
-            # 沙箱租约归属与工具缓存的按人隔离依据；由服务端注入，绝不来自模型参数。
-            user_id=user.id,
-            # 会话标识只用来标记「最后是谁在用」，不是授权凭据：租约查询一律带 user_id，
-            # 谎报 session_id 也只能拿到本用户自己的机器（见 `app/tools/sandbox_scope.py`）。
-            session_id=request.session_id,
-            # 批准/拒绝原样透传；是否真的续跑由服务层看历史形状决定（以带工具调用的 assistant 结尾）。
-            approvals=request.approvals,
-        ):
-            yield to_sse_frame(event)
+        try:
+            async for event in stream_chat_events(
+                snapshot,
+                request.messages,
+                reasoning_effort=request.reasoning_effort,
+                context_anchor=request.context_anchor,
+                cache_scope_key=str(user.id),
+                # 沙箱租约归属与工具缓存的按人隔离依据；由服务端注入，绝不来自模型参数。
+                user_id=user.id,
+                # 会话标识只用来标记「最后是谁在用」，不是授权凭据：租约查询一律带 user_id，
+                # 谎报 session_id 也只能拿到本用户自己的机器（见 `app/tools/sandbox_scope.py`）。
+                session_id=request.session_id,
+                # 批准/拒绝原样透传；是否真的续跑由服务层看历史形状决定（以带工具调用的 assistant 结尾）。
+                approvals=request.approvals,
+            ):
+                yield to_sse_frame(event)
+        finally:
+            # 无论正常收尾、异常还是客户端断开都要归还名额；不还就只能等 TTL 过期。
+            await capacity.aclose()
 
     return ChatEventSourceResponse(
         event_generator(),

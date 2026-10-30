@@ -111,6 +111,10 @@ class ContextCompacted(BaseModel):
     type: Literal["compaction"] = "compaction"
     #: `truncate` = 只截断了超长消息；`summarize` = 折叠了早期轮次。
     strategy: Literal["truncate", "summarize"]
+    #: 摘要来源：`model` 是模型真的写了摘要；`extractive` 是超时/失败/预算耗尽时的
+    #: 确定性兜底。两种都标 `strategy="summarize"`，少了这一维就区分不出「压缩正常」
+    #: 与「降级了」——用户把答非所归因成「模型变傻」时无从查起。
+    digest_kind: Literal["model", "extractive"] = "extractive"
     #: 被折叠成摘要的消息条数（`truncate` 时为 0）。
     dropped_messages: int = 0
     #: 被截断了中间部分的消息条数（`summarize` 时可能同时发生）。

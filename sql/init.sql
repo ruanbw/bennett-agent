@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS model_provider (
     enabled       BOOLEAN      NOT NULL,
     created_at    TIMESTAMPTZ  NOT NULL,
     updated_at    TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT ck_model_provider_auth_style CHECK (auth_style IN ('bearer', 'none', 'x-api-key', 'x-goog-api-key'))
+    CONSTRAINT ck_model_provider_auth_style CHECK (auth_style IN ('bearer', 'none', 'x-api-key', 'x-goog-api-key', 'api-key'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_model_provider_slug ON model_provider (slug);
 

@@ -33,6 +33,11 @@ class PromptManager:
             undefined=jinja2.StrictUndefined,
             trim_blocks=True,
             lstrip_blocks=True,
+            # 关掉自动重载（Jinja 默认每次 render 都 stat 源文件）：渲染结果一旦装配就被冻进
+            # `agent_factory` 的 `lru_cache`，而 `token_budget` 每请求**重新**渲染。两种语义
+            # 混用会给出互相矛盾的信号——改了 `.jinja` 后线上模型仍用旧提示词，预算却按新的算。
+            # 关掉它 = 「改提示词 = 重启/重新部署」：两条路径都只看到进程启动时加载的那一份。
+            auto_reload=False,
         )
 
     def render(self, template_name: str, **kwargs: Any) -> str:

@@ -4,8 +4,10 @@
 判定必须留在用例里——它们决定管理员看到的是 400 还是 500。
 """
 
+import asyncio
 import ipaddress
 import logging
+import random
 import uuid
 from urllib.parse import urlsplit
 
@@ -29,12 +31,28 @@ from app.services.model_service.outbound_guard import (
     reject_private_target,
 )
 from app.services.model_service.presets import AUTH_STYLES, get_preset
-from app.services.model_service.upstream import UpstreamModel, next_page_cursor, parse_upstream_models
+from app.services.model_service.upstream import (
+    UpstreamModel,
+    next_page_cursor,
+    next_page_offset,
+    parse_upstream_models,
+)
 
 logger = logging.getLogger(__name__)
 
 #: 管理后台的「测试连接 / 同步」是显式动作，可以等久一点，但不能无限挂住。
 PROVIDER_SYNC_TIMEOUT_SECONDS = 15.0
+
+#: 整个同步（含翻页与重试）的总时长上限。单看单页超时是不够的：15s × 上限 20 页 = 300s，
+#: 而反代通常 60s 就断，管理员看不到结果就会重试 → 两个并发同步。
+PROVIDER_SYNC_TOTAL_TIMEOUT_SECONDS = 45.0
+
+#: 额外重试次数（只重试一次）：模型列表接口无副作用、可安全重试；但上游持续 5xx 时要尽快
+#: 把故障暴露给管理员，而不是在 deadline 前反复重打。
+SYNC_RETRY_ATTEMPTS = 1
+
+#: 重试退避上界（秒）：`random.uniform` 抖动，避免上游恢复的那一瞬间所有管理请求同时冲上去。
+SYNC_RETRY_BACKOFF_SECONDS = 0.5
 
 #: 同步翻页上限：触顶说明上游 `has_more` 恒为 true，宁可截断留日志也不无限打下去。
 SYNC_MAX_PAGES = 20
@@ -54,6 +72,44 @@ def _default_display_name(model_id: str) -> str:
     return model_id.rsplit("/", 1)[-1] or model_id
 
 
+def _retry_backoff_seconds() -> float:
+    return random.uniform(0, SYNC_RETRY_BACKOFF_SECONDS)
+
+
+def _touched_fields(passed: dict[str, object]) -> list[str]:
+    """update 用：`_UNSET` 之外的键都算「这次动过」。`None` 也要算——`api_key=None` 表示清空。"""
+    return [name for name, value in passed.items() if value is not _UNSET]
+
+
+def _set_fields(passed: dict[str, object]) -> list[str]:
+    """create 用：真正带值写进新行的字段（空值不算，否则日志会说「设了 key」而其实没设）。"""
+    return [name for name, value in passed.items() if value is not _UNSET and value not in (None, "", [], {})]
+
+
+def _log_provider_write(
+    action: str,
+    *,
+    target: str,
+    target_id: uuid.UUID,
+    actor: uuid.UUID | None,
+    changed: list[str],
+) -> None:
+    """写操作审计：一次成功的管理端写入打一行 who/what/when。
+
+    只记**字段名**，绝不记值：`changed=api_key` 说明凭据被动过，但日志本身不能出现凭据
+    （日志会进文件与采集管道，比数据库更容易被顺手翻看）。`actor=-` 表示不是管理后台发起的
+    （环境变量引导、脚本、内部调用）——这类调用也要留痕，否则「凭据被换过」无法界定时间窗。
+    """
+    logger.info(
+        "provider_write action=%s target=%s id=%s actor=%s changed=%s",
+        action,
+        target,
+        target_id,
+        "-" if actor is None else actor,
+        ",".join(changed) if changed else "-",
+    )
+
+
 def build_auth_headers(provider: ModelProvider) -> dict[str, str]:
     """组装出站请求头：固定头在前，API Key 按库里的 `auth_style` 放进对应位置。"""
     headers = {str(key): str(value) for key, value in (provider.extra_headers or {}).items()}
@@ -62,6 +118,9 @@ def build_auth_headers(provider: ModelProvider) -> dict[str, str]:
             headers["x-api-key"] = provider.api_key
         elif provider.auth_style == "x-goog-api-key":
             headers["x-goog-api-key"] = provider.api_key
+        elif provider.auth_style == "api-key":
+            # Azure OpenAI：不收 `Authorization: Bearer`，头名就是 `api-key`
+            headers["api-key"] = provider.api_key
         else:
             headers["Authorization"] = f"Bearer {provider.api_key}"
     return headers
@@ -86,6 +145,7 @@ async def create_provider(
     preset_key: str | None = None,
     auth_style: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    actor: uuid.UUID | None = None,
 ) -> ModelProvider:
     """新建提供商；`preset_key` 指向内置预设时地址与鉴权细节可省略，预设值只在创建时抄进库。
 
@@ -137,6 +197,22 @@ async def create_provider(
             # 理论上不可能（刚提交完）；用 assert 会被 `python -O` 删掉，错误点被推到调用方。
             raise ProviderFetchError("创建提供商后无法重新读取，请重试")
 
+    _log_provider_write(
+        "create",
+        target="provider",
+        target_id=loaded.id,
+        actor=actor,
+        changed=_set_fields(
+            {
+                "name": name,
+                "base_url": resolved_base_url,
+                "auth_style": resolved_auth,
+                "api_key": api_key,
+                "extra_headers": resolved_headers,
+            }
+        ),
+    )
+
     await _warn_plaintext_key_over_public_http(
         loaded.base_url,
         provider_name=loaded.name,
@@ -151,7 +227,10 @@ async def update_provider(
     name: object = _UNSET,
     base_url: object = _UNSET,
     api_key: object = _UNSET,
+    auth_style: object = _UNSET,
+    extra_headers: object = _UNSET,
     enabled: object = _UNSET,
+    actor: uuid.UUID | None = None,
 ) -> ModelProvider | None:
     """更新提供商；`api_key` 传 `None` 表示清空，不传则保持不变。
 
@@ -165,6 +244,14 @@ async def update_provider(
 
         if name is not _UNSET:
             provider.name = str(name).strip()
+        if auth_style is not _UNSET:
+            resolved_auth = str(auth_style)
+            if resolved_auth not in AUTH_STYLES:
+                raise ProviderFetchError(f"未知的认证方式：{resolved_auth}")
+            provider.auth_style = resolved_auth
+        if extra_headers is not _UNSET:
+            # 空 dict = 清空：固定头属于凭据配置，填错了要能撤掉。`None` 在路由层已被当作「不修改」丢掉。
+            provider.extra_headers = {str(k): str(v) for k, v in (extra_headers or {}).items()}
         if base_url is not _UNSET:
             # 只校验变化过的新地址：不动地址的保存不该因旧行违规而失败（那样由 `_build_target` 出站时拦）。
             next_base_url = str(base_url).strip().rstrip("/")
@@ -183,6 +270,22 @@ async def update_provider(
         # 就配置过的旧库在删光提供商后重启会被环境变量重新引导出一条「默认网关」。
         await provider_repo.mark_registry_initialized(session)
         await session.commit()
+        _log_provider_write(
+            "update",
+            target="provider",
+            target_id=provider_id,
+            actor=actor,
+            changed=_touched_fields(
+                {
+                    "name": name,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "auth_style": auth_style,
+                    "extra_headers": extra_headers,
+                    "enabled": enabled,
+                }
+            ),
+        )
         loaded = await provider_repo.load_provider(session, provider_id)
 
     if loaded is not None and base_url is not _UNSET:
@@ -194,7 +297,7 @@ async def update_provider(
     return loaded
 
 
-async def delete_provider(provider_id: uuid.UUID) -> bool:
+async def delete_provider(provider_id: uuid.UUID, *, actor: uuid.UUID | None = None) -> bool:
     """删除提供商及其全部模型。
 
     同样写 registry 标记：删光是管理员的明确意图，不代表回到出厂状态；否则旧库删完重启会被
@@ -205,7 +308,8 @@ async def delete_provider(provider_id: uuid.UUID) -> bool:
             return False
         await provider_repo.mark_registry_initialized(session)
         await session.commit()
-        return True
+    _log_provider_write("delete", target="provider", target_id=provider_id, actor=actor, changed=[])
+    return True
 
 
 async def list_provider_models(provider_id: uuid.UUID) -> list[ProviderModel]:
@@ -225,6 +329,7 @@ async def create_provider_model(
     max_output_tokens: int | None = None,
     enabled: bool = True,
     is_default: bool = False,
+    actor: uuid.UUID | None = None,
 ) -> ProviderModel:
     """手动添加一个模型（同步上游之外的补充途径）。
 
@@ -261,6 +366,25 @@ async def create_provider_model(
             await session.rollback()
             logger.warning("添加模型撞唯一约束（可能是并发添加同一模型）: provider=%s model=%s", provider_id, cleaned)
             raise DuplicateModelError(cleaned) from exc
+        _log_provider_write(
+            "create",
+            target="model",
+            target_id=model.id,
+            actor=actor,
+            changed=_set_fields(
+                {
+                    "model_id": cleaned,
+                    "display_name": display_name,
+                    "description": description,
+                    "reasoning": reasoning,
+                    "supported_reasoning_levels": supported_reasoning_levels,
+                    "context_window": context_window,
+                    "max_output_tokens": max_output_tokens,
+                    "enabled": enabled,
+                    "is_default": is_default,
+                }
+            ),
+        )
         return model
 
 
@@ -275,6 +399,7 @@ async def update_provider_model(
     max_output_tokens: object = _UNSET,
     enabled: object = _UNSET,
     is_default: object = _UNSET,
+    actor: uuid.UUID | None = None,
 ) -> ProviderModel | None:
     """更新模型字段；切换默认时全局只保留一个默认模型。"""
     async with async_session_maker() as session:
@@ -310,55 +435,102 @@ async def update_provider_model(
             model.is_default = False
 
         await session.commit()
+        _log_provider_write(
+            "update",
+            target="model",
+            target_id=model_uuid,
+            actor=actor,
+            changed=_touched_fields(
+                {
+                    "display_name": display_name,
+                    "description": description,
+                    "reasoning": reasoning,
+                    "supported_reasoning_levels": supported_reasoning_levels,
+                    "context_window": context_window,
+                    "max_output_tokens": max_output_tokens,
+                    "enabled": enabled,
+                    "is_default": is_default,
+                }
+            ),
+        )
         return model
 
 
-async def delete_provider_model(model_uuid: uuid.UUID) -> bool:
+async def delete_provider_model(model_uuid: uuid.UUID, *, actor: uuid.UUID | None = None) -> bool:
     async with async_session_maker() as session:
         if not await provider_repo.delete_model(session, model_uuid):
             return False
         await session.commit()
-        return True
+    _log_provider_write("delete", target="model", target_id=model_uuid, actor=actor, changed=[])
+    return True
 
 
-async def _fetch_remote_models(provider: ModelProvider) -> list[UpstreamModel]:
-    """向单个提供商请求模型列表并解析，失败抛 `ProviderFetchError`。
+async def _fetch_models_page(
+    provider: ModelProvider,
+    client,  # noqa: ANN001 - httpx.AsyncClient；注入替身才能离线用例
+    models_url: str,
+    headers: dict[str, str],
+    params: dict[str, str] | None,
+) -> object:
+    """请求一页模型列表并返回已解析的 JSON；5xx 与网络/超时错误在这里重试一次。
 
-    信封别名由 `upstream.parse_upstream_models` 兼容，分页只认 Anthropic 形状（`has_more` + `last_id`）。
-    错误文案只给管理员看、不含上游响应体（可能含内部信息），只保留状态码与异常类型。
+    只读接口可安全重试：上游抖动一次就让管理员手动重点「测试连接」是纯噪音，而这类 502
+    在运维视角与「配置错了」不可区分。重试次数固定为 1 且带抖动，持续故障要尽早暴露，
+    不能变成在 deadline 前不停重打上游。
     """
-    # 先检查目标地址，再组装认证头——这些请求带着明文 API Key
-    await reject_private_target(provider.base_url)
-
-    headers = build_auth_headers(provider)
-    models_url = build_models_url(provider.base_url)
-    client = get_http_client()
-
-    entries: list[UpstreamModel] = []
-    cursor: str | None = None
-    for page in range(SYNC_MAX_PAGES):
+    attempts_left = SYNC_RETRY_ATTEMPTS
+    while True:
         try:
             response = await client.get(
                 models_url,
                 headers=headers,
-                params={"after_id": cursor} if cursor else None,
+                params=params,
                 timeout=PROVIDER_SYNC_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - 任何网络/超时/URL 错误都归为「连不上」
+            if attempts_left:
+                attempts_left -= 1
+                logger.warning("拉取提供商模型列表失败，重试一次 (provider=%s): %s", provider.name, exc)
+                await asyncio.sleep(_retry_backoff_seconds())
+                continue
             logger.warning("拉取提供商模型列表失败 (provider=%s): %s", provider.name, exc, exc_info=True)
             raise ProviderFetchError(f"无法连接提供商（{type(exc).__name__}）") from exc
+        if response.status_code >= 500 and attempts_left:
+            attempts_left -= 1
+            logger.warning("提供商返回 HTTP %d，重试一次 (provider=%s)", response.status_code, provider.name)
+            await asyncio.sleep(_retry_backoff_seconds())
+            continue
+        break
 
-        if response.status_code in (401, 403):
-            raise ProviderFetchError("认证失败，请检查 API Key")
-        if response.status_code == 404:
-            raise ProviderFetchError("模型列表地址不存在，请检查 Base URL 是否需要包含 /v1")
-        if response.status_code != 200:
-            raise ProviderFetchError(f"提供商返回 HTTP {response.status_code}")
+    if response.status_code in (401, 403):
+        raise ProviderFetchError("认证失败，请检查 API Key")
+    if response.status_code == 404:
+        raise ProviderFetchError("模型列表地址不存在，请检查 Base URL 是否需要包含 /v1")
+    if response.status_code != 200:
+        raise ProviderFetchError(f"提供商返回 HTTP {response.status_code}")
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ProviderFetchError("提供商返回的不是 JSON") from exc
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ProviderFetchError("提供商返回的不是 JSON") from exc
+
+
+async def _collect_upstream_entries(
+    provider: ModelProvider,
+    models_url: str,
+    headers: dict[str, str],
+) -> list[UpstreamModel]:
+    """逐页拉取并解析，直到上游说没有下一页或撞上页数上限。
+
+    游标必须带参数名：Anthropic 形状用 `after_id=`，`links.next` 的 offset 形状用 `offset=`。
+    统一拼 `after_id=` 会让 offset 上游忽略这个参数、每轮又返回第一页——那就是「静默重复拉第一页」，
+    而且因为没有真实游标，永远不会撞上 `SYNC_MAX_PAGES` 的告警。
+    """
+    client = get_http_client()
+    entries: list[UpstreamModel] = []
+    params: dict[str, str] | None = None
+    for page in range(SYNC_MAX_PAGES):
+        payload = await _fetch_models_page(provider, client, models_url, headers, params)
 
         if isinstance(payload, list):
             remote_entries: list[object] = payload
@@ -373,11 +545,45 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[UpstreamModel]:
             return []
 
         entries.extend(parse_upstream_models(payload, settings.model_description_field))
+
         cursor = next_page_cursor(payload)
-        if cursor is None:
+        if cursor is not None:
+            params = {"after_id": cursor}
+            continue
+        offset = next_page_offset(payload)
+        if offset is None:
             break
+        params = {"offset": offset}
     else:
         logger.warning("提供商 %s 的模型列表分页超过 %d 页，结果已截断", provider.name, SYNC_MAX_PAGES)
+    return entries
+
+
+async def _fetch_remote_models(provider: ModelProvider) -> list[UpstreamModel]:
+    """向单个提供商请求模型列表并解析，失败抛 `ProviderFetchError`。
+
+    信封别名由 `upstream.parse_upstream_models` 兼容，分页认两种显式形状（见 `_collect_upstream_entries`）。
+    错误文案只给管理员看、不含上游响应体（可能含内部信息），只保留状态码与异常类型。
+    整个拉取（含翻页与重试）受 `PROVIDER_SYNC_TOTAL_TIMEOUT_SECONDS` 约束：只卡单页超时时，
+    一次卡住的上游能让管理请求挂满 20 页 × 15s。
+    """
+    # 先检查目标地址，再组装认证头——这些请求带着明文 API Key
+    await reject_private_target(provider.base_url)
+
+    headers = build_auth_headers(provider)
+    models_url = build_models_url(provider.base_url)
+    try:
+        entries = await asyncio.wait_for(
+            _collect_upstream_entries(provider, models_url, headers),
+            timeout=PROVIDER_SYNC_TOTAL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            "拉取提供商模型列表超过总时长上限 (provider=%s, deadline=%.0fs)",
+            provider.name,
+            PROVIDER_SYNC_TOTAL_TIMEOUT_SECONDS,
+        )
+        raise ProviderFetchError("同步超时，请稍后重试") from exc
 
     # 列宽 200：Postgres 会直接报错，超长 id 也放不进 ChatRequest 的 300 字符上限。跳过并留日志，不静默截断。
     too_long = [entry.model_id for entry in entries if len(entry.model_id) > 200]
@@ -394,7 +600,7 @@ async def test_provider_connection(provider_id: uuid.UUID) -> int:
     return len(await _fetch_remote_models(provider))
 
 
-async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
+async def sync_provider_models(provider_id: uuid.UUID, *, actor: uuid.UUID | None = None) -> tuple[int, int, int]:
     """把上游模型列表同步进库，返回 `(上游数量, 新增, 更新)`。
 
     已存在模型的 `enabled` / `is_default` 保持不变；上游不再返回的模型不删除，那可能只是一时不完整。
@@ -468,6 +674,14 @@ async def sync_provider_models(provider_id: uuid.UUID) -> tuple[int, int, int]:
         len(remote),
         created,
         updated,
+    )
+    # 同步拿不到操作者身份就只能回答「模型清单被改过」，回答不了「谁改的」；计数在上面那条日志里。
+    _log_provider_write(
+        "sync",
+        target="provider",
+        target_id=provider_id,
+        actor=actor,
+        changed=["model_list"],
     )
     return len(remote), created, updated
 

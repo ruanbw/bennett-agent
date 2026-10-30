@@ -6,6 +6,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -290,3 +291,36 @@ def next_page_cursor(payload: object) -> str | None:
     if not isinstance(last_id, str) or not last_id.strip():
         return None
     return last_id.strip()
+
+
+def next_page_offset(payload: object) -> str | None:
+    """读出 offset 分页形状（OpenRouter 的 `links.next`）里的下一页 offset。
+
+    只接受**同源相对 URL**（`/api/v1/models?offset=20`）且 `offset` 是整数：绝对 URL 可能指向别的
+    host，照它的参数继续请求等于把 API Key 送到第三方；其余形状一律 None——返回一个猜测的游标会让
+    同步对不分页的上游反复重打第一页，且因为没有真实游标，永远不会撞上 `SYNC_MAX_PAGES` 的告警。
+    调用方必须按游标种类决定查询参数名（这里是 `offset`，`next_page_cursor` 是 `after_id`）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    links = payload.get("links")
+    if not isinstance(links, dict):
+        return None
+    next_link = links.get("next")
+    if not isinstance(next_link, str):
+        return None
+
+    parsed = urlsplit(next_link.strip())
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    raw_offset = parse_qs(parsed.query).get("offset")
+    if not raw_offset:
+        return None
+    try:
+        offset = int(raw_offset[0])
+    except ValueError:
+        return None
+    if offset < 0:
+        return None
+    return str(offset)

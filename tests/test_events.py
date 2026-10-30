@@ -593,8 +593,28 @@ def test_compaction_event_rejects_unknown_strategy():
         )
 
 
+def test_compaction_event_reports_the_digest_kind_but_not_the_digest_itself():
+    """摘要正文不进 SSE（它可能含早期对话的敏感内容，会被前端落库并同步到其他设备），
+
+    但**来源**必须进：模型摘要与抽取式兜底都标 `strategy="summarize"`，少了 `digest_kind`
+    就分不清「压缩正常」与「降级了」——用户把答非所问归因成「模型变傻」时无从查起。
+    """
+    payload = ContextCompacted(
+        strategy="summarize",
+        dropped_messages=6,
+        digest_kind="extractive",
+        used_tokens_before=10,
+        used_tokens_after=5,
+        limit_tokens=100,
+    ).model_dump()
+
+    assert "digest" not in payload
+    assert "summary" not in payload
+    assert payload["digest_kind"] == "extractive"
+
+
 def test_compaction_event_has_no_digest_field():
-    """摘要正文不进 SSE：它可能含早期对话的敏感内容，会被前端落库并同步到其他设备。"""
+    """没有 `digest_kind` 的老服务端不该被新字段影响：默认值落在兜底那一侧。"""
     payload = ContextCompacted(
         strategy="truncate",
         used_tokens_before=10,
@@ -604,6 +624,7 @@ def test_compaction_event_has_no_digest_field():
 
     assert "digest" not in payload
     assert "summary" not in payload
+    assert payload["digest_kind"] == "extractive"
 
 
 # ---------------------------------------------------------------------

@@ -15,6 +15,9 @@
 所以下面用英文填充字符来精确控制量级，中文只出现在需要宽字符语义的地方。
 """
 
+import asyncio
+import time
+
 import pytest
 
 from app.config import settings
@@ -24,6 +27,7 @@ from app.services.context_compaction import (
     DIGEST_FOOTER,
     DIGEST_HEADER,
     MAX_DIGEST_CHARS,
+    MAX_SUMMARY_INPUT_CHARS,
     build_digest,
     compact_history,
     extractive_digest,
@@ -235,6 +239,18 @@ async def test_single_message_cannot_be_folded():
     assert plan.digest is None
 
 
+async def test_short_history_can_still_be_folded():
+    """只有三条时也要能折叠：切点吸附到网格不能把「能压」变成「只能拒绝」。"""
+    messages = [msg("user", padded(2_000, "o")), msg("assistant", padded(2_000, "r")), msg("user", "latest")]
+    budget = budget_with_window(1_000)  # 上限约 349 token，两条 2,000 字符 ≈ 1,013
+
+    plan = await compact_history("test/model", messages, budget)
+
+    assert plan.strategy == "summarize"
+    assert plan.dropped_messages == 2
+    assert plan.messages == [messages[-1]]
+
+
 # ---------------------------------------------------------------------
 # 4. 摘要的降级路径
 # ---------------------------------------------------------------------
@@ -243,6 +259,20 @@ def _long_history() -> list[ChatMessage]:
     for index in range(6):
         messages.append(msg("user", f"Q{index} " + padded(2_990, "q")))
         messages.append(msg("assistant", f"A{index} " + padded(2_990, "r")))
+    messages.append(msg("user", "latest question"))
+    return messages
+
+
+def _medium_history() -> list[ChatMessage]:
+    """12 条 2,000 字符（≈500 token/条）+ 本轮问题。
+
+    量级是算好的：窗口 4,000 时切点 8 只保留 5 条（≈2,500 token）就够用，
+    所以第一轮只会呼叫一次摘要；下一轮多两条时同一个切点依旧够用。
+    """
+    messages = []
+    for index in range(6):
+        messages.append(msg("user", f"Q{index} " + padded(1_990, "q")))
+        messages.append(msg("assistant", f"A{index} " + padded(1_990, "r")))
     messages.append(msg("user", "latest question"))
     return messages
 
@@ -301,6 +331,90 @@ def test_extractive_digest_is_delimited_and_bounded():
     assert len(digest) <= MAX_DIGEST_CHARS
 
 
+async def test_summary_input_keeps_both_ends_of_the_dropped_range():
+    """摘要要替整段历史当记忆：会话开头的约束不能是第一个被丢掉的。
+
+    「从最新往回填、超限即 break」时，长会话里最早那条（用户的原始约束/偏好）整条不见，
+    而它恰恰是模型后面最容易违反的那一条。
+    """
+    seen: list[str] = []
+
+    async def capture(transcript: str) -> str:
+        seen.append(transcript)
+        return "- 摘要"
+
+    dropped = [
+        msg("user", "OLDEST-CONSTRAINT " + padded(9_000, "o")),
+        msg("assistant", padded(9_000, "m")),
+        msg("user", padded(9_000, "m")),
+        msg("assistant", padded(9_000, "m")),
+        msg("user", padded(9_000, "m")),
+        msg("assistant", padded(9_000, "n") + " NEWEST-DECISION"),
+    ]
+
+    await build_digest("test/model", dropped, capture)
+
+    transcript = seen[0]
+    assert "OLDEST-CONSTRAINT" in transcript
+    assert "NEWEST-DECISION" in transcript
+    assert len(transcript) <= MAX_SUMMARY_INPUT_CHARS
+
+
+def test_extractive_digest_keeps_both_ends_when_space_is_short():
+    """抽取式兜底要与模型摘要覆盖同一区间，否则两条降级路径丢的东西正好相反。"""
+    messages = [msg("user", "OLDEST-CONSTRAINT " + padded(200, "o"))]
+    messages.extend(msg("user", f"中间-{index} " + padded(200, "m")) for index in range(58))
+    messages.append(msg("assistant", padded(200, "n") + " NEWEST-DECISION"))
+
+    digest = extractive_digest(messages)
+
+    assert "OLDEST-CONSTRAINT" in digest
+    assert "NEWEST-DECISION" in digest
+    assert len(digest) <= MAX_DIGEST_CHARS
+
+
+async def test_summary_calls_share_a_single_deadline(monkeypatch):
+    """候选切点最多 4 个、每个各自 20s 超时就是最坏 80s 干等，而用户这段时间什么都看不到。
+
+    挂住的摘要器只该被调一次：deadline 用尽后，剩下的候选直接走抽取式兜底。
+    """
+    monkeypatch.setattr(context_compaction, "SUMMARY_TIMEOUT_SECONDS", 0.2)
+    calls: list[str] = []
+
+    async def hangs(transcript: str) -> str:
+        calls.append(transcript)
+        await asyncio.sleep(10)
+        return "- 不该到这里"
+
+    started = time.monotonic()
+    plan = await compact_history("test/model", _long_history(), budget_with_window(4_000), summarizer=hangs)
+    elapsed = time.monotonic() - started
+
+    assert len(calls) == 1, "deadline 用尽后不该再呼叫模型"
+    # 时间断言只是粗筛（不随机器抖动）：旧行为是 3 个候选各等一个超时 = 0.6s
+    assert elapsed < 0.5
+    assert plan.strategy == "summarize"
+    assert plan.digest_kind == "extractive"
+
+
+async def test_digest_kind_distinguishes_model_digest_from_fallback():
+    """两条降级路径都标 `strategy="summarize"`：没有 `digest_kind` 就分不清正常与兜底。"""
+
+    async def answering(transcript: str) -> str:
+        return "- 用户在做上下文压缩"
+
+    async def boom(transcript: str) -> str:
+        raise RuntimeError("上游挂了")
+
+    model_plan = await compact_history("test/model", _long_history(), budget_with_window(4_000), summarizer=answering)
+    reset_digest_cache()
+    fallback_plan = await compact_history("test/model", _long_history(), budget_with_window(4_000), summarizer=boom)
+
+    assert model_plan.digest_kind == "model"
+    assert fallback_plan.digest_kind == "extractive"
+    assert model_plan.strategy == fallback_plan.strategy == "summarize"
+
+
 async def test_summary_is_cached_across_calls():
     """同一段历史连续几轮都会被压缩：缓存把「每轮一次摘要调用」降到「首次一次」。"""
     calls = 0
@@ -317,6 +431,63 @@ async def test_summary_is_cached_across_calls():
 
     assert first == second
     assert calls == 1
+
+
+async def test_digest_cache_is_keyed_by_the_dropped_range():
+    """缓存按「折叠区间的边界 + 模型名」做键，而不是渲染后的文本。
+
+    渲染文本每轮都在变（保留区随新消息往后移），拿它做键等于稳态每轮必 miss——
+    每轮都在关键路径上多付一次完整模型调用。
+    """
+    calls = 0
+
+    async def counting(transcript: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "- 早期讨论的约束"
+
+    dropped = [msg("user", padded(3_000, "q")), msg("assistant", padded(3_000, "r"))]
+
+    first = await build_digest("test/model", dropped, counting, dropped_range=(0, 8))
+    second = await build_digest("test/model", dropped, counting, dropped_range=(0, 8))
+
+    assert calls == 1
+    assert first == second
+    assert first.kind == "model"
+
+
+def test_split_snaps_to_a_fixed_grid_so_consecutive_turns_reuse_the_same_range():
+    """切点吸附到固定网格：只追加了两条消息的下一轮算出同一个切点。"""
+    first_turn = _long_history()
+    second_turn = [*first_turn, msg("assistant", "新回答"), msg("user", "再追问")]
+
+    assert context_compaction._split_keep_recent(first_turn, 4) == context_compaction._split_keep_recent(second_turn, 4)
+
+
+async def test_the_next_turn_reuses_the_previous_digest_instead_of_paying_twice():
+    """稳态（每轮都跨窗口）里，第二轮只该很便宜——同一个切点应直接命中上一轮的摘要。
+
+    `_medium_history` 的量级是算好的：窗口 4,000 时切点 8 保留的 7 条（≈2,000 token）
+    加上摘要仍在 3,049 的可用上限内，所以第一轮只会呼叫一次。第二轮多两条消息后，
+    切点不吸附时会滑到 10（新区间、必 miss、再付一次完整模型调用），吸附到网格则仍是 8。
+    """
+    calls = 0
+
+    async def counting(transcript: str) -> str:
+        nonlocal calls
+        calls += 1
+        return f"- 第 {calls} 次摘要"
+
+    first_turn = _medium_history()
+    await compact_history("test/model", first_turn, budget_with_window(4_000), summarizer=counting)
+    assert calls == 1
+
+    second_turn = [*first_turn, msg("assistant", "新回答"), msg("user", "再追问")]
+    plan = await compact_history("test/model", second_turn, budget_with_window(4_000), summarizer=counting)
+
+    assert calls == 1, "同一区间必须命中上一轮的摘要，而不是每轮重打一次"
+    assert plan.strategy == "summarize"
+    assert plan.digest_kind == "model"
 
 
 async def test_digest_is_not_shared_across_models():

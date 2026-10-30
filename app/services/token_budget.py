@@ -32,6 +32,12 @@ ASCII_CHARS_PER_TOKEN = 4
 #: 同进程其它对话明显卡顿；阈值也不能太小，`asyncio.to_thread` 自身要付线程池调度开销。
 THREAD_ESTIMATE_CHARS_THRESHOLD = 50_000
 
+#: 锚点可信的「低置信下限」：前缀估算的这个比例。估算按宽字符 1、窄字符 1/4 取**上界**
+#: （实测英文真实约 5.47 字符/token），而可容忍的下界要到宽字符 1/2、窄字符 1/8——
+#: 换一个分词器，同一段文本的 token 数可以少掉一半。把估算折半就落在下界上，所以这里
+#: 只用它挡「报一个数量级偏小的值来跳过预检」，而不是拿它当真实规模核对。
+ANCHOR_TRUST_FLOOR_RATIO = 0.5
+
 
 def _is_wide_char(char: str) -> bool:
     """是否属于「一个字符接近一个 token」的文字（中日韩 + 全角标点）。
@@ -81,7 +87,11 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
-    """估算整份历史的 token 数（含逐条结构性开销）；`thinking` 也占窗口，必须计入。
+    """估算整份历史的 token 数（含逐条结构性开销）；`thinking` 与 `tool_calls[].args` 都占窗口。
+
+    工具入参必须计入：单条上限 64k 字符、每条消息最多 50 个，`convert_chat_history` 会把它们
+    变成真实的 `ToolCallPart` 发给模型。漏掉这一项时，客户端可控的字段能让「远未超限」的估算
+    与真实 prompt 差出几十万 token，最后撞在上游 400 上——而 400 的文案是「请更换模型」。
 
     同步函数：异步调用方走 `_estimate_messages_tokens_off_loop`，那里才按量决定要不要让出
     事件循环。
@@ -91,6 +101,7 @@ def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
         total += MESSAGE_OVERHEAD_TOKENS
         total += estimate_tokens(message.content)
         total += estimate_tokens(message.thinking or "")
+        total += sum(estimate_tokens(call.args) for call in message.tool_calls)
     return total
 
 
@@ -244,11 +255,15 @@ def usable_anchor(messages: list[ChatMessage], anchor: ContextAnchor | None) -> 
 
 
 def _history_chars(messages: Sequence[ChatMessage]) -> int:
-    """待估算历史里 `content + thinking` 的字符总数。
+    """待估算历史里 `content + thinking + tool_calls[].args` 的字符总数。
 
     只求 `len`、不做逐字符判定，所以它自己在多大输入下都是微秒级，可以拿它决定要不要挪线程。
+    工具入参也要算：它同样是接下来要逐字符估算的输入，漏掉就会把最大的一类文本留在同步路径上。
     """
-    return sum(len(message.content) + len(message.thinking or "") for message in messages)
+    return sum(
+        len(message.content) + len(message.thinking or "") + sum(len(call.args) for call in message.tool_calls)
+        for message in messages
+    )
 
 
 async def _estimate_messages_tokens_off_loop(messages: list[ChatMessage]) -> int:
@@ -291,15 +306,22 @@ async def resolve_context_budget(
     anchor = usable_anchor(messages, anchor)
     if anchor is not None:
         # 锚点来自客户端，不能无条件相信：声称覆盖 N 条消息却报一个远小于前缀真实规模的
-        # token 数，就是拿它绕过上下文预检（I-08）。用前缀估算核对，明显偏低就退回全量估算。
+        # token 数，就是拿它绕过上下文预检（I-08）。用前缀估算核对，低于宽限下界就退回全量估算。
+        #
+        # 这里曾经要求 `>= 前缀估算 × 0.9`，方向是错的：估算按设计是上界（窄字符按 4 字符/token，
+        # 实测英文 5.47），而锚点还含系统提示词与工具 schema、前缀估算不含。于是合法锚点必须
+        # 大过真实前缀的 1.2 倍才通得过，真实前缀一过约 1 万 token 就几乎必被拒——长会话永远
+        # 走全量估算，而全量估算的高估又让压缩在真实预算六成多的地方提前触发。
         prefix_estimate = await _estimate_messages_tokens_off_loop(messages[: anchor.message_index + 1])
-        if anchor.context_tokens < int(prefix_estimate * 0.9):
+        floor = int(prefix_estimate * ANCHOR_TRUST_FLOOR_RATIO) + MESSAGE_OVERHEAD_TOKENS * (anchor.message_index + 1)
+        if anchor.context_tokens < floor:
             _warn_anchor_dropped_once(
                 "understated",
-                "上下文锚点明显低于前缀估算，退回估算 (index=%d, context_tokens=%d, 前缀估算=%d)",
+                "上下文锚点低于宽限下界，退回估算 (index=%d, context_tokens=%d, 前缀估算=%d, 下界=%d)",
                 anchor.message_index,
                 anchor.context_tokens,
                 prefix_estimate,
+                floor,
             )
             anchor = None
 
@@ -357,6 +379,7 @@ def overflow_message(budget: ContextBudget) -> str:
 
 
 __all__ = [
+    "ANCHOR_TRUST_FLOOR_RATIO",
     "ContextBudget",
     "MESSAGE_OVERHEAD_TOKENS",
     "rebuild_budget_as_estimate",

@@ -121,7 +121,7 @@ async def list_provider_presets():
     status_code=status.HTTP_201_CREATED,
     summary="新增模型提供商",
 )
-async def create_provider(payload: ProviderCreate):
+async def create_provider(payload: ProviderCreate, admin: User = Depends(current_admin)):  # noqa: B008
     try:
         provider = await model_service.create_provider(
             name=payload.name,
@@ -129,6 +129,9 @@ async def create_provider(payload: ProviderCreate):
             api_key=payload.api_key,
             enabled=payload.enabled,
             preset_key=payload.preset_key,
+            auth_style=payload.auth_style,
+            extra_headers=payload.extra_headers,
+            actor=admin.id,
         )
     except ProviderFetchError as exc:
         # 输入问题返回 400 而非 502：用 502 会让管理员以为网关挂了（test/sync 的失败才是 502）。
@@ -137,10 +140,14 @@ async def create_provider(payload: ProviderCreate):
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderRead, summary="更新模型提供商")
-async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
+async def update_provider(
+    provider_id: uuid.UUID,
+    payload: ProviderUpdate,
+    admin: User = Depends(current_admin),  # noqa: B008
+):
     fields = payload.model_dump(exclude_unset=True)
-    # 显式 null 对名称/地址/启用状态没有意义（api_key 例外：null 表示清空）
-    for key in ("name", "base_url", "enabled"):
+    # 显式 null 对名称/地址/启用状态/认证方式没有意义（api_key 例外：null 表示清空）
+    for key in ("name", "base_url", "enabled", "auth_style", "extra_headers"):
         if fields.get(key) is None:
             fields.pop(key, None)
 
@@ -148,7 +155,7 @@ async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
 
     # 「换地址必须重填 key」在服务层（`model_service.update_provider`）：它要先读库才知道有没有 key 可泄露。
     try:
-        provider = await model_service.update_provider(provider_id, **fields)
+        provider = await model_service.update_provider(provider_id, actor=admin.id, **fields)
     except ApiKeyRequiredError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except ProviderFetchError as exc:
@@ -164,8 +171,8 @@ async def update_provider(provider_id: uuid.UUID, payload: ProviderUpdate):
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除模型提供商",
 )
-async def delete_provider(provider_id: uuid.UUID) -> Response:
-    if not await model_service.delete_provider(provider_id):
+async def delete_provider(provider_id: uuid.UUID, admin: User = Depends(current_admin)) -> Response:  # noqa: B008
+    if not await model_service.delete_provider(provider_id, actor=admin.id):
         raise HTTPException(status_code=404, detail="提供商不存在")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -191,9 +198,9 @@ async def test_provider(provider_id: uuid.UUID):
     response_model=ProviderSyncResult,
     summary="同步提供商模型列表",
 )
-async def sync_provider(provider_id: uuid.UUID):
+async def sync_provider(provider_id: uuid.UUID, admin: User = Depends(current_admin)):  # noqa: B008
     try:
-        fetched, created, updated = await model_service.sync_provider_models(provider_id)
+        fetched, created, updated = await model_service.sync_provider_models(provider_id, actor=admin.id)
     except ProviderNotFoundError:
         raise HTTPException(status_code=404, detail="提供商不存在") from None
     except ProviderFetchError as exc:
@@ -221,7 +228,11 @@ async def list_provider_models(provider_id: uuid.UUID):
     status_code=status.HTTP_201_CREATED,
     summary="手动添加模型",
 )
-async def create_provider_model(provider_id: uuid.UUID, payload: ModelCreate):
+async def create_provider_model(
+    provider_id: uuid.UUID,
+    payload: ModelCreate,
+    admin: User = Depends(current_admin),  # noqa: B008
+):
     provider = await _require_provider(provider_id)
     try:
         model = await model_service.create_provider_model(
@@ -235,6 +246,7 @@ async def create_provider_model(provider_id: uuid.UUID, payload: ModelCreate):
             max_output_tokens=payload.max_output_tokens,
             enabled=payload.enabled,
             is_default=payload.is_default,
+            actor=admin.id,
         )
     except DuplicateModelError:
         raise HTTPException(status_code=409, detail="该模型已存在") from None
@@ -244,14 +256,18 @@ async def create_provider_model(provider_id: uuid.UUID, payload: ModelCreate):
 
 
 @router.patch("/models/{model_uuid}", response_model=ModelRead, summary="更新模型")
-async def update_model(model_uuid: uuid.UUID, payload: ModelUpdate):
+async def update_model(
+    model_uuid: uuid.UUID,
+    payload: ModelUpdate,
+    admin: User = Depends(current_admin),  # noqa: B008
+):
     fields = payload.model_dump(exclude_unset=True)
     # 展示名不允许显式清成 null；空字符串由服务层回退成 model_id
     if fields.get("display_name") is None:
         fields.pop("display_name", None)
 
     try:
-        model = await model_service.update_provider_model(model_uuid, **fields)
+        model = await model_service.update_provider_model(model_uuid, actor=admin.id, **fields)
     except InvalidModelStateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     if model is None:
@@ -268,8 +284,8 @@ async def update_model(model_uuid: uuid.UUID, payload: ModelUpdate):
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除模型",
 )
-async def delete_model(model_uuid: uuid.UUID) -> Response:
-    if not await model_service.delete_provider_model(model_uuid):
+async def delete_model(model_uuid: uuid.UUID, admin: User = Depends(current_admin)) -> Response:  # noqa: B008
+    if not await model_service.delete_provider_model(model_uuid, actor=admin.id):
         raise HTTPException(status_code=404, detail="模型不存在")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

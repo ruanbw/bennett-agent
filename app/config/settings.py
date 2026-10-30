@@ -670,6 +670,25 @@ class Settings(BaseSettings):
             "需要在管理后台重新填写（旧明文行不受影响，仍按原样读取）。"
         ),
     )
+    provider_key_secret: str | None = Field(
+        default=None,
+        description=(
+            "加密数据库里提供商 API Key 的密钥；不设则回退 AUTH_SECRET（向后兼容，旧部署无需改配置）。"
+            "**建议独立设置**：两者轮换周期与泄露后果完全不同——签名密钥泄露要立刻换，"
+            "而换 AUTH_SECRET 会让全部已加密的 API Key 解不开；反过来为了保住密文而拖着不换签名密钥，"
+            "重置密码令牌就能被伪造。更换本字段的流程见 `scripts/rotate_provider_keys.py`："
+            "新值写这里、旧值写 PROVIDER_KEY_SECRET_PREVIOUS，重启后跑脚本重加密，再删掉旧值。"
+        ),
+    )
+    provider_key_secret_previous: str | None = Field(
+        default=None,
+        description=(
+            "上一把提供商 API Key 加密密钥：只在轮换期间设置，`secret_box` 用它解密**新密钥写出来之前**"
+            "的旧密文（`MultiFernet` 依次尝试新→旧）。空表示不保留。"
+            "它是一把仍在生效的解密凭据，重加密完成（`scripts/rotate_provider_keys.py --apply`）后必须删掉，"
+            "否则泄露的旧密钥一直能解开库里的密文。"
+        ),
+    )
     auth_cookie_name: str = Field(default="bennett_session", description="会话 cookie 名。")
     auth_cookie_secure: bool = Field(
         default=False,
@@ -825,11 +844,22 @@ class Settings(BaseSettings):
     def _reject_placeholder_secret_in_production(self) -> "Settings":
         """生产级环境用默认密钥等于没有密钥：任何人都能伪造重置密码令牌。
         选择启动即报错而不是打日志警告——警告会被忽略，而后果是任意账号可被接管。
+
+        显式设置的 PROVIDER_KEY_SECRET 也按同一标准校验：它是 AES 密钥的来源，弱值等于
+        库里的 API Key 可被离线爆破，而症状（没有任何报错、一切正常）比签名密钥更隐蔽。
         """
-        if is_production_like(self.app_env) and _is_weak_auth_secret(self.auth_secret):
+        if not is_production_like(self.app_env):
+            return self
+        if _is_weak_auth_secret(self.auth_secret):
             raise ValueError(
                 "生产环境（production/staging）必须设置强随机 AUTH_SECRET：不能是默认/占位值，且至少 32 个字符。"
                 "生成方式：python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        if self.provider_key_secret and _is_weak_auth_secret(self.provider_key_secret):
+            raise ValueError(
+                "生产环境的 PROVIDER_KEY_SECRET 不能是默认/占位值，且至少 32 个字符。"
+                "不设该字段时会回退 AUTH_SECRET（也可接受）；生成方式："
+                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
         return self
 
