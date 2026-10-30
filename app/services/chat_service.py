@@ -427,6 +427,10 @@ async def stream_chat_events(
     if compaction is not None and compaction.changed:
         yield ContextCompacted(
             strategy="summarize" if compaction.strategy == "summarize" else "truncate",
+            # 必须透传：`digest_kind` 是唯一能区分「模型真写了摘要」与「超时退化成抽取式」的信号。
+            # 漏传时 schema 的默认值 `"extractive"` 会出现在 100% 的事件里，包括健康路径与缓存命中，
+            # 于是这个字段恒为常量——「压缩退化了」这件事再也看不出来。
+            digest_kind=compaction.digest_kind,
             dropped_messages=compaction.dropped_messages,
             truncated_messages=compaction.truncated_messages,
             used_tokens_before=compaction.used_tokens_before,

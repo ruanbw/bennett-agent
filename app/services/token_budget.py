@@ -373,7 +373,10 @@ def overflow_message(budget: ContextBudget) -> str:
     """
     return (
         f"本会话上下文约 {budget.used_tokens:,} tokens，超出模型 {budget.model} 的可用上限 "
-        f"{budget.limit_tokens:,}（该模型窗口 {budget.context_window:,}）。"
+        # 不能写「该模型窗口」：主模型配了窗口更小的备用模型时，判定用的是两者较小值，
+        # 那样写会把备用模型的窗口报成用户所选模型的窗口，给出的建议（换个窗口更大的模型）
+        # 也就无从执行——他已经选的就是大的那个。
+        f"{budget.limit_tokens:,}（判定窗口 {budget.context_window:,}，取主模型与备用模型中较小者）。"
         "请新建会话后继续提问，或改用上下文窗口更大的模型。"
     )
 

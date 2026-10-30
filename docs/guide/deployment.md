@@ -43,6 +43,7 @@ cp .env.example .env
 | `AUTH_COOKIE_SECURE` | `true` | 生产走 HTTPS；为 false 也会**拒绝启动** |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | 随机值，且与 compose 里 RustFS 的同名变量一致 | compose 的 RustFS 默认凭据是公开值，只在回环端口上暴露 |
 | `DATABASE_URL` | 不用改 | compose 的 `environment:` 会覆盖成容器内地址 |
+| `POSTGRES_PASSWORD` | 与 `DATABASE_URL` 里的口令一致，**必填** | compose 里是 `${POSTGRES_PASSWORD:?...}`（`docker-compose.yml`），缺了 `docker compose up` 直接报错退出。之所以不给默认值：那个默认值会变成所有部署共享的口令，而它守护的是唯一一个能读写全部会话的库。改这个值**不会**改已有数据卷里 postgres 的密码，已有部署请保持原值 |
 | `CORS_ALLOWED_ORIGINS` | 同域反代时留空 | production 不回退本地前端端口 |
 
 生成密钥：
@@ -57,6 +58,7 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 - **`environment:` 里的服务地址必须覆盖 `env_file:` 里的宿主机地址**：数据库走 `postgres:5432`，Redis 走 `redis:6379`，对象存储走 `rustfs:9000`。
 - **`NO_PROXY` / `no_proxy` 已自动追加 `postgres,redis,rustfs`**。不配的话容器内的 `http://rustfs:9000` 会被宿主代理拦掉，报错看起来像「对象存储没起来」。
 - **密钥不要写进 compose 文件**。compose 用 `env_file:` 而不是逐条 `environment:`，正是为了不让 `AUTH_SECRET` 出现在 `docker inspect` 的容器元数据里。
+- **容器加了 `cap_drop: [ALL]` 与 `no-new-privileges:true`**（`docker-compose.yml`）。应用进程不需要任何 Linux capability（不绑低端口、不建网、不调 raw socket），先全部丢掉再按需加回，比逐条列黑名单可靠：`CAP_NET_RAW` 这类能绕开网络策略的能力很难穷举。`no-new-privileges` 挡住 `setuid` 提权，让「应用进程被拿下」不等于「容器 root」。
 - **`AUTH_SECRET` 同时是库里 API Key 的加密密钥**（`app/config/secret_box.py`）。轮换它等于让所有已加密的 Key 解不开，需要在管理后台逐个重填；`/health/ready` 的 `provider_keys` 项会点名。
 - **连接池总量 = (`DATABASE_POOL_SIZE` + `DATABASE_MAX_OVERFLOW`) × 进程数**，默认 10 + 10 = 20。`main.py` 不起多 worker，所以单容器就是一个进程；多实例部署时乘以实例数，并确保明显小于 compose 里设的 Postgres `max_connections=200`。
 - **多套部署共用一个 Redis 时 `REDIS_KEY_PREFIX` 必须各不相同**（默认 `bennett`），否则限流桶与会话缓存会互相踩。

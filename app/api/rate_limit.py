@@ -398,6 +398,11 @@ class InFlightStreamLimiter:
             if remaining < 0:
                 # 只可能是「归还多于占用」（降级切换/进程重启），删掉让下一次请求从 0 开始
                 await client.delete(self._key(key))
+            # Redis 正常时也要清掉降级期间留下的进程内计数：`acquire` 只在 Redis 抛错时累加它，
+            # 而这个分支原来直接 return，于是「Redis 抖动时占位、恢复后归还」会永久留下一条无法回收的
+            # 计数（`_local` 没有 TTL）。攒满 `CHAT_MAX_INFLIGHT_STREAMS` 次之后，该账号下次 Redis
+            # 抖动就会拿到一个永远解不掉的 429。
+            self._local.pop(key, None)
             return
         except Exception:  # noqa: BLE001
             warn_throttled("rate_limit", "Redis 在途流计数不可用，降级为进程内计数")

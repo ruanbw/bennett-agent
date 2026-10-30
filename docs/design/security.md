@@ -63,7 +63,11 @@ SameSite=Lax 只限制是否携带已有 cookie，不阻止跨站顶层表单 PO
 受害者会被静默登入攻击者账号。
 
 来源判定顺序：`Origin` → `Referer` → `Sec-Fetch-Site`。三者都没有时只拒 `cross-site`。
-允许列表来自 `CORS_ALLOWED_ORIGINS`；同 host 的来源也算允许。
+允许列表来自 `CORS_ALLOWED_ORIGINS`；同 host 的来源也算允许。`Referer` 会先归一化成 `scheme://host` 再比对——带路径的 `Referer` 与允许列表里只写到 host 的条目永远对不上。
+
+**`CORS_ALLOWED_ORIGINS=*` 不再连带放行写请求。** 早先这两件事共用一个判据，配了 `*` 的开发环境里跨站顶层表单 POST 能一路走到 `/api/*`；CORS 只决定浏览器**读不读**响应，它从来不是服务端的访问控制。现在 `*` 只影响响应头，要真正放开跨站写请求得显式设 `CSRF_ALLOW_ANY_ORIGIN=true`（默认关闭，`app/config/settings.py`）。
+
+被拒时按判定依据累加 `csrf_rejected_total{reason}`（`origin` / `referer` / `sec-fetch-site`）。持续非零通常是前端来源配错了，而不是有人在打——没有这个指标时，唯一的症状是用户说「点保存没反应」。
 
 ## RBAC
 
@@ -248,6 +252,14 @@ MCP 工具的风险等级默认 `safe_write`（第三方实现，无法确认有
 - `S3_SECRET_KEY` 必须由密钥管理注入，不写进镜像或 compose 文件。
 - 沙箱 server 的 API Key 为空时服务端要求显式确认「无鉴权」，生产必须配。
 
+## 生产级环境的判定
+
+「是不是生产」这件事只由 `app/config/settings.py:is_production_like()` 回答，集合是 `PRODUCTION_LIKE_APP_ENVS = {"production", "staging"}`。
+
+`staging` 必须与前缀一致：它承接入网测试流量、常常连着生产数据的一份拷贝，但**没有**生产那套 WAF 与访问控制。把 `staging` 当开发环境处理，等于在「有真实数据、没有真实防护」的环境里关掉弱密钥检查、`Secure` cookie 与 `/docs` 关闭——这正是最容易被忽略的一档。
+
+散落的 `app_env == "production"` 字面比较是这一档最容易漏的地方：新增一处就漏一处。判定入口只有一个函数，检查项新增时不会漏掉 `staging`。
+
 ## CORS、跨站守卫、安全头与请求体上限
 
 ### CORS
@@ -274,7 +286,12 @@ Access-Control-Expose-Headers: Retry-After, X-RateLimit-Limit, X-RateLimit-Remai
 X-Content-Type-Options: nosniff
 X-Frame-Options: DENY
 Referrer-Policy: no-referrer
+Strict-Transport-Security: max-age=31536000   # 仅 AUTH_COOKIE_SECURE=true 时
 ```
+
+HSTS 跟随 `AUTH_COOKIE_SECURE` 而不是 `app_env`：cookie 标了 `Secure` 才说明这个部署**确实**只在 HTTPS 上服务。在纯 HTTP 环境发 HSTS 会把 `http://` 永久改写成 `https://`，本地调试与内网部署会直接打不开。
+
+`Server: uvicorn` 指纹头在 `main.py` 里用 `server_header=False` 关掉：它只能告诉扫描器「这是个 Python 服务」，对运维没有价值。（只对 `python main.py` 启动生效，用 `uvicorn` 命令直连启动时 uvicorn 会自己补回来。）
 
 `/api/*` 额外带 `Cache-Control: no-store`（已有值不覆盖）：
 `/api/auth/me`、`/api/admin/users` 的响应含账号与角色信息，

@@ -125,6 +125,21 @@ runtime 只定义规则与最小接口（`ToolCatalog` 就是一个 `describe(na
 所以调用方必须把结果纳入缓存键——`agent_factory._settings_cache_key()` 里有
 `is_usable_api_key(settings.tavily_api_key)`（只取布尔值，避免密钥原文进键）。
 
+## 中间件顺序
+
+`add_middleware` 的**注册序与执行序相反**：最后注册的在最外层、最先看到请求。`app/server.py:384` 起按这个顺序注册，所以实际执行是自外向内：
+
+| 层 | 中间件 | 为什么在这个位置 |
+|---|---|---|
+| 1（最外） | `SecurityHeadersMiddleware` | 最后注册，因此连 CORS 与限流产生的错误响应也带安全头。HSTS 跟随 `AUTH_COOKIE_SECURE`：cookie 标了 `Secure` 才说明部署确实走 HTTPS |
+| 2 | `RequestContextMiddleware` | 生成 `request_id` 并写进 `scope["state"]`，所以第 1 层之外的 413/403/500 都能带 `X-Request-ID` |
+| 3 | `CORSMiddleware` | 在指标之外，OPTIONS 预检被它直接应答、不会进入指标 |
+| 4 | `HttpMetricsMiddleware` | 在 CORS 之内：只给真正进到业务的请求计时。若放到 CORS 外面，预检会被算成请求，错误率分母虚高并混进 `<unmatched>` 标签 |
+| 5 | `OriginGuardMiddleware`（跨站守卫） | 必须在 CORS **之前**注册（= 更内层）才能在拒绝写请求时还带着 CORS 头，否则浏览器只显示 CORS 错误、看不到真实原因 |
+| 6（最内） | `MaxBodySizeMiddleware` | 同上：413 要带 CORS 头，否则前端看到的是「网络错误」而不是「请求体太大」 |
+
+顺序有两处容易搞反，都会表现为「本地好好的、线上只看到 CORS 报错」：注册越晚越靠外；`MaxBodySizeMiddleware` 与 `OriginGuardMiddleware` 必须比 `CORSMiddleware` 更内。
+
 ## 启动顺序
 
 `app/server.py` 的 `lifespan` 按固定顺序执行，失败的处理各不相同：

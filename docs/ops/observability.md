@@ -17,7 +17,9 @@ description: 健康探针、Prometheus 指标名与标签、请求 ID 传递、�
 
 ### `GET /health/ready`
 
-就绪探针。逐项探测依赖，按配置决定是否把实例摘出负载均衡：
+就绪探针。逐项探测依赖，按配置决定是否把实例摘出负载均衡。
+
+四项**并发**探测、共享一个 2 秒总预算：串行探测在最坏情况下（每项都卡满超时）要 8 秒，而探针自己的超时通常配在 3~5 秒，结果是「依赖真挂了」与「探针跑不完」在监控上无法区分。并发后最坏约 2 秒，总会返回明确结论。
 
 | 检查项 | 怎么判 | 失败时 |
 |---|---|---|
@@ -40,7 +42,9 @@ curl -s http://127.0.0.1:8000/health/ready | python -m json.tool
 
 ## 指标端点
 
-`GET /api/metrics` 输出 Prometheus 文本格式（`text/plain; version=0.0.4; charset=utf-8`）。
+`GET /api/metrics` 输出 Prometheus 文本格式（`text/plain; version=0.0.4; charset=utf-8`），按指标名分组输出，`# HELP` 与 `# TYPE` 只在每个指标首次出现时写一次。
+
+支持 counter、histogram 与 gauge；histogram 允许**按指标**指定桶边界（`observe(..., buckets=...)`），同名指标用不同桶时会告警一次并沿用先注册的那套——Prometheus 不允许同名 hist 有两种桶，静默覆盖会让两处代码互相打架。时间序列总数超过上限时丢弃新序列并累加 `metrics_series_dropped_total`：不设上限的单指标高基数标签（例如把原始 URL 当 `route`）能让进程 OOM。
 
 **默认关闭**（`METRICS_ENABLED=false`），关闭时返回 **404 而不是 403**：免登录端点多开一个就多一分侦察面，404 比「存在但你不能看」泄露得更少。打开后建议同时用反向代理把它挡在内网或白名单后面——它没有认证。
 
@@ -56,14 +60,21 @@ curl -s http://127.0.0.1:8000/api/metrics | head -20
 
 | 指标名 | 类型 | 标签 | 含义 |
 |---|---|---|---|
-| `http_requests_total` | counter | `method`、`route`、`status` | HTTP 请求数。`route` 是路由模板不是实际路径；`status` 是分类（`2xx`/`4xx`/`5xx`/`none`），`none` 是响应前就断开。`/health*` 与 `/api/metrics` 本身不统计 |
+| `http_requests_total` | counter | `method`、`route`、`status` | HTTP 请求数。`route` 是路由模板不是实际路径；`status` 是分类（`2xx`/`4xx`/`5xx`/`none`），`none` 是响应前就断开。未捕获异常**记 `5xx`**（早先记成 `none`，结果是「服务在 500」在错误率上看不见）。`/health*`、`/api/metrics` 与 OPTIONS 预检不计 |
 | `http_request_duration_seconds` | histogram | `method`、`route` | 请求耗时。计时覆盖到响应发送完毕，`/api/chat` 是整条 SSE 流的时长 |
 | `chat_streams_total` | counter | `outcome` | 对话流终态数。正常收尾是 `done`/`error`/`stopped`/`timeout`/`approval_required`；没进流式循环就被拒的轮次另记 `model_unavailable`/`context_overflow`/`invalid_history`，否则错误率永远算不出来 |
-| `chat_first_event_seconds` | histogram | 无 | 首字节耗时——用户感知的「卡不卡」主要就是这一段 |
 | `context_compactions_total` | counter | `result`（`compacted`/`rejected`） | 上下文压缩次数，是「会话还能用多久」的先行指标 |
 | `tool_executions_total` | counter | `tool`、`outcome` | 工具执行。`outcome` 取 `success`/`failed`/`denied`/`interrupted`；失败率 = `failed` / (`success` + `failed`)，审批与中断不算故障 |
 | `model_fallbacks_total` | counter | `from`、`to` | 备用模型切换次数 |
 | `redis_unavailable_total` | counter | `reason` | Redis 降级次数。当前代码里只发 `rate_limit` / `search_cache` 两个值；会话热缓存失败只记 warning，不打这个指标 |
+| `chat_first_event_seconds` | histogram | `model` | 首个事件延迟。带 `model` 才能在备用模型接手时把成绩记到真正应答的模型上；混在一起算平均会把一次容灾误读成整体变慢 |
+| `chat_prompt_tokens_total` / `chat_completion_tokens_total` | counter | 无 | 用量。上游没回 `usage` 时**整块跳过而不是补 0**，所以「增长变慢」可能是采集缺失而非真的省了钱 |
+| `chat_stream_retries_total` | counter | `model` | 流式重试次数。每次重试都是一次额外的全量 prompt 计费 |
+| `model_upstream_errors_total` | counter | `provider`、`status_class` | 上游失败按提供商与状态类分桶；`status_class` 是有限集合，不能塞原始状态码（会打爆时间序列数） |
+| `auth_login_failures_total` | counter | `reason` | 登录失败。与按 IP 的限流桶互补：换个出口就绕过 IP 桶，账号维度才拦得住凭据填充 |
+| `csrf_rejected_total` | counter | `reason`（`origin`/`referer`/`sec-fetch-site`） | 跨站守卫拒绝数。持续非零说明前端来源配置错了，或有人在试 CSRF |
+| `untrusted_markers_neutralized_total` | counter | `source` | 被中和的伪造不可信定界符。非零意味着上游内容在试图冒充系统指令 |
+| `sync_push_rejected_total` / `sync_cursor_stale_total` / `sync_pull_rows_total` | counter | `reason` / 无 / 无 | 同步侧：拒绝原因分布、游标过期（会触发全量重同步）、拉取行数 |
 
 延迟直方图的桶固定在 `DEFAULT_BUCKETS`：0.005s 到 600s，跨度按「大致翻倍」而非等距——延迟是长尾分布。上界取 600 秒（对话流的总预算），取小了长流全落进 `+Inf`，首字延迟的 p95 从此不可读。
 
@@ -73,9 +84,11 @@ curl -s http://127.0.0.1:8000/api/metrics | head -20
 
 `RequestContextMiddleware` 给每个请求分配一个 12 位十六进制的 ID，同时出现在三处：
 
-- 响应头 `X-Request-ID`；
+- 响应头 `X-Request-ID`（500 也带，且与该响应的 `error_id` 是同一个值）；
 - 每条日志行的 `[request_id]` 字段；
 - 未捕获异常的 500 响应体里的 `error_id`。
+
+500 的 `error_id` 从 ASGI `scope["state"]` 读，而不是用 `contextvars` 里的当前值：异常可能发生在 contextvar 已被清理或尚未设置的时机，那时 `contextvars` 拿不到值，响应体里会出现 `error_id: "-"`——用户报错时给出的那串 ID 恰恰查不到任何日志。`RequestContextMiddleware` 因此把 ID 同时写进 `scope["state"]`（Starlette 的 `request.state` 与 `scope["state"]` 并不是同一个对象，只写前者时异常处理器读不到）。
 
 客户端可以自带 `X-Request-ID`（网关已生成时不必再造），但会被 `sanitize_request_id` 校验：长度不超过 64、字符集限 ASCII 字母数字加 `._-`。不合法的值被丢弃并自己生成——它会原样写进日志行与响应头，换行符能伪造一整条假日志。
 

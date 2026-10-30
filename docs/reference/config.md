@@ -26,6 +26,7 @@ description: Settings 里 89 个字段的变量名、类型、默认值与作用
 | `ENABLE_API_DOCS` | bool（可空） | `None` | 是否暴露 `/docs`、`/redoc`、`/openapi.json`。`None` = 自动：production 关闭、其余环境开启（`app/server.py:205`）。 |
 | `ASSISTANT_NAME` | str | `Bennett` | 展示名。进 OpenAPI 标题（`app/server.py:330`）、系统提示词与首轮标题生成，同时是 agent 装配缓存键的一部分。 |
 | `CORS_ALLOWED_ORIGINS` | str | `""` | 逗号分隔的来源白名单。留空时 development 回退 `localhost:5173/5174` 与 `127.0.0.1:5173/5174`，production 不回退（`app/config/settings.py:844`）。尾斜杠、重复项、只剩协议的坏值会被清掉，`*` 保留。 |
+| `CSRF_ALLOW_ANY_ORIGIN` | bool | `False` | **危险开关**：允许任意 Origin 的 `/api/*` 状态变更请求通过跨站守卫，等于关掉 CSRF 防护。`CORS_ALLOWED_ORIGINS=*` 只决定 CORS 响应头，**不再**连带放行写请求——否则配了 `*` 的部署里，跨站顶层表单 POST 能把受害者静默登入攻击者账号。被拒时按原因累加 `csrf_rejected_total{reason=origin\|referer\|sec-fetch-site}`。 |
 | `CORS_ALLOW_CREDENTIALS` | bool | `False` | 允许浏览器携带 cookie。设为 true 后生效的 SameSite 会变成 `none`（见 `AUTH_COOKIE_SAMESITE`），且来源列表不能含 `*`。 |
 | `MAX_REQUEST_BODY_BYTES` | int | `33554432` | 单个请求体的硬上限（字节，下限 1024），默认 32 MiB。超限返回 413 且不会把 body 读进内存（`app/middleware.py:45`）。 |
 
@@ -125,6 +126,8 @@ Redis 故障时的行为由限流那两个字段决定（见下一节），缓�
 | `AUTH_COOKIE_SAMESITE` | `Literal["lax","strict","none"]`（可空） | `None` | `None` = 自动：`CORS_ALLOW_CREDENTIALS=true` 时取 `none`，否则取 `lax`（`app/config/settings.py:821`）。生效值为 `none` 时必须 `AUTH_COOKIE_SECURE=true`。 |
 | `SESSION_LIFETIME_SECONDS` | int | `2592000` | 登录态有效期（秒，≥60，默认 30 天），同时决定 cookie 的 Max-Age（`app/services/auth.py:71`）。 |
 | `REGISTRATION_ENABLED` | bool | `True` | 是否允许公开注册。关闭后注册端点返回 403（`app/api/auth.py:77`），需要用 `scripts/seed_admin.py` 或后台建号。 |
+| `PROVIDER_KEY_SECRET` | str（可空） | `None` | 加密库里提供商 API Key 的密钥；不设则回退 `AUTH_SECRET`。**建议独立设置**：签名密钥泄露要立刻换，而换 `AUTH_SECRET` 会让全部已加密的 Key 解不开；反过来为了保住密文而拖着不换签名密钥，重置密码令牌就能被伪造。生产环境要求 ≥32 字符（`app/config/settings.py`）。 |
+| `PROVIDER_KEY_SECRET_PREVIOUS` | str（可空） | `None` | 只在轮换期间设置。`secret_box` 是 `MultiFernet`，新→旧依次尝试解密，所以旧密文（`enc:v1:` 与旧 kid 的 `enc:v2:`）仍可读。重加密完成后（`scripts/rotate_provider_keys.py --apply`）**必须删掉**，否则泄露的旧密钥一直能解开库里的密文。 |
 
 ## 限流与可信代理
 
@@ -133,6 +136,7 @@ Redis 故障时的行为由限流那两个字段决定（见下一节），缓�
 | `CHAT_RATE_LIMIT_PER_MINUTE` | int | `30` | 单个**账号**每分钟的对话/标题请求数（≥0，0 = 不限流）。 |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | int | `10` | 单个**来源 IP** 每分钟的登录 / 注册请求数（≥0）。登录与注册各自一个桶（桶名取路径末段，`app/api/rate_limit.py:401`）。 |
 | `CHANGE_PASSWORD_RATE_LIMIT_PER_MINUTE` | int | `5` | 单个**账号**每分钟的改密请求数（≥0）。每次校验当前密码都是一次 Argon2 计算（`app/api/auth.py:147`）。 |
+| `ACCOUNT_LOGIN_FAILURE_LIMIT_PER_HOUR` | int | `20` | 单个**账号**每小时允许的登录失败次数（≥0，0 = 不限）。按 IP 的桶换个出口就能绕过，分布式凭据填充只能按账号拦（ASVS 2.2.1 的上限是每小时 100 次，这里更严）。只在失败分支累加，所以正确密码永远能登录，被锁住的只是「继续猜」；超限返回 429 带 `Retry-After`。 |
 | `RATE_LIMIT_BACKEND` | `Literal["redis","memory"]` | `redis` | 计数存储。`memory` = 进程内（单 worker 够用）；配额变化时会重建限流器（`app/api/rate_limit.py:324`）。 |
 | `RATE_LIMIT_ON_REDIS_ERROR` | `Literal["local_fallback","fail_closed","fail_open"]` | `local_fallback` | Redis 不可用时的处置：退到进程内计数 / 一律 429 / 一律放行（`app/api/rate_limit.py:290`）。三种都会告警并累加 `redis_unavailable_total`。 |
 | `TRUSTED_PROXY_HEADERS` | str | `""` | 受信任的代理 IP 标头，如 `X-Forwarded-For,X-Real-IP`。只有直连对端落在 `TRUSTED_PROXY_IPS` 内才采信。 |
@@ -260,6 +264,8 @@ CORS_ALLOWED_ORIGINS=https://app.example.com   # production 留空不回退本�
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | 日志级别，只接受 `CRITICAL` / `ERROR` / `WARNING` / `INFO` / `DEBUG`（大小写不敏感），认不出退回 `INFO`（`app/config/logging_setup.py:54`）。`DEBUG` 下 httpx / openai 等第三方库仍被压在 `WARNING`。 |
 | `LOG_ACCESS` | `False` | 是否输出 uvicorn 访问日志。`true/1/yes/on` 为真，`false/0/no/off` 为假，其余退回默认（`app/config/logging_setup.py:60`）。 |
+| `LOG_JSON` | `False` | 日志格式。默认文本单行；设 `1/true/yes/on` 输出单行 JSON，traceback 整体落进 `exc_info` 单字段，采集器按行切分时不会把栈帧与它的 `request_id` 分家。根 logger 与 uvicorn 的三个 logger 同时切换（`app/config/logging_setup.py:JsonFormatter`）。 |
+| `SETTINGS_SECRETS_DIR` | 空 | 从目录读密钥文件（pydantic `secrets_dir`）：每项一个文件，文件名即变量名，内容即值。用于把 `AUTH_SECRET` / `PROVIDER_KEY_SECRET` 从环境变量挪到文件（进程环境对同机任何进程可见，文件可用 0400 收窄）。**只能在进程环境里设，不能写进 `.env`**——`secrets_dir` 在类定义时就求值，写进 `.env` 不生效（`app/config/settings.py:secrets_dir_from_env`）。 |
 | `OPENSANDBOX_INSECURE_SERVER` | 未设置 | 由 OpenSandbox server 自己读取，不属于本服务配置。设为 `YES` 才允许无鉴权启动，见 `scripts/demo/README.md`。 |
 
 质量平台的变量由 `python -m quality` 这个独立 CLI 读取，不进服务进程，模块级读取意味着要在启动它之前设好；命令行参数可覆盖（`QUALITY_TIMEOUT_S` 是例外：拿到非数字会在导入时抛 `ValueError`）。

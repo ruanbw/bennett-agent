@@ -5,6 +5,7 @@ httpx/openai 在 DEBUG 下会打印请求头（含 API Key），必须压到 WAR
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Iterable
@@ -51,6 +52,57 @@ def parse_bool_env(raw: str | None, default: bool) -> bool:
     return default
 
 
+#: `LogRecord` 自带的属性名。JSON 输出时把不属于这些的键当作调用方 `extra=` 传进来的业务字段。
+_RESERVED_RECORD_KEYS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None)).keys()) | {
+    "message",
+    "asctime",
+    "request_id",
+}
+
+
+class JsonFormatter(logging.Formatter):
+    """单行 JSON 日志。
+
+    为什么需要：文本格式下 traceback 是多行，采集器按行切分会把栈帧与它所属的 `request_id`
+    拆到不同事件里，事后无法把一次 500 的所有日志串起来。JSON 把栈整体塞进 `exc_info` 一个字段，
+    一条记录永远只占一行。
+
+    不做任何字段裁剪：调用方 `extra=` 传的业务字段（如 `user_id`、`conversation_id`）原样带上，
+    否则要排查时还得回代码里找打了什么。不可序列化的值退化成 `str()`，不是为了好看，
+    是因为日志格式化抛异常会把产生日志的那个请求一起打挂。
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, object] = {
+            "ts": self.formatTime(record, LOG_DATE_FORMAT),
+            "level": record.levelname,
+            "logger": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "message": record.getMessage(),
+        }
+        for key, value in vars(record).items():
+            if key not in _RESERVED_RECORD_KEYS:
+                payload[key] = value
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        elif record.stack_info:
+            payload["stack_info"] = self.formatStack(record.stack_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def make_formatter(*, json_logs: bool) -> logging.Formatter:
+    """两种格式共用同一个入口，避免 JSON 开关只在根 handler 生效、uvicorn 的 handler 还是文本。"""
+    if json_logs:
+        return JsonFormatter(datefmt=LOG_DATE_FORMAT)
+    return logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+
+
+def json_logs_from_env(env: dict[str, str] | None = None) -> bool:
+    """`LOG_JSON` 的取值（默认 text）。"""
+    source = os.environ if env is None else env
+    return parse_bool_env(source.get("LOG_JSON"), default=False)
+
+
 def log_level_from_env(env: dict[str, str] | None = None) -> str:
     """`LOG_LEVEL` 的取值（默认 INFO）。"""
     source = os.environ if env is None else env
@@ -74,6 +126,7 @@ def configure_logging(
     *,
     level: str | None = None,
     access_log: bool | None = None,
+    json_logs: bool | None = None,
 ) -> int:
     """配置根 logger 与 uvicorn 的 logger，返回最终生效的级别；`basicConfig(force=True)` 保证幂等。"""
     resolved = level if level is not None else log_level_from_env()
@@ -82,7 +135,12 @@ def configure_logging(
     if not isinstance(numeric, int):  # 理论上不会发生；parse_log_level 已保证合法
         numeric = logging.INFO
 
+    want_json = json_logs_from_env() if json_logs is None else json_logs
     logging.basicConfig(level=numeric, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT, force=True)
+    if want_json:
+        # basicConfig 只接受 format 字符串，换不了 formatter 类；只能事后把根 handler 的格式换掉。
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(make_formatter(json_logs=True))
 
     # 挂在 handler 而不是 logger 上：handler 级 filter 对所有经过它的记录生效，包括子 logger 冒泡上来的。
     from app.observability import RequestIdFilter
@@ -93,7 +151,7 @@ def configure_logging(
             handler.addFilter(RequestIdFilter())
 
     # uvicorn 的三件套：改成同一套格式，并按需关掉 access log
-    formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    formatter = make_formatter(json_logs=want_json)
     want_access = access_log_enabled() if access_log is None else access_log
     for name in UVICORN_LOGGERS:
         uv_logger = logging.getLogger(name)

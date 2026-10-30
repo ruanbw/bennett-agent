@@ -104,3 +104,72 @@ def test_log_level_can_come_from_the_environment():
     assert log_level_from_env({"LOG_LEVEL": "warning"}) == "WARNING"
     assert log_level_from_env({}) == "INFO"
     assert log_level_from_env({"LOG_LEVEL": "loud"}) == "INFO"
+
+
+def test_json_formatter_keeps_traceback_on_one_line():
+    """JSON 日志存在的唯一理由：一条记录只占一行，栈帧不能与它的 request_id 分家。
+
+    文本格式下 traceback 是多行，采集器按行切分会把栈帧切成独立事件，
+    事后无法把一次 500 抛出的所有日志按 request_id 串起来。
+    """
+    import json
+
+    from app.config.logging_setup import JsonFormatter
+
+    record = logging.LogRecord("app.api.chat", logging.ERROR, __file__, 1, "boom %s", ("x",), None)
+    record.request_id = "req-123"
+    try:
+        raise RuntimeError("inner")
+    except RuntimeError:
+        import sys
+
+        record.exc_info = sys.exc_info()
+
+    line = JsonFormatter().format(record)
+    assert "\n" not in line, "多行输出会让按行切分的采集器把栈帧孤立出来"
+    payload = json.loads(line)
+    assert payload["request_id"] == "req-123"
+    assert payload["level"] == "ERROR"
+    assert "RuntimeError: inner" in payload["exc_info"]
+
+
+def test_json_formatter_carries_extra_fields_and_survives_unserializable():
+    """`extra=` 传的业务字段必须带出来；不可序列化的值退化成 str 而不是让格式化抛异常——
+    否则产生日志的那个请求会跟着一起 500。"""
+    import json
+
+    from app.config.logging_setup import JsonFormatter
+
+    record = logging.LogRecord("app.api.chat", logging.INFO, __file__, 1, "hi", None, None)
+    record.user_id = "u-1"
+    record.blob = object()
+
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["user_id"] == "u-1"
+    assert isinstance(payload["blob"], str)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1", True), ("true", True), ("0", False), ("", False), (None, False)])
+def test_json_logs_from_env(raw, expected):
+    from app.config.logging_setup import json_logs_from_env
+
+    env = {} if raw is None else {"LOG_JSON": raw}
+    assert json_logs_from_env(env) is expected
+
+
+def test_configure_logging_switches_both_root_and_uvicorn_to_json():
+    """开关不能只作用于根 handler：uvicorn 的三个 logger 有独立 handler，
+    漏掉它们的结果是同一份日志里一半 JSON 一半文本，采集器直接解析失败。"""
+    import json
+
+    from app.config.logging_setup import configure_logging
+
+    try:
+        configure_logging(level="INFO", access_log=False, json_logs=True)
+        for name in (None, *UVICORN_LOGGERS):
+            logger = logging.getLogger() if name is None else logging.getLogger(name)
+            for handler in logger.handlers:
+                line = handler.formatter.format(logging.LogRecord("x", logging.INFO, __file__, 1, "m", None, None))
+                assert json.loads(line)["message"] == "m", f"{name or 'root'} 的 handler 仍是文本格式"
+    finally:
+        configure_logging(level="INFO", access_log=False, json_logs=False)
