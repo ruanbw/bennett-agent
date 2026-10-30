@@ -56,3 +56,7 @@ docs/demo-admin/timeline.json
 
 # macOS Finder 产物（仓库根也会生成，不只各子项目）
 .DS_Store
+
+# 评测产物（可重跑）
+quality/runs/*
+!quality/runs/.gitkeep

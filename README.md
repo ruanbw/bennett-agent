@@ -161,6 +161,28 @@ CI（GitHub Actions）：后端跑 ruff、结构漂移检测、pytest；前端�
 uv run python scripts/run_eval.py
 ```
 
+## 评测 / 调优 / 安全管控（`quality/`）
+
+`evals/` 回答「这轮行为对不对」，`quality/` 回答发布前该问的三件事：**改完是变好还是变坏、该改什么、能不能放行**。三段闭环跑在项目自己身上——被测对象是真实的 `prompts/system_prompt.jinja` 与 `app/tools` 工具契约，判分只读 Trace。
+
+```bash
+# 评测：k 次采样 → 五维指标 + Pass^k
+uv run python -m quality run --suite quality/suites/core-behavior.yaml --samples 3
+
+# 安全：OWASP Agentic 探针，命中 critical 即非 0 退出
+uv run python -m quality scan --samples 2 --fail-over 30
+
+# 调优：失败聚簇 → 改提示词 → 重跑 → Pareto 选优（输出可回滚 diff）
+uv run python -m quality tune --suite quality/suites/core-behavior.yaml --iterations 2
+
+# 门禁：与基线报告比，回归即非 0
+uv run python -m quality gate --current quality/runs/core-behavior/<new> --baseline quality/runs/core-behavior/<base>
+```
+
+产物落 `quality/runs/<suite>/<run_id>/`：`report.json`、自包含 `report.html`、逐样本轨迹 `verdicts.jsonl`、append-only `audit.jsonl`。设计口径、指标定义与借自 Claw-Eval / OpenJudge / reflection / A.I.G 的机制见 [`docs/quality-platform.md`](docs/quality-platform.md)。
+
+`--driver scripted` 与 `--judge none` 用于离线自测；真数字要 `--driver openai`（默认指向本地 OpenAI 兼容代理）。
+
 ## 常用脚本
 
 | 脚本 | 用途 |

@@ -100,6 +100,26 @@ jobs:
         # 但**需要** postgres / redis / rustfs（见上面的 services）。
         run: uv run pytest
 
+  quality:
+    # 评测框架自己的测试必须**不依赖任何服务**：它要是需要 Postgres 才能跑，
+    # 就没人会在改评测逻辑时跑它，而评测逻辑坏了会让后面所有结论失真。
+    # 真实模型评测不在这里跑：一次全量要花钱且不稳定，属于发版前的人工动作。
+    name: 评测框架自测（quality/）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --locked
+
+      - name: 判分器 / 执行器 / 调优 / 安全 / 报告
+        run: uv run pytest quality/tests -q
+
   frontend:
     name: 前端（lint + 类型 + 测试 + 构建）
     runs-on: ubuntu-latest
