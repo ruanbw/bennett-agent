@@ -225,9 +225,8 @@ def _head_and_tail(pairs: list[tuple[str, str]], capacity: int) -> list[tuple[st
 def _render_transcript(messages: Sequence[ChatMessage], limit_chars: int) -> str:
     """把要折叠的消息渲染成摘要调用的输入：头 35% + 尾 65%。
 
-    「从最新往回填、超限即 break」曾经让会话开头成为第一个被丢掉的东西，而摘要要替整段
-    历史当记忆，开头正是身份、偏好与用户最初的约束的所在（与 `truncate_middle` 同一思路：
-    头尾都比中间重要）。两段可能碰头，所以头部按条数占位，尾部只从剩下的那些里取。
+    摘要要替整段历史当记忆，开头是身份、偏好与用户最初的约束的所在（与 `truncate_middle` 同一思路：
+    头尾都比中间重要），所以头部也保留。两段可能碰头，所以头部按条数占位，尾部只从剩下的那些里取。
     """
     blocks = [f"{speaker}: {text}" for speaker, text in _speaker_texts(messages)]
     if not blocks:

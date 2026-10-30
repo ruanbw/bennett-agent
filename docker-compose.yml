@@ -2,9 +2,9 @@
 #
 # ## 这个文件编排什么
 #
-#   postgres  业务库（用户 / 会话 / 会话同步 / 知识库 / 上传记录）
+#   postgres  业务库（用户 / 会话 / 会话同步 / 模型提供商与模型 / 沙箱租约）
 #   redis     限流计数、搜索缓存、会话 token 热缓存
-#   rustfs    对象存储（S3 协议），存上传文件的原件
+#   rustfs    对象存储（S3 协议），存沙箱产物
 #   app       FastAPI 后端（只提供 /api/*，启动时执行 sql/init.sql 建表，并跑沙箱回收）  [profile: app]
 #
 # ## 开发与生产的区别：靠 profile 表达
@@ -40,7 +40,7 @@
 #   docker compose logs -f app
 #
 # 数据库/Redis/对象存储的数据都在命名卷里，`docker compose down` 不会删（加 `-v` 才会）。
-# 注意 `down -v` 会同时删掉上传的原件与全部会话——那是不可恢复的。
+# 注意 `down -v` 会同时删掉对象存储里的沙箱产物与全部会话。
 #
 # ## 端口只绑回环
 #

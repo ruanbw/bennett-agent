@@ -1,6 +1,6 @@
 """上游「列出模型」响应的统一解析：信封形状与字段别名在这里收敛成一份白名单。
 
-同步（`provider_sync._fetch_remote_models`）与旧版网关（`gateway.parse_gateway_models`）共用本模块。
+同步（`provider_sync._fetch_remote_models`）与环境变量兜底网关（`gateway.parse_gateway_models`）共用本模块。
 别名表外的字段不读：窗口上限会被 token 预算拿去截断请求，编一个数比留 None 更危险。
 """
 

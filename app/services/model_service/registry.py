@@ -76,7 +76,7 @@ class ChatModelSnapshot:
 
 
 async def provider_config_exists() -> bool:
-    """True 表示管理后台是权威（即使此刻零个提供商）；False 才退回旧版环境变量网关。"""
+    """True 表示管理后台是权威（即使此刻零个提供商）；False 才退回环境变量兜底网关。"""
     async with async_session_maker() as session:
         return await registry_configured(session)
 
@@ -150,7 +150,7 @@ async def resolve_chat_model(requested_key: str | None) -> ChatModelSnapshot:
 
 
 async def _resolve_from_gateway(requested_key: str | None) -> ChatModelSnapshot:
-    """旧版网关路径的解析：列表来自缓存，不碰数据库（凭据与地址由环境变量兜底）。
+    """环境变量兜底路径的解析：列表来自缓存，不碰数据库（凭据与地址由环境变量提供）。
 
     兜底时白名单收敛到 `settings.model_name` 与 `FALLBACK_MODEL_NAME` 而不放行任意模型名：
     否则网关 `/v1/models` 抖一下，任意登录用户就能用服务端 key 调未启用的高价模型。
@@ -247,7 +247,7 @@ async def _public_models() -> ModelListResponse:
 
 
 async def fetch_available_models(*, use_cache: bool = True) -> ModelListResponse:
-    """获取可用模型列表：库已接管时只看后台开关（不缓存），否则走旧版网关。"""
+    """获取可用模型列表：库已接管时只看后台开关（不缓存），否则走环境变量兜底网关。"""
     if await provider_config_exists():
         return await _public_models()
 

@@ -186,11 +186,7 @@ class Settings(BaseSettings):
     )
     sandbox_provider: Literal["opensandbox"] = Field(
         default="opensandbox",
-        description=(
-            "沙箱后端。目前只有 `opensandbox`：本地 Docker 运行时与生产 K8s+Firecracker 运行时"
-            "共用同一套 API，所以不需要两个后端。先前自写的 docker 后端已删除——它只能在本地用，"
-            "却要单独维护一套命令拼装与超时处理。"
-        ),
+        description=("沙箱后端，取值 `opensandbox`：本地 Docker 运行时与生产 K8s+Firecracker 运行时共用同一套 API。"),
     )
     sandbox_template: str = Field(default="bennett-sandbox", description="沙箱模板/镜像名")
     sandbox_template_version: str = Field(
@@ -453,9 +449,7 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+asyncpg://bennett:bennett@127.0.0.1:5432/bennett",
         description=(
-            "SQLAlchemy 异步连接串，必须是 `postgresql+asyncpg://`。"
-            "SQLite 已从支持矩阵移除：并发写入、外键语义、迁移工具链都不足以支撑"
-            "多实例部署（见 app/db.py 的模块说明）。"
+            "SQLAlchemy 异步连接串，必须是 `postgresql+asyncpg://`。本地依赖库由 `docker compose up -d postgres` 提供。"
         ),
     )
     database_pool_size: int = Field(
@@ -801,14 +795,12 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _require_postgres_driver(cls, value: str) -> str:
-        """只接受 `postgresql+asyncpg://`：残留的 sqlite 串不会报错，而是静默建出一个空库。
-        所以在配置层硬性拒绝，把错误提到进程启动，而不是让人事后查「用户表为什么是空的」。
-        """
+        """只接受 `postgresql+asyncpg://`。其他协议串在配置层直接拒绝，错误发生在进程启动而不是运行期。"""
         cleaned = value.strip()
         if not cleaned.startswith("postgresql+asyncpg://"):
             raise ValueError(
                 f"DATABASE_URL 必须是 postgresql+asyncpg://…，收到 {cleaned.split('://')[0]}://…。"
-                "SQLite 已不再支持：请改用 Postgres（本地可用 `docker compose up -d postgres`）。"
+                "本地可用 `docker compose up -d postgres`。"
             )
         return cleaned
 

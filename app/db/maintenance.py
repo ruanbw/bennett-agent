@@ -88,9 +88,8 @@ async def delete_user_access_tokens(user_id: uuid.UUID) -> int:
 async def cleanup_sandbox_history(older_than_days: int) -> int:
     """删除已结束且超过保留期的租约，返回删除条数（命令行随 `ON DELETE CASCADE` 一起走）。
 
-    这张表以前只增不减：`destroyed` 的行永久留存，而用户每次点开环境面板都要过一遍
-    `get_latest_lease`（`WHERE user_id=? ORDER BY created_at DESC`），代价随历史租约数线性增长，
-    也等于「用户删了会话、服务端还留着全量审计」。
+    用户每次点开环境面板都会走 `get_latest_lease`（`WHERE user_id=? ORDER BY created_at DESC`），
+    已结束的租约行永久留存会让它的代价随行数线性增长。
 
     过滤用 `destroyed_at` 而不是 `created_at`：保留期要算「机器停了多久」，不是「建了多久」。
     代价是 `failed` 且从未进入销毁流程的行（`destroyed_at` 为 NULL）永远删不到——宁可漏删审计线索，

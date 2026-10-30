@@ -306,12 +306,8 @@ async def resolve_context_budget(
     anchor = usable_anchor(messages, anchor)
     if anchor is not None:
         # 锚点来自客户端，不能无条件相信：声称覆盖 N 条消息却报一个远小于前缀真实规模的
-        # token 数，就是拿它绕过上下文预检（I-08）。用前缀估算核对，低于宽限下界就退回全量估算。
-        #
-        # 这里曾经要求 `>= 前缀估算 × 0.9`，方向是错的：估算按设计是上界（窄字符按 4 字符/token，
-        # 实测英文 5.47），而锚点还含系统提示词与工具 schema、前缀估算不含。于是合法锚点必须
-        # 大过真实前缀的 1.2 倍才通得过，真实前缀一过约 1 万 token 就几乎必被拒——长会话永远
-        # 走全量估算，而全量估算的高估又让压缩在真实预算六成多的地方提前触发。
+        # token 数，就是拿它绕过上下文预检（I-08）。用前缀估算核对，低于宽限下界就退回全量估算；
+        # 下界的取值理由见 `ANCHOR_TRUST_FLOOR_RATIO`。
         prefix_estimate = await _estimate_messages_tokens_off_loop(messages[: anchor.message_index + 1])
         floor = int(prefix_estimate * ANCHOR_TRUST_FLOOR_RATIO) + MESSAGE_OVERHEAD_TOKENS * (anchor.message_index + 1)
         if anchor.context_tokens < floor:

@@ -39,10 +39,10 @@ export type ActivityKind =
 /**
  * 工具名 → 动作分类。
  *
- * 本仓的工具名（`app/tools/`：`tavily_search` / `search_knowledge_base` /
- * `ask_user_clarification` / `get_current_time`）与 DSH 的原生工具名不同，所以除了
- * 照抄 DSH 的判定表，还要认本仓这一套；两者都不认时回落 `tools`（「已调用工具」），
- * 而不是把内部名字甩给用户。
+ * 本仓的工具名（`app/tools/`：`tavily_search` / `ask_user_clarification` /
+ * `get_current_time` / `sandbox_*`）与 DSH 的原生工具名不同，所以除了抄 DSH 的判定表，
+ * 还要认本仓这一套；MCP server 的工具名带 `server__` 前缀，`normalizeToolName` 先剥掉前缀再判。
+ * 两者都不认时回落 `tools`（「已调用工具」），而不是把内部名字甩给用户。
  */
 export function classifyActivity(toolName: string): ActivityKind {
   const name = normalizeToolName(toolName);
@@ -363,7 +363,7 @@ const TOOL_TITLES: Record<string, string> = {
   create_goal: '创建目标',
   get_goal: '查看目标',
   update_goal: '更新目标',
-  // 本仓的工具：`search_knowledge_base` 是本地知识库，不是搜索引擎
+  // 知识库工具名（外部 MCP server 常见）：检索知识库不等于网页搜索，文案要区分开
   search_knowledge_base: '检索知识库',
   knowledge_search: '检索知识库',
   get_current_time: '查看时间',

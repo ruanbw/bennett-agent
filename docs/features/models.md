@@ -30,7 +30,7 @@ description: 提供商与模型的两层数据模型、OpenAI 兼容端点接入
 
 引导只发生在「全新库」上：一旦写过初始化标记（`app_setting` 的 `model_registry_initialized`，首次引导或首次在后台创建提供商时写入），标记永不清除，所以**删光提供商后重启不会再次引导**。
 
-只有「库里一条提供商都没有、也没有这个标记」的库才会退回旧版环境变量网关（`model_service/gateway.py`）：列表来自 `LITELLM_API_BASE` 的模型接口并缓存 5 分钟；上游拉不到时兜底成只报 `MODEL_NAME` 一项（负缓存 10 秒），可用模型白名单同时收敛到 `MODEL_NAME` 与（若配了）`FALLBACK_MODEL_NAME`——否则网关抖一下，任意登录用户就能用服务端 key 调未启用的高价模型。
+只有「库里一条提供商都没有、也没有这个标记」的库才走环境变量兜底网关（`model_service/gateway.py`）：列表来自 `LITELLM_API_BASE` 的模型接口并缓存 5 分钟；上游拉不到时兜底成只报 `MODEL_NAME` 一项（负缓存 10 秒），可用模型白名单同时收敛到 `MODEL_NAME` 与（若配了）`FALLBACK_MODEL_NAME`——否则网关抖一下，任意登录用户就能用服务端 key 调未启用的高价模型。
 
 ## 启用与默认
 

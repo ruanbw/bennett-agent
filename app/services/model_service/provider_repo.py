@@ -29,9 +29,9 @@ def slugify_provider_name(name: str) -> str:
 
 
 async def registry_configured(session: AsyncSession) -> bool:
-    """数据库是否已经接管模型清单：有 registry 标记或有提供商行都算（兼容标记上线前的库）。
+    """数据库是否已经接管模型清单：有 registry 标记或有提供商行都算。
 
-    只有全新库且从未配置才返回 False，此时退回旧版环境变量网关。
+    只有全新库且从未配置才返回 False，此时走环境变量兜底网关。
     """
     if await session.get(AppSetting, REGISTRY_MARKER_KEY) is not None:
         return True

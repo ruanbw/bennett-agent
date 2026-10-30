@@ -2,7 +2,7 @@
 
 导出面 = 管理端与对话路径真正调用的入口 + 有明确语义的公开查询（默认模型、白名单、窗口上限）。
 拆包只按变化原因分：`provider_repo`（行级读写）、`provider_sync`（写用例与上游同步）、
-`registry`（模型解析与对外清单）、`gateway`（旧版环境变量兜底）、`outbound_guard`（出站守卫）、
+`registry`（模型解析与对外清单）、`gateway`（环境变量兜底）、`outbound_guard`（出站守卫）、
 `upstream`（上游响应解析）、`presets`（厂商预设）、`errors`（错误类型）。
 要验证内部实现就去它的定义处引用：`__all__` 不是内部实现的冻结契约。
 """

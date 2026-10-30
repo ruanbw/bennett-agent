@@ -18,7 +18,7 @@ description: 启动自检、认证、上游、沙箱、同步、限流的真实�
 | 启动即退出，`会话 cookie 的 SameSite=None 必须同时设置 AUTH_COOKIE_SECURE=true` | `CORS_ALLOW_CREDENTIALS=true` 时 SameSite 默认解析成 `none`，而 `AUTH_COOKIE_SECURE=false` | `grep -n "SameSite=None" 日志` | 本地 http 调试把 `CORS_ALLOW_CREDENTIALS` 改回 `false`（SameSite 回落到 `lax`），或显式设 `AUTH_COOKIE_SAMESITE=lax`；跨站部署就开 HTTPS |
 | 启动即退出，`AUTH_COOKIE_NAME 用了 __Host- 前缀` / `__Secure- 前缀` | cookie 名带前缀但没开 `AUTH_COOKIE_SECURE`，浏览器会直接丢弃这类 cookie | `grep -n "AUTH_COOKIE_NAME" 日志` | 设 `AUTH_COOKIE_SECURE=true`，或改用不带前缀的名字 |
 | 启动即退出，`APP_ENV 必须是 … 之一` | 环境名拼错（`Production`、`prod`），拼错会让 `.env.{env}` 静默加载不到 | `grep -n "APP_ENV" 日志` | 只用 `development` / `production` / `staging` / `test`；大小写会被归一化 |
-| 启动即退出，`DATABASE_URL 必须是 postgresql+asyncpg://…` | 连接串还写着 sqlite 或同步驱动 | `grep -n "DATABASE_URL" 日志` | 改回 `postgresql+asyncpg://`；本地用 `docker compose up -d postgres` |
+| 启动即退出，`DATABASE_URL 必须是 postgresql+asyncpg://…` | 连接串不是 `postgresql+asyncpg://`（协议写错、用了同步驱动） | `grep -n "DATABASE_URL" 日志` | 改回 `postgresql+asyncpg://`；本地用 `docker compose up -d postgres` |
 | 启动即退出，`CORS 配置无效` | `CORS_ALLOW_CREDENTIALS=true` 而 `CORS_ALLOWED_ORIGINS` 含 `*` | `grep -n "CORS 配置无效" 日志` | 改成具体来源，如 `https://app.example.com` |
 | 启动日志有 `API Key 解密失败（AUTH_SECRET 可能已更换）` | 换了 `AUTH_SECRET`，库里旧密文解不开 | `curl -s localhost:8000/health/ready`，看 `provider_keys` 项 | 到管理后台重新填写各提供商的 API Key；旧明文行不受影响 |
 | 启动日志有 `MCP 工具发现失败` 或 `部分 MCP server 不可用` | `MCP_SERVERS` 里某个 server 连不上 | `grep -n "MCP" 日志`；`curl -s localhost:8000/api/capabilities -b cookie.txt` 看 `mcp_error`（响应字段，不是 `discovery_error`） | 修 server 地址或从 `MCP_SERVERS` 里删掉该条。内置工具照常可用，不影响启动 |

@@ -74,7 +74,7 @@ from app.services.usage import TurnTimer, TurnUsage, extract_turn_usage
 
 logger = logging.getLogger(__name__)
 
-# 再导出面：这些名字原先是本模块的实现，调用方与测试按旧路径 import，搬走后从这里取。
+# 对外导出面：这些名字由本模块导出，调用方从这里 import。
 __all__ = [
     "CLARIFICATION_TOOL_NAME",
     "DEFAULT_TITLE",

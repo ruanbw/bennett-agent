@@ -119,7 +119,7 @@ local=stdio:/usr/local/bin/my-mcp-server --port 8080
 
 几条硬约束：
 
-- **只接受 `postgresql+asyncpg://`**。SQLite 已被移出支持矩阵：残留的 sqlite 串不会报错，而是静默建出一个空库，所以配置层直接拒绝。
+- **只接受 `postgresql+asyncpg://`**。其他协议串在配置层直接拒绝。
 - **总连接数 =（`POOL_SIZE` + `MAX_OVERFLOW`）× worker 数**，必须明显小于 Postgres 的 `max_connections`。`docker-compose.yml` 里已经把 Postgres 调到 200，注释里写了算式。
 - **`DATABASE_POOL_RECYCLE` 必须短于 Postgres / pgbouncer / 云负载均衡的空闲断连时间**，否则会拿到一批已经死掉的连接。
 - **`DATABASE_POOL_TIMEOUT` 要明显小于客户端与反代的超时**：等 30 秒再报错时，用户侧的连接早就断了，日志里只剩无意义的 500。

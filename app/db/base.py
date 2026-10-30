@@ -19,7 +19,7 @@ from app.services.metrics import metrics
 logger = logging.getLogger(__name__)
 
 #: 项目根目录。sql/init.sql 锚在这里，不能用 CWD：从别的目录启动会找不到建库脚本。
-#: 本文件比原先的 app/db.py 深一层，故多退一级（parents[2] 才是仓库根）；所有模块从这里取，避免各算一份。
+#: 本文件在 `app/db/` 下层，仓库根是 parents[2]；所有模块从这里取，避免各算一份。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 

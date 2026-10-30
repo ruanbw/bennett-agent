@@ -131,7 +131,7 @@ cp .env.example .env
 | `S3_ENDPOINT_URL` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | 否 | 端点与凭据都为空 | 只服务沙箱产物导出；不开沙箱可整段留空 |
 | `TAVILY_API_KEY` | 否 | 空 | 留空或仍是占位值时搜索工具不会被装配 |
 
-这张表里有两项会让进程直接起不来。其一是 `AUTH_SECRET`：`APP_ENV=production` 时，仍是内置占位值、含 `change-me` / `your-` 之类占位词、或短于 32 字符，配置校验直接抛错（`app/config/settings.py:_reject_placeholder_secret_in_production`）。其二是 `DATABASE_URL`：只接受 `postgresql+asyncpg://`，残留的 sqlite 串在配置层就被拒（`_require_postgres_driver`）——那种串不会报错，而是静默建出一个空库，所以必须提前挡。因为 `settings = Settings()` 在模块导入时就实例化，这两类错误的表现都是进程启动即退出，而不是跑起来之后某个请求 500。生产环境还有同类守卫：`AUTH_COOKIE_SECURE=false` 同样拒绝启动。完整清单见[配置手册](configuration.md)。
+这张表里有两项会让进程直接起不来。其一是 `AUTH_SECRET`：`APP_ENV=production` 时，仍是内置占位值、含 `change-me` / `your-` 之类占位词、或短于 32 字符，配置校验直接抛错（`app/config/settings.py:_reject_placeholder_secret_in_production`）。其二是 `DATABASE_URL`：只接受 `postgresql+asyncpg://`，其他协议串在配置层就被拒（`_require_postgres_driver`）。因为 `settings = Settings()` 在模块导入时就实例化，这两类错误的表现都是进程启动即退出，而不是跑起来之后某个请求 500。生产环境还有同类守卫：`AUTH_COOKIE_SECURE=false` 同样拒绝启动。完整清单见[配置手册](configuration.md)。
 
 生成 `AUTH_SECRET`：
 

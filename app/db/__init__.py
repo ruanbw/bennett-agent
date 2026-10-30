@@ -7,9 +7,8 @@
 调用方不需要知道名字在哪个子模块。这里必须把每个模型模块都 import 过：SQLAlchemy 是按字符串
 解析 relationship 的，少 import 一个模块，mapper 就会在运行期（配置 mapper 时）才炸。
 
-`__all__` 与拆分前完全一致。不在 `__all__` 里、但一直被 `from app.db import X` 取用的名字
-（沙箱模型、`init_sql_text`、会话缓存函数等）就地标 `noqa: F401` 继续导出：它们是对外公开面，
-删掉等于在重构里悄悄改 API。
+`__all__` 与 `from app.db import X` 这一类导入面都是对外公开面。不在 `__all__` 里、但被调用的名字
+（沙箱模型、`init_sql_text`、会话缓存函数等）就地标 `noqa: F401` 导出。
 """
 
 from app.db.base import (
