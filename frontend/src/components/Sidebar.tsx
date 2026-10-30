@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Loader2, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
+import { ListChecks, Loader2, Plus, Search, X } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { getRunningSessionsKey, subscribeRunningSessions } from '../lib/chat-runs';
@@ -20,7 +20,8 @@ import { useSessionContentSearch } from '../hooks/use-session-search';
 import { AccountBar } from './AccountBar';
 import { BrandMark } from './BrandMark';
 import { ConfirmDialog } from './ui/confirm-dialog';
-import { SidebarBatchBar } from './SidebarBatchBar';
+import { SidebarSelectionActions } from './SidebarSelectionActions';
+import { SidebarSelectToolbar } from './SidebarSelectToolbar';
 import { SidebarSearchEmpty, SidebarSearchError } from './SidebarSearchEmpty';
 import { SidebarSessionItem } from './SidebarSessionItem';
 import { SyncStatusButton } from './SyncStatusButton';
@@ -31,6 +32,8 @@ export interface ConfirmRequest {
   description: string;
   confirmLabel: string;
   destructive: boolean;
+  /** 必须原样输入这段文字才能确认（不可逆的全局操作专用）。 */
+  requirePhrase?: string;
   onConfirm: () => void;
 }
 
@@ -69,6 +72,7 @@ export interface SidebarProps {
  * 历史会话侧边栏（DeepSeek 风格）。
  *
  * 顶部是品牌名与图标，中间是胶囊「开启新对话」+ 按时间分组的会话列表，底部是账号区。
+ * 多选时这三块各自换装：胶囊变成模式工具条、行内出现勾选框、账号区让位给批量操作条。
  *
  * 收起时整个 aside 不渲染（不是把宽度设成 0）：入口转移到 ChatContainer 顶栏的
  * 胶囊工具栏，避免留下一块不可见但仍参与布局 / 聚焦的空白区域。
@@ -273,6 +277,29 @@ export function Sidebar({
     setSelectedIds(new Set());
   }, []);
 
+  /**
+   * 进入/退出多选。
+   *
+   * 进入时顺手收掉搜索与重命名：两个都是「单条会话」的输入焦点，和多选共享同一块
+   * 顶部空间；同时开着会出现「搜着搜着全选了被搜索藏起来的会话」这种不可解释的状态。
+   */
+  const toggleSelectMode = useCallback(() => {
+    const next = !isSelectMode;
+    setIsSelectMode(next);
+    setSelectedIds(new Set());
+    if (next) {
+      setSearchOpen(false);
+      setSearchQuery('');
+      setEditingId(null);
+    }
+  }, [isSelectMode]);
+
+  /** 选中的会话是否全部已置顶：底部「置顶」按钮据此切换成「取消置顶」。 */
+  const allSelectedPinned = useMemo(() => {
+    const selected = filteredSessions.filter((session) => visibleSelectedIds.has(session.id));
+    return selected.length > 0 && selected.every((session) => Boolean(session.isPinned));
+  }, [filteredSessions, visibleSelectedIds]);
+
   const handleTogglePin = useCallback(
     (id: string) => {
       void runAction(() => onTogglePinSession(id), '置顶操作失败，请重试');
@@ -358,7 +385,7 @@ export function Sidebar({
       setConfirmRequest({
         title: `删除 ${ids.length} 个对话`,
         description: batchDeleteDescription(ids.length, messageCount, runningCount),
-        confirmLabel: '删除',
+        confirmLabel: `删除 ${ids.length} 项`,
         destructive: true,
         onConfirm: () => {
           void (async () => {
@@ -374,9 +401,11 @@ export function Sidebar({
   const requestClearAll = useCallback(() => {
     setConfirmRequest({
       title: '清空所有历史对话',
-      description: '全部会话与消息将被删除，且无法恢复。',
+      description: `全部 ${sessions.length} 个会话与消息将被删除，且无法恢复。`,
       confirmLabel: '全部清空',
       destructive: true,
+      // 全局且不可逆：要求手打一遍，把「手滑点了」和「真想清空」分开
+      requirePhrase: '清空',
       onConfirm: () => {
         void (async () => {
           const ok = await runAction(() => onClearAllSessions(), '清空失败，请重试');
@@ -384,7 +413,7 @@ export function Sidebar({
         })();
       },
     });
-  }, [onClearAllSessions, runAction, exitSelectMode]);
+  }, [onClearAllSessions, runAction, exitSelectMode, sessions.length]);
 
   const handleCreateSession = useCallback(() => {
     void runAction(() => onCreateSession(), '新建会话失败，请重试');
@@ -402,6 +431,7 @@ export function Sidebar({
       description={confirmRequest?.description}
       confirmLabel={confirmRequest?.confirmLabel}
       destructive={confirmRequest?.destructive}
+      requirePhrase={confirmRequest?.requirePhrase}
       onConfirm={() => confirmRequest?.onConfirm?.()}
     />
   );
@@ -432,14 +462,35 @@ export function Sidebar({
                 setSearchOpen((open) => !open);
                 if (searchOpen) setSearchQuery('');
               }}
-              className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition cursor-pointer"
-              title={`搜索对话（${searchShortcutLabel()}）`}
+              disabled={isSelectMode}
+              className="size-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition cursor-pointer disabled:pointer-events-none disabled:opacity-40"
+              title={isSelectMode ? '多选模式下不可搜索' : `搜索对话（${searchShortcutLabel()}）`}
               aria-label="搜索对话"
               aria-keyshortcuts={SEARCH_SHORTCUT_KEYS}
               aria-expanded={searchOpen}
               aria-controls={searchOpen ? 'sidebar-search-panel' : undefined}
             >
               <Search size={16} aria-hidden="true" />
+            </button>
+            {/*
+              多选入口常驻顶栏：原先是藏在第一个分组标题右侧的滑块图标，既不在用户的
+              视线路径上，图标语义（筛选）也和「批量管理」无关。这里用列表勾选图标，
+              并保留 aria-pressed，模式状态与按钮状态一致。
+            */}
+            <button
+              type="button"
+              onClick={toggleSelectMode}
+              aria-pressed={isSelectMode}
+              disabled={sessions.length === 0 && !isSelectMode}
+              className={`size-8 flex items-center justify-center rounded-lg transition cursor-pointer disabled:pointer-events-none disabled:opacity-40 ${
+                isSelectMode
+                  ? 'bg-accent text-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+              }`}
+              title={isSelectMode ? '退出多选' : '多选管理'}
+              aria-label={isSelectMode ? '退出多选' : '多选管理'}
+            >
+              <ListChecks size={16} aria-hidden="true" />
             </button>
             {onToggleOpen && (
               <button
@@ -547,15 +598,34 @@ export function Sidebar({
           </div>
         )}
 
-        {/* 开启新对话：全圆角胶囊 */}
-        <button
-          type="button"
-          onClick={handleCreateSession}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-[13px] font-medium rounded-full border border-border/70 bg-background hover:bg-accent/40 text-foreground transition cursor-pointer"
-        >
-          <Plus size={16} strokeWidth={2} aria-hidden="true" />
-          <span>开启新对话</span>
-        </button>
+        {/*
+          同一块 40px 高的胶囊位置：平时是「开启新对话」，多选时换成模式工具条。
+          两者共用同一副外壳，进出多选时下面的列表不会上下跳。
+        */}
+        {isSelectMode ? (
+          <SidebarSelectToolbar
+            selectedCount={visibleSelectedIds.size}
+            isAllSelected={isAllSelected}
+            canSelectAll={filteredSessions.length > 0}
+            canClearAll={sessions.length > 0}
+            onToggleSelectAll={() =>
+              setSelectedIds(
+                isAllSelected ? new Set() : new Set(filteredSessions.map((session) => session.id)),
+              )
+            }
+            onExitSelectMode={exitSelectMode}
+            onRequestClearAll={requestClearAll}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={handleCreateSession}
+            className="w-full h-10 flex items-center justify-center gap-2 px-4 text-[13px] font-medium rounded-full border border-border/70 bg-background hover:bg-accent/40 text-foreground transition cursor-pointer"
+          >
+            <Plus size={16} strokeWidth={2} aria-hidden="true" />
+            <span>开启新对话</span>
+          </button>
+        )}
       </div>
 
       {actionError && (
@@ -575,29 +645,18 @@ export function Sidebar({
         </div>
       )}
 
-      {isSelectMode && (
-        <SidebarBatchBar
-          selectedCount={visibleSelectedIds.size}
-          isAllSelected={isAllSelected}
-          canSelectAll={filteredSessions.length > 0}
-          onToggleSelectAll={() =>
-            setSelectedIds(isAllSelected ? new Set() : new Set(filteredSessions.map((s) => s.id)))
-          }
-          onExitSelectMode={exitSelectMode}
-          onPinSelected={() => handleBatchPin(true)}
-          onUnpinSelected={() => handleBatchPin(false)}
-          onRequestBatchDelete={requestBatchDelete}
-          onRequestClearAll={requestClearAll}
-          onExportSelected={onExportSessions ? handleExportSelected : undefined}
-          canClearAll={sessions.length > 0}
-        />
-      )}
-
       <div
         className="flex-1 overflow-y-auto pb-2"
         onKeyDown={(event) => {
           const buttons = sessionRowButtons();
           const index = buttons.indexOf(document.activeElement as HTMLElement);
+
+          // 多选中按 Esc 直接退出：这是一个「临时状态」，键盘用户不该只能去点顶部的取消
+          if (event.key === 'Escape' && isSelectMode) {
+            event.preventDefault();
+            exitSelectMode();
+            return;
+          }
 
           // 方向键在会话行之间移动：每行内部还有置顶/导出/删除等多个按钮，逐个 Tab
           // 过去很长；列表本身按「一行一项」阅读，用方向键更顺手。只在焦点已经落在
@@ -653,7 +712,7 @@ export function Sidebar({
             <div className="text-xs text-muted-foreground text-center py-12">暂无历史对话</div>
           )
         ) : (
-          sessionGroups.map((group, groupIndex) => (
+          sessionGroups.map((group) => (
             <section key={group.label}>
               {/*
                 分组标题吸顶：长列表滚到「7 天内」时仍能看出当前段。
@@ -670,26 +729,6 @@ export function Sidebar({
                   </span>
                   <span className="sr-only">{group.sessions.length} 个会话</span>
                 </h3>
-                {/* 多选管理入口挂在第一个分组标题右侧 */}
-                {groupIndex === 0 && !searchOpen && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsSelectMode((value) => !value);
-                      setSelectedIds(new Set());
-                    }}
-                    title={isSelectMode ? '退出多选' : '多选管理'}
-                    aria-pressed={isSelectMode}
-                    className={`p-1 rounded-md transition cursor-pointer shrink-0 ${
-                      isSelectMode
-                        ? 'bg-accent text-accent-foreground'
-                        : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent/60'
-                    }`}
-                  >
-                    <SlidersHorizontal size={13} aria-hidden="true" />
-                    <span className="sr-only">{isSelectMode ? '退出多选' : '多选管理'}</span>
-                  </button>
-                )}
               </div>
               <div className="px-2 space-y-0.5">
                 {group.sessions.map((session) => (
@@ -721,11 +760,21 @@ export function Sidebar({
         )}
       </div>
 
-      <AccountBar
-        email={userEmail}
-        onLogout={onLogout}
-        onOpenSettings={onOpenSettings}
-      />
+      {isSelectMode ? (
+        <SidebarSelectionActions
+          selectedCount={visibleSelectedIds.size}
+          allPinned={allSelectedPinned}
+          onTogglePin={() => handleBatchPin(!allSelectedPinned)}
+          onExportSelected={onExportSessions ? handleExportSelected : undefined}
+          onRequestDelete={requestBatchDelete}
+        />
+      ) : (
+        <AccountBar
+          email={userEmail}
+          onLogout={onLogout}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
 
       {confirmDialog}
     </aside>

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, type ReactNode } from 'react';
-import { Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2, Download } from 'lucide-react';
+import { Check, Loader2, MoreHorizontal, Pin, PinOff, Edit2, Trash2, Download } from 'lucide-react';
 
 import type { SessionRecord } from '../types';
 import { highlightRanges, type ContentMatch, type TextRange } from '../lib/session-search';
@@ -87,7 +87,11 @@ export interface SidebarSessionItemProps {
  *   （`aria-label`）也要带上「内容命中：…」，否则读屏用户无法解释这条会话为何出现在
  *   搜索结果里。
  * - **多选模式复用 `<button role="checkbox">`**：原生 Enter/Space 即触发 click，
- *   `aria-checked` 把选中态交给读屏，不需要再手写键盘处理。
+ *   `aria-checked` 把选中态交给读屏，不需要再手写键盘处理。视觉上的方框是纯装饰
+ *   （内容层 `pointer-events-none` + `aria-hidden`），点击依然落在整行按钮上，
+ *   不会出现「点方框没反应 / 点标题才选中」的分裂手感。
+ * - **选中态不靠字重**：`font-medium` 会让文字宽度变化、整行抖动；选中用底色 + 勾选框
+ *   表达，字重只留给「当前会话」。
  * - **操作菜单不能只在 hover 时出现**。Tailwind 4 的 `hover:` / `group-hover:` 会被包进
  *   `@media (hover: hover)`，触屏设备上永远不生效——而容器同时挂了 `pointer-events-none`，
  *   于是「重命名 / 置顶 / 删除」在手机上彻底点不到。除了 hover，还要在
@@ -191,11 +195,11 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
     <div
       /* 搜索结果的键盘导航靠它定位行（`[data-session-id] > button`）；顺带方便 E2E 选择 */
       data-session-id={session.id}
-      className={`group relative flex items-center gap-2 px-3 py-2.5 rounded-xl text-[13px] transition-colors ${
+      className={`group relative flex items-center gap-2 rounded-xl px-3 py-2.5 text-[13px] transition-colors duration-150 ${
         isSelected
-          ? 'bg-accent/80 text-accent-foreground font-medium'
+          ? 'bg-accent text-foreground'
           : isActive
-            ? 'bg-accent/70 text-foreground font-medium'
+            ? 'bg-accent text-foreground font-medium'
             : 'text-foreground/80 hover:bg-accent/40'
       }`}
     >
@@ -231,6 +235,25 @@ export const SidebarSessionItem = memo(function SidebarSessionItem({
         aria-hidden={isEditing ? undefined : true}
         className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-2"
       >
+        {isSelectMode && (
+          <span
+            className={`grid size-4 shrink-0 place-items-center rounded-[5px] border transition-colors duration-150 motion-reduce:transition-none ${
+              isSelected
+                ? 'border-foreground bg-foreground text-background'
+                : 'border-foreground/25 bg-background/50'
+            }`}
+          >
+            <Check
+              size={11}
+              strokeWidth={3.5}
+              aria-hidden="true"
+              className={`transition-transform duration-150 motion-reduce:transition-none ${
+                isSelected ? 'scale-100' : 'scale-0'
+              }`}
+            />
+          </span>
+        )}
+
         {isRunning && (
           <Loader2 size={14} className="shrink-0 animate-spin text-foreground/60" aria-hidden="true" />
         )}

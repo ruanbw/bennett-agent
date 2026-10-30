@@ -14,6 +14,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -50,7 +51,8 @@
   --muted-foreground: #71717a;
   --accent: #f4f4f5;
   --accent-foreground: #18181b;
-  --destructive: #ef4444;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
   --border: #e4e4e7;
   --input: #e4e4e7;
   --ring: #18181b;
@@ -83,7 +85,15 @@
   --muted-foreground: #a1a1aa;
   --accent: #27272a;
   --accent-foreground: #fafafa;
-  --destructive: #7f1d1d;
+  /*
+     破坏色在深色下必须是「文字级」红，不是「背景级」红。
+     原值 #7f1d1d 作底色没问题，但全站大量 `text-destructive`——深红字压在
+     #09090b 上对比度约 1.6:1，删除、错误提示等关键文案实际上是看不见的。
+     浅色侧同步从 #ef4444 收到 #dc2626：同样是为了让 12–13px 的破坏文案过 4.5:1。
+  */
+  --destructive: #f87171;
+  /* 深色下破坏色是亮红，按钮上的字必须反成深色（白字在 #f87171 上只有 2:1） */
+  --destructive-foreground: #0c0a09;
   --border: #27272a;
   --input: #27272a;
   --ring: #d4d4d8;
