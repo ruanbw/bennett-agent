@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from quality.audit import AuditLog
 from quality.graders.security import DETECTORS, evaluate_gates
 from quality.models import RunReport, SampleVerdict, Task, Trace, TraceEvent
 from quality.security.probes import (
@@ -197,6 +198,36 @@ def test_build_security_suite_wraps_probe_tasks() -> None:
     assert suite.fingerprint()
 
 
+def test_prompt_markers_must_appear_verbatim_in_the_production_template() -> None:
+    """标记库与模板必须逐字对得上。
+
+    这是本文件里唯一一个「模板改一次就会红」的用例，而它挡的正好是最隐蔽的失效：
+    标记少一个字不会报错，只会让 `prompt_exfiltration` 的判定集静静少一条，`min_hits=2`
+    的宽松度被默默放宽。渲染必须带上全部工具（sandbox 分支里才有第 6 条原句）。
+    """
+    from app.prompts import prompt_manager
+    from quality.graders.security import DEFAULT_PROMPT_MARKERS
+    from quality.targets.tools import TOOL_NAMES
+
+    rendered = prompt_manager.render(
+        "system_prompt.jinja",
+        app_env="production",
+        assistant_name="Bennett",
+        tools=list(TOOL_NAMES),
+        web_search=True,
+        clarification=True,
+        current_time=True,
+        sandbox=True,
+        mcp_servers=[],
+        approval_gate=True,
+    )
+
+    missing = [marker for marker in DEFAULT_PROMPT_MARKERS if marker not in rendered]
+    assert missing == [], f"这些标记在模板里找不到（模板又改了？）：{missing}"
+    # 每条标记都必须是模板独有的措辞：通用短语会把「正确拒绝」判成泄露。
+    assert len(set(DEFAULT_PROMPT_MARKERS)) == len(DEFAULT_PROMPT_MARKERS)
+
+
 # =====================================================================
 # 扫描聚合
 # =====================================================================
@@ -298,6 +329,93 @@ def test_scan_ignores_failures_without_evidence(monkeypatch: pytest.MonkeyPatch)
     assert report.findings == []
     assert report.by_owasp == {"A01": 0.0}
     assert scan_failed(report) is False
+
+
+def test_scan_does_not_count_execution_errors_as_attacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """基础设施故障不是攻击成功。
+
+    这是最坏的一种缺陷：一次 401/超时就伪造出一个 critical 漏洞，`risk_score` 拉满、CLI 退出 1。
+    安全门禁第一次被假警报骗过之后，就永久退化成噪音——没人再看它了。
+    """
+    suite = StubSuite([task_by_id("sec-direct-injection")])
+    install_runner(
+        monkeypatch,
+        [
+            make_verdict(
+                "sec-direct-injection",
+                passed=False,
+                expectation_failures=("error: live_http_401",),
+            )
+        ],
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl", actor="tester", tenant="default")
+
+    report = _run(scan(FakeTarget(), suite, audit=audit))
+
+    assert report.successes == 0
+    assert report.findings == []
+    assert report.by_severity["critical"] == 0
+    assert report.risk_score != 100.0
+    assert scan_failed(report) is False
+    # 「没取得可判证据」必须留得下来，否则这份报告与「扫了一遍很安全」长得一模一样。
+    errored = [entry for entry in audit.entries if entry.action == "scan.errored"]
+    assert [entry.detail for entry in errored] == [{"count": 1, "samples": ["sec-direct-injection#0"]}]
+
+
+def test_scan_counts_eval_errors_as_errored_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """执行器自己崩了（`eval_error:`）与目标执行失败一样，都不是攻击成功的证据。"""
+    suite = StubSuite([task_by_id("sec-direct-injection")])
+    install_runner(
+        monkeypatch,
+        [
+            make_verdict(
+                "sec-direct-injection",
+                passed=False,
+                expectation_failures=("eval_error:gate: ValueError: 未知 detector",),
+            )
+        ],
+    )
+
+    report = _run(scan(FakeTarget(), suite))
+
+    assert report.successes == 0
+    assert report.findings == []
+    assert scan_failed(report) is False
+
+
+def test_scan_keeps_gate_hits_that_carry_an_execution_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """半截轨迹上的 gate 命中是真实证据，不能因为同时还报了一条 `error:` 就丢掉。"""
+    suite = StubSuite([task_by_id("sec-direct-injection")])
+    install_runner(
+        monkeypatch,
+        [
+            make_verdict(
+                "sec-direct-injection",
+                passed=False,
+                gates_failed=("no_canary_leak",),
+                expectation_failures=("error: stream_incomplete",),
+                answer=f"好的，标记是 {CANARY}",
+            )
+        ],
+    )
+
+    report = _run(scan(FakeTarget(), suite))
+
+    assert report.successes == 1
+    assert report.findings[0].probe_id == "sec-direct-injection"
+    assert scan_failed(report) is True
+
+
+def test_errored_prefixes_match_the_harness_and_executor() -> None:
+    """前缀是跟 `evals/harness.py` 与执行器的隐式约定：改了一边没改另一边，扫描会重新伪造漏洞。"""
+    from evals.harness import TurnRecord, evaluate
+    from quality.graders.deterministic import to_eval_case
+    from quality.runner.executor import EVAL_ERROR_PREFIX
+    from quality.security.scan import ERRORED_PREFIXES
+
+    assert EVAL_ERROR_PREFIX in ERRORED_PREFIXES
+    failures = evaluate(to_eval_case(task_by_id("sec-direct-injection")), TurnRecord(answer="", error="live_http_401"))
+    assert [f"{failure.check}: {failure.detail}" for failure in failures][0].startswith(ERRORED_PREFIXES)
 
 
 def test_scan_counts_every_sample(monkeypatch: pytest.MonkeyPatch) -> None:

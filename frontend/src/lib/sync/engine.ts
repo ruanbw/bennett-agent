@@ -44,7 +44,14 @@ import {
   SyncCursorLoopError,
   createCursorResetGuard,
 } from './cursor-reset';
-import { buildPushBatch, fromConversationRow, fromMessageRow, shouldApplyRemote, type PushBatch } from './mapping';
+import {
+  PUSH_BATCH_MAX_BYTES,
+  buildPushBatch,
+  fromConversationRow,
+  fromMessageRow,
+  shouldApplyRemote,
+  type PushBatch,
+} from './mapping';
 // 只取运行时函数；status-view 对 engine 只有 `import type`，不构成运行时循环依赖
 import { describeSyncFailure } from './status-view';
 
@@ -87,8 +94,8 @@ export interface SyncStatus {
   /**
    * 本次会话里有多少行本机修改被服务器上更新版本覆盖（推送被判 `stale`）。
    *
-   * `stale` 的处理是「标 synced，等下一轮 pull 用服务端版本盖掉本地」——本机那次修改
-   * 就此丢掉。静默丢弃是最糟的失败方式（用户以为改上去了），所以单独计数给面板显示。
+   * `stale` 的处理是「标 synced + 一次全量重拉」，本机那次修改就此丢掉（服务端版本才是
+   * 权威）。静默丢弃是最糟的失败方式（用户以为改上去了），所以单独计数给面板显示。
    */
   superseded?: number;
 }
@@ -433,16 +440,21 @@ async function pushBatch(): Promise<number> {
   if (!isOnline()) return 0;
   beginPushActivity();
   pushInFlight = (async () => {
-    const [sessions, messages] = await readPending();
-    const batch = buildPushBatch(sessions, messages, PUSH_BATCH_ROWS);
-    if (batch.conversations.length === 0 && batch.messages.length === 0) return 0;
-
-    const response = await pushRows({
-      conversations: batch.conversations,
-      messages: batch.messages,
-    });
-    await ackPush(batch, response);
-    return batch.conversations.length + batch.messages.length;
+    try {
+      return await pushBatchOnce(PUSH_BATCH_ROWS, PUSH_BATCH_MAX_BYTES);
+    } catch (err) {
+      if (!(err instanceof SyncHttpError) || !err.isTooLarge) throw err;
+      /*
+        请求体超过服务端上限（413）。原样重放会组出一模一样的批次（行数与字节预算都没变），
+        所以把两者一起砍半再试一次。`isFatal` 已把 413 归为可重试，即使这次又失败，退避
+        重试还会再来；但重试读到的仍是同一批行，所以“砍半”是唯一能推进的动作。
+      */
+      console.warn('推送请求体超过服务端上限，砍半重试一次:', err.message);
+      return await pushBatchOnce(
+        Math.max(1, Math.floor(PUSH_BATCH_ROWS / 2)),
+        Math.max(1, Math.floor(PUSH_BATCH_MAX_BYTES / 2)),
+      );
+    }
   })();
   try {
     return await pushInFlight;
@@ -450,6 +462,19 @@ async function pushBatch(): Promise<number> {
     pushInFlight = null;
     endPushActivity();
   }
+}
+
+async function pushBatchOnce(limit: number, maxBytes: number): Promise<number> {
+  const [sessions, messages] = await readPending();
+  const batch = buildPushBatch(sessions, messages, limit, maxBytes);
+  if (batch.conversations.length === 0 && batch.messages.length === 0) return 0;
+
+  const response = await pushRows({
+    conversations: batch.conversations,
+    messages: batch.messages,
+  });
+  if (await ackPush(batch, response)) await forceFullResync();
+  return batch.conversations.length + batch.messages.length;
 }
 
 function beginPushActivity(): void {
@@ -464,8 +489,20 @@ function endPushActivity(): void {
 
 async function readPending(): Promise<[SessionRecord[], MessageRecord[]]> {
   return db.transaction('r', db.sessions, db.messages, async () => {
-    const sessions = await db.sessions.where('syncState').equals('pending').toArray();
-    const messages = await db.messages.where('syncState').equals('pending').toArray();
+    // 必须 limit：`backfillIfNeeded` 与 410 之后的 `markAllPending` 会把**整库**标成
+    // pending，不带上限的话一次就会把整个 IndexedDB 读进内存再排序（移动端/低内存标签页
+    // 直接 OOM，同步就不工作）。取两批的量：让「本批推不完也没关系」的那一半留给下一轮，
+    // 同时也给 `buildPushBatch` 留出「会话被截断时仍有足够消息可挑」的余量。
+    const sessions = await db.sessions
+      .where('syncState')
+      .equals('pending')
+      .limit(PUSH_BATCH_ROWS * 2)
+      .toArray();
+    const messages = await db.messages
+      .where('syncState')
+      .equals('pending')
+      .limit(PUSH_BATCH_ROWS * 2)
+      .toArray();
     return [sessions, messages] as [SessionRecord[], MessageRecord[]];
   });
 }
@@ -478,15 +515,20 @@ async function readPending(): Promise<[SessionRecord[], MessageRecord[]]> {
  *   更新版本或本来就不该存在，重试永远不会成功；
  * - `conversation_missing` → 消息留着 pending，把会话重新标 pending（下一批先推会话）；
  * - 其余（`too_large` / `quota_exceeded`）→ 标 error 并计数，重试没有意义。
+ *
+ * 返回值：本批是否出现了「本地视图与服务端已经分叉」的拒绝（`stale` /
+ * `conversation_deleted`）。调用方据此做一次全量重同步，见 `forceFullResync`。
  */
-async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> {
+async function ackPush(batch: PushBatch, response: PushResponse): Promise<boolean> {
   const rejections = new Map(response.rejected.map((row) => [`${row.kind}:${row.id}`, row.reason]));
   let rejectedRows = 0;
   let rejectionReason: string | null = null;
+  let diverged = false;
 
   await runSyncInternal(async () => {
     for (const row of batch.conversations) {
       const reason = rejections.get(`conversation:${row.id}`);
+      if (reason === 'stale' || reason === 'conversation_deleted') diverged = true;
       if (await settleRow('conversation', row.id, row.client_rev, reason)) {
         rejectedRows += 1;
         rejectionReason ??= reason ?? null;
@@ -494,6 +536,7 @@ async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> 
     }
     for (const row of batch.messages) {
       const reason = rejections.get(`message:${row.id}`);
+      if (reason === 'stale' || reason === 'conversation_deleted') diverged = true;
       if (reason === 'conversation_missing') {
         const conversationRejected = rejections.get(`conversation:${row.conversation_id}`);
         const conversation = await db.sessions.get(row.conversation_id);
@@ -519,6 +562,7 @@ async function ackPush(batch: PushBatch, response: PushResponse): Promise<void> 
   // 只记原因，数量由 `refreshQueue` 从库里重算——增量计数在「同一行被重新标记」时
   // 会漂移，而重算永远不会。
   if (rejectionReason !== null) setStatus({ rejectedReason: rejectionReason });
+  return diverged;
 }
 
 /**
@@ -546,8 +590,8 @@ async function settleRow(
     // 顺带清掉上一次的拒收原因：这一行已经不再停在 error 了。
     await table.update(id, { syncState: 'synced', syncError: null });
     if (reason === 'stale') {
-      // 服务端有更新的修订号：这一行本机修改即将被下一轮 pull 覆盖。
-      // 不静默吞掉——否则用户完全无从得知自己改的内容没上去。
+      // 服务端有更新的修订号：这一行本机修改已经开始被服务端版本覆盖（由
+      // `forceFullResync` 重拉）。不静默吞掉——否则用户完全无从得知自己改的内容没上去。
       setStatus({ superseded: (status.superseded ?? 0) + 1 });
     }
     if (reason !== undefined) {
@@ -567,12 +611,17 @@ async function settleRow(
 /** 返回是否还有下一页。 */
 async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
   let page: PullResponse;
+  //: 本次请求实际使用的游标（可能被 410 重置或全量重同步改过，见下面的写入判定）。
+  let requestedCursor: string | null = cursor;
   // 游标失效一次就重拉；连续失效累计到阈值后停下（见 cursor-reset.ts）。
   // 循环放在这里而不是让 pump 反复重入：pump 的 4xx 分类把 410 当「可恢复」，
   // 重入只会把「拉→410→全量拉」的节奏摊到多轮里，仍然是一次次白打请求。
   for (;;) {
+    // 记下这次请求用的是哪个游标：响应回来时若 `cursor` 已被别处改过（见下面的
+    // `forceFullResync`），这一页的游标就是「过时的位置」，不能写回去。
+    requestedCursor = cursor;
     try {
-      page = await pullRows(cursor, { timeoutSeconds, limit: PULL_LIMIT });
+      page = await pullRows(requestedCursor, { timeoutSeconds, limit: PULL_LIMIT });
       break;
     } catch (err) {
       if (!(err instanceof SyncHttpError) || !err.isCursorReset) throw err;
@@ -608,8 +657,15 @@ async function pullOnce(gen: number, timeoutSeconds: number): Promise<boolean> {
   if (!isCurrent(gen)) return false;
 
   const affected = await applyPage(page);
-  cursor = page.cursor;
-  await saveCursor(cursor);
+  /*
+    拉取在飞期间可能发生过全量重同步（push 被判 `stale` / `conversation_deleted` →
+    `forceFullResync` 把游标置空）。此时这一页的游标是重同步**之前**的位置，写回去就等于
+    让全量重拉静静地不发生——而被拒的那几行正等着重拉才能回来。
+  */
+  if (cursor === requestedCursor) {
+    cursor = page.cursor;
+    await saveCursor(cursor);
+  }
   setStatus({ lastSyncedAt: Date.now() });
   if (affected.length > 0) notifyApplied(affected);
   await refreshQueue();
@@ -681,6 +737,25 @@ async function saveCursor(value: string | null): Promise<void> {
     value: value ?? '',
     updatedAt: Date.now(),
   });
+}
+
+/**
+ * 丢弃游标，下一轮从 0 全量重拉。
+ *
+ * 只在 push 被判 `stale` / `conversation_deleted` 时用。这两种拒绝说明本地视图已经和
+ * 服务端分叉，而**增量游标不再可信**：那条行的服务端 `version` 在本地编辑之前就已经被
+ * 游标越过，`version > since` 再也不会把它发回来。`settleRow` 把这些行标成 synced 之后
+ * 如果只是等下一轮 pull，本地被拒的内容会永久留在屏幕上，服务端版本永远回不来。
+ *
+ * 不复用 `markAllPending`：那是 410（服务端回滚/换库，本机全部行都可能不存在）的语义；
+ * 这里服务端数据是好的，只需要重拉一次把它盖到本地。
+ */
+async function forceFullResync(): Promise<void> {
+  cursor = null;
+  await saveCursor(null);
+  // pump 正在跑时它自己接下来的 pullOnce 就会用空游标；没在跑（如 `kickPush`）时
+  // 由这里把 pump 拉起来，否则这条恢复路径会静静地不发生。
+  requestPull();
 }
 
 /**

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -21,6 +21,21 @@ from app.schemas.events import ContentDelta, ThinkingDelta, ToolCall, ToolResult
 from quality.models import Task, Trace, TraceEvent, fingerprint
 
 DEFAULT_BASE_URL = os.environ.get("QUALITY_LIVE_BASE_URL", "http://127.0.0.1:8000")
+
+
+class _StreamFailure(NamedTuple):
+    """服务端在流内下发的 `type=="error"`。
+
+    用本模块的内部类型回传给 `run`，而不是给 `TraceEvent` 加字段（`models.py` 是冻结契约）：
+    `_parse_event` 的返回值只有 `run` 读，它需要的是「这一轮失败了」这个信号。
+    """
+
+    reason: str
+
+
+#: `_parse_event` 的完成信号。只用来判断本轮是否真的收到了 `done`，不产生轨迹事件
+#: （`done` 仍按未知事件记一条 guard，服务端说了什么要原样留证）。
+_STREAM_DONE = object()
 
 
 class LiveTarget:
@@ -70,6 +85,7 @@ class LiveTarget:
                     error = f"live_http_{response.status_code}"
                     events.append(TraceEvent(kind="error", payload={"error": error}, at_ms=elapsed()))
                 else:
+                    saw_done = False
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -79,6 +95,17 @@ class LiveTarget:
                         parsed = _parse_event(payload, elapsed, events)
                         if isinstance(parsed, ContentDelta):
                             answer += parsed.delta
+                        elif isinstance(parsed, _StreamFailure):
+                            # 第一次错误为准：后面就算来了 `done`，也不能把已经失败的一轮洗白。
+                            error = error or parsed.reason
+                        elif parsed is _STREAM_DONE:
+                            saw_done = True
+                    if error is None and not saw_done:
+                        # 连接关了却没有 `done`：回答可能只有半截。不标记的话
+                        # `answer_not_contains` 对半截/空回答恒真、gate 也不会命中，
+                        # 探针会被记成「防住了」——ASR 0% 认证的是一个已经挂掉的系统。
+                        error = "stream_incomplete"
+                        events.append(TraceEvent(kind="error", payload={"error": error}, at_ms=elapsed()))
         except Exception as exc:  # 连不上/超时/中断都落成 Trace
             error = f"live_unavailable: {type(exc).__name__}: {exc}"
             events.append(TraceEvent(kind="error", payload={"error": error}, at_ms=elapsed()))
@@ -135,5 +162,16 @@ def _parse_event(raw: str, elapsed: Any, events: list[TraceEvent]) -> Any:
             )
         )
         return result
+    if kind == "error":
+        # 流内错误必须同时落成 `Trace.error`：只记一条 guard 事件的话，`run` 拿不到错误、
+        # `final_answer` 留着半截文本，判分器会把它当成一份完整回答来判。
+        message = str(payload.get("message") or "")
+        reason = f"stream_error: {message}" if message else "stream_error"
+        events.append(TraceEvent(kind="error", payload={"error": reason, "raw": payload}, at_ms=elapsed()))
+        events.append(TraceEvent(kind="guard", payload={"event": kind, "raw": payload}, at_ms=elapsed()))
+        return _StreamFailure(reason=reason)
+    if kind == "done":
+        events.append(TraceEvent(kind="guard", payload={"event": kind, "raw": payload}, at_ms=elapsed()))
+        return _STREAM_DONE
     events.append(TraceEvent(kind="guard", payload={"event": kind, "raw": payload}, at_ms=elapsed()))
     return None

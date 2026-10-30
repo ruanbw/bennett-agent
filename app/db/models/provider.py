@@ -8,7 +8,12 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, EncryptedText
+from app.db.base import Base, EncryptedText, enum_check
+
+#: `auth_style` 的全部取值。必须与 `app/services/model_service/presets.AUTH_STYLES` 逐字一致；
+#: 不 import 它是因为该包初始化时会反过来 import `app.db`（模型层面不能反向依赖服务层）。
+#: 两份取值的对齐由 `tests/test_schema_guard.py` 盯着。
+AUTH_STYLES: tuple[str, ...] = ("bearer", "none", "x-api-key", "x-goog-api-key")
 
 
 class ModelProvider(Base):
@@ -19,6 +24,10 @@ class ModelProvider(Base):
     """
 
     __tablename__ = "model_provider"
+    __table_args__ = (
+        # 写错的值不会有任何运行期症状：请求头发错，上游一律 401，看不出是本地拼错。
+        enum_check("auth_style", AUTH_STYLES, name="ck_model_provider_auth_style"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -83,11 +92,11 @@ class ProviderModel(Base):
     __table_args__ = (UniqueConstraint("provider_id", "model_id", name="uq_provider_model"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID, primary_key=True, default=uuid.uuid4)
+    #: 不建单列索引：`uq_provider_model (provider_id, model_id)` 的前导列已覆盖同一查询形状。
     provider_id: Mapped[uuid.UUID] = mapped_column(
         GUID,
         ForeignKey("model_provider.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)

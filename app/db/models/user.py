@@ -11,9 +11,9 @@ from fastapi_users_db_sqlalchemy.access_token import (
 from sqlalchemy import String, delete
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, enum_check
 from app.db.session_cache import _session_cache_delete, _session_cache_get, _session_cache_set
-from app.roles import ROLE_USER, Role
+from app.roles import ALL_ROLES, ROLE_USER, Role
 
 
 class User(SQLAlchemyBaseUserTableUUID, Base):
@@ -22,6 +22,12 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     `role` 是唯一权限判据（见 `app/roles.py`），只能由管理后台授予；`is_superuser` 只是它的
     派生镜像、由 `apply_role()` 单点写入，鉴权绝不读它，否则同一个问题会有两个答案。
     """
+
+    __table_args__ = (
+        # 取值直接取 `app.roles.ALL_ROLES`：这是三档权限的唯一事实来源，CHECK 只是把
+        # 「手工改库写错字符串」从「静默降级为 USER」变成一条立即失败。
+        enum_check("role", ALL_ROLES, name="ck_user_role"),
+    )
 
     #: 存成小写字符串而非 Enum：加档位只改 sql/init.sql，不必在 PG 维护类型。取值见 `app/roles.py`。
     role: Mapped[str] = mapped_column(

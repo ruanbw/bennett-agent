@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { TurnStatusRow } from './turn-status-row';
+import { TurnAnnouncement, TurnAnnouncementText, TurnStatusRow } from './turn-status-row';
 
 /**
  * 状态行是纯展示组件（无运行时上下文），用 react-dom/server 出静态 HTML 断言。
@@ -43,5 +43,46 @@ describe('异常结束的状态行', () => {
     expect(html).not.toContain('<button');
     expect(html).not.toContain('aria-expanded');
     expect(html).toContain('role="status"');
+  });
+});
+
+/**
+ * 流式结束后的播报。
+ *
+ * 组件靠一次渲染间的状态比对捕捉 `isRunning` 的 true→false，而 react-dom/server 只
+ * 渲染一帧，所以这里钉两件事：静态结构（视觉隐藏、独立的 polite 状态区、初始不喧哗）
+ * 与文案（只说轮次，不含正文）。
+ */
+describe('流式结束的播报', () => {
+  const renderAnnouncement = (props: Partial<Parameters<typeof TurnAnnouncement>[0]> = {}) =>
+    renderToStaticMarkup(createElement(TurnAnnouncement, { isRunning: false, ...props }));
+
+  const renderText = (turnNumber: number | null) =>
+    renderToStaticMarkup(createElement(TurnAnnouncementText, { turnNumber }));
+
+  it('是视觉隐藏的独立 status 区，不靠 aria-live=assertive 也不带正文', () => {
+    const html = renderAnnouncement();
+
+    expect(html.startsWith('<p')).toBe(true);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('sr-only');
+    expect(html).not.toContain('aria-live="assertive"');
+    // 初始为空：打开历史会话（本来就没在生成）不该凭空念一句「回复完成」
+    expect(html).toBe('<p role="status" class="sr-only"></p>');
+  });
+
+  it('生成中不播报任何东西', () => {
+    expect(renderAnnouncement({ isRunning: true, turnNumber: 3 })).toBe(
+      '<p role="status" class="sr-only"></p>'
+    );
+  });
+
+  it('文案只报轮次：正文不能进 live region（否则等于再念一遍整段）', () => {
+    expect(renderText(3)).toBe('第 3 轮回复完成');
+    expect(renderText(1)).toBe('第 1 轮回复完成');
+  });
+
+  it('拿不到轮次时退回一句短的，不编一个序号', () => {
+    expect(renderText(null)).toBe('回复完成');
   });
 });

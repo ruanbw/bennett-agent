@@ -175,7 +175,8 @@ def _error_message(exc: SandboxError) -> str:
 async def sandbox_exec(ctx: RunContext[None], command: str, timeout_s: int = DEFAULT_EXEC_TIMEOUT_S) -> str:
     """在当前会话的隔离执行环境里运行一条 shell 命令。
     工作目录 /home/sandbox/workspace，文件在本会话内一直存在（重置或回收后消失）；timeout_s 默认 120、
-    上限 900；输出截断保留头 4000 + 尾 2000 字符，要更多内容用 grep / head / tail 缩小范围而不是重跑。
+    上限 300（`MAX_EXEC_TIMEOUT_S`，必须小于整轮对话预算）；输出截断保留头 4000 + 尾 2000 字符，要更多内容用
+    grep / head / tail 缩小范围而不是重跑。
     """
     scope = current_sandbox_scope()
     if scope is None:

@@ -14,17 +14,24 @@
 """
 
 import asyncio
+import time
+from typing import Any
 
 import pytest
 from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
 from app.config import settings
 from app.tools import mcp_client
 from app.tools.mcp_client import (
+    MAX_MCP_BINARY_BYTES,
     MAX_MCP_RESULT_CHARS,
     UNTRUSTED_PREFIX,
     McpRegistry,
     McpServerConfig,
+    ResilientToolset,
+    RiskAnnotatingToolset,
     load_server_configs,
     make_result_processor,
     parse_server_spec,
@@ -68,6 +75,55 @@ def make_mcp_server(name: str = "demo"):
         return a + b
 
     return server
+
+
+def run_context() -> RunContext[None]:
+    return RunContext(deps=None, model=None, usage=None)
+
+
+class _StubToolset(AbstractToolset[None]):
+    """`get_tools` 原样吐出给定工具名，`call_tool` 返回固定值或抛指定异常的替身。
+
+    要验的是容器层（过滤 / 容错）而不是协议：造一个「能返回超长工具名的真 server」
+    不值当，也锁不住「是哪一层拦的」这一点。
+    """
+
+    def __init__(
+        self,
+        names: list[str],
+        *,
+        get_tools_error: Exception | None = None,
+        call_tool_error: Exception | None = None,
+    ) -> None:
+        self.names = names
+        self.get_tools_error = get_tools_error
+        self.call_tool_error = call_tool_error
+
+    @property
+    def id(self) -> str | None:
+        return "stub"
+
+    def make_tool(self, name: str) -> ToolsetTool[None]:
+        from pydantic import TypeAdapter
+
+        return ToolsetTool(
+            toolset=self,
+            tool_def=ToolDefinition(name=name, description="remote tool"),
+            max_retries=0,
+            args_validator=TypeAdapter(dict[str, Any]).validator,
+        )
+
+    async def get_tools(self, ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+        if self.get_tools_error is not None:
+            raise self.get_tools_error
+        return {name: self.make_tool(name) for name in self.names}
+
+    async def call_tool(
+        self, name: str, tool_args: dict[str, Any], ctx: RunContext[None], tool: ToolsetTool[None]
+    ) -> Any:  # noqa: ANN401
+        if self.call_tool_error is not None:
+            raise self.call_tool_error
+        return "stub-result"
 
 
 # ---------------------------------------------------------------------
@@ -187,6 +243,17 @@ def test_overlong_server_name_is_rejected():
         validate_server_name("x" * 33)
 
 
+def test_server_name_with_double_underscore_is_rejected():
+    """`__` 是工具名里分隔 server 与工具的那个串（`a__b` 的工具显示成 `a__b__tool`）：
+    名字里再用它，事后按第一个 `__` 拆分会把 server 认错。`mcp_server_summary` 的兜底分支
+    就是这么拆的，它一直假设这条校验存在。
+    """
+    with pytest.raises(ValueError, match="连续下划线"):
+        validate_server_name("a__b")
+    # 单个下划线仍然合法：只是普通字符，不构成分隔符
+    assert validate_server_name("a_b") == "a_b"
+
+
 # ---------------------------------------------------------------------
 # 3. 结果包装
 # ---------------------------------------------------------------------
@@ -263,6 +330,43 @@ async def test_processor_does_not_touch_binary():
     assert result is payload
 
 
+async def test_multi_part_result_shares_one_total_quota():
+    """多段内容共享**一份**总配额：逐段各给 8000 的话，三段就能灌进 24000 字符——
+    正是「吃掉上下文预算 → 上游 400 被误报成模型不可用」要挡的那类响应。
+    """
+    config = McpServerConfig(name="demo", url="https://demo.example/mcp")
+    chunk = "x" * MAX_MCP_RESULT_CHARS
+
+    async def call_tool(name, args):
+        # pydantic-ai 把多段 content 归一化成多元素结果，这里按它的形状给
+        return (chunk, chunk, chunk)
+
+    result = await make_result_processor(config)(None, call_tool, "dump", {})
+
+    total = sum(len(part) for part in result)
+    assert total <= MAX_MCP_RESULT_CHARS + len(UNTRUSTED_PREFIX) + 40
+    # 配额用尽后的段被丢弃：它们进上下文只会挤掉真正的对话内容
+    assert len(result) == 1
+
+
+async def test_oversized_binary_result_is_rejected():
+    """二进制没法像文本那样截断：一张几 MB 的 base64 图直接吃穿窗口，只能在进上下文前拒掉。"""
+    from pydantic_ai.messages import BinaryContent
+
+    config = McpServerConfig(name="demo", url="https://demo.example/mcp")
+    payload = BinaryContent(data=b"\x00" * (MAX_MCP_BINARY_BYTES + 1), media_type="image/png")
+
+    async def call_tool(name, args):
+        return payload
+
+    with pytest.raises(ToolFailed) as exc:
+        await make_result_processor(config)(None, call_tool, "fetch_image", {})
+
+    message = str(exc.value)
+    assert "字节" in message
+    assert "不要原样重试" in message
+
+
 async def test_processor_timeout_becomes_tool_failed(monkeypatch):
     """超时要变成「可执行的失败结果」，而不是让模型拿同样参数再试一次。"""
     config = McpServerConfig(name="demo", url="https://demo.example/mcp", timeout=0.01)
@@ -312,7 +416,7 @@ async def test_discovery_skip_a_broken_server_but_keep_the_good_one(monkeypatch)
 
     real_build = mcp_client.build_toolset
 
-    def fake_build(config):
+    def fake_build(config, *, on_error=None):
         if config.name == "broken":
             # 一个「连接必然失败」的 toolset：端口 1 上没有服务
             return real_build(McpServerConfig(name="broken", url="http://127.0.0.1:1/mcp"))
@@ -354,6 +458,40 @@ async def test_discovery_failure_is_recorded_not_raised():
 
     assert tools == []
     assert registry.discovery_error is None
+
+
+async def test_discovery_probes_servers_concurrently(monkeypatch):
+    """发现就在 lifespan 的 `yield` 之前，串行时 N 个挂掉的 server 会叠加成 N×超时，
+    把就绪探针一直往后推（容器编排的 `initialDelaySeconds` 不够就会被判不健康）。
+    """
+    timeout = 0.3
+    monkeypatch.setattr(mcp_client, "DISCOVERY_TIMEOUT_SECONDS", timeout)
+
+    class HangingRaw:
+        async def list_tools(self):
+            await asyncio.sleep(5)
+            return []
+
+    registry = McpRegistry(
+        configs=[
+            McpServerConfig(name="slow1", url="https://slow1.example/mcp"),
+            McpServerConfig(name="slow2", url="https://slow2.example/mcp"),
+        ]
+    )
+    registry._toolsets = [
+        mcp_client.McpToolsetBinding(config=config, raw=HangingRaw(), exposed=HangingRaw())
+        for config in registry.configs
+    ]
+
+    started = time.monotonic()
+    tools = await registry.discover()
+    elapsed = time.monotonic() - started
+
+    assert tools == []
+    assert registry.discovery_error is not None
+    assert registry.discovery_error.count("超时") == 2
+    # 串行要等两次超时（约 2×）。两个 server 同时挂 → 总耗时应接近单个超时。
+    assert elapsed < timeout * 1.8, f"发现是串行的：{elapsed:.2f}s"
 
 
 # ---------------------------------------------------------------------
@@ -484,6 +622,101 @@ async def test_unknown_mcp_tool_name_is_not_callable():
 
     # 模型编的工具名不会被派发到 server：它拿到的是一句「工具不存在」，然后放弃
     assert result.output == "gave up"
+
+
+# ---------------------------------------------------------------------
+# 6. 容器层：运行期容错与工具名过滤
+#
+# 这一层挡的是两类不报错、只报「模型不可用」的故障：
+# ① 启动时活着的 server 在运行期挂掉 → 异常穿出 run → 每一轮对话都失败，只能重启进程；
+# ② 远端工具名超出上游约束（允许 `.`、最长 128）→ **整份** tools 数组被 400 拒掉。
+# ---------------------------------------------------------------------
+async def test_get_tools_failure_degrades_to_empty_instead_of_failing_the_run():
+    """server 在运行期挂掉，只该少几个外部工具：`_mcp_toolsets` 只包住了 toolset 的**构造**，
+    而连接错误发生在每次 run 的 `get_tools()`。"""
+    reported: list[tuple[str, str]] = []
+    toolset = ResilientToolset(
+        _StubToolset([], get_tools_error=ConnectionError("connection reset")),
+        server="demo",
+        on_error=lambda server, reason: reported.append((server, reason)),
+    )
+
+    tools = await toolset.get_tools(run_context())
+
+    assert tools == {}
+    # 故障不能只留在日志里：能力探针读的就是这份上报
+    assert reported == [("demo", "运行期取工具失败（ConnectionError）")]
+
+
+async def test_call_tool_failure_becomes_a_result_instead_of_an_exception():
+    """调用失败要给模型一句可执行的话：异常穿出去会让整轮失败，而模型对挂掉的 server
+    重试同一个调用只会再挂一次。"""
+    stub = _StubToolset(["demo__echo"], call_tool_error=RuntimeError("session closed"))
+    toolset = ResilientToolset(stub, server="demo")
+
+    result = await toolset.call_tool("demo__echo", {}, run_context(), stub.make_tool("demo__echo"))
+
+    assert isinstance(result, str)
+    assert "demo__echo" in result
+    # 只写异常类型：远端可以往错误文案里塞任意内容，那是一条指令注入通道
+    assert "RuntimeError" in result
+    assert "session closed" not in result
+    assert "不要编造结果" in result
+
+
+async def test_call_tool_keeps_tool_failed_wording():
+    """超时 / 结果超限已经是写好的可执行建议：容错层再包一层只会让文案套娃。"""
+    failure = ToolFailed("MCP 工具 demo__echo 超过 30 秒未返回，本轮不再等待。不要原样重试这个调用。")
+    stub = _StubToolset(["demo__echo"], call_tool_error=failure)
+    toolset = ResilientToolset(stub, server="demo")
+
+    with pytest.raises(ToolFailed) as exc:
+        await toolset.call_tool("demo__echo", {}, run_context(), stub.make_tool("demo__echo"))
+
+    assert str(exc.value) == str(failure)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["demo__read.file", "demo__" + "x" * 60, ""],
+    ids=["dot", "overlong", "empty"],
+)
+async def test_tools_with_names_the_upstream_rejects_are_dropped(name):
+    """MCP 规范允许工具名带点号、最长 128；上游 function name 只收 `[A-Za-z0-9_-]` 且 ≤ 64。
+    越界的**一个**工具名会让**整份** tools 数组被 400 拒掉，而现场只看到「模型不可用」。
+
+    丢弃而不是改名：改名会让模型看到的工具名与 server 的文档对不上。
+    """
+    reported: list[str] = []
+    toolset = RiskAnnotatingToolset(
+        _StubToolset([name, "demo__echo"]), server="demo", on_error=lambda server, reason: reported.append(reason)
+    )
+
+    tools = await toolset.get_tools(run_context())
+
+    assert set(tools) == {"demo__echo"}
+    assert reported and name in reported[0]
+
+
+async def test_runtime_failure_is_reported_into_discovery_error(monkeypatch):
+    """装配时要把上报回调接进容错层：否则运行期故障只留在日志里，
+    能力探针还报「一切正常」，而用户看到的是工具一个个少掉。"""
+
+    def fake_build(config, *, on_error=None):
+        return mcp_client.McpToolsetBinding(
+            config=config,
+            raw=_StubToolset([]),
+            exposed=ResilientToolset(
+                _StubToolset([], get_tools_error=ConnectionError("gone")), server=config.name, on_error=on_error
+            ),
+        )
+
+    monkeypatch.setattr(mcp_client, "build_toolset", fake_build)
+    registry = McpRegistry(configs=[McpServerConfig(name="demo", url="https://demo.example/mcp")])
+
+    await registry.toolsets()[0].get_tools(run_context())
+
+    assert registry.discovery_error == "demo: 运行期取工具失败（ConnectionError）"
 
 
 # ---------------------------------------------------------------------
@@ -627,11 +860,54 @@ def test_build_toolset_wires_the_risk_annotation():
     它」。少了这条，把 `build_toolset` 里的 `RiskAnnotatingToolset(...)` 改回裸
     `raw.prefixed(...)` 时全部测试仍然是绿的，而线上审批已经静默失效——这正是当初
     那个 bug 的形态。
-    """
-    from app.tools.mcp_client import RiskAnnotatingToolset
 
+    外层还必须是容错层（`ResilientToolset`）：两件事都在装配路径上、都不能少。
+    """
     binding = mcp_client.build_toolset(McpServerConfig(name="demo", url="https://demo.example/mcp"))
 
-    assert isinstance(binding.exposed, RiskAnnotatingToolset), (
-        "build_toolset 必须用 RiskAnnotatingToolset 包一层，否则 MCP 工具没有 risk_level，审批闸门会对它们全部放行"
+    assert isinstance(binding.exposed, ResilientToolset), (
+        "build_toolset 必须把容错层包在最外面，否则 server 一挂就整轮对话失败"
     )
+    assert isinstance(binding.exposed.wrapped, RiskAnnotatingToolset), (
+        "容错层里面必须是 RiskAnnotatingToolset，否则 MCP 工具没有 risk_level，审批闸门会对它们全部放行"
+    )
+
+
+# ---------------------------------------------------------------------
+# 关闭钩子（`app/server.py` 的 lifespan 收尾）
+# ---------------------------------------------------------------------
+async def test_shutdown_closes_mcp_clients_and_isolates_failures(monkeypatch):
+    """stdio 子进程的存活期比进程本身长：收尾必须显式关客户端，
+    且一个 server 关不掉不能挡住其它 server（否则只漏一个也变成全部漏）。"""
+    from app.server import _close_mcp_clients
+
+    closed: list[str] = []
+
+    class FakeClient:
+        def __init__(self, name: str, *, fail: bool) -> None:
+            self._name = name
+            self._fail = fail
+
+        async def close(self) -> None:
+            if self._fail:
+                raise RuntimeError("already gone")
+            closed.append(self._name)
+
+    class FakeRaw:
+        def __init__(self, client: FakeClient) -> None:
+            self.client = client
+
+    def binding(name: str, *, fail: bool = False) -> mcp_client.McpToolsetBinding:
+        return mcp_client.McpToolsetBinding(
+            config=McpServerConfig(name=name, url=f"https://{name}.example/mcp"),
+            raw=FakeRaw(FakeClient(name, fail=fail)),  # type: ignore[arg-type]
+            exposed=None,  # type: ignore[arg-type]
+        )
+
+    registry = McpRegistry(configs=[])
+    registry._toolsets = [binding("broken", fail=True), binding("good")]
+    monkeypatch.setattr(mcp_client, "_registry", registry)
+
+    await _close_mcp_clients()
+
+    assert closed == ["good"]

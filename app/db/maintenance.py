@@ -1,4 +1,4 @@
-"""维护动作：过期/按用户清理会话行，以及 API Key 解密审计。"""
+"""维护动作：过期/按用户清理会话行、回收沙箱历史，以及 API Key 解密审计。"""
 
 import logging
 import uuid
@@ -8,10 +8,16 @@ from sqlalchemy import delete, select, text
 
 from app.config.secret_box import PREFIX, SecretDecryptError, decrypt_secret
 from app.db.base import async_session_maker
+from app.db.models.sandbox import SandboxLease
 from app.db.models.user import AccessToken
 from app.db.session_cache import _session_cache_delete
 
 logger = logging.getLogger(__name__)
+
+#: 已经不会再被任何代码碰的租约状态。必须与 `services/sandbox/lease.py` 的
+#: `STATE_DESTROYED` / `STATE_FAILED` / `STATE_DESTROY_FAILED` 逐字一致；不 import 那边是因为
+#: lease.py 反过来 import `app.db`，会在包初始化时成环。
+TERMINAL_LEASE_STATES: tuple[str, ...] = ("destroyed", "failed", "destroy_failed")
 
 
 async def audit_provider_key_decryption() -> list[str]:
@@ -76,4 +82,34 @@ async def delete_user_access_tokens(user_id: uuid.UUID) -> int:
 
     for token in tokens:
         await _session_cache_delete(token)
+    return result.rowcount or 0
+
+
+async def cleanup_sandbox_history(older_than_days: int) -> int:
+    """删除已结束且超过保留期的租约，返回删除条数（命令行随 `ON DELETE CASCADE` 一起走）。
+
+    这张表以前只增不减：`destroyed` 的行永久留存，而用户每次点开环境面板都要过一遍
+    `get_latest_lease`（`WHERE user_id=? ORDER BY created_at DESC`），代价随历史租约数线性增长，
+    也等于「用户删了会话、服务端还留着全量审计」。
+
+    过滤用 `destroyed_at` 而不是 `created_at`：保留期要算「机器停了多久」，不是「建了多久」。
+    代价是 `failed` 且从未进入销毁流程的行（`destroyed_at` 为 NULL）永远删不到——宁可漏删审计线索，
+    也不拿别的列猜一个会被误删的时间点。
+    """
+    if older_than_days <= 0:
+        # 0/负值会把 cutoff 推到当下，一次调用就能清空全部历史（含正在被排障引用的行）。
+        raise ValueError(
+            f"cleanup_sandbox_history 的 older_than_days 必须 > 0，当前为 {older_than_days}："
+            "0 或负值会让保留期归零，把刚结束的租约连同审计记录一起删掉。"
+        )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    async with async_session_maker() as session:
+        result = await session.execute(
+            delete(SandboxLease).where(
+                SandboxLease.state.in_(TERMINAL_LEASE_STATES),
+                SandboxLease.destroyed_at < cutoff,
+            )
+        )
+        await session.commit()
     return result.rowcount or 0

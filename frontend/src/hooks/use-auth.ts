@@ -33,6 +33,18 @@ import { stopSync } from '../lib/sync/engine';
 
 export type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
+/**
+ * 会话在用户操作中途失效时的提示。
+ *
+ * 没有这句话的后果：用户正在看流式回答，画面突然变回登录页，没有任何说明——他会
+ * 怀疑是崩溃、是被人踢下线，而不是「会话到期」。会话默认 30 天且不滑动续期，这件事
+ * 对每个活跃用户都会发生一次。
+ *
+ * 文案刻意与消息区 401 的那句（`connection-failure.ts` 的 `describeStatus`）逐字一致：
+ * 同一次失效在界面上不能有两种说法，否则用户会以为碰到了两个不同的问题。
+ */
+export const SESSION_EXPIRED_MESSAGE = '登录状态已失效，请重新登录';
+
 export interface UseAuthResult {
   status: AuthStatus;
   user: AuthUser | null;
@@ -153,6 +165,9 @@ export function useAuth(): UseAuthResult {
       stopSync();
       setUser(null);
       setStatus('anonymous');
+      // 必须说明「为什么突然回到登录页」：流式输出看到一半被踢回去，没有一句解释
+      // 时用户只能猜是崩溃还是被别人踢了。登录页的 role="alert" 会把它念出来。
+      setError(SESSION_EXPIRED_MESSAGE);
     };
 
     addUnauthorizedListener(handleUnauthorized);

@@ -33,8 +33,10 @@ async def test_unknown_email_still_runs_a_password_hash():
     """登录耗时不能区分「邮箱不存在」与「密码错误」（I-12）。
 
     fastapi-users 的 `authenticate` 在用户不存在时会故意跑一次 hash；这条用例把它
-    锁住，避免升级框架后静默丢掉该缓解。
+    锁住，避免升级框架后静默丢掉该缓解。同时断言这次假哈希必须发生在**另一个线程**：
+    我们覆盖了 `authenticate`，缓解留在事件循环线程上就等于没做（一次 Argon2 约 65ms）。
     """
+    import threading
     from types import SimpleNamespace
 
     from fastapi_users.exceptions import UserNotExists
@@ -48,15 +50,19 @@ async def test_unknown_email_still_runs_a_password_hash():
     class _CountingHelper:
         def __init__(self) -> None:
             self.hashed = 0
+            self.thread_ids: list[int] = []
 
         def hash(self, password):  # noqa: ANN001, ANN202
             self.hashed += 1
+            self.thread_ids.append(threading.get_ident())
             return "hashed"
 
     helper = _CountingHelper()
     manager = UserManager(_MissingUserDB(), helper)
+    main_thread = threading.get_ident()
 
     result = await manager.authenticate(SimpleNamespace(username="nobody@example.com", password="whatever123"))
 
     assert result is None
     assert helper.hashed == 1
+    assert helper.thread_ids[0] != main_thread

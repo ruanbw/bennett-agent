@@ -32,6 +32,9 @@ globals().pop("registry", None)
 #: 沙箱工具的外层防线超时，必须严格大于工具内部能等的最长时间（`MAX_EXEC_TIMEOUT_S` 是
 #: 模型能调的 `timeout_s` 上限，另加建机与传输余量）：pydantic-ai 的超时抛成 `ModelRetry`，
 #: 先于内部收尾触发时工具里的中文建议就全不可达。
+#: 另一端同样有约束：它必须**小于** `chat_service.TOTAL_STREAM_BUDGET_SECONDS`（600s），
+#: 否则整轮预算会先中止，外层防线永远等不到——那时模型看到的是「生成超时」，工具里写的
+#: 超时文案一句都到不了。两条边界都有用例钉住（`tests/test_sandbox_provider.py`）。
 SANDBOX_TOOL_TIMEOUT_SECONDS = MAX_EXEC_TIMEOUT_S + 60.0
 
 #: 旧导出名 → 注册表里的工具名。工具对象随注册表惰性产生，只能经 `__getattr__` 取。
@@ -122,13 +125,18 @@ def _register_all(registry: ToolRegistry) -> None:
 
     # ---------------------------------------------------------------------
     # 沙箱：四个工具，签名里没有任何 id。
-    # 分级按「能不能撤销」而非「有多危险」（见 `app/runtime/approval.py`）：命令全可撤销，故不逐条
-    # 审批；身份由作用域在构造上保证（`app/runtime/scopes.py`），只有 `sandbox_reset` 需审批。
+    # 分级按「能不能撤销」而非「有多危险」（见 `app/runtime/approval.py`）：身份由作用域在构造上
+    # 保证（`app/runtime/scopes.py`），所以这里不存在「谁能跑」的问题。
+    # `sandbox_exec` / `sandbox_write_file` 是 `SAFE_WRITE` 而不是 `READ_ONLY`：`READ_ONLY` 的定义是
+    # 「只读操作，无外部副作用」，而一条任意 shell 命令能删文件、能联网外带、能改工作目录之外的东西
+    # ——标成只读等于给唯一的执行闸门喂一条假事实，将来任何「按等级限流 / 按等级强制审计」的策略
+    # 都会把它当只读放过去。代价是这两类调用会先问一次用户（审批框），这正是「不可撤销」的分界线。
+    # `sandbox_read_file` 保持 `READ_ONLY`：它真的只读。
     # ---------------------------------------------------------------------
 
     registry.register(
         category=ToolCategory.DATA,
-        risk_level=RiskLevel.READ_ONLY,
+        risk_level=RiskLevel.SAFE_WRITE,
         tags=["sandbox", "code", "compute"],
         description=(
             "在用户自己的执行环境（同一用户跨会话共用一台机器）里跑一条 shell 命令，返回退出码与输出。"
@@ -143,7 +151,7 @@ def _register_all(registry: ToolRegistry) -> None:
 
     registry.register(
         category=ToolCategory.DATA,
-        risk_level=RiskLevel.READ_ONLY,
+        risk_level=RiskLevel.SAFE_WRITE,
         tags=["sandbox", "files"],
         description=(
             "把文本内容写入用户执行环境里的文件（父目录会自动创建；同一用户的其它会话也能看到）。"

@@ -29,4 +29,15 @@ describe('SyncHttpError 分类', () => {
     expect(error(500).isFatal).toBe(false);
     expect(error(503).isFatal).toBe(false);
   });
+
+  /**
+   * 413 是「这一批装得太多」，不是「请求写错了」。
+   *
+   * 判成 fatal 等于该账号的推送永久停摆：调度器不再排程，而重试会重新组装出同一批。
+   */
+  it('413 不是 fatal，且单独可识别（客户端据此砍半重试）', () => {
+    expect(error(413).isFatal).toBe(false);
+    expect(error(413).isTooLarge).toBe(true);
+    expect(error(400).isTooLarge).toBe(false);
+  });
 });

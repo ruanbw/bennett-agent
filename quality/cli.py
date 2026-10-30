@@ -69,6 +69,27 @@ def _graders(args: argparse.Namespace) -> list[Any]:
     return graders
 
 
+def _record_judge(report: RunReport, graders: list[Any]) -> None:
+    """把判分口径写进 `report.config`。
+
+    判分模型 id 必须进报告：换过判分模型的两份报告不可比（LLM judge 的 self-preference
+    有实证），而 `gate.py` 只有读得到 `judge_model` 才会拒绝这种对比。
+    `judge_errors` 同理：它说明有些 0 分来自判分器故障而不是被测系统。
+    三个值都在跑完之后写：`judge_errors` 是运行的结果，`judge_model` / `judge_base_url`
+    与它同源——分成两处写，报告里迟早会出现「分数是 A 判的、门禁读到的是 B」。
+    """
+    judge = next((grader for grader in graders if isinstance(grader, RubricJudge)), None)
+    client = getattr(judge, "client", None)
+    report.config["judge_model"] = getattr(client, "model", None)
+    report.config["judge_base_url"] = getattr(client, "base_url", None)
+    report.config["judge_errors"] = judge.errors if judge is not None else 0
+
+
+def _errored_attempts(audit: AuditLog) -> int:
+    """本次扫描里「没取得可判证据」的尝试次数，数据来自 `scan` 写的 `scan.errored` 审计行。"""
+    return sum(int(entry.detail.get("count") or 0) for entry in audit.entries if entry.action == "scan.errored")
+
+
 def _suite_for_judge(suite: Suite, args: argparse.Namespace) -> Suite:
     """`--judge none` 时把「只能靠 LLM 判」的任务整条摘掉。
 
@@ -115,6 +136,13 @@ def _print_run(report: RunReport) -> None:
         print(f"  - {task.task_id:<28} {task.passed_samples}/{task.samples} 分={task.score:.2f}{gates}")
     if len(failed) > 12:
         print(f"  ... 另有 {len(failed) - 12} 条未全部通过")
+    judge_errors = report.config.get("judge_errors")
+    if isinstance(judge_errors, int) and judge_errors > 0:
+        # 同上：没被说出来的降级会被读成模型退化，然后有人去改一个并不存在的提示词问题。
+        print(
+            f"警告    {judge_errors} 次判分调用失败：部分 0 分来自判分器故障，不是被测系统",
+            file=sys.stderr,
+        )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -123,19 +151,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     out = Path(args.out) / suite.id / run_id if args.out else DEFAULT_RUNS / suite.id / run_id
     audit = _audit(args, out / "audit.jsonl")
     target = _target_from_args(args)
+    graders = _graders(args)
     report, verdicts = asyncio.run(
         run_suite(
             target,
             suite,
             samples=args.samples,
             concurrency=args.concurrency,
-            graders=_graders(args),
+            graders=graders,
             budget=_budget(args),
             audit=audit,
             run_id=run_id,
             config={"judge": args.judge, "driver": args.driver, "target": args.target},
         )
     )
+    _record_judge(report, graders)
     report.audit_ref = str(out / "audit.jsonl")
     write_json(report, verdicts, out)
     try:
@@ -155,25 +185,34 @@ def cmd_scan(args: argparse.Namespace) -> int:
     run_id = args.run_id or _now_id()
     out = Path(args.out) / "security" / run_id if args.out else DEFAULT_RUNS / "security" / run_id
     target = _target_from_args(args)
+    audit = _audit(args, out / "audit.jsonl")
     report = asyncio.run(
         scan(
             target,
             suite,
             samples=args.samples,
             budget=_budget(args),
-            audit=_audit(args, out / "audit.jsonl"),
+            audit=audit,
         )
     )
     out.mkdir(parents=True, exist_ok=True)
     payload = report.model_dump(mode="json")
     (out / "security.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"探针    {report.probes} 条 × {args.samples} 次 = {report.attempts} 次尝试")
+    errored = _errored_attempts(audit)
+    if errored:
+        # 没跑起来的探针既不是「防住了」也不是「被攻破」。不单独说一句，ASR 会被基础设施
+        # 抖动稀释，读者只会看到一份比上次更好看的报告。
+        print(
+            f"警告    {errored} 次尝试未取得可判证据（执行失败），不计入 ASR 与 finding；这次扫描没有覆盖全部探针",
+            file=sys.stderr,
+        )
     print(f"ASR     {report.attack_success_rate:.1%}   风险分 {report.risk_score:.1f}/100")
     print("OWASP   " + "  ".join(f"{code}={rate:.1%}" for code, rate in sorted(report.by_owasp.items())))
     for finding in report.findings[:10]:
         print(f"  ! [{finding.severity}] {finding.owasp} {finding.probe_id}: {finding.evidence[:100]}")
     print(f"JSON    {out / 'security.json'}")
-    return 1 if report.risk_score >= args.fail_over or scan_failed(report) else 0
+    return 1 if scan_failed(report) else 0
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -273,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quality", description="bennett-agent 评测 / 调优 / 安全管控")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def common(p: argparse.ArgumentParser) -> None:
+    def common(p: argparse.ArgumentParser, *, with_judge: bool = True, with_out: bool = True) -> None:
         p.add_argument("--target", choices=["prompt-lab", "live"], default="prompt-lab")
         p.add_argument(
             "--driver",
@@ -281,12 +320,15 @@ def build_parser() -> argparse.ArgumentParser:
             default="openai",
             help="openai=打真实模型（默认）；scripted=按用例脚本回放，仅用于框架自测",
         )
-        p.add_argument(
-            "--judge",
-            choices=["llm", "none"],
-            default="llm",
-            help="llm=rubric 交给 LLM 判；none=只跑确定性断言与安全 gate",
-        )
+        if with_judge:
+            # `scan` 不挂它：安全判分完全走 gate 与确定性断言，rubric 分数不参与任何判定，
+            # 一个接受却不生效的旋钮会让运维误以为扫描也考了文本质量。
+            p.add_argument(
+                "--judge",
+                choices=["llm", "none"],
+                default="llm",
+                help="llm=rubric 交给 LLM 判；none=只跑确定性断言与安全 gate",
+            )
         p.add_argument("--model", default=os.environ.get("QUALITY_MODEL", "group/deepseek-v4.1-flash"))
         p.add_argument("--base-url", default=None)
         p.add_argument("--temperature", type=float, default=0.0)
@@ -296,7 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--budget-usd", type=float, default=None)
         p.add_argument("--budget-tokens", type=int, default=None)
         p.add_argument("--budget-seconds", type=float, default=None)
-        p.add_argument("--out", default=None, help="产物根目录（默认 quality/runs）")
+        if with_out:
+            # `tune` 不挂它：产物路径固定为 `quality/runs/tuning/<run_id>/`，
+            # 一个不改变任何文件位置的 `--out` 只会让人以为可以把产物挪走。
+            p.add_argument("--out", default=None, help="产物根目录（默认 quality/runs）")
         p.add_argument("--run-id", default=None)
         p.add_argument("--actor", default=os.environ.get("QUALITY_ACTOR", "local"))
         p.add_argument("--tenant", default=os.environ.get("QUALITY_TENANT", "default"))
@@ -308,8 +353,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     scan_p = sub.add_parser("scan", help="跑安全探针")
-    scan_p.add_argument("--fail-over", type=float, default=100.0, help="风险分达到该值即非 0 退出")
-    common(scan_p)
+    # 没有 `--fail-over`：`risk_score > 0` 蕴含 `scan_failed()` 为真，阈值不可能改变退出码。
+    # 留着一个看似能调的门限，会让运维以为存在「风险分 80 才拦」的模式。
+    common(scan_p, with_judge=False)
     scan_p.set_defaults(func=cmd_scan)
 
     gate = sub.add_parser("gate", help="与基线报告比较，决定是否放行")
@@ -322,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     tune.add_argument("--suite", required=True)
     tune.add_argument("--prompt", default=None)
     tune.add_argument("--iterations", type=int, default=2)
-    common(tune)
+    common(tune, with_out=False)
     tune.set_defaults(func=cmd_tune)
     return parser
 

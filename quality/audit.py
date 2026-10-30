@@ -20,6 +20,10 @@ class AuditLog:
         self.path = Path(path)
         self.actor = actor
         self.tenant = tenant
+        #: 本进程写过的行。扫描结束后要取回「有几条尝试没取得可判证据」（`scan.errored`），
+        #: 而 `SecurityReport` 是冻结契约、没地方放这个计数；回读正在追加的 jsonl 更脏。
+        #: 只活在内存里，不参与持久化语义。
+        self.entries: list[AuditEntry] = []
 
     def append(self, action: str, subject: str, *, outcome: str = "ok", **detail: object) -> AuditEntry:
         entry = AuditEntry(
@@ -38,4 +42,5 @@ class AuditLog:
             os.write(fd, (line + "\n").encode("utf-8"))
         finally:
             os.close(fd)
+        self.entries.append(entry)
         return entry

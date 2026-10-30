@@ -17,7 +17,13 @@ MAX_OUTPUT_TAIL_CHARS = 2_000
 #: 单条命令默认超时。provider 必须自己保证到点终止：取消协程后容器里的进程还在跑，
 #: 下一次 exec 会和它抢同一个 workspace。
 DEFAULT_EXEC_TIMEOUT_S = 120
-MAX_EXEC_TIMEOUT_S = 900
+
+#: 单条命令的超时上限。**必须小于 `chat_service.TOTAL_STREAM_BUDGET_SECONDS`（600s）**：
+#: 一轮对话的预算是整轮共用的，比它更长的上限是不可达的假承诺——流式到点先抛
+#: `StreamTimeoutError`，模型看到的是一句「生成超时」，而容器里的进程还在跑（没有
+#: `sandbox_command` 行，下一次 exec 还要和它抢 workspace）。取 300：留出建机、模型上下行与
+#: 其余步骤的余量，同时容得下 `npm install` / 跑一次测试这类真实耗时。
+MAX_EXEC_TIMEOUT_S = 300
 
 
 class SandboxError(RuntimeError):

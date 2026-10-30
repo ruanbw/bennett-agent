@@ -64,13 +64,13 @@ async def _run_all(host: str, port: int) -> None:
     """
     import uvicorn
 
-    from app.db import engine, verify_schema_at_head
+    from app.db import engine
     from app.services.http_client import close_http_client
     from app.services.redis_client import close_redis
     from app.services.sandbox.reaper import run_reaper
 
-    await verify_schema_at_head()
-
+    # 建库脚本不在这里跑：`app.server:lifespan` 已经跑了一次，且它覆盖 `uvicorn app.server:app` 直启的路径。
+    # 两处都跑等于每次启动多一轮全表 DDL 与锁，纯粹是浪费。
     stop = asyncio.Event()
     loops = [asyncio.create_task(run_reaper(stop), name="sandbox-reaper")]
     server = uvicorn.Server(

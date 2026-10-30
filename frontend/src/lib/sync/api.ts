@@ -74,12 +74,26 @@ export class SyncHttpError extends Error {
   }
 
   /**
-   * 4xx 且不是游标/限流问题：请求本身有问题，重试不会成功。
+   * 请求体超过服务端上限（`max_request_body_bytes`）。
+   *
+   * 它和其它 4xx 的区别是「内容没错，只是这一批装得太多」：原样重试必然再撞，但把批量
+   * 砍半后同一批能推进（见 `engine.pushBatch` 的 413 分支）。
+   */
+  get isTooLarge(): boolean {
+    return this.status === 413;
+  }
+
+  /**
+   * 4xx 且不是游标/限流/超大请求：请求本身有问题，重试不会成功。
    *
    * 429 必须排除：限流是暂时状态，服务端还会在 `Retry-After` 里给出恢复时间。
    * 把它当 fatal 等于一次限流就让同步永久停下，只能等用户手动点重试。
+   *
+   * 413 同理不能算 fatal：`isFatal` 是「这个错误值不值得重试」的唯一判据，把它判成 fatal
+   * 就等于该账号的推送永久停摆（面板上只留一条错误）——而事实是砍半就好。
    */
   get isFatal(): boolean {
+    if (this.isTooLarge) return false;
     return this.status >= 400 && this.status < 500 && this.status !== 429 && !this.isCursorReset;
   }
 }

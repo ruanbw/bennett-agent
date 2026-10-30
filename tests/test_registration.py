@@ -9,17 +9,27 @@ from app.config import settings
 from app.schemas.user import UserCreate
 
 
+class _FakePasswordHelper:
+    def __init__(self) -> None:
+        self.hashed: list[str] = []
+
+    def hash(self, password: str) -> str:
+        self.hashed.append(password)
+        return "hashed"
+
+
 class _FakeUserManager:
     def __init__(self, outcome: str = "created") -> None:
         self.outcome = outcome
         self.created: list[UserCreate] = []
+        self.password_helper = _FakePasswordHelper()
 
     async def create(self, payload: UserCreate, *, safe: bool, request=None):  # noqa: ANN001
         assert safe is True  # 注册绝不能走 superuser 字段路径
         if self.outcome == "exists":
             raise UserAlreadyExists()
         if self.outcome == "invalid":
-            raise InvalidPasswordException(reason="密码至少需要 8 个字符")
+            raise InvalidPasswordException(reason="密码至少需要 12 个字符")
         self.created.append(payload)
         return object()
 
@@ -49,6 +59,21 @@ async def test_invalid_password_still_reports_reason():
 
     assert excinfo.value.status_code == 400
     assert "REGISTER_INVALID_PASSWORD" in excinfo.value.detail
+
+
+async def test_existing_email_still_runs_a_password_hash():
+    """已存在的邮箱也必须付一次哈希成本。
+
+    新邮箱要走一次 Argon2（约 65ms），已存在的邮箱若直接返回，「秒回」本身就等于
+    「这个邮箱注册过」——202 与统一文案（I-04/I-05）想挡的枚举器就被延迟差重新打开了。
+    """
+    payload = _payload()
+    existing = _FakeUserManager("exists")
+
+    response = await register_account(payload, None, existing)
+
+    assert response.status_code == 202
+    assert existing.password_helper.hashed == [payload.password]
 
 
 async def test_registration_can_be_disabled(monkeypatch):

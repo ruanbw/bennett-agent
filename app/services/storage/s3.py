@@ -90,11 +90,15 @@ def reset_object_store() -> None:
 
 
 class S3ObjectStore:
-    """`ObjectStore` 的 S3 实现。所有 boto3 调用都在线程池里执行。"""
+    """`ObjectStore` 的 S3 实现。所有 boto3 调用都在线程池里执行。
 
-    def __init__(self, bucket: str | None = None, prefix: str | None = None) -> None:
+    这里不认键前缀：键由唯一的生产者 `app/services/sandbox/artifacts.py:_artifact_key` 用
+    `S3_PREFIX` 拼好（如果这一层再拼一次，就变成 `sandbox/sandbox/…`；而它不拼又会让
+    `S3_PREFIX` 成为改了不起作用的死配置）。
+    """
+
+    def __init__(self, bucket: str | None = None) -> None:
         self.bucket = bucket or settings.s3_bucket
-        self.prefix = prefix or settings.s3_prefix
 
     # -- 内部：把同步调用卸载到线程池 ---------------------------------
     async def _call(self, operation: str, **kwargs: Any) -> Any:  # noqa: ANN401

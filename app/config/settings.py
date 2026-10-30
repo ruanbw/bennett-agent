@@ -278,6 +278,15 @@ class Settings(BaseSettings):
         ge=0,
         description=("单个**来源 IP** 每分钟可发起的登录/注册请求数；0 表示不限流。挡的是密码暴力破解与批量注册。"),
     )
+    account_login_failure_limit_per_hour: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "单个**账号**每小时允许的登录失败次数；0 表示不限制。按 IP 的桶换个出口就能绕过，"
+            "分布式凭据填充只能按账号拦（ASVS 2.2.1 的上限是每小时 100 次，这里更严）。"
+            "计数只在失败分支累加，所以正确密码永远能登录：被锁住的只是「继续猜」。"
+        ),
+    )
     registration_enabled: bool = Field(
         default=True,
         description=(

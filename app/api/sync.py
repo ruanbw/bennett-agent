@@ -14,6 +14,7 @@ from app.db import User
 from app.schemas.sync import PullResult, PushRequest, PushResult
 from app.services import sync_service
 from app.services.auth import current_active_user
+from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,10 @@ async def pull(
         await sync_service.wait_for_change(user.id, since, wait_seconds)
         return await sync_service.pull(user.id, since, limit=limit)
     except sync_service.StaleCursor as exc:
+        # 410 是客户端「丢弃游标、全量重拉」的唯一入口，也是本层唯一能观测到游标失效的地方。
+        # 没有这条计数，一次 410 风暴（客户端会被劝全量重拉，服务端游标也就跟着大批作废）
+        # 在运维侧完全不可见，只有用户报障。
+        metrics.increment(sync_service.SYNC_CURSOR_STALE_TOTAL)
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail=f"{exc}（code=resync_required）",

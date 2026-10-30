@@ -130,6 +130,7 @@ export function fromConversationRow(row: ConversationRow, local?: SessionRecord)
     deleted: row.deleted,
     syncState: 'synced',
     clientRev: row.client_rev,
+    serverVersion: row.version,
   };
 }
 
@@ -379,30 +380,37 @@ export function fromMessageRow(row: MessageRow, local?: MessageRecord): MessageR
     createdAt: row.created_at,
     syncState: 'synced',
     clientRev: row.client_rev,
+    serverVersion: row.version,
   };
 }
 
 /**
  * 拉到的这一行是否应该覆盖本地。
  *
- * 三条规则，顺序不能换：
+ * 四条规则，顺序不能换：
  *
  * 1. 本地没有 → 直接建；
- * 2. 本地是 `pending` / `error` → **不动**。pending 意味着本机有还没推上去的内容，
+ * 2. **墓碑无条件落库**。删除是服务端单向广播的终态，本地修订号再大也没资格把它挡回来；
+ *    挡掉就是幽灵会话：本地还有内容、服务端已经不存在，此后每次编辑都被判
+ *    `conversation_deleted`，用户既看不到也删不掉它；
+ * 3. 本地是 `pending` / `error` → **不动**。pending 意味着本机有还没推上去的内容，
  *    拿服务端的旧版本盖掉它就是同步把用户刚写的消息回滚；error 是服务端明确拒绝过
  *    的行，覆盖会让它看起来像成功；
- * 3. 其余按 `client_rev` 比较：同一行的修订号只有写它的那台设备会推进，所以
- *    「服务端更大」= 那台设备后来又改了它。
+ * 4. 其余比**服务端版本号** `version`：它由服务端单点发号、单调递增，是「这一行被谁
+ *    更新过」的唯一权威答案。
  *
- * 不用 `version` 比较：它是全用户级别的游标，和「这一行被改过几次」无关。
+ * 为什么不是 `client_rev`：修订号是**每台设备自己发的**。设备 A、B 各改一次都会到 4，
+ * A 本地那份 4 会把服务端推回来的 4 号行挡在门外——两台设备从此各自分叉，第三台设备
+ * 拿到的是第三种状态。`serverVersion` 缺席（本机从未拉过该行）按 0 处理：服务端版本从 1 起。
  */
 export function shouldApplyRemote(
-  row: { client_rev: number },
-  local?: { syncState?: SyncState; clientRev?: number },
+  row: { version: number; deleted?: boolean },
+  local?: { syncState?: SyncState; serverVersion?: number },
 ): boolean {
   if (!local) return true;
+  if (row.deleted) return true;
   if (local.syncState === 'pending' || local.syncState === 'error') return false;
-  return row.client_rev > (local.clientRev ?? 0);
+  return row.version > (local.serverVersion ?? 0);
 }
 
 export interface PushBatch {
@@ -411,27 +419,64 @@ export interface PushBatch {
 }
 
 /**
+ * 单次 push 的请求体字节预算。
+ *
+ * 服务端的硬上限是请求体 32MB（`max_request_body_bytes`，防未登录 DoS）；服务端没有
+ * 单个 push 的字节限额，所以超限时只会回一个没头没脑的 413，而**按行数切分永远算不出它**：
+ * 150 行 × 单行 payload 上限 256KB = 38.4MB。取 8MB 是给「单行刚好吃满 256KB」留 4 倍余量，
+ * 同时也让一批的序列化/传输时间不至于把其它请求拖住。
+ */
+export const PUSH_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+const utf8 = new TextEncoder();
+
+/**
+ * 一行序列化后的 UTF-8 字节数。
+ *
+ * 必须按字节而不是 `JSON.stringify(...).length`：后者数的是 UTF-16 码元，中文正文
+ * （占 3 字节）会被少算到三分之一，预算就形同虚设。
+ */
+function serializedBytes(row: unknown): number {
+  return utf8.encode(JSON.stringify(row)).length;
+}
+
+/**
  * 组一批要推送的行。
  *
- * 两条约束：
+ * 三条约束：
  *
  * 1. 会话必须先于它的消息到达服务端（服务端会按 id 校验会话归属）；
  * 2. 会话数超出一批时，**不能**把引用这些会话的消息塞进同一批——那只会换回一堆
- *    `conversation_missing`。本轮先推会话，消息下一批再说。
+ *    `conversation_missing`。本轮先推会话，消息下一批再说；
+ * 3. 行数与**累计字节**双重封顶，且至少保留一行。只看行数会组出服务端收不下的批次
+ *    （413 后客户端既不重试也改不了批次，推送就永久停摆），而至少留一行是为了避免
+ *    「单行超预算」时一批都组不出来、同步原地死锁。
  */
 export function buildPushBatch(
   sessions: readonly SessionRecord[],
   messages: readonly MessageRecord[],
   limit: number,
+  maxBytes: number = PUSH_BATCH_MAX_BYTES,
 ): PushBatch {
   // 同毫秒的会话按 id 兜底排序：批次的顺序必须确定，否则「谁先到服务端」随
   // 引擎实现细节漂移，排查问题时无法复现。
   const orderedSessions = [...sessions].sort(
     (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id),
   );
-  const batchSessions = orderedSessions.slice(0, limit);
-  const batchedIds = new Set(batchSessions.map((session) => session.id));
-  const pendingIds = new Set(orderedSessions.map((session) => session.id));
+
+  const conversationRows: ConversationPushRow[] = [];
+  let bytes = 0;
+  for (const record of orderedSessions) {
+    if (conversationRows.length >= limit) break;
+    const row = toConversationPushRow(record);
+    const size = serializedBytes(row);
+    if (conversationRows.length > 0 && bytes + size > maxBytes) break;
+    conversationRows.push(row);
+    bytes += size;
+  }
+
+  const batchedIds = new Set(conversationRows.map((row) => row.id));
+  const pendingIds = new Set(orderedSessions.map((record) => record.id));
 
   const eligible = messages.filter(
     (message) => !pendingIds.has(message.sessionId) || batchedIds.has(message.sessionId),
@@ -442,10 +487,16 @@ export function buildPushBatch(
       a.sessionId.localeCompare(b.sessionId) || a.createdAt - b.createdAt || a.id.localeCompare(b.id),
   );
 
-  return {
-    conversations: batchSessions.map(toConversationPushRow),
-    messages: orderedMessages
-      .slice(0, Math.max(limit - batchSessions.length, 0))
-      .map(toMessagePushRow),
-  };
+  const messageRows: MessagePushRow[] = [];
+  for (const record of orderedMessages) {
+    if (conversationRows.length + messageRows.length >= limit) break;
+    const row = toMessagePushRow(record);
+    const size = serializedBytes(row);
+    // 至少保留一行：让超大单行也发得出去，服务端会按 `sync_payload_max_bytes` 逐行拒。
+    if (conversationRows.length + messageRows.length > 0 && bytes + size > maxBytes) break;
+    messageRows.push(row);
+    bytes += size;
+  }
+
+  return { conversations: conversationRows, messages: messageRows };
 }

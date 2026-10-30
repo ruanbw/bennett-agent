@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Protocol
 from weakref import WeakValueDictionary
 
@@ -41,41 +42,70 @@ class ChangeNotifier(Protocol):
 
 
 class InMemoryNotifier:
-    """单进程实现：每用户一个 `asyncio.Event`。
+    """单进程实现：每用户一个自增世代号 + 一组等待方各自的事件。
 
-    `WeakValueDictionary`：没有请求在等的时候事件会被回收，不会因为历史用户数量增长而泄漏内存。
+    **不能用「每用户一个共享 `asyncio.Event`」**：`subscribe` 进入时必须先 `clear()`（否则
+    上一个等待方留下的 set 状态会立刻返回），而 `clear()` 作用于所有人——A 已订阅、尚未
+    `wait()` 时 B 进来 clear 一下，就把这期间到达的 `notify` 吐掉了，A 只能白等到超时。
+    改成每个等待方一个独立事件后，谁的唤醒也吐不掉谁的。
+
+    世代号（`generation`）是协议的一部分：唤醒信号是「世代变过了」而不只是「事件被 set」，
+    所以将来谁把事件换成需要 clear 的实现，也不会重新引入上面那个吞唤醒的 bug。
+
+    `WeakValueDictionary`：没有请求在等的时候条目会被回收，不会因为历史用户数量增长而泄漏内存。
     `asyncio.Event` 绑定创建时的 event loop，跨 loop 复用会抛「bound to a different event loop」，
     所以换 loop（测试、进程重启）要整个换掉实例，而不是只清表。
     """
 
     def __init__(self) -> None:
-        self._events: WeakValueDictionary[uuid.UUID, asyncio.Event] = WeakValueDictionary()
+        self._signals: WeakValueDictionary[uuid.UUID, _UserSignals] = WeakValueDictionary()
 
     def notify(self, user_id: uuid.UUID) -> None:
-        event = self._events.get(user_id)
-        if event is not None:
+        signals = self._signals.get(user_id)
+        if signals is None:
+            # 没人在等：什么都不用做，下一个订阅方会先自己查一遍版本号。
+            return
+        signals.generation += 1
+        for event in signals.waiters:
             event.set()
 
     @contextlib.asynccontextmanager
     async def subscribe(self, user_id: uuid.UUID) -> AsyncIterator[ChangeSubscription]:
-        # 进入时就 clear，且必须早于调用方查版本号：否则查完之后到达的唤醒会被清掉。
-        event = self._event_for(user_id)
-        event.clear()
-        yield _EventSubscription(event)
+        # 不 clear 任何东西：新等待方拿到的是自己的事件，而基线世代号让「已订阅读、尚未
+        # wait 之间到达的唤醒」也能立刻返回。
+        signals = self._signals.get(user_id)
+        if signals is None:
+            signals = _UserSignals()
+            self._signals[user_id] = signals
+        event = asyncio.Event()
+        signals.waiters.append(event)
+        try:
+            yield _GenerationSubscription(signals, event, signals.generation)
+        finally:
+            with contextlib.suppress(ValueError):
+                signals.waiters.remove(event)
 
-    def _event_for(self, user_id: uuid.UUID) -> asyncio.Event:
-        event = self._events.get(user_id)
-        if event is None:
-            event = asyncio.Event()
-            self._events[user_id] = event
-        return event
+
+@dataclass
+class _UserSignals:
+    """一个用户当前的唤醒状态。`waiters` 里每个元素只被一个订阅方持有。"""
+
+    #: 每次 `notify` +1。订阅时记基线，`wait` 先比它——比事件更可靠地表达「期间已经被
+    #: 唤醒过了」（事件被谁 clear 掉也不影响这个判断）。
+    generation: int = 0
+    waiters: list[asyncio.Event] = field(default_factory=list)
 
 
-class _EventSubscription:
-    def __init__(self, event: asyncio.Event) -> None:
+class _GenerationSubscription:
+    def __init__(self, signals: _UserSignals, event: asyncio.Event, baseline: int) -> None:
+        self._signals = signals
         self._event = event
+        self._baseline = baseline
 
     async def wait(self, timeout: float) -> None:
+        if self._signals.generation != self._baseline:
+            # 订阅之后、开始等之前已经被唤醒过：立即返回，不要白等一个长轮询周期。
+            return
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._event.wait(), timeout=timeout)
 

@@ -20,6 +20,7 @@ from app.services.sandbox.artifacts import export_workspace
 from app.services.sandbox.base import SandboxError, SandboxProvider, owner_tag
 from app.services.sandbox.lease import (
     DESTROY_ERROR,
+    DESTROY_HARD_TTL,
     DESTROY_USER_BANNED,
     LeaseView,
     find_destroyable,
@@ -69,7 +70,11 @@ async def reap_once(*, now: datetime | None = None, provider: SandboxProvider | 
     for candidate in candidates:
         lease = candidate.lease
         try:
-            if await heartbeat_alive(redis, lease.id):
+            # 硬上限到期的候选不看心跳：provider 侧的 `timeout=hard_ttl` 已经把机器杀了，心跳只
+            # 证明「客户端还在看」。用心跳否决它，租约就会停在 `ready` 且 `provider_ref` 指向一台
+            # 不存在的机器——之后每次 exec 都 `SandboxNotFound`，工具回「请重试」却永远重建不出新
+            # 机器，用户只能等心跳过期。软时钟只能给软上限续命。
+            if candidate.reason != DESTROY_HARD_TTL and await heartbeat_alive(redis, lease.id):
                 summary.skipped_heartbeat += 1
                 continue
         except Exception:  # noqa: BLE001 - Redis 抖动时保守处理：这一轮先不动它
@@ -78,13 +83,20 @@ async def reap_once(*, now: datetime | None = None, provider: SandboxProvider | 
             continue
 
         reason = candidate.reason or DESTROY_ERROR
-        async with async_session_maker() as session:
-            if not await mark_destroying(session, lease.id):
-                # 别人抢先了（另一个 worker，或者用户主动 reset）。不是错误。
-                continue
-        if await _destroy_lease(lease, reason=reason, provider=provider):
-            summary.destroyed += 1
-        else:
+        try:
+            async with async_session_maker() as session:
+                if not await mark_destroying(session, lease.id):
+                    # 别人抢先了（另一个 worker，或者用户主动 reset）。不是错误。
+                    continue
+            if await _destroy_lease(lease, reason=reason, provider=provider):
+                summary.destroyed += 1
+            else:
+                summary.failed += 1
+        except Exception:  # noqa: BLE001 - 一台失败只影响这一台
+            # 不隔开就会穿出这个 for、被 `run_reaper` 的最外层接住：整轮中止，后面所有到期机器
+            # 都要再等一轮（60s），而这一台会停在 `destroying`，要等 `DESTROYING_STALE_SECONDS`
+            # （15 分钟）才能重抢——期间它按 `OPEN_STATES` 占着该用户唯一的容量位。
+            logger.warning("回收：处理租约时出现未预期异常，跳过这一台 (lease=%s)", lease.id, exc_info=True)
             summary.failed += 1
 
     # 卡在 provisioning 的残留：机器可能建出来了也可能没有。标记 + 告警，不猜着销毁。
@@ -148,11 +160,16 @@ async def destroy_leases_for_user(
 async def _destroy_many(leases: list[LeaseView], *, reason: str, provider: SandboxProvider | None = None) -> int:
     destroyed = 0
     for lease in leases:
-        async with async_session_maker() as session:
-            if not await mark_destroying(session, lease.id):
-                continue
-        if await _destroy_lease(lease, reason=reason, provider=provider):
-            destroyed += 1
+        try:
+            async with async_session_maker() as session:
+                if not await mark_destroying(session, lease.id):
+                    continue
+            if await _destroy_lease(lease, reason=reason, provider=provider):
+                destroyed += 1
+        except Exception:  # noqa: BLE001 - 一台失败不能放过剩下的机器
+            # 封禁/删号的语义是「立刻全部失效」：这里抛出去会让剩下几台机器继续跑，
+            # 而调用方（封禁端点）拿到的是 500，运维只能从日志里猜还有哪几台没拆。
+            logger.warning("强制销毁：处理租约时出现未预期异常，跳过这一台 (lease=%s)", lease.id, exc_info=True)
     return destroyed
 
 
@@ -168,7 +185,7 @@ async def _destroy_lease(lease: LeaseView, *, reason: str, provider: SandboxProv
             await mark_destroy_failed(session, lease.id, error=f"provider 不可用：{exc}")
         return False
 
-    artifact = await export_workspace(backend, lease, workdir=settings.sandbox_workdir)
+    artifact = await _export_or_none(backend, lease)
 
     try:
         if lease.provider_ref:
@@ -182,6 +199,19 @@ async def _destroy_lease(lease: LeaseView, *, reason: str, provider: SandboxProv
     async with async_session_maker() as session:
         await mark_destroyed(session, lease.id, reason=reason, artifact_uri=artifact)
     return True
+
+
+async def _export_or_none(backend: SandboxProvider, lease: LeaseView) -> str | None:
+    """导出产物，失败一律当「没有产物」。
+    导出链路里的 `provider.exec` 抛的不是 `SandboxError`（httpx 超时、SDK 内部异常），不在这里
+    拦就整台机器都不会被销毁——产物是尽力而为，机器必须回收（否则对象存储抖一下就等于永久占机）。
+    `CancelledError` 是 `BaseException`，停机取消照样穿出去，不会被当成导出失败。
+    """
+    try:
+        return await export_workspace(backend, lease, workdir=settings.sandbox_workdir)
+    except Exception:  # noqa: BLE001 - 见 docstring
+        logger.warning("回收：导出产物时出现未预期异常，继续销毁 (lease=%s)", lease.id, exc_info=True)
+        return None
 
 
 __all__ = [

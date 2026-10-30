@@ -7,12 +7,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
 
 from app.config import settings
 from app.services.sandbox.base import SandboxError, SandboxProvider
 from app.services.sandbox.lease import LeaseView
 from app.services.storage import ObjectStoreError, StorageNotConfigured, get_object_store
+from app.services.storage.base import _validate_key
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +134,14 @@ async def _upload(key: str, data: bytes, content_type: str) -> str | None:
         logger.warning("沙箱产物：对象存储未配置，跳过导出")
         return None
 
-    path = None
+    directory = None
     try:
         # 接口只收本地路径，所以落一次临时文件，用后即删。
-        fd, path = tempfile.mkstemp(prefix="sbx-artifact-")
-        with os.fdopen(fd, "wb") as handle:
+        # 文件名必须就是最终的下载名：`put_file` 用 `Path(path).name` 拼 Content-Disposition，
+        # 用 `mkstemp` 的临时名会让用户把 `workspace.tar.gz` 下载成 `sbx-artifact-XXXX`。
+        directory = tempfile.mkdtemp(prefix="sbx-artifact-")
+        path = os.path.join(directory, key.rsplit("/", 1)[-1])
+        with open(path, "wb") as handle:
             handle.write(data)
         await store.put_file(key, path, content_type)
         return key
@@ -144,12 +149,19 @@ async def _upload(key: str, data: bytes, content_type: str) -> str | None:
         logger.warning("沙箱产物：上传失败 (key=%s)：%s", key, exc)
         return None
     finally:
-        if path:
-            await asyncio.to_thread(lambda: os.path.exists(path) and os.unlink(path))
+        if directory:
+            await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
 
 
 def _artifact_key(lease: LeaseView, filename: str) -> str:
-    """对象键：`sandbox/{user_id}/{lease_id}/{filename}`。
+    """对象键：`{S3_PREFIX}/{user_id}/{lease_id}/{filename}`。
     带 lease_id 是因为同一会话会重建多次环境（`sandbox_reset`），否则后一次导出会覆盖前一次。
+    前缀在这里拼而不是在 `S3ObjectStore` 里：键只有这一个生产者，两处各拼一次会变成
+    `sandbox/sandbox/…`，而 `S3_PREFIX` 必须真的生效——按前缀授权的最小权限桶策略依赖它。
+    生成后立刻 `_validate_key`：自建网关/反代可能把桶挂成本地目录，`../` 与空段会写到桶外。
     """
-    return f"sandbox/{lease.user_id}/{lease.id}/{filename}"
+    prefix = settings.s3_prefix.strip("/")
+    name = f"{lease.user_id}/{lease.id}/{filename}"
+    key = f"{prefix}/{name}" if prefix else name
+    _validate_key(key)
+    return key

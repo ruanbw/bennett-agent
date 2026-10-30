@@ -15,8 +15,10 @@ from app.config import settings
 from app.db import User
 from app.schemas.user import PasswordChangeRequest, UserCreate, UserRead, UserUpdate
 from app.services.auth import (
+    MIN_PASSWORD_LENGTH,
     UserManager,
     auth_backend,
+    cookie_transport,
     current_active_user,
     fastapi_users,
     get_user_manager,
@@ -42,7 +44,7 @@ _FRAMEWORK_ROUTE_TEXT: dict[str, tuple[str, str]] = {
     ),
     "/register": (
         "注册账号（新账号的角色是普通用户）",
-        "邮箱 + 密码（至少 8 位）。新账号的角色固定为 **普通用户**（`user`）："
+        f"邮箱 + 密码（至少 {MIN_PASSWORD_LENGTH} 位）。新账号的角色固定为 **普通用户**（`user`）："
         "**没有任何请求参数能指定角色**，管理员身份只能由 `scripts/seed_admin.py` 播种"
         "或由超管在后台授予。同一来源 IP 有请求频率上限。",
     ),
@@ -89,7 +91,7 @@ async def enforce_registration_enabled() -> None:
     status_code=status.HTTP_202_ACCEPTED,
     summary="注册账号（新账号的角色是普通用户）",
     description=(
-        "邮箱 + 密码（至少 8 位）。新账号的角色固定为**普通用户**（`user`）："
+        f"邮箱 + 密码（至少 {MIN_PASSWORD_LENGTH} 位）。新账号的角色固定为**普通用户**（`user`）："
         "**没有任何请求参数能指定角色**，管理员身份只能由 `scripts/seed_admin.py` 播种"
         "或由超管在后台授予。同一来源 IP 有请求频率上限。"
         "无论邮箱是否已存在都返回 202，避免把注册接口变成邮箱枚举器。"
@@ -104,6 +106,10 @@ async def register_account(
     try:
         await user_manager.create(payload, safe=True, request=request)
     except UserAlreadyExists:
+        # 时间旁路：新邮箱要走一次 Argon2（约 65ms），已存在的邮箱若直接返回，「秒回」本身就
+        # 等于「这个邮箱注册过」——202 加统一文案的设计意图被这个延迟差完全抵消。
+        # 所以这里补算一次哈希（同样放进线程池），两条分支的耗时才对得上。
+        await anyio.to_thread.run_sync(user_manager.password_helper.hash, payload.password)
         # 不区分「已注册」与「刚创建」：两者响应完全一致
         logger.info("注册请求命中已存在邮箱（返回 202，不泄露存在性）")
     except InvalidPasswordException as exc:
@@ -195,7 +201,20 @@ async def change_password(
             detail=f"CHANGE_PASSWORD_INVALID: {exc.reason}",
         ) from exc
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    # `on_after_update` 已经删掉服务端的全部会话行，客户端却还拿着那个 cookie：不清掉的话
+    # 它会一直带着死令牌打 401（共享电脑上持续到 Max-Age）。属性必须与下发时逐项一致——
+    # 浏览器按 name+domain+path 认定「是哪个 cookie」，对不上就删不掉（`__Host-` 前缀还要
+    # 求 Secure），所以直接从 `cookie_transport` 取，不在第二个地方重新写死一遍。
+    response.delete_cookie(
+        cookie_transport.cookie_name,
+        path=cookie_transport.cookie_path,
+        domain=cookie_transport.cookie_domain,
+        secure=cookie_transport.cookie_secure,
+        httponly=cookie_transport.cookie_httponly,
+        samesite=cookie_transport.cookie_samesite,
+    )
+    return response
 
 
 @router.get("/me", response_model=UserRead, summary="获取当前登录用户")

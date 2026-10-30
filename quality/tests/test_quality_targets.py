@@ -191,13 +191,59 @@ def test_live_target_maps_sse_events() -> None:
                 {"type": "tool_call", "tool_call_id": "1", "tool_name": "get_current_time", "args": "{}"},
                 {"type": "tool_result", "tool_call_id": "1", "tool_name": "get_current_time", "result": "2026-03-15"},
                 {"type": "content", "delta": "今天是 2026-03-15。"},
+                {"type": "done"},
             ),
         )
 
     target = LiveTarget(cookie="session=abc", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     trace = asyncio.run(target.run(make_task(), 0))
     assert trace.final_answer == "今天是 2026-03-15。"
-    assert [event.kind for event in trace.events] == ["tool_call", "tool_result", "message"]
+    assert [event.kind for event in trace.events][:3] == ["tool_call", "tool_result", "message"]
+    assert trace.error is None
+
+
+def test_live_stream_error_sets_trace_error() -> None:
+    """流内 `type=="error"` 不能只记一条 guard 事件：半截回答会被当成完整回答判分。
+
+    这是最坏的一类失真：安全探针的 `answer_not_contains` 对空/半截回答恒真、gate 也不会命中，
+    于是 ASR 0% 认证的是一个已经挂掉的系统。
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                {"type": "content", "delta": "今天是"},
+                {"type": "error", "message": "上游 503", "code": "internal_error"},
+            ),
+        )
+
+    target = LiveTarget(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    trace = asyncio.run(target.run(make_task(), 0))
+
+    assert trace.error is not None and "stream_error" in trace.error and "上游 503" in trace.error
+    assert trace.final_answer == "今天是"
+    # 原样的服务端错误也留着（取证要看服务端说了什么）。
+    assert [event.kind for event in trace.events if event.kind in {"error", "guard"}] == ["error", "guard"]
+
+
+def test_live_missing_done_marks_stream_incomplete() -> None:
+    """`done` 缺失时不能当正常结束：连接提前断掉会留下一个看起来合法的空回答。"""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse({"type": "content", "delta": "我正在查"}),
+        )
+
+    target = LiveTarget(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    trace = asyncio.run(target.run(make_task(), 0))
+
+    assert trace.error == "stream_incomplete"
+    assert trace.final_answer == "我正在查"
+    assert any(event.kind == "error" and event.payload["error"] == "stream_incomplete" for event in trace.events)
 
 
 def test_live_target_reports_unreachable_instead_of_passing() -> None:

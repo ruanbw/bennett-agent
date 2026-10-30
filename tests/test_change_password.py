@@ -22,6 +22,7 @@ from fastapi_users.exceptions import InvalidPasswordException
 
 from app.api.auth import change_password
 from app.schemas.user import PasswordChangeRequest, UserUpdate
+from app.services.auth import cookie_transport
 
 
 class _FakePasswordHelper:
@@ -82,13 +83,13 @@ async def test_same_password_is_rejected():
 
 
 async def test_invalid_new_password_surfaces_framework_reason():
-    manager = _FakeUserManager(reject_reason="密码至少需要 8 个字符")
+    manager = _FakeUserManager(reject_reason="密码至少需要 12 个字符")
 
     with pytest.raises(HTTPException) as excinfo:
         await change_password(_payload(new="short"), None, _FakeUser(), manager)
 
     assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "CHANGE_PASSWORD_INVALID: 密码至少需要 8 个字符"
+    assert excinfo.value.detail == "CHANGE_PASSWORD_INVALID: 密码至少需要 12 个字符"
 
 
 async def test_success_returns_204_and_updates_through_user_manager():
@@ -102,6 +103,22 @@ async def test_success_returns_204_and_updates_through_user_manager():
     assert manager.updates[0].password == "new-password"
     # 走的是 UserManager.update：会话失效在 on_after_update 里，路由不重复实现
     assert user.hashed_password == "rehashed"
+
+
+async def test_success_clears_the_session_cookie():
+    """服务端的会话行已经全删了，客户端手里的 cookie 也必须清。
+
+    不清的话它会一直带着死令牌打 401（共享电脑上持续到 Max-Age = 30 天）。属性必须与下发时
+    逐项一致，否则浏览器认定「不是同一个 cookie」而拒绝删除——所以从 `cookie_transport` 取值对账。
+    """
+    response = await change_password(_payload(), None, _FakeUser(), _FakeUserManager())
+
+    set_cookie = response.headers["set-cookie"]
+    assert set_cookie.startswith(f"{cookie_transport.cookie_name}=")
+    assert "Max-Age=0" in set_cookie
+    assert f"Path={cookie_transport.cookie_path}" in set_cookie
+    assert f"SameSite={cookie_transport.cookie_samesite}" in set_cookie
+    assert "HttpOnly" in set_cookie
 
 
 # ---------------------------------------------------------------------

@@ -71,13 +71,57 @@ export interface ApiFetchOptions extends RequestInit {
   notifyUnauthorized?: boolean;
 
   /**
-   * 超时（毫秒）。到点中止请求（fetch 抛 AbortError）。
+   * 等响应头的下限（毫秒）。到点中止请求，`fetch` 以 `TimeoutError` 拒绝。
    *
    * 认证请求必须带它：`/me` 探测挂起会让登录页永远停在 loading、登录按钮永远禁用。
-   * 调用方自己传了 `signal` 时不再叠加超时——合并两个信号需要额外机制，而目前
-   * 需要超时的调用点都不自带 signal。
+   * 调用方自带 `signal` 时**两者都要生效**：用户取消与超时是两条独立的退出路径，
+   * 少任何一条都会挂住（合成方式见 `connectGuard`）。
    */
   timeoutMs?: number;
+}
+
+/**
+ * 等响应头超时时给中止用的说明。
+ *
+ * 它必须与「连不上」在错误层面就分开：连不上是 `fetch` 自己抛 `TypeError`（文案各
+ * 浏览器不同，Chrome 是「Failed to fetch」），到点是我们主动中止并带 `TimeoutError`。
+ * 下游据此翻成两句不同的中文（`connection-failure.ts` / `auth.ts` 的「请求超时」
+ * 对「网络连接中断」）——这两种失败下一步动作不同：一个再等一等/重试，一个要查网络。
+ */
+export const CONNECT_TIMEOUT_MESSAGE = '等待服务器响应超时：请求已发出，但没有等到响应';
+
+/** 「等响应头」这一跳的守卫：一个专用 controller，超时与用户取消都汇到它身上。 */
+interface ConnectGuard {
+  signal: AbortSignal;
+  /** 响应头到手后调用：停表。 */
+  disarm: () => void;
+}
+
+function connectGuard(ms: number, caller: AbortSignal | null | undefined): ConnectGuard {
+  const controller = new AbortController();
+
+  /*
+    与调用方 signal 的联动**不解除**，哪怕响应头已经到手。
+
+    fetch 的 signal 管的不只是建连，还有响应体：中途把监听摘掉，用户点「停止」时
+    响应体不会 reject，`reader.read()` 就永远挂着——run 停不下来，后端继续生成、
+    继续计费。监听器挂在调用方的 controller 上（对话里是每轮一个），随这一轮一起
+    回收，不会跨轮累积。
+  */
+  if (caller) {
+    if (caller.aborted) controller.abort(caller.reason);
+    else caller.addEventListener('abort', () => controller.abort(caller.reason), { once: true });
+  }
+
+  // 中止理由刻意用 TimeoutError 而不是默认的 AbortError：AbortError 在对话链路里
+  // 是「用户点了停止」（chat-runs 据此把这一轮标成已停止）。超时被记成用户主动停止，
+  // 用户就只会看到一句「已停止」，没人知道是服务器没响应。
+  const timer = setTimeout(
+    () => controller.abort(new DOMException(CONNECT_TIMEOUT_MESSAGE, 'TimeoutError')),
+    ms
+  );
+
+  return { signal: controller.signal, disarm: () => clearTimeout(timer) };
 }
 
 /**
@@ -91,11 +135,27 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
   const { notifyUnauthorized = true, timeoutMs, ...init } = options;
   const epoch = authEpoch;
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    credentials: 'include',
-    ...init,
-    signal: init.signal ?? (timeoutMs ? timeoutSignal(timeoutMs) : undefined),
-  });
+  /*
+    计时只覆盖「请求发出去 → 响应头回来」这一跳，所以拿到 response 就必须停表：
+    响应体怎么读由调用方自己管（对话流另有一道 60s 空闲看门狗）。
+
+    不用 `AbortSignal.timeout` 的原因有两条：它的计时**不可提前取消**（响应头 200ms
+    就回来了，那颗定时器仍会在 15s 后把早就不用了的 signal 中止），而且它没法与调用方
+    的 signal 合成同一条退出路径——旧写法在两者同时给的场景下直接把 timeoutMs 丢掉，
+    于是「请求发出去、响应头永远不回来」这一跳没有任何上界。
+  */
+  const guard = timeoutMs ? connectGuard(timeoutMs, init.signal) : null;
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      credentials: 'include',
+      ...init,
+      signal: guard ? guard.signal : init.signal,
+    });
+  } finally {
+    guard?.disarm();
+  }
 
   // 世代对不上：这是登录前发出的请求，它的 401 属于旧会话，不能拿来登出当前会话
   if (response.status === 401 && notifyUnauthorized && epoch === authEpoch) {
@@ -104,20 +164,6 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
   }
 
   return response;
-}
-
-/**
- * `AbortSignal.timeout` 的降级包装：老 WebView 没有这个静态方法，直接调用会让
- * 启动探测和登录同步抛错（表现为“无法连接服务器”）。缺 API 时退回
- * AbortController + setTimeout，语义一致（超时以 TimeoutError 中止）。
- */
-function timeoutSignal(ms: number): AbortSignal {
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    return AbortSignal.timeout(ms);
-  }
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(new DOMException('TimeoutError', 'TimeoutError')), ms);
-  return controller.signal;
 }
 
 /**

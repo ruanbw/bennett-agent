@@ -556,6 +556,15 @@ export interface MessageRecord {
    */
   clientRev?: number;
   /**
+   * 本机见过的服务端行版本号（服务端发号，全用户单调递增）。
+   *
+   * 同步的「哪一份更新」只能按它比：`clientRev` 是**每台设备自己发的号**，两台设备各改一次
+   * 都会到同一个数字，拿它比较会把服务端（权威）版本挡在门外，两端从此各自分叉。
+   * 没拉取过该行时缺席，按 0 处理（服务端版本从 1 起）。只用于会话与消息行的落库判定，
+   * 墓碑不参与比较（删除是单向的）。
+   */
+  serverVersion?: number;
+  /**
    * 被服务端拒收的原因码（仅 `syncState === 'error'` 时有值）。
    * 持久化的理由：刷新页面后同步状态面板仍要能解释「为什么这几条传不上去」，
    * 只在内存里留原因的话，重启后用户只看到一个没有下文的数字。
@@ -578,6 +587,8 @@ export interface SessionRecord {
   deleted?: boolean;
   syncState?: SyncState;
   clientRev?: number;
+  /** 见 `MessageRecord.serverVersion`：同步判据只认服务端版本号，不认 `clientRev`。 */
+  serverVersion?: number;
   /** 见 `MessageRecord.syncError`：拒收原因码，仅 `error` 状态时有值。 */
   syncError?: string | null;
 }

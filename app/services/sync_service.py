@@ -6,15 +6,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 # PostgreSQL 方言的 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`。必须用它的 insert：
 # 通用 insert 在 PG 上编译期就抛 AttributeError（OnConflictDoUpdate 没有 constraint_target）。
@@ -38,11 +38,21 @@ from app.schemas.sync import (
     RejectReason,
 )
 from app.services import sync_notifier
+from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
 #: `WHERE id IN (...)` 的单批大小。PG 绑定参数上限 65535，留足余量。
 _IN_CHUNK = 400
+
+# 同步路径的指标名。指标注册表在 `app/services/metrics.py`，但同步的名字只有这一层用，
+# 放在这里才好连同「什么时候加一、为什么值得记」一起读。
+#: 游标失效（410）：客户端接下来要全量重拉。
+SYNC_CURSOR_STALE_TOTAL = "sync_cursor_stale_total"
+#: 逐行拒绝次数。标签 `reason` 是 `RejectReason` 的有限枚举，基数安全。
+SYNC_PUSH_REJECTED_TOTAL = "sync_push_rejected_total"
+#: 拉取返回的行数。标签 `kind`（conversation / message）。
+SYNC_PULL_ROWS_TOTAL = "sync_pull_rows_total"
 
 
 class SyncError(Exception):
@@ -312,27 +322,25 @@ async def _next_seq(session: AsyncSession, conversation_id: str) -> int:
 # push
 # ---------------------------------------------------------------------
 
-#: 单进程内的 push 串行锁：配额是「先 COUNT 再 INSERT」，并发请求各自读到旧计数就会同时
-#: 突破上限。只覆盖单进程，多 worker 仍需数据库行锁或唯一索引。
-_push_lock: asyncio.Lock | None = None
-_push_lock_loop: asyncio.AbstractEventLoop | None = None
 
+async def _lock_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """取该用户的事务级排他锁，串行化同一个人的并发 push。
 
-def _get_push_lock() -> asyncio.Lock:
-    """取当前事件循环的 push 锁；loop 变了就重建（测试每个用例一个新 loop）。"""
-    global _push_lock, _push_lock_loop
-    loop = asyncio.get_running_loop()
-    if _push_lock is None or _push_lock_loop is not loop:
-        _push_lock = asyncio.Lock()
-        _push_lock_loop = loop
-    return _push_lock
+    必须在 `session.begin()` 里当第一句：配额是「先 COUNT 再 INSERT」，两个并发请求各自读到
+    旧计数就会同时突破上限，而 `ON CONFLICT` 的行锁只管单行、管不了 COUNT。
 
+    之前这里是一把模块级的 `asyncio.Lock`，但它没有 key——任一用户的 200 行大 batch（逐行
+    发号 + JSONB 序列化）期间，**全站所有用户**的 push 都排队。锁的粒度本该跟着被保护的键
+    走，而配额的键就是 user_id。
 
-def reset_push_lock() -> None:
-    """清空 push 锁（测试用；与 `reset_notifier` 同口径）。"""
-    global _push_lock, _push_lock_loop
-    _push_lock = None
-    _push_lock_loop = None
+    `pg_advisory_xact_lock` 是**跨进程**的（多 worker 也生效），事务结束（含 rollback）自动
+    释放，不必担心漏放锁。`hashtext` 是 32 位哈希，理论上两个用户会碰巧同锁——那只会让两人
+    互相多等一会儿，不会算错配额。
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:user_id))"),
+        {"user_id": str(user_id)},
+    )
 
 
 async def push(user_id: uuid.UUID, request: PushRequest) -> PushResult:
@@ -341,14 +349,13 @@ async def push(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     if total > settings.sync_push_max_rows:
         raise TooManyRows(f"单次最多推送 {settings.sync_push_max_rows} 行，本次 {total} 行")
 
-    async with _get_push_lock():
-        try:
-            return await _push_once(user_id, request)
-        except IntegrityError:
-            # 同一批 id 被并发推送（首次推送与重试同时在飞）：upsert 幂等，整批重放一次
-            # 就落到已有行上；第二次还撞就是真故障，往上抛。
-            logger.warning("并发推送撞主键，整批重放一次 (user=%s rows=%d)", user_id, total)
-            return await _push_once(user_id, request)
+    try:
+        return await _push_once(user_id, request)
+    except IntegrityError:
+        # 同一批 id 被并发推送（首次推送与重试同时在飞）：upsert 幂等，整批重放一次
+        # 就落到已有行上；第二次还撞就是真故障，往上抛。
+        logger.warning("并发推送撞主键，整批重放一次 (user=%s rows=%d)", user_id, total)
+        return await _push_once(user_id, request)
 
 
 async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
@@ -360,6 +367,9 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     wrote_rows = False
 
     async with async_session_maker() as session, session.begin():
+        # 第一句就上锁：配额与版本号都在这个事务里读写，晚一条语句取锁就已经读过旧计数了。
+        await _lock_user(session, user_id)
+
         conversation_rows = _dedupe_conversations(request.conversations)
         message_rows = _dedupe_messages(request.messages)
 
@@ -580,6 +590,8 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
     # 删除会话不拆机器：机器按用户分，同一人的其他会话可能正靠它跑着（装好的依赖、在跑
     # 的结果都在里面），它会照常被空闲回收带走。
 
+    _record_rejections(rejected)
+
     logger.info(
         "同步推送 user=%s conversations=%d messages=%d rejected=%d version=%d",
         user_id,
@@ -593,6 +605,17 @@ async def _push_once(user_id: uuid.UUID, request: PushRequest) -> PushResult:
         accepted=PushAccepted(conversations=accepted_conversations, messages=accepted_messages),
         rejected=rejected,
     )
+
+
+def _record_rejections(rejected: Sequence[RejectedRow]) -> None:
+    """按拒绝原因分桶计数。
+
+    `stale` / `conversation_deleted` 是「拒绝但最终会被全量重拉修好」的一类，`too_large` /
+    `quota_exceeded` 是「永远推不上去」的一类；两者比例没有任何信号能看得到——在此之前
+    只能靠用户报障。原因码是有限枚举，基数安全（`MAX_SERIES_PER_METRIC`）。
+    """
+    for reason, count in Counter(row.reason for row in rejected).items():
+        metrics.increment(SYNC_PUSH_REJECTED_TOTAL, count, reason=reason)
 
 
 # ---------------------------------------------------------------------
@@ -666,6 +689,11 @@ async def pull(user_id: uuid.UUID, since: int, limit: int | None = None) -> Pull
         if messages_more:
             stops.append(message_rows[-1].version)
         cursor_version = min(stops) if stops else head
+
+        # 记实际返回的行数（截断之后）：它跟 410 / 拒绝原因放一起才能回答「这个账号是不是
+        # 一直拉不干净」——永远压在 `sync_pull_max_rows` 上说明它在反复追一大段积压。
+        metrics.increment(SYNC_PULL_ROWS_TOTAL, len(conversation_rows), kind="conversation")
+        metrics.increment(SYNC_PULL_ROWS_TOTAL, len(message_rows), kind="message")
 
         return PullResult(
             cursor=encode_cursor(cursor_version),

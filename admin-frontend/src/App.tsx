@@ -14,11 +14,16 @@
  * （「没有权限」页 + 登出入口），不能把普通用户当成未登录——那样他会以为自己密码
  * 输错了，重输多少次都进不来。
  *
- * ## 401 不做全局广播
+ * ## 401 不做全局广播，但 401 与 403 必须分开
  *
  * 用户端把「任何请求 401」广播成全局登出，因为它有同步引擎和多标签场景要顾；
- * 管理后台请求面小，401 出现时各面板自己把错误渲染出来（与 403 同一处理路径），
- * 用户重新登录即可。登录态只在启动探测与登录动作两个时机确定。
+ * 管理后台的请求面小，401 的处理就限定在一处：`lib/query-client.ts` 的 `QueryCache`
+ * 发现 401 时回调这里注册的 `onUnauthorized`，由它重新探测登录态（探测到 401 自然
+ * 退到 anonymous，路由随即回登录页）。403 不触发它——那是「权限不够」，重走登录流程
+ * 也没用，面板里原地提示才是正着。
+ *
+ * 为什么不能两者都留在面板里：401 时面板画的是「加载失败 + 重试」，而重试同一个
+ * 请求必然再吃一次 401；唯一出路是重新认证，界面却不提供。
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -34,7 +39,7 @@ import { ProvidersPanel } from './components/admin/ProvidersPanel';
 import { UsersPanel } from './components/admin/UsersPanel';
 import { NotFoundPanel } from './components/admin/NotFoundPanel';
 import { QueryProvider } from './lib/query';
-import { queryClient } from './lib/query-client';
+import { queryClient, setUnauthorizedHandler } from './lib/query-client';
 import { Toaster } from './components/Toaster';
 import {
   canAccessAdmin,
@@ -100,6 +105,18 @@ export function App() {
     void (async () => {
       await probeSession();
     })();
+  }, [probeSession]);
+
+  /*
+    面板里的请求拿到 401 时回到登录页（分流规则见 `lib/query-client.ts`）。
+
+    复用 `probeSession` 而不是直接 `setStatus('anonymous')`：探测会拿同一个 cookie 再问
+    一次 `/me`，确认真的是凭据失效才把人踢走——代理偶发回一个 401 时不会白白登出。
+    `/me` 回 401 后状态变 anonymous，`RequireAdmin` 则带着当前路径跳 `/login`。
+  */
+  useEffect(() => {
+    setUnauthorizedHandler(() => void probeSession());
+    return () => setUnauthorizedHandler(null);
   }, [probeSession]);
 
   /** 用户点「重试」时重新探测：先回到加载态，避免登录页闪一下又跳走。 */

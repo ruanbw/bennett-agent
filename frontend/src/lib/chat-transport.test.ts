@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSPORT_INCOMPLETE, type ChatEvent } from '../types'
+import { CONNECT_TIMEOUT_MESSAGE } from './api'
 import { API_BASE_URL } from './constants'
-import { IDLE_TIMEOUT_MS, MAX_FRAME_BYTES, streamChat } from './chat-transport'
+import { IDLE_TIMEOUT_MS, MAX_FRAME_CHARS, PRE_HEADER_TIMEOUT_MS, streamChat } from './chat-transport'
 
 const encoder = new TextEncoder()
 
@@ -226,7 +227,7 @@ describe('请求体', () => {
     expect(JSON.parse(init.body).messages).toEqual([{ role: 'user', content: '你好' }])
   })
 
-  it('把 AbortSignal 透传给 fetch', async () => {
+  it('把调用的 signal 接到请求上：点停止仍能中止这一跳', async () => {
     const controller = new AbortController()
     const fetchMock = stubFetch({ body: bodyFrom([frame({ type: 'done' })]) })
 
@@ -240,7 +241,63 @@ describe('请求体', () => {
       // 消费掉
     }
 
-    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+    // apiFetch 会把「调用方 signal」与「等响应头超时」合成同一条退出路径，所以交给
+    // fetch 的不再是同一个对象；但联动必须还在，否则用户点停止时请求停不下来。
+    const forwarded = fetchMock.mock.calls[0][1].signal
+    expect(forwarded).not.toBeUndefined()
+
+    controller.abort()
+    expect(forwarded?.aborted).toBe(true)
+    // 用户主动停是 AbortError（chat-runs 据此标成「已停止」），不能变成超时
+    expect(forwarded?.reason.name).toBe('AbortError')
+  })
+
+  it('响应头迟迟不回来：到点以 TimeoutError 收尾，而不是永久挂住', async () => {
+    // 旧实现只在拿到 response.body **之后**才开始计时，而传了 signal 时 timeoutMs
+    // 还会被忽略——反代建连挂住时用户对着「生成中」无限等待，只能手动点停止。
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (_url: string, init: { signal?: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              const signal = init.signal
+              if (!signal) return
+              if (signal.aborted) {
+                reject(signal.reason)
+                return
+              }
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+            })
+        )
+      )
+
+      let settled = false
+      const outcome = drain().then(
+        () => {
+          settled = true
+          return null
+        },
+        (err: unknown) => {
+          settled = true
+          return err
+        }
+      )
+
+      await vi.advanceTimersByTimeAsync(PRE_HEADER_TIMEOUT_MS - 1)
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(2)
+      const err = await outcome
+
+      expect(err).toBeInstanceOf(DOMException)
+      // 名字能区分于「连不上」（fetch 自己抛 TypeError）与「用户停止」（AbortError）
+      expect((err as DOMException).name).toBe('TimeoutError')
+      expect((err as Error).message).toBe(CONNECT_TIMEOUT_MESSAGE)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -273,6 +330,15 @@ describe('分帧解析', () => {
     const events = await collect(['data: {"type":"done"}\n\n'])
 
     expect(events.map((e) => e.type)).toEqual(['done'])
+  })
+
+  it('接受单独 CR 结尾的帧与行（WHATWG 要求三种行尾都认）', async () => {
+    // 只写 `\r?\n` 时这种流一个事件都产不出，最后报「回复可能不完整」——症状与
+    // 「模型没回答」一模一样，排查会被带偏。注意帧内还有一行 data，故两边都要认 CR。
+    const events = await collect(['data: {"type":"content",\rdata: "delta":"x"}\r\r', 'data: {"type":"done"}\r\r'])
+
+    expect(events.map((e) => e.type)).toEqual(['content', 'done'])
+    expect(events[0].delta).toBe('x')
   })
 
   it('忽略心跳注释与空帧', async () => {
@@ -668,8 +734,8 @@ describe('内容类型与帧长度上限', () => {
   })
 
   it('单个帧超过上限时停止读取并标成 damaged，已产出的内容照常保留', async () => {
-    // 一帧 1MB+ 且没有分隔符：继续读下去只会把标签页的内存吃光
-    const huge = `data: ${'x'.repeat(MAX_FRAME_BYTES + 10)}`
+    // 一帧 1M 字符且没有分隔符：继续读下去只会把标签页的内存吃光
+    const huge = `data: ${'x'.repeat(MAX_FRAME_CHARS + 10)}`
     const events = await collect([frame({ type: 'content', delta: '前半段' }), huge])
 
     expect(events[0]).toMatchObject({ type: 'content', delta: '前半段' })

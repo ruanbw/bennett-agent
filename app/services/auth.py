@@ -4,19 +4,23 @@
 `AUTH_SECRET` 不参与会话（轮换不让登录失效），只用于重置/验证令牌与 `secret_box` 加密。
 """
 
+import hashlib
 import logging
 import secrets
 import uuid
 from typing import Any
 
+import anyio
 from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin, schemas
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
-from fastapi_users.exceptions import InvalidPasswordException
+from fastapi_users.exceptions import InvalidPasswordException, UserAlreadyExists, UserNotExists
 from sqlalchemy import func, select
 
+from app.api.rate_limit import RedisSlidingWindowLimiter, SlidingWindowLimiter, too_many
 from app.config import settings
 from app.db import (
     AccessToken,
@@ -30,11 +34,27 @@ from app.db import (
     hash_access_token,
 )
 from app.roles import ADMIN_LEVEL, ROLE_SUPERADMIN, Role
+from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
 #: 密码最小长度：基类 `validate_password` 是空实现，不覆盖就能用 1 个字符注册。
-MIN_PASSWORD_LENGTH = 8
+#: 12 是 ASVS 2.1.1 的下限；只限长度、不强制字符种类——组合规则只会把人逼向 `Password1!`。
+MIN_PASSWORD_LENGTH = 12
+
+#: 密码最大长度（ASVS 2.1.2）。改密入参 `PasswordChangeRequest.max_length` 也是 128：两侧
+#: 不一致时，用超长口令注册的账号永远改不了密码（当前密码被 422 拦下），且超长输入是对
+#: Argon2 的免费放大量。
+MAX_PASSWORD_LENGTH = 128
+
+#: 账号维度登录失败计数的窗口（秒）。ASVS 2.2.1 的口径是「单账号每小时失败次数」，所以窗口
+#: 必须是一小时；`app/api/rate_limit.py:make_limiter` 的窗口写死 60 秒（那是按 IP 的快速闸门），
+#: 在账号维度上表达不了每小时配额。
+ACCOUNT_FAILURE_WINDOW_SECONDS = 3600.0
+
+#: 登录失败计数器。标签 `reason` 只取三个值（`unknown_email` / `wrong_password` / `account_locked`）：
+#: 高基数标签会把指标自己变成内存泄漏（见 `app/services/metrics.py:MAX_SERIES_PER_METRIC`）。
+AUTH_LOGIN_FAILURES_TOTAL = "auth_login_failures_total"
 
 
 def role_assignment(role: Role) -> dict[str, object]:
@@ -108,6 +128,35 @@ auth_backend = AuthenticationBackend(
 )
 
 
+#: 账号维度的失败计数桶（惰性创建，配额/后端变化时重建）。
+_account_failure_limiter: SlidingWindowLimiter | RedisSlidingWindowLimiter | None = None
+
+
+def get_account_failure_limiter() -> SlidingWindowLimiter | RedisSlidingWindowLimiter:
+    """取账号失败计数桶；配额或存储后端变化时重建（测试改 settings 后立即生效）。
+
+    不经过 `rate_limit.make_limiter`：那个工厂把窗口写死成 60 秒，而这里要的是每小时配额。
+    后端语义与它保持一致（redis 跨实例共享、memory 仅供单 worker/测试）。
+    """
+    global _account_failure_limiter
+    limit = max(settings.account_login_failure_limit_per_hour, 1)
+    if settings.rate_limit_backend == "redis":
+        if isinstance(_account_failure_limiter, RedisSlidingWindowLimiter) and _account_failure_limiter.limit == limit:
+            return _account_failure_limiter
+        _account_failure_limiter = RedisSlidingWindowLimiter(limit=limit, window_seconds=ACCOUNT_FAILURE_WINDOW_SECONDS)
+    else:
+        if isinstance(_account_failure_limiter, SlidingWindowLimiter) and _account_failure_limiter.limit == limit:
+            return _account_failure_limiter
+        _account_failure_limiter = SlidingWindowLimiter(limit=limit, window_seconds=ACCOUNT_FAILURE_WINDOW_SECONDS)
+    return _account_failure_limiter
+
+
+def reset_account_failure_limiter() -> None:
+    """丢弃缓存的计数桶（测试用）。不整片清 Redis 键：那会顺带解掉别的账号的锁。"""
+    global _account_failure_limiter
+    _account_failure_limiter = None
+
+
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     """用户生命周期钩子；暂不接入邮件，邮箱验证与忘记密码不可自助。
 
@@ -118,9 +167,113 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     verification_token_secret = settings.auth_secret
 
     async def validate_password(self, password: str, user: schemas.UC | User) -> None:
-        """密码强度校验：只设下限，强制大小写/符号只会把人逼向 `Password1!` 这类可预测模式。"""
+        """密码强度校验：只设长度上下限，强制大小写/符号只会把人逼向 `Password1!` 这类可预测模式。
+
+        上下限都在这里判一次：注册、改密、种子脚本共用同一个判据，两处规则分叉的后果是
+        「能注册但改不掉」（见 `MAX_PASSWORD_LENGTH` 的注释）。
+        """
         if len(password) < MIN_PASSWORD_LENGTH:
             raise InvalidPasswordException(reason=f"密码至少需要 {MIN_PASSWORD_LENGTH} 个字符")
+        if len(password) > MAX_PASSWORD_LENGTH:
+            raise InvalidPasswordException(reason=f"密码最多 {MAX_PASSWORD_LENGTH} 个字符")
+
+    async def create(
+        self,
+        user_create: schemas.UC,
+        safe: bool = False,
+        request: Request | None = None,
+    ) -> User:
+        """覆盖框架实现：只把 `password_helper.hash` 挪进 worker 线程，其余步骤逐句保持上游。
+
+        框架没有「哈希钩子」，改不动 `_update`/`authenticate` 里的同步调用，所以这里必须复制
+        `BaseUserManager.create` 的主体（validate → 查重 → 落库 → `on_after_register`）。
+        升级 fastapi-users 时要对照上游复核：漏掉新增步骤的症状是注册路径静默少一道校验。
+        为什么必须挪：注册是**未认证**可达的，一次 Argon2 约 65ms 且占几十 MiB，同步跑在
+        事件循环线程上等于把整个进程（含 SSE 与长轮询）交给任何匿名请求去卡。
+        """
+        await self.validate_password(user_create.password, user_create)
+
+        existing_user = await self.user_db.get_by_email(user_create.email)
+        if existing_user is not None:
+            raise UserAlreadyExists()
+
+        user_dict = user_create.create_update_dict() if safe else user_create.create_update_dict_superuser()
+        password = user_dict.pop("password")
+        user_dict["hashed_password"] = await anyio.to_thread.run_sync(self.password_helper.hash, password)
+
+        created_user = await self.user_db.create(user_dict)
+
+        await self.on_after_register(created_user, request)
+
+        return created_user
+
+    async def authenticate(self, credentials: OAuth2PasswordRequestForm) -> User | None:
+        """覆盖框架实现：Argon2 挪进 worker 线程，失败分支留下账号维度的痕迹。
+
+        主体与 `BaseUserManager.authenticate` 逐句等价（含「邮箱不存在也要跑一次假哈希」这条
+        时间旁路缓解），区别是两处哈希都走 `anyio.to_thread`：登录同样**未认证**可达，一次
+        尝试阻塞事件循环约 65ms，多 IP 并发几十个就能把进程的内存与 CPU 一起打满。
+        rehash-on-login 仍按上游写法直接写 `user_db`（不经过 `update`，避免连带删会话）。
+        """
+        try:
+            user = await self.get_by_email(credentials.username)
+        except UserNotExists:
+            # 账号不存在也必须跑一次哈希：否则「没这个邮箱」会立刻返回，那个稳定的几十毫秒差
+            # 就是远程可用的邮箱枚举器。这条缓解同样不能留在事件循环线程上。
+            await anyio.to_thread.run_sync(self.password_helper.hash, credentials.password)
+            self._log_login_failure(credentials.username, reason="unknown_email")
+            return None
+
+        verified, updated_password_hash = await anyio.to_thread.run_sync(
+            self.password_helper.verify_and_update,
+            credentials.password,
+            user.hashed_password,
+        )
+        if not verified:
+            self._log_login_failure(credentials.username, reason="wrong_password")
+            await self._enforce_account_failure_limit(user)
+            return None
+
+        if updated_password_hash is not None:
+            await self.user_db.update(user, {"hashed_password": updated_password_hash})
+
+        return user
+
+    @staticmethod
+    def _email_digest(email: str) -> str:
+        """邮箱摘要（8 位十六进制）。归一化大小写，否则同一个账号会散成两条日志线索。"""
+        return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:8]
+
+    @classmethod
+    def _log_login_failure(cls, email: str, *, reason: str) -> None:
+        """登录失败留痕：日志只写邮箱摘要，指标按 `reason` 分桶。
+
+        不落明文邮箱：日志会被轮转、抓取、贴进工单，明文邮箱等于把用户清单抄一份出去；
+        摘要足够把同一账号的连续失败串起来，又不足以反推地址。
+        """
+        logger.warning("登录失败: email_hash=%s reason=%s", cls._email_digest(email), reason)
+        metrics.increment(AUTH_LOGIN_FAILURES_TOTAL, reason=reason)
+
+    async def _enforce_account_failure_limit(self, user: User) -> None:
+        """账号维度的失败上限：超了就让这次失败变成 429（ASVS 2.2.1）。
+
+        按 IP 的桶（`app/api/rate_limit.py:enforce_auth_rate_limit`）换个出口即绕过，分布式
+        凭据填充只能按账号拦；默认 20/小时，比 ASVS 的 100/小时更严。
+        只在**失败**分支计数，所以正确密码永远能登录，被锁的只是「继续猜」——合法用户不会被
+        锁在门外，这也是这里不需要「成功即清零」的原因（限流器没有单键删除接口，整片
+        `reset()` 反而给了攻击者「登录自己的账号来解锁目标账号」的能力）。
+        """
+        limit = settings.account_login_failure_limit_per_hour
+        if limit <= 0:
+            return
+        limiter = get_account_failure_limiter()
+        allowed, retry_after = await limiter.acheck(f"account:{user.id}")
+        if allowed:
+            return
+        # 这一条是刚那次失败尝试的**附加标记**，不是第二次尝试：看板按 reason 分开看，
+        # 把三个 reason 相加不等于失败次数。
+        self._log_login_failure(user.email, reason="account_locked")
+        raise too_many(retry_after, limit=limiter.limit)
 
     async def on_after_register(self, user: User, request: Request | None = None) -> None:
         """新用户注册后只记一条日志：注册开放，但建号不授予权限，提权只能走管理后台。"""

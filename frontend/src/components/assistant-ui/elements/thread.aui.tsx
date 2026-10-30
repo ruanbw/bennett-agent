@@ -62,7 +62,7 @@ import { describeCompactionNotice } from "@/lib/run-error";
 import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
-import { TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
+import { TurnAnnouncement, TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
 import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useApproval } from "@/context/approval-context";
@@ -213,6 +213,10 @@ export const Thread: FC<ThreadProps> = ({
   const composerEmpty = useAuiState((s) => s.composer.isEmpty);
 
   const isRunning = useAuiState(isThreadRunning);
+  // 已完成轮次（助手回复条数）：只用来让「第 N 轮回复完成」的播报能区分相邻两轮
+  const completedTurns = useAuiState(
+    (s) => s.thread.messages.filter((message) => message.role === "assistant").length,
+  );
   // 上下文已满：输入框锁住并给出「新建会话」。服务端每轮都会拒绝，这里只是不让用户
   // 白点一次发送，并把他直接送到唯一的出路（推导规则见 lib/chat-message.ts）。
   const contextLocked = useAuiState((s) => contextExhausted(s.thread.messages, currentModel));
@@ -415,6 +419,11 @@ export const Thread: FC<ThreadProps> = ({
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
           </div>
+
+          {/* 结束时播报一句「第 N 轮回复完成」：`aria-busy` 翻回 false 时整段新回答是
+              一次性倒给读屏的，用户既插不上话也不知道何时算结束。播报只带轮次，不带
+              正文（理由与做法见 `turn-status-row.tsx` 的 `TurnAnnouncement`）。 */}
+          <TurnAnnouncement isRunning={isRunning} turnNumber={completedTurns} />
 
           {/* 吸底输入框区域：用渐隐替代硬边框，避免视觉上切断最后一条消息 */}
           <div className="bg-background sticky bottom-0 mt-auto relative pb-4 pt-3">

@@ -1,5 +1,5 @@
 import { AlertTriangleIcon, SquareIcon } from "lucide-react";
-import { type FC } from "react";
+import { type FC, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import {
@@ -56,6 +56,54 @@ export const TurnStatusRow: FC<TurnStatusRowProps> = ({ reason, elapsedMs, class
         {turnStatusLabel(reason)}
         {duration !== "" && `，用时 ${duration}`}
       </span>
+    </p>
+  );
+};
+
+/**
+ * 播报内容：只说轮次，不说正文。
+ *
+ * 把最后一条回答塞进 live region 等于再念一遍整段，用户既不能暂停也挑不了段落。
+ * 单独成一个组件（而不是一个返回字符串的函数），是因为本仓库没有能跑 effect 的
+ * renderer：用 `react-dom/server` 直接出静态 HTML 是唯一能断言文案实际内容的办法。
+ */
+export const TurnAnnouncementText: FC<{ turnNumber: number | null }> = ({ turnNumber }) => (
+  <>{turnNumber === null ? "回复完成" : `第 ${turnNumber} 轮回复完成`}</>
+);
+
+export interface TurnAnnouncementProps {
+  /** 线程是否在生成。真正的播报发生在 true → false 的那一帧。 */
+  isRunning: boolean;
+  /** 本轮是第几轮（1 起）：只用来让相邻两轮的文案互换，否则内容不变的 live region 不会重念。 */
+  turnNumber?: number | null;
+}
+
+/**
+ * 流式回答结束时的**一次性**播报（视觉隐藏）。
+ *
+ * 为什么需要它：消息列表是 `role="log" aria-live="polite"`，`aria-busy` 在生成结束时
+ * 翻回 false，此刻整段新回答作为一次 live-region 变更交给读屏——一次几千字的注入，
+ * 用户既插不上话也不知道什么时候算结束。这里另设一个只读一句话的状态区，把「结束」
+ * 这件事本身说清楚，而且始终**不**包含正文。
+ *
+ * 为什么不直接把消息列表改成 `aria-live="off"`：那样连用户自己的消息、审批卡片上的
+ * 变化也不会被念到。两者分工更稳：容器负责「存在与追加」，这一个负责「这一轮结束了」。
+ */
+export const TurnAnnouncement: FC<TurnAnnouncementProps> = ({ isRunning, turnNumber = null }) => {
+  // 「上一帧在生成、这一帧不在了」是个跨渲染的状态，只能用 state 记：它在渲染期间
+  // 条件更新（React 文档里的 adjusting state when props change），不进 effect——
+  // 进 effect 就得多渲染一帧，播报也会晚一拍。
+  const [phase, setPhase] = useState({ running: isRunning, completed: false });
+  if (phase.running !== isRunning) {
+    setPhase({ running: isRunning, completed: !isRunning });
+  }
+
+  return (
+    // role=status 隐含 aria-live=polite：不打断用户正在听的正文，但一定会被念到
+    <p role="status" className="sr-only">
+      {/* 新一轮开始时回到空内容：相邻两轮的文案可能一字不差，内容没变的 live region
+          不会被重念——不先清空，下一轮结束时读屏就静默了 */}
+      {phase.completed && <TurnAnnouncementText turnNumber={turnNumber} />}
     </p>
   );
 };

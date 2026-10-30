@@ -1,5 +1,10 @@
 -- Bennett Agent schema，唯一事实来源。整段幂等，在一个事务里执行。
 -- 改表直接改这里，然后重建开发库：docker compose down -v && docker compose up -d postgres
+--
+-- 枚举列一律带 CHECK：取值必须与 Python 常量逐字一致（state 见 services/sandbox/lease.py，
+-- role 见 app/roles.py，auth_style 见 services/model_service/presets.py）。
+-- 线上补加约束必须分两步：先 ADD CONSTRAINT ... NOT VALID（只拿短暂的锁，不扫表），
+-- 再 VALIDATE CONSTRAINT（SHARE UPDATE EXCLUSIVE，不阻塞读写）；直接 ADD 会 ACCESS EXCLUSIVE 扫全表。
 
 CREATE TABLE IF NOT EXISTS app_setting (
     key        VARCHAR(80) NOT NULL PRIMARY KEY,
@@ -18,7 +23,8 @@ CREATE TABLE IF NOT EXISTS model_provider (
     preset_key    VARCHAR(40),
     enabled       BOOLEAN      NOT NULL,
     created_at    TIMESTAMPTZ  NOT NULL,
-    updated_at    TIMESTAMPTZ  NOT NULL
+    updated_at    TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT ck_model_provider_auth_style CHECK (auth_style IN ('bearer', 'none', 'x-api-key', 'x-goog-api-key'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_model_provider_slug ON model_provider (slug);
 
@@ -40,7 +46,8 @@ CREATE TABLE IF NOT EXISTS provider_model (
     updated_at                 TIMESTAMPTZ  NOT NULL,
     CONSTRAINT uq_provider_model UNIQUE (provider_id, model_id)
 );
-CREATE INDEX IF NOT EXISTS ix_provider_model_provider_id ON provider_model (provider_id);
+-- 不再单独建 ix_provider_model_provider_id：上面前导列已覆盖，同列索引是纯写放大。
+-- （存量库可能还留着这条索引，DROP INDEX 随时可做，不影响正确性。）
 
 -- is_active = false 即封禁
 CREATE TABLE IF NOT EXISTS "user" (
@@ -50,7 +57,8 @@ CREATE TABLE IF NOT EXISTS "user" (
     hashed_password VARCHAR(1024) NOT NULL,
     is_active       BOOLEAN       NOT NULL,
     is_superuser    BOOLEAN       NOT NULL,
-    is_verified     BOOLEAN       NOT NULL
+    is_verified     BOOLEAN       NOT NULL,
+    CONSTRAINT ck_user_role CHECK (role IN ('user', 'admin', 'superadmin'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_user_email ON "user" (email);
 
@@ -79,23 +87,29 @@ CREATE TABLE IF NOT EXISTS conversation (
     seq_counter      INTEGER     NOT NULL,
     version          BIGINT      NOT NULL,
     created_at       BIGINT      NOT NULL,
-    updated_at       BIGINT      NOT NULL
+    updated_at       BIGINT      NOT NULL,
+    CONSTRAINT uq_conversation_id_user UNIQUE (id, user_id)
 );
 CREATE INDEX IF NOT EXISTS ix_conversation_pull ON conversation (user_id, version);
 
 CREATE TABLE IF NOT EXISTS message (
     id              VARCHAR(64) NOT NULL PRIMARY KEY,
-    conversation_id VARCHAR(64) NOT NULL REFERENCES conversation (id) ON DELETE CASCADE,
-    user_id         UUID        NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
+    conversation_id VARCHAR(64) NOT NULL,
+    user_id         UUID        NOT NULL,
     role            VARCHAR(16) NOT NULL,
     payload         JSONB       NOT NULL,
     client_rev      INTEGER     NOT NULL,
     seq             INTEGER     NOT NULL,
     version         BIGINT      NOT NULL,
     created_at      BIGINT      NOT NULL,
-    CONSTRAINT uq_message_conversation_seq UNIQUE (conversation_id, seq)
+    CONSTRAINT uq_message_conversation_seq UNIQUE (conversation_id, seq),
+    -- 冗余的 user_id 由复合外键绑死到会话归属（而不是两条互相独立的 FK）：
+    -- 漏传一次 user_id，pull 就会把别人的消息投给错误租户。删 user → 删 conversation → 删 message。
+    CONSTRAINT fk_message_conversation_user FOREIGN KEY (conversation_id, user_id)
+        REFERENCES conversation (id, user_id) ON DELETE CASCADE,
+    CONSTRAINT ck_message_role CHECK (role IN ('user', 'assistant'))
 );
-CREATE INDEX IF NOT EXISTS ix_message_conversation ON message (conversation_id, seq);
+-- 不再建 ix_message_conversation：uq_message_conversation_seq 已给出同列的 btree。
 CREATE INDEX IF NOT EXISTS ix_message_pull ON message (user_id, version);
 
 CREATE TABLE IF NOT EXISTS sandbox_lease (
@@ -116,13 +130,20 @@ CREATE TABLE IF NOT EXISTS sandbox_lease (
     destroying_since TIMESTAMPTZ,
     destroy_reason   VARCHAR(32),
     artifact_uri     VARCHAR(512),
-    error            TEXT
+    error            TEXT,
+    -- 取值见 services/sandbox/lease.py 的 STATE_*：拼错会让下面的部分唯一索引谓词不匹配。
+    CONSTRAINT ck_sandbox_lease_state CHECK (
+        state IN ('provisioning', 'ready', 'paused', 'destroying', 'destroyed', 'failed', 'destroy_failed')
+    )
 );
--- 每用户一台；谓词须与 app/db.py:SandboxLease 一致
+-- 每用户一台；谓词须与 app/db/models/sandbox.py:SandboxLease 一致
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sandbox_lease_one_per_user
     ON sandbox_lease (user_id)
     WHERE state IN ('provisioning', 'ready', 'paused');
 CREATE INDEX IF NOT EXISTS ix_sandbox_lease_reap ON sandbox_lease (state, hard_expires_at);
+-- 用户端点 get_latest_lease 的唯一形状：WHERE user_id=? ORDER BY created_at DESC LIMIT 1。
+-- 它查全部状态（界面要说清「环境已回收」），只覆盖活动状态的部分唯一索引替代不了。
+CREATE INDEX IF NOT EXISTS ix_sandbox_lease_user_recent ON sandbox_lease (user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS sandbox_command (
     id           BIGSERIAL   NOT NULL PRIMARY KEY,

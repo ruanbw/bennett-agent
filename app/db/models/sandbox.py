@@ -7,7 +7,19 @@ from fastapi_users_db_sqlalchemy.generics import GUID
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, enum_check
+
+#: 租约状态机的全部取值。必须与 `app/services/sandbox/lease.py:STATE_*` 逐字一致；不能 import 它：
+#: lease.py 反过来 import 本模块，反向依赖会成环。两份取值由 `tests/test_schema_guard.py` 对齐。
+LEASE_STATES: tuple[str, ...] = (
+    "provisioning",
+    "ready",
+    "paused",
+    "destroying",
+    "destroyed",
+    "failed",
+    "destroy_failed",
+)
 
 
 class SandboxLease(Base):
@@ -27,6 +39,11 @@ class SandboxLease(Base):
         ),
         # 回收循环的索引：WHERE state='ready' AND hard_expires_at < now()
         Index("ix_sandbox_lease_reap", "state", "hard_expires_at"),
+        # 用户端点 `get_latest_lease` 的唯一形状：WHERE user_id=? ORDER BY created_at DESC LIMIT 1。
+        # 它查的是全部状态（界面要说清「环境已回收」），而部分唯一索引只覆盖三个活动状态，替代不了。
+        Index("ix_sandbox_lease_user_recent", "user_id", text("created_at DESC")),
+        # 状态是本模块的核心状态机：一个拼错的值不会报错，只会让上面的部分唯一索引谓词不匹配。
+        enum_check("state", LEASE_STATES, name="ck_sandbox_lease_state"),
     )
 
     #: `sbx_<32 hex>`。服务端生成、随机，不作为凭据使用（凭据是登录态 + 作用域）。

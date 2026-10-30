@@ -123,8 +123,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.warning("关闭共享 HTTP 客户端失败", exc_info=True)
         try:
             await close_redis()
-        except Exception:  # noqa: BLE001 - 同上，三个清理动作互不遮蔽
+        except Exception:  # noqa: BLE001 - 同上，几个清理动作互不遮蔽
             logger.warning("关闭 Redis 连接失败", exc_info=True)
+        try:
+            await _close_mcp_clients()
+        except Exception:  # noqa: BLE001 - 同上
+            logger.warning("关闭 MCP 客户端失败", exc_info=True)
         try:
             await engine.dispose()
         except Exception:  # noqa: BLE001
@@ -172,6 +176,22 @@ async def _ensure_object_storage() -> None:
         logger.warning("对象存储未配置，沙箱产物将不会被导出: %s", exc)
     except Exception:  # noqa: BLE001 - 见 docstring：不影响启动
         logger.warning("对象存储初始化失败（不影响启动）", exc_info=True)
+
+
+async def _close_mcp_clients() -> None:
+    """关掉 MCP 客户端，让 stdio server 的子进程跟着退出。
+
+    `keep_alive` 默认为 True，子进程跨 run 常驻；SDK 只在 transport `disconnect()` 时结束进程树，
+    而没有任何代码在关闭流程里进出过 toolset。不做这一步，worker 回收 / `--reload` 后 `npx`（及其
+    node 子进程）会成孤儿一直趴在宿主上，同一 server 反复重启还会叠加。
+    """
+    from app.tools.mcp_client import get_mcp_registry
+
+    for binding in get_mcp_registry().bindings():
+        try:
+            await binding.raw.client.close()
+        except Exception:  # noqa: BLE001 - 单个 server 关不掉不能遮蔽其它 server
+            logger.warning("关闭 MCP server %s 的连接失败", binding.config.name, exc_info=True)
 
 
 async def _discover_mcp_tools() -> None:

@@ -179,6 +179,11 @@ async def scan(
 ) -> SecurityReport: ...
 ```
 
+执行失败（`live_http_401` / `driver_error` / `step_limit`）在断言层表现为一条 `error: …`，
+它们**不是**攻击成功：既不计入 `successes` 也不进 `findings`，只写一条
+`audit.append("scan.errored", …, count=…, samples=[…])`，由 CLI 单独提示。
+（gate 命中仍然算 finding——半截轨迹上的泄露是真实证据。）
+
 ## 调优契约
 
 ```python
@@ -225,6 +230,21 @@ python -m quality gate  --current <run-dir> --baseline <run-dir>
 ```
 退出码：`run` 恒 0（除非预算耗尽/装配失败）；`gate` 有回归 1；`scan` 有 critical finding 或 ASR>0 1；`tune` 恒 0。
 运行产物落 `quality/runs/<suite>/<run_id>/{report.json,report.html,verdicts.jsonl,audit.jsonl}`。
+
+`scan` 没有 `--judge` 与 `--fail-over`：安全判定只走 gate 与确定性断言，且 `risk_score > 0`
+必然意味着 `scan_failed()` 为真，「调阈值」没有任何效果。`tune` 没有 `--out`：产物路径固定。
+
+`report.config` 里与门禁相关的键（`evaluate_gate` 直接读）：
+
+| 键 | 含义 |
+|---|---|
+| `gate_severities` | 执行器写：`{gate_id: severity}` |
+| `judge_model` / `judge_base_url` | `cli._record_judge` 写：本次判分用的模型。与基线不同 → 门禁判 failed |
+| `judge_errors` | 判分调用（已重试后）失败次数。`> 0` → 门禁按 `partial` 同等待遇拒绝放行 |
+| `partial` / `stopped_reason` | 预算耗尽中断 |
+
+判分模型由 `QUALITY_JUDGE_MODEL` 指定（默认 `group/qwen3-235b-a22b-instruct`），**不读**
+`QUALITY_MODEL`：后者是被测模型的旋钮，共用一个变量会让「换 SUT」顺手把判分器也换掉。
 
 ## 用例 `setup` 的键（由 `prompt-lab` 解释）
 

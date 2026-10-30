@@ -13,9 +13,30 @@ import { ChatRequestError } from './chat-request-error';
 import { parseRetryAfterSeconds } from './retry-after';
 import { isSessionIdSendable } from './session-id';
 
-const FRAME_SEPARATOR = /\r?\n\r?\n/;
-const LINE_SEPARATOR = /\r?\n/;
+/**
+ * SSE 的帧与行分隔符。
+ *
+ * 三种行尾规范都要求接受：CRLF、单独 LF、单独 CR（WHATWG HTML「server-sent events」）。
+ * 只写 `\r?\n` 时，一个只发 CR 的服务端/中间层会让整条流一个事件都产不出，最后报
+ * 「回复可能不完整」——症状与「模型没回答」完全一样，排查方向直接被带偏。
+ */
+const FRAME_SEPARATOR = /\r\n\r\n|\n\n|\r\r/;
+const LINE_SEPARATOR = /\r\n|\n|\r/;
 const DATA_PREFIX = 'data:';
+
+/**
+ * 等响应头的上界。
+ *
+ * 空闲看门狗（`IDLE_TIMEOUT_MS`）只管拿到 `response.body` **之后**的静默：从请求发出
+ * 到响应头回来这一跳此前没有任何超时——反代建连挂住、上游 TCP 半开、云 LB 黑洞时，
+ * 前端会永远停在「生成中」，用户除了手动点停止没有任何出路，而这时他连「模型在想」
+ * 还是「卡死了」都分不出来。
+ *
+ * 30s 宽于正常最慢的情形（反代排队 + 上游首包；sse-starlette 一旦开始响应就立刻回
+ * 响应头），又明显短于用户的耐心。比空闲看门狗短是有意的：这一跳本不该连一个字节
+ * 都没有。
+ */
+export const PRE_HEADER_TIMEOUT_MS = 30_000;
 
 /**
  * 空闲看门狗阈值：连续这么久没收到**任何字节**就认定连接已半开。
@@ -27,14 +48,17 @@ const DATA_PREFIX = 'data:';
 export const IDLE_TIMEOUT_MS = 60_000;
 
 /**
- * 单个 SSE 帧的缓冲上限。
+ * 单个 SSE 帧的缓冲上限（单位：UTF-16 码元，即 `String.prototype.length`）。
+ *
+ * 叫 CHARS 而不是 BYTES：比较的是 `buffer.length`，不是真实字节数（一个中文码点约
+ * 占 3 字节，声明的数值与字节上限差三倍，将来有人按名字去调这个数就会调错）。
  *
  * 我们的事件都很小（增量文本、工具入参、用量），一帧到不了这个量级。没有上限时，
  * 一个只发字节不发 `\n\n` 的坏上游（或被中间层改写的响应）会让 `buffer` 无界增长，
  * 直到把标签页的内存吃光——用户看到的是浏览器卡死而不是「请求失败」。超限按
  * 「丢帧」处理：结束读取、标成 damaged，已有的内容照常显示。
  */
-export const MAX_FRAME_BYTES = 1_000_000;
+export const MAX_FRAME_CHARS = 1_000_000;
 
 /**
  * 事件流的内容类型校验。
@@ -190,10 +214,10 @@ async function* parseEventStream(
       // 最后一段可能是不完整的帧，留到下一轮
       buffer = frames.pop() ?? '';
 
-      if (buffer.length > MAX_FRAME_BYTES) {
+      if (buffer.length > MAX_FRAME_CHARS) {
         // 只发字节不发分隔符的坏上游：继续读下去只会把内存吃光，已有的内容照常交出去
         frameTooLarge = true;
-        onParseError(new Error(`单个 SSE 帧超过 ${MAX_FRAME_BYTES} 字节`), '');
+        onParseError(new Error(`单个 SSE 帧超过 ${MAX_FRAME_CHARS} 个字符`), '');
         break;
       }
 
@@ -258,7 +282,10 @@ export async function* streamChat({
   approvals = null,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
-  // 走 apiFetch：带上 cookie，并在会话过期（401）时通知全局退回登录页
+  // 走 apiFetch：带上 cookie，并在会话过期（401）时通知全局退回登录页。
+  // `timeoutMs` 只管「等响应头」这一跳：响应头一到 apiFetch 就停表，之后的静默由
+  // parseEventStream 的空闲看门狗负责。两者都要带上 signal，不然用户点停止时
+  // 这一跳停不下来（apiFetch 会把两条中止路径合成一条）。
   const response = await apiFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -282,6 +309,7 @@ export async function* streamChat({
       ...(approvals && Object.keys(approvals).length > 0 ? { approvals } : {}),
     }),
     signal,
+    timeoutMs: PRE_HEADER_TIMEOUT_MS,
   });
 
   if (!response.ok) {

@@ -18,6 +18,16 @@
 - **target 指纹不一致 = 换了考生**。这正是评测想做的（改了提示词跑一遍看有没有变好），
   只记一条提示，不拦。
 
+下面三条同样是「不可比」而不是「变差了」，一律 failed（理由与 suite 指纹一致：分母或
+判分器变了，差异就无法归因到被测系统）：
+
+- **采样数不同**：`pass^k` / `robustness` 的分母变了（k=1 的当前跑 vs k=3 的基线），
+  一次真实回归可以因为 k 变小被掩盖，也可以因为 k 变大被误判成回归。
+- **判分模型不同**：分数出自不同的判分器，LLM judge 的 self-preference 会让同一个回答
+  在不同判分模型下得到不同分。
+- **判分调用失败**（`config.judge_errors > 0`）与 `config.partial` 同理：那些 0 分来自
+  判分器故障而不是被测系统，指标不是被测系统的分数。
+
 另外，本次运行带 `config.partial` 时一律不放行（见 `budget.py`：预算耗尽要标记 partial，
 门禁据此拒绝放行）。预算中断时指标分母变小，常常比基线还好看。
 """
@@ -96,6 +106,25 @@ def evaluate_gate(
         failures.append(
             f"suite 指纹不一致（基线 {baseline.suite_fingerprint} ≠ 当前 {current.suite_fingerprint}）："
             "用例集不同，指标不可比，请先确认基线是否过期"
+        )
+    if current.samples != baseline.samples:
+        # 理由同 suite 指纹：分母变了就不是同一个数。k 变小会把真实回归抹匀，
+        # k 变大会把抽样噪声读成回归。
+        failures.append(
+            f"采样数不一致（基线 {baseline.samples} ≠ 当前 {current.samples}）：pass^k 的分母不同，通过率与总分都不可比"
+        )
+    judge_model = current.config.get("judge_model")
+    baseline_judge_model = baseline.config.get("judge_model")
+    if judge_model != baseline_judge_model:
+        failures.append(
+            f"判分模型不一致（基线 {baseline_judge_model} ≠ 当前 {judge_model}）："
+            "分数出自不同的判分器，差异无法归因到被测系统"
+        )
+    judge_errors = current.config.get("judge_errors")
+    if isinstance(judge_errors, int) and judge_errors > 0:
+        failures.append(
+            f"本次有 {judge_errors} 次判分调用失败（config.judge_errors）："
+            "部分 0 分来自判分器故障而不是被测系统，这份报告不能用来放行"
         )
     if current.target_fingerprint != baseline.target_fingerprint:
         notes.append(

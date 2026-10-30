@@ -53,7 +53,7 @@ from sqlalchemy import select  # noqa: E402
 from app.db import User, async_session_maker, verify_schema_at_head  # noqa: E402
 from app.roles import ROLE_SUPERADMIN, Role  # noqa: E402
 from app.schemas.user import UserCreate, UserUpdate  # noqa: E402
-from app.services.auth import MIN_PASSWORD_LENGTH, UserManager, apply_role  # noqa: E402
+from app.services.auth import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, UserManager, apply_role  # noqa: E402
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -169,6 +169,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_invalid_password(exc: InvalidPasswordException) -> None:
+    """密码不合规的提示：建号与重置两条路径共用同一句。
+
+    `reason` 来自 `UserManager.validate_password`，与注册接口一字不差；这里再补上区间，
+    因为 `SEED_ADMIN_PASSWORD` 短于下限时运维需要当场知道要求，而不是去翻 settings。
+    """
+    print(
+        f"错误：密码不合规（{exc.reason}；本脚本与注册共用同一套规则："
+        f"{MIN_PASSWORD_LENGTH}-{MAX_PASSWORD_LENGTH} 位）。",
+        file=sys.stderr,
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
     email = (args.email or "").strip().lower()
     if not email or "@" not in email:
@@ -189,7 +202,7 @@ async def run(args: argparse.Namespace) -> int:
         try:
             created = await _create_superadmin(email, password)
         except InvalidPasswordException as exc:
-            print(f"错误：密码不合规（{exc.reason}）。", file=sys.stderr)
+            _print_invalid_password(exc)
             return EXIT_FAILED
         except UserAlreadyExists:
             # 并发跑两次的竞态：另一个进程刚建好。交给下面的分支重新处理。
@@ -231,7 +244,8 @@ async def run(args: argparse.Namespace) -> int:
     try:
         updated = await _reset_password(existing, password)
     except InvalidPasswordException as exc:
-        print(f"错误：密码不合规（{exc.reason}，至少 {MIN_PASSWORD_LENGTH} 位）。", file=sys.stderr)
+        # SEED_ADMIN_PASSWORD 短于下限时不会被静默跳过：密码只在写入前校验一次，这里如实报错退出。
+        _print_invalid_password(exc)
         return EXIT_FAILED
 
     print(f"✓ 密码已重置: {updated.email}")

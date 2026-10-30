@@ -33,6 +33,7 @@ def make_report(
     config: dict[str, Any] | None = None,
     suite_fingerprint: str = "suite-0001",
     target_fingerprint: str = "target-0001",
+    samples: int = 1,
 ) -> RunReport:
     return RunReport(
         run_id=run_id,
@@ -41,7 +42,7 @@ def make_report(
         target="fake",
         target_fingerprint=target_fingerprint,
         config=dict(config or {}),
-        samples=1,
+        samples=samples,
         tasks=list(tasks or []),
         metrics=dict(FULL_METRICS if metrics is None else metrics),
     )
@@ -183,6 +184,52 @@ def test_partial_run_is_never_released():
     # 样本不全时指标分母变小，常常比基线还好看——这正是最容易被误读成「改进」的情况。
     assert outcome.failed is True
     assert any("partial" in reason and "token 预算耗尽" in reason for reason in outcome.failures)
+
+
+def test_samples_mismatch_refuses_to_compare():
+    baseline = make_report(run_id="base", samples=3)
+
+    outcome = evaluate_gate(make_report(run_id="cur", samples=1), baseline)
+
+    # pass^k 的分母变了就不是同一个数：k 变小会把真实回归抹匀，k 变大会把噪声读成回归。
+    assert outcome.failed is True
+    assert any("采样数" in reason for reason in outcome.failures)
+
+
+def test_judge_model_mismatch_refuses_to_compare():
+    baseline = make_report(run_id="base", config={"judge_model": "group/judge-a"})
+
+    outcome = evaluate_gate(make_report(run_id="cur", config={"judge_model": "group/judge-b"}), baseline)
+
+    # 分数出自不同的判分器（self-preference 有实证），差异无法归因到被测系统。
+    assert outcome.failed is True
+    assert any("判分模型" in reason for reason in outcome.failures)
+
+
+def test_same_judge_model_passes():
+    config = {"judge_model": "group/judge-a"}
+
+    outcome = evaluate_gate(make_report(run_id="cur", config=config), make_report(run_id="base", config=config))
+
+    assert outcome.failed is False
+
+
+def test_missing_judge_model_on_both_sides_is_not_a_mismatch():
+    # 历史报告（加了 judge_model 之前跑出来的）不能被一次性判红，否则所有基线都得重跑。
+    outcome = evaluate_gate(make_report(run_id="cur"), make_report(run_id="base"))
+
+    assert outcome.failed is False
+
+
+def test_judge_errors_block_release():
+    current = make_report(run_id="cur", config={"judge_model": "group/judge-a", "judge_errors": 2})
+    baseline = make_report(run_id="base", config={"judge_model": "group/judge-a", "judge_errors": 0})
+
+    outcome = evaluate_gate(current, baseline)
+
+    # 与 partial 同口径：那些 0 分来自判分器故障，指标不是被测系统的分数。
+    assert outcome.failed is True
+    assert any("判分调用失败" in reason for reason in outcome.failures)
 
 
 def test_metric_missing_on_one_side_is_noted_not_failed():

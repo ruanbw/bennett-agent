@@ -12,7 +12,9 @@ from typing import Any
 
 from opensandbox import Sandbox
 from opensandbox.config import ConnectionConfig
+from opensandbox.exceptions import SandboxError as OpenSandboxErrorCode
 from opensandbox.exceptions import SandboxException as OpenSandboxError
+from opensandbox.exceptions import SandboxRateLimitException
 from opensandbox.models.execd import RunCommandOpts
 
 from app.config import settings
@@ -31,6 +33,30 @@ KILLED_EXIT_CODE = -1
 
 #: 沙箱内 execd 的工作目录由服务端与镜像共同决定，这里只兜底。
 DEFAULT_WORKDIR = "/home/sandbox/workspace"
+
+#: 服务端「没容量」的状态码：429 是显式限流，507（Insufficient Storage）是节点池/磁盘配额打满。
+_CAPACITY_STATUS_CODES = frozenset({429, 507})
+
+
+def _is_capacity_error(exc: OpenSandboxError) -> bool:
+    """这次建机失败是不是「节点池满了」。
+
+    先看结构化字段：SDK 对 429 抛 `SandboxRateLimitException`（`status_code=429`、
+    `error.code=RATE_LIMIT`），这类判定不随服务端文案变。按子串判会把「池满」降级成「环境暂时
+    不可用」：模型据此去换路径重试，而运维也分不清是池真的满了还是我们判错了。
+
+    子串匹配留作最后的兜底：部分网关把「no capacity」包成 500 + 纯文本 body，那时只剩文案可看。
+    兜底不能删——它误判的代价只是把一次普通失败说成「资源已满」（两句文案的下一步都是稍后再试），
+    而漏判会让模型拿着「暂时不可用」去无限重试。
+    """
+    if isinstance(exc, SandboxRateLimitException):
+        return True
+    if getattr(exc, "status_code", None) in _CAPACITY_STATUS_CODES:
+        return True
+    if getattr(getattr(exc, "error", None), "code", None) == OpenSandboxErrorCode.RATE_LIMIT:
+        return True
+    message = str(exc).lower()
+    return "rate" in message or "limit" in message or "quota" in message or "capacity" in message
 
 
 def _memory_spec(memory_mb: int) -> str:
@@ -121,8 +147,7 @@ class OpenSandboxProvider:
                 timeout=_seconds(settings.sandbox_hard_ttl_seconds),
             )
         except OpenSandboxError as exc:
-            message = str(exc).lower()
-            if "rate" in message or "limit" in message or "quota" in message or "capacity" in message:
+            if _is_capacity_error(exc):
                 raise SandboxCapacityError("沙箱服务资源已满，请稍后再试。") from exc
             raise self._wrap(exc, "创建") from exc
 

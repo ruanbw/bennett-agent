@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { MessageRecord, SessionRecord } from '../../types';
 import {
+  PUSH_BATCH_MAX_BYTES,
   buildPushBatch,
   fromConversationRow,
   fromMessageRow,
@@ -170,6 +171,8 @@ describe('fromMessageRow', () => {
       thinking: '服务端的思考',
       syncState: 'synced',
       clientRev: 2,
+      // 服务端版本号必须落库：下一次 pull 的「该不该覆盖」全靠它比
+      serverVersion: 43,
     });
   });
 
@@ -195,6 +198,7 @@ describe('fromConversationRow', () => {
       reasoningEffort: 'high',
       syncState: 'synced',
       clientRev: 3,
+      serverVersion: 42,
       deleted: false,
     });
   });
@@ -206,25 +210,50 @@ describe('fromConversationRow', () => {
 
 describe('shouldApplyRemote', () => {
   it('本地没有 → 建', () => {
-    expect(shouldApplyRemote({ client_rev: 0 })).toBe(true);
+    expect(shouldApplyRemote({ version: 0 })).toBe(true);
   });
 
   it('本地有未推送的修改 → 不许覆盖（这是同步回滚用户内容的唯一防线）', () => {
-    expect(shouldApplyRemote({ client_rev: 9 }, { syncState: 'pending', clientRev: 1 })).toBe(false);
+    expect(shouldApplyRemote({ version: 9 }, { syncState: 'pending', serverVersion: 1 })).toBe(false);
   });
 
   it('本地是 error → 也不覆盖（服务端明确拒绝过，盖上去会假装成功）', () => {
-    expect(shouldApplyRemote({ client_rev: 9 }, { syncState: 'error', clientRev: 1 })).toBe(false);
+    expect(shouldApplyRemote({ version: 9 }, { syncState: 'error', serverVersion: 1 })).toBe(false);
   });
 
-  it('已同步：只有服务端修订号更大才代表「另一台设备又改了它」', () => {
-    expect(shouldApplyRemote({ client_rev: 3 }, { syncState: 'synced', clientRev: 3 })).toBe(false);
-    expect(shouldApplyRemote({ client_rev: 4 }, { syncState: 'synced', clientRev: 3 })).toBe(true);
+  it('已同步：只有服务端版本号更大才落库', () => {
+    expect(shouldApplyRemote({ version: 42 }, { syncState: 'synced', serverVersion: 42 })).toBe(false);
+    expect(shouldApplyRemote({ version: 41 }, { syncState: 'synced', serverVersion: 42 })).toBe(false);
+    expect(shouldApplyRemote({ version: 43 }, { syncState: 'synced', serverVersion: 42 })).toBe(true);
   });
 
-  it('老记录（没有 syncState/clientRev）按已同步处理，但不会被同修订号覆盖', () => {
-    expect(shouldApplyRemote({ client_rev: 0 }, {})).toBe(false);
-    expect(shouldApplyRemote({ client_rev: 1 }, {})).toBe(true);
+  it('老记录没有 serverVersion → 按 0 处理（服务端版本从 1 起，所以一定会落库一次）', () => {
+    expect(shouldApplyRemote({ version: 1 }, { syncState: 'synced' })).toBe(true);
+  });
+
+  /**
+   * P1 回归：LWW 比错了轴，会话在两台设备上永久分叉。
+   *
+   * 设备 A、B 各改一次同一行，`client_rev` 都是 4。服务端（权威）后到的那一次版本号更大，
+   * 必须能盖到先到的那台设备上。若判定改回 `row.client_rev > local.clientRev`，这条会失败。
+   */
+  it('两台设备修订号撞成同一个数字时，仍然按服务端版本号落库', () => {
+    const local = { syncState: 'synced' as const, clientRev: 4, serverVersion: 40 };
+    // 服务端行也是 client_rev=4（另一台设备刚改的，两台的本地修订号都是 4），但版本号更新
+    expect(shouldApplyRemote({ version: 41 }, local)).toBe(true);
+    // 同一行服务端没变：不重复落库
+    expect(shouldApplyRemote({ version: 40 }, local)).toBe(false);
+  });
+
+  /**
+   * P1 回归：墓碑被本地修订号挡回去 → 会话在本机永久复活。
+   *
+   * 设备 B 用更小的 `client_rev` 删了会话，设备 A 本地修订号更大；删除是服务端单向广播的
+   * 终态，不论本地版本号、pending 与否都必须落库（本地那份要从屏幕上消失）。
+   */
+  it('墓碑一律落库：本地有更新的服务端版本、甚至还有未推送的改动，也盖不住删除', () => {
+    expect(shouldApplyRemote({ version: 3, deleted: true }, { syncState: 'synced', serverVersion: 99 })).toBe(true);
+    expect(shouldApplyRemote({ version: 3, deleted: true }, { syncState: 'pending' })).toBe(true);
   });
 });
 
@@ -277,6 +306,37 @@ describe('buildPushBatch', () => {
     const first = buildPushBatch(sessions, messages, 2);
     expect(first.conversations).toHaveLength(2);
     expect(first.messages).toEqual([]);
+  });
+
+  /**
+   * P1 回归：行数上限挡不住请求体超限。
+   *
+   * 150 行 × 单行 payload 上限 256 KB = 38.4 MB > 服务端的 32 MB 请求体上限 → 413，
+   * 而 413 曾被视为 fatal，该账号的推送就永久停摆。所以还要按**字节**再截一次。
+   */
+  it('按字节切分：200 条 200KB 的消息不会被组进同一批', () => {
+    const big = 'x'.repeat(200_000);
+    const sessions = [session({ id: 'sess_a', createdAt: 1 })];
+    const messages = Array.from({ length: 200 }, (_, index) =>
+      message({ id: `msg_${index}`, sessionId: 'sess_a', createdAt: index, content: big }),
+    );
+
+    const batch = buildPushBatch(sessions, messages, 150);
+    const bytes = new TextEncoder().encode(JSON.stringify(batch)).length;
+
+    expect(batch.messages.length).toBeGreaterThan(0);
+    expect(batch.messages.length).toBeLessThan(150);
+    expect(bytes).toBeLessThanOrEqual(PUSH_BATCH_MAX_BYTES);
+  });
+
+  it('字节预算小于单行时仍然发一行（否则同步原地死锁）', () => {
+    // 会话都已同步（不在待推里），只有一条超大消息：预算再小也得把它发出去，
+    // 服务端会按 `sync_payload_max_bytes` 逐行拒，而不是让队列永远推不动。
+    const messages = [message({ id: 'msg_1', sessionId: 'sess_a', content: 'x'.repeat(10_000) })];
+
+    const batch = buildPushBatch([], messages, 150, 1);
+    expect(batch.conversations).toEqual([]);
+    expect(batch.messages.map((row) => row.id)).toEqual(['msg_1']);
   });
 });
 

@@ -53,9 +53,13 @@ DESTROY_ERROR = "error"
 #: 它随时能恢复，同一会话再建一台会让用户看到两个 workspace。
 LIVE_STATES = (STATE_PROVISIONING, STATE_READY, STATE_PAUSED)
 
-#: 未结束的状态：用于展示与容量计数。`destroying` 也算——provider 确认之前那台机器的
-#: CPU/内存还没还给节点池，按它不占容量放行会打爆节点池。
-OPEN_STATES = (*LIVE_STATES, STATE_DESTROYING)
+#: 未结束的状态：用于展示与容量计数。`destroying` 与 `destroy_failed` 也算——provider 确认之前
+#: 那台机器的 CPU/内存还没还给节点池，按它不占容量放行会打爆节点池；`destroy_failed` 的定义恰恰是
+#: 「provider 说没销毁成功」，机器一定还在跑，不计数就会「reset 失败一次 → 下一轮 exec 立刻再建
+#: 一台」，同一用户两台机器、全局上限也失效。
+#: 它不能并进 `LIVE_STATES`：那个谓词喂部分唯一索引（同一用户至多一台），而 `destroy_failed` 的
+#: 用户必须能重建新机器（`mark_destroying` 允许从它重抢，`ensure_lease` 也不复用它）。
+OPEN_STATES = (*LIVE_STATES, STATE_DESTROYING, STATE_DESTROY_FAILED)
 
 #: `destroying` 停留多久算卡住、该重试（见 `find_destroyable`）。没有它，被硬杀留下的
 #: 一行会永久吃掉该用户唯一的容量位：`mark_destroying` 抢不回来、`get_active_lease` 也不认它。
@@ -146,7 +150,9 @@ async def get_latest_lease(session: AsyncSession, *, user_id: uuid.UUID) -> Leas
 
 
 async def list_active_for_user(session: AsyncSession, *, user_id: uuid.UUID) -> list[LeaseView]:
-    """某用户全部尚未结束的租约（容量面板 / 「我的环境」列表）。新的在前。"""
+    """某用户全部尚未结束的租约（容量面板 / 封禁时批量销毁的清单）。新的在前。
+    口径是 `OPEN_STATES`：`destroy_failed` 必须在内，否则被封禁的用户那台「没拆掉的」机器会漏掉。
+    """
     rows = await session.scalars(
         select(SandboxLease)
         .where(SandboxLease.user_id == user_id, SandboxLease.state.in_(OPEN_STATES))
