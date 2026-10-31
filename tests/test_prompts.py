@@ -21,7 +21,7 @@ SYSTEM_PROMPT_TEMPLATE = "system_prompt.jinja"
 def render_system_prompt(**overrides):
     """按 `agent_factory.render_system_prompt` 的口径准备变量。
 
-    三个工具开关都由 `tools` 派生（生产代码也是这么做的）：模板里的条件分支与真实装配
+    四个工具开关都由 `tools` 派生（生产代码也是这么做的）：模板里的条件分支与真实装配
     必须同源，否则「挂了工具却没写进提示词」或反过来都会发生。
     """
     tools = overrides.pop("tools", ["ask_user_clarification", "get_current_time"])
@@ -32,6 +32,7 @@ def render_system_prompt(**overrides):
         "web_search": "tavily_search" in tools,
         "clarification": "ask_user_clarification" in tools,
         "current_time": "get_current_time" in tools,
+        "todo": "todo_write" in tools,
         # 生产代码由 `agent_factory.mcp_server_summary(tools)` 从工具名还原；
         # 这里默认空列表，MCP 相关的用例显式传入。
         "mcp_servers": overrides.pop("mcp_servers", []),
@@ -66,6 +67,7 @@ def test_default_filter_still_works_with_strict_undefined():
         web_search=False,
         clarification=False,
         current_time=False,
+        todo=False,
         mcp_servers=[],
         sandbox=False,
         approval_gate=True,
@@ -146,6 +148,19 @@ def test_search_instruction_only_appears_when_search_is_mounted():
     assert "本轮**没有**联网搜索工具" in without
     assert "请调用 `tavily_search`" in with_search
     assert "本轮**没有**联网搜索工具" not in with_search
+
+
+def test_todo_instruction_only_appears_when_todo_is_mounted():
+    """没挂 todo_write 时不能教模型建清单；挂了才给「什么时候用、怎么更新」的规则。"""
+    without = render_system_prompt()
+    with_todo = render_system_prompt(
+        tools=["ask_user_clarification", "get_current_time", "todo_write"],
+    )
+
+    assert "todo_write" not in without
+    assert "先用 `todo_write`" not in without
+    assert "先用 `todo_write`" in with_todo
+    assert "同一时间最多一项 `in_progress`" in with_todo
 
 
 def test_sandbox_instruction_only_appears_when_sandbox_is_mounted():

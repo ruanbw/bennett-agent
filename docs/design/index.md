@@ -40,8 +40,8 @@ Bennett Agent 是一个多租户 AI 对话平台：两套 React 前端（用户�
 │ runtime（工具执行面）  │   │ tools（装配层）                │
 │  approval 审批闸门      │   │  registry 编目、sandbox 四个、  │
 │  guard 异常隔离        │   │  tavily_search、ask_user、    │
-│  scopes 作用域注入      │   │  current_time、mcp_client     │
-│  tool_registry 元数据  │   │                              │
+│  scopes 作用域注入      │   │  current_time、todo、       │
+│  tool_registry 元数据  │   │  mcp_client                  │
 │  catalog 说明查询      │   └──────────────────────────────┘
 └───────┬───────────────┘
         ▼

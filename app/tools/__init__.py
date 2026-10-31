@@ -42,6 +42,7 @@ SANDBOX_TOOL_TIMEOUT_SECONDS = MAX_EXEC_TIMEOUT_S + 60.0
 _TOOL_EXPORTS: dict[str, str] = {
     "clarification_tool": "ask_user_clarification",
     "current_time_tool": "get_current_time",
+    "todo_tool": "todo_write",
     "tavily_tool": "tavily_search",
     "sandbox_exec_tool": "sandbox_exec",
     "sandbox_write_file_tool": "sandbox_write_file",
@@ -53,6 +54,7 @@ _TOOL_EXPORTS: dict[str, str] = {
 _RAW_FUNCTION_MODULES: dict[str, str] = {
     "ask_user_clarification": "app.tools.ask_user_clarification",
     "get_current_time": "app.tools.current_time",
+    "todo_write": "app.tools.todo",
     "tavily_search": "app.tools.tavily_search",
     "sandbox_exec": "app.tools.sandbox",
     "sandbox_write_file": "app.tools.sandbox",
@@ -88,6 +90,7 @@ def _register_all(registry: ToolRegistry) -> None:
     from app.tools.tavily_search import (
         tavily_search as _raw_tavily_search,
     )
+    from app.tools.todo import todo_write as _raw_todo_write
 
     registry.register(
         category=ToolCategory.INTERACTION,
@@ -116,6 +119,22 @@ def _register_all(registry: ToolRegistry) -> None:
         timeout=None,
         enabled_checker=None,
     )(_raw_get_current_time)
+
+    registry.register(
+        category=ToolCategory.SYSTEM,
+        risk_level=RiskLevel.READ_ONLY,
+        permissions=[],
+        tags=["planning", "todo", "task"],
+        description=(
+            "维护当前任务清单（整表替换）：每次传入完整清单，传空数组表示清空。"
+            "把多步工作拆成可跟踪的待办，开始一项时标 in_progress，完成后标 completed；"
+            "同一时间最多一项进行中。简单的一步任务不要为了走流程而建清单。"
+        ),
+        # 只校验并渲染模型自己提交的清单，没有外部副作用，也不读写服务端状态：
+        # 清单以对话历史为载体。标成 SAFE_WRITE 会让每次更新计划都弹审批，规划工具就不可用了。
+        timeout=None,
+        enabled_checker=None,
+    )(_raw_todo_write)
 
     registry.register(
         category=ToolCategory.SEARCH,
@@ -271,4 +290,6 @@ __all__ = [
     "set_registry_for_tests",
     "tavily_search",
     "tavily_tool",
+    "todo_tool",
+    "todo_write",
 ]

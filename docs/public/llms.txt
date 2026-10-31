@@ -18,7 +18,7 @@
 
 - [功能总览](https://ruanbw.github.io/bennett-agent/features/): 能力矩阵（每项默认是否开启、依赖什么）、四条贯穿全局的设计约定，以及一轮对话的核心链路。
 - [对话与流式事件](https://ruanbw.github.io/bennett-agent/features/chat): `POST /api/chat` 的请求体硬约束、SSE 分帧与全部事件类型、审批续跑、三段超时边界。
-- [工具系统](https://ruanbw.github.io/bennett-agent/features/tools): 工具注册表的编目与惰性装配、七个内置工具、按可撤销性分级的审批闸门、异常隔离与 MCP 动态发现。
+- [工具系统](https://ruanbw.github.io/bennett-agent/features/tools): 工具注册表的编目与惰性装配、八个内置工具、按可撤销性分级的审批闸门、异常隔离与 MCP 动态发现。
 - [沙箱执行](https://ruanbw.github.io/bennett-agent/features/sandbox): 每用户一台而非每会话一台的租约状态机、心跳与回收、容量、命令审计、reset 审批与 provider 契约。
 - [上下文预算与压缩](https://ruanbw.github.io/bennett-agent/features/context): 字符上限为什么挡不住 token 溢出、估算公式、三种模式、两级压缩与摘要失败降级。
 - [模型接入与容灾](https://ruanbw.github.io/bennett-agent/features/models): 提供商与模型两层数据、预设与只增不删的模型同步、密钥加密、出站 SSRF 防护与备用模型切换矩阵。

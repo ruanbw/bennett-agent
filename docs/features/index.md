@@ -17,6 +17,7 @@ Bennett Agent 是一套自托管的多租户 Agent 平台。核心只有四件�
 | 联网搜索（Tavily） | 关闭（未配 Key 就不装配） | `TAVILY_API_KEY` 非占位值 | [工具系统](./tools.md) |
 | 澄清提问 | 开启 | 无 | [工具系统](./tools.md) |
 | 当前时间 | 开启 | 无 | [工具系统](./tools.md) |
+| 任务清单 | 开启 | 无 | [工具系统](./tools.md) |
 | MCP 外部工具 | 关闭（`MCP_SERVERS` 为空） | `MCP_SERVERS` 声明 + server 可达 | [工具系统](./tools.md) |
 | 沙箱代码执行 | 关闭（`SANDBOX_ENABLED=false`） | OpenSandbox 服务 + 对象存储（导出产物） | [沙箱执行](./sandbox.md) |
 | 上下文预算与压缩 | 开启（`CONTEXT_GUARD_MODE=compact`） | 网关上报 `context_window` | [上下文预算与压缩](./context.md) |
