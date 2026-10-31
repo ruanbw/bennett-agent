@@ -46,7 +46,7 @@ def test_keys_are_independent():
 def test_window_slides(monkeypatch):
     """窗口之外的命中要被丢掉，否则限流器会永久锁死一个来源。"""
     clock = {"now": 1000.0}
-    monkeypatch.setattr("app.api.rate_limit.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("app.services.rate_limit.limiter.time.monotonic", lambda: clock["now"])
 
     limiter = SlidingWindowLimiter(limit=1, window_seconds=10)
     assert limiter.check("ip")[0] is True
@@ -86,7 +86,7 @@ def test_tracked_keys_evict_expired_and_lru():
 def test_eviction_prefers_expired_key_over_still_usable_key(monkeypatch):
     """容量满时先丢窗口内已无命中的键，而不是丢掉还能继续用的键。"""
     clock = {"now": 1000.0}
-    monkeypatch.setattr("app.api.rate_limit.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("app.services.rate_limit.limiter.time.monotonic", lambda: clock["now"])
 
     limiter = SlidingWindowLimiter(limit=5, window_seconds=10, max_keys=2)
     limiter.check("stale")
@@ -145,7 +145,7 @@ def test_window_seconds_must_be_positive(window_seconds):
 def test_hit_exactly_on_window_boundary_is_expired(monkeypatch):
     """窗口是 `(now - window, now]`：恰好落在左端点的命中已经过期，不该继续占配额。"""
     clock = {"now": 500.0}
-    monkeypatch.setattr("app.api.rate_limit.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("app.services.rate_limit.limiter.time.monotonic", lambda: clock["now"])
 
     limiter = SlidingWindowLimiter(limit=1, window_seconds=10)
     assert limiter.check("ip")[0] is True
