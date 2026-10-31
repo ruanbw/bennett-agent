@@ -120,6 +120,10 @@ docker compose down -v && docker compose up -d postgres
 
 改完跑 `uv run pytest tests/test_db_schema.py`，它会检查模型与脚本是否漂移。
 
+### 增量迁移（Alembic，新增）
+
+生产库升级走 Alembic，与上面的机制**共存而非替换**：`sql/init.sql` 仍是表结构唯一事实来源。开发/新库不变（启动时执行脚本 + baseline 迁移自动 stamp）；生产上改表 = 改 `sql/init.sql` + `uv run alembic revision -m "..."` 手写一个增量脚本（禁用 `--autogenerate` 直出），两者一起提交，生产跑 `uv run alembic upgrade head`。baseline（`0001_baseline`）幂等：业务表已在则只建/更新 `alembic_version` 戳，不在则报错引导先跑 `init.sql`——首建永远归启动守卫，Alembic 只管增量。
+
 ### 启用沙箱（可选）
 
 默认关闭。本地开发用 Docker 运行时：

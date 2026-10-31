@@ -23,6 +23,7 @@ dependencies = [
     "sse-starlette>=3.5.0",
     "uvicorn[standard]>=0.54.0",
     "opensandbox>=1.1.1",
+    "alembic>=1.20.1",
 ]
 
 [dependency-groups]
