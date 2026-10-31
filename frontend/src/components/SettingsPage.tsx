@@ -1,12 +1,11 @@
 /**
  * 设置页面。
  *
- * ## 为什么是「居中的一小块」，而不是「左菜单 + 右大页」
+ * ## 布局
  *
- * 设置里能调的东西是三组（账号、主题、对话显示），把菜单钉在屏幕最左侧、
- * 右边铺满整页，结果就是一条窄内容浮在一大片空白里——像没写完的页面。所以这里
- * 把整块设置收成一个居中的 672px 卡片：页头（返回 + 标题）+ 左侧分区 + 右侧内容，
- * 宽屏居中留白，窄屏自然下落成一列。
+ * 采用桌面设置页的经典结构：左侧固定分区菜单 + 右侧大内容区。主题排成一行三张
+ * 卡片，其余选项收成一行分段控件；每组按「左标题说明、右控件」排布。窄屏时菜单
+ * 变成顶部横滑标签，控件自动落到说明下方。
  *
  * ## 与对话区的关系
  *
@@ -24,8 +23,8 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type Reac
 import {
   Activity,
   AlignLeft,
-  Check,
   ChevronsUpDown,
+  Eye,
   FoldVertical,
   KeyRound,
   Laptop,
@@ -81,27 +80,26 @@ interface OptionCard<T extends string> {
 /**
  * 单选偏好组。
  *
- * ## 为什么是行列表，不是一排大卡片
+ * 两种形态，按内容性质分工：
+ * - 主题用 `prominent` 卡片：三张并排、图标大、文字少，像选择桌面壁纸一样先看再选；
+ * - 其余选项用紧凑分段控件：一行排开，嵌在设置行的右侧，不把每项都撑成大卡片。
  *
- * 卡片要么把「图标 + 名称 + 一句说明」撑在 200px 见方的盒子里（屏上大片空白），
- * 要么在 390px 的窄屏上被挤成三栏、说明文折成三行还高低不齐。行列表把同样的信息
- * 装进一条容器：每行自带「图标 / 名称＋说明 / 勾选」的横排，宽屏窄屏一套布局就够。
- *
- * ## 语义用 radiogroup/radio，不用一排 aria-pressed
- *
- * 这确实是「多选一」：读屏会读出「第 2 项，共 4 项」，方向键能在组内移动；
- * 而按钮组要点 Tab 四次才走得完，还得自己记住哪些按钮是一组。
+ * 语义都用 radiogroup/radio，不用一排 aria-pressed：读屏会读出「第 2 项，共 4 项」，
+ * 方向键能在组内移动；而按钮组要点 Tab 四次才走得完，还得自己记住哪些按钮是一组。
  */
 function PreferenceGroup<T extends string>({
   ariaLabel,
   options,
   value,
   onChange,
+  prominent = false,
 }: {
   ariaLabel: string;
   options: ReadonlyArray<OptionCard<T>>;
   value: T;
   onChange: (next: T) => void;
+  /** 主题这类需要「预览感」的选项用更大的卡片。 */
+  prominent?: boolean;
 }) {
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -130,11 +128,71 @@ function PreferenceGroup<T extends string>({
     }
   };
 
+  if (prominent) {
+    return (
+      <div role="radiogroup" aria-label={ariaLabel} className="grid grid-cols-3 gap-3">
+        {options.map((option, index) => {
+          const checked = option.value === value;
+          return (
+            <button
+              key={option.value}
+              ref={(node) => {
+                optionRefs.current[index] = node;
+              }}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              tabIndex={checked ? 0 : -1}
+              title={option.description}
+              onClick={() => onChange(option.value)}
+              onKeyDown={(event) => handleKeyDown(event, index)}
+              className={cn(
+                'flex h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border transition select-none',
+                'focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
+                checked
+                  ? 'border-foreground/20 bg-muted/60'
+                  : 'border-border/70 bg-card hover:border-foreground/15 hover:bg-muted/30'
+              )}
+            >
+              <option.Icon
+                className={cn(
+                  'size-6 shrink-0',
+                  checked
+                    ? (option.activeIconClassName ?? 'text-primary')
+                    : 'text-muted-foreground'
+                )}
+                aria-hidden="true"
+              />
+              <span
+                className={cn(
+                  'text-base text-foreground',
+                  checked ? 'font-medium' : 'font-normal'
+                )}
+              >
+                {option.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  const columns =
+    options.length >= 4
+      ? 'grid-cols-4'
+      : options.length === 3
+        ? 'grid-cols-3'
+        : 'grid-cols-2';
+
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
-      className="overflow-hidden rounded-xl border border-border/70 bg-muted/20"
+      className={cn(
+        'grid w-full max-w-[24rem] gap-1 rounded-lg border border-border/60 bg-muted/60 p-1 xl:ml-auto',
+        columns
+      )}
     >
       {options.map((option, index) => {
         const checked = option.value === value;
@@ -149,39 +207,19 @@ function PreferenceGroup<T extends string>({
             aria-checked={checked}
             // 组内只有一项能 Tab 进来，剩下靠方向键——与原生 radio 一致
             tabIndex={checked ? 0 : -1}
+            title={option.description}
             onClick={() => onChange(option.value)}
             onKeyDown={(event) => handleKeyDown(event, index)}
             className={cn(
-              'flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition select-none',
-              'focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/60 focus-visible:outline-none',
-              index > 0 && 'border-t border-border/60',
-              checked ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-muted/60'
+              'flex h-8 min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-md px-1.5 text-sm transition select-none',
+              'focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
+              checked
+                ? 'bg-card text-foreground ring-1 ring-border/50'
+                : 'text-muted-foreground hover:bg-card/60 hover:text-foreground'
             )}
           >
-            <option.Icon
-              className={cn(
-                'size-4 shrink-0',
-                checked ? (option.activeIconClassName ?? 'text-primary') : 'text-muted-foreground'
-              )}
-              aria-hidden="true"
-            />
-            <span className="min-w-0 flex-1">
-              <span
-                className={cn(
-                  'block text-xs text-foreground',
-                  checked ? 'font-medium' : 'font-normal'
-                )}
-              >
-                {option.label}
-              </span>
-              <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
-                {option.description}
-              </span>
-            </span>
-            {/* 未选中时也占位：否则每行右侧宽窄不一，勾会左右跳 */}
-            <span className="flex size-3.5 shrink-0 items-center justify-center">
-              {checked && <Check className="size-3.5 text-primary" aria-hidden="true" />}
-            </span>
+            <option.Icon className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{option.label}</span>
           </button>
         );
       })}
@@ -192,10 +230,38 @@ function PreferenceGroup<T extends string>({
 /** 区块小标题：`h3`（页面标题 `h1`、分区标题 `h2` 都在它上面，层级不跳）。 */
 function SectionHeading({ Icon, children }: { Icon: LucideIcon; children: ReactNode }) {
   return (
-    <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-      <Icon className="size-3.5" aria-hidden="true" />
+    <h3 className="flex items-center gap-2 text-base font-medium text-foreground">
+      <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
       <span>{children}</span>
     </h3>
+  );
+}
+
+/**
+ * 一行设置：左边是「是什么、改了什么」，右边是控件。
+ *
+ * 宽屏并排，窄屏自动落到上下两段——和成熟设置页的阅读顺序一致：先读标签，
+ * 再操作旁边的控件，而不是让每个选项各占一整行。
+ */
+function SettingBlock({
+  Icon,
+  title,
+  description,
+  children,
+}: {
+  Icon: LucideIcon;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="grid gap-3 py-8 first:pt-0 last:pb-0 xl:grid-cols-[450px_minmax(0,1fr)] xl:items-start xl:gap-8">
+      <div className="xl:pt-1">
+        <SectionHeading Icon={Icon}>{title}</SectionHeading>
+        <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{description}</p>
+      </div>
+      <div className="min-w-0 rounded-2xl bg-muted/40 p-4">{children}</div>
+    </section>
   );
 }
 
@@ -298,9 +364,8 @@ export function AccountSection({
   const roleLabel = userRole ? (ROLE_LABELS[userRole] ?? null) : null;
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-2">
-        <SectionHeading Icon={User}>登录身份</SectionHeading>
+    <div className="divide-y divide-border/60">
+      <SettingBlock Icon={User} title="登录身份" description="当前登录的邮箱与账号角色">
         <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-2.5">
           <Avatar size="default" className="border border-border/80">
             <AvatarFallback className="bg-primary/10 text-xs font-medium text-primary">
@@ -309,27 +374,61 @@ export function AccountSection({
           </Avatar>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <span className="truncate text-xs font-medium text-foreground">{nickname}</span>
+              <span className="truncate text-sm font-medium text-foreground">{nickname}</span>
               {roleLabel && (
-                <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
                   {roleLabel}
                 </span>
               )}
             </div>
             <div
-              className="truncate text-[11px] text-muted-foreground"
+              className="truncate text-xs text-muted-foreground"
               title={userEmail ?? undefined}
             >
               {userEmail ?? '未登录'}
             </div>
           </div>
         </div>
-      </div>
+      </SettingBlock>
 
       {/* 修改密码：成功会让所有设备下线，由 App 统一退回登录页 */}
-      <div className="space-y-2">
-        <SectionHeading Icon={KeyRound}>修改密码</SectionHeading>
+      <SettingBlock Icon={KeyRound} title="修改密码" description="修改成功后会自动退出当前登录，需要重新登录。">
         <PasswordChangeForm onPasswordChanged={onPasswordChanged} />
+      </SettingBlock>
+    </div>
+  );
+}
+
+/** 主题预览：把当前配色投到一段真实的对话片段上，改主题时这里同步变。 */
+function ThemePreview() {
+  return (
+    <div className="overflow-hidden rounded-xl border border-border/70 bg-background">
+      <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+        <span className="text-xs font-medium text-foreground">Bennett Agent</span>
+        <span className="text-[11px] text-muted-foreground">对话预览</span>
+      </div>
+      <div className="space-y-3 p-3">
+        <div className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-md bg-primary px-3 py-2 text-[11px] leading-relaxed text-primary-foreground">
+          把这份文档总结成三条结论，并列出风险
+        </div>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />
+            已读取文档 · 3 个步骤
+          </div>
+          <div className="space-y-1 text-[11px] leading-relaxed text-foreground">
+            <p>1. 先确认目标与范围</p>
+            <p>2. 再提取关键结论</p>
+            <p>3. 最后列出下一步</p>
+          </div>
+          <div className="rounded-lg bg-muted/50 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            风险：第二点依赖旧数据，需要重新核对。
+          </div>
+        </div>
+        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+          <span>继续提问…</span>
+          <span aria-hidden="true">↵</span>
+        </div>
       </div>
     </div>
   );
@@ -337,20 +436,27 @@ export function AccountSection({
 
 /** 外观与主题。 */
 export function AppearanceSection() {
-  const { theme, setTheme } = useTheme();
+  const { theme, resolvedTheme, setTheme } = useTheme();
+  const activeTheme = THEME_CARDS.find((option) => option.value === theme) ?? THEME_CARDS[2];
+  const themeDescription = `选择界面配色，也可以让界面跟着系统深浅色自动切换。当前：${activeTheme.label}${
+    theme === 'system' ? `（实际显示${resolvedTheme === 'dark' ? '深色' : '浅色'}）` : ''
+  }。`;
 
   return (
-    <div className="space-y-2">
-      <SectionHeading Icon={Sun}>主题</SectionHeading>
-      <PreferenceGroup
-        ariaLabel="外观主题"
-        options={THEME_CARDS}
-        value={theme}
-        onChange={setTheme}
-      />
-      <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-        「跟随系统」会在操作系统切换深浅色时自动同步，不必再回来改一次。
-      </p>
+    <div className="divide-y divide-border/60">
+      <SettingBlock Icon={Sun} title="主题" description={themeDescription}>
+        <PreferenceGroup
+          ariaLabel="外观主题"
+          options={THEME_CARDS}
+          value={theme}
+          onChange={setTheme}
+          prominent
+        />
+      </SettingBlock>
+
+      <SettingBlock Icon={Eye} title="预览" description="切换主题后，对话窗口会立即显示成下面的效果。">
+        <ThemePreview />
+      </SettingBlock>
     </div>
   );
 }
@@ -366,48 +472,48 @@ export function ConversationSection() {
   const performanceUsage = usePerformanceUsageState();
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-2">
-        <SectionHeading Icon={AlignLeft}>工作步骤展示</SectionHeading>
+    <div className="divide-y divide-border/60">
+      <SettingBlock
+        Icon={AlignLeft}
+        title="工作步骤展示"
+        description="四档都能点开看细节；这里只决定默认露多少。改动立即生效，不影响已有对话的内容。"
+      >
         <PreferenceGroup
           ariaLabel="工作步骤展示"
           options={DETAIL_LEVEL_CARDS}
           value={level}
           onChange={setLevel}
         />
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          四档都能点开看细节；这里只决定默认露多少。改动立即生效，不影响已有对话的内容。
-        </p>
-      </div>
+      </SettingBlock>
 
       {/* 与上面四档**正交**（所以是独立一组而不是第五档）。默认「回答结束后」，
           长回答里想回看刚跑完的过程才需要改成「下次有新消息时」。 */}
-      <div className="space-y-2">
-        <SectionHeading Icon={ChevronsUpDown}>工作步骤收起时机</SectionHeading>
+      <SettingBlock
+        Icon={ChevronsUpDown}
+        title="工作步骤收起时机"
+        description="只影响刚结束的那一轮何时收起；选「下次有新消息时」可以在提问前回看它刚才做了什么。"
+      >
         <PreferenceGroup
           ariaLabel="工作步骤收起时机"
           options={COLLAPSE_TIMING_CARDS}
           value={collapseTiming}
           onChange={setCollapseTiming}
         />
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          只影响刚结束的那一轮何时收起；选「下次有新消息时」可以在提问前回看它刚才做了什么。
-        </p>
-      </div>
+      </SettingBlock>
 
       {/* 性能与用量：只影响输入框下方那排统计读数显示多少，不改任何记账与落库 */}
-      <div className="space-y-2">
-        <SectionHeading Icon={Activity}>性能与用量</SectionHeading>
+      <SettingBlock
+        Icon={Activity}
+        title="性能与用量"
+        description="只影响输入框下方读数显示多少；上下文占用环始终显示，记账与落库也不受影响。"
+      >
         <PreferenceGroup
           ariaLabel="性能与用量"
           options={PERFORMANCE_USAGE_CARDS}
           value={performanceUsage.mode}
           onChange={performanceUsage.setMode}
         />
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
-          只影响输入框下方读数显示多少；上下文占用环始终显示，记账与落库也不受影响。
-        </p>
-      </div>
+      </SettingBlock>
     </div>
   );
 }
@@ -427,7 +533,7 @@ export interface SettingsPageProps {
 }
 
 /**
- * 设置页：居中一列，左边分区菜单、右边当前分区的内容。
+ * 设置页：左侧分区菜单、右侧内容区。
  *
  * 所有分区一次性挂载、非当前分区用 `hidden` 收起：切走再切回来时，密码框里
  * 已经敲的内容还在。
@@ -512,79 +618,80 @@ export function SettingsPage({
   );
 
   return (
-    // 整块设置收成一列居中：内容本来就少，卡片随内容长，不拉满屏高
-    <div className="flex h-full w-full justify-center overflow-y-auto bg-muted/30 text-foreground">
-      <div className="flex w-full max-w-2xl flex-col px-3 py-4 md:px-4 md:py-8">
-        <header className="flex items-center justify-between gap-2 px-1 pb-3">
-          <h1 className="text-sm font-semibold tracking-tight">设置</h1>
-          {/* 只留一个图标：文字版「返回对话」在页头是多余的重量，退出本该一眼可见 */}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onClose}
-            aria-label="关闭设置"
-            className="-mr-1 cursor-pointer text-muted-foreground hover:text-foreground"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </Button>
-        </header>
+    <div className="relative flex h-full w-full flex-col overflow-hidden bg-muted/30 text-foreground md:flex-row">
+      {/* 关闭按钮固定在页面右上角：宽屏与侧边栏标题同一水平线，窄屏也不挤占标题 */}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={onClose}
+        aria-label="关闭设置"
+        className="absolute top-3 right-4 z-10 cursor-pointer text-muted-foreground hover:text-foreground md:top-4 md:right-6"
+      >
+        <X className="size-4" aria-hidden="true" />
+      </Button>
 
-        <div className="flex flex-col overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs md:flex-row">
-          {/* 左：分区菜单。窄屏横排成一条可横滑的标签行 */}
-          <nav
+      {/* 左：分区菜单。宽屏固定一列，窄屏横排成一条可横滑的标签行 */}
+      <aside className="flex shrink-0 flex-col bg-background md:w-[14.5rem] md:border-r md:border-border/60">
+        <div className="flex h-14 shrink-0 items-center px-4 md:h-16 md:px-7">
+          <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
+        </div>
+        <nav
+          aria-label="设置分区"
+          className="shrink-0 border-b border-border/60 px-2 pb-2 md:min-h-0 md:flex-1 md:overflow-y-auto md:border-b-0 md:px-3 md:py-4"
+        >
+          <div
+            role="tablist"
             aria-label="设置分区"
-            className="shrink-0 border-b border-border/60 p-2 md:w-44 md:border-r md:border-b-0 md:p-2.5"
+            aria-orientation={isMobile ? 'horizontal' : 'vertical'}
+            className="flex min-w-0 gap-1 overflow-x-auto md:min-h-0 md:flex-col md:overflow-visible"
           >
-            <div
-              role="tablist"
-              aria-label="设置分区"
-              aria-orientation={isMobile ? 'horizontal' : 'vertical'}
-              className="flex min-w-0 gap-1 overflow-x-auto md:min-h-0 md:flex-col md:overflow-visible"
-            >
-              {SETTINGS_SECTIONS.map((section, index) => {
-                const selected = section.id === active;
-                return (
-                  <button
-                    key={section.id}
-                    ref={(node) => {
-                      tabRefs.current[index] = node;
-                    }}
-                    type="button"
-                    role="tab"
-                    id={tabId(section.id)}
-                    aria-selected={selected}
-                    aria-controls={panelId(section.id)}
-                    tabIndex={selected ? 0 : -1}
-                    onClick={() => setActive(section.id)}
-                    onKeyDown={(event) => handleTabKeyDown(event, index)}
+            {SETTINGS_SECTIONS.map((section, index) => {
+              const selected = section.id === active;
+              return (
+                <button
+                  key={section.id}
+                  ref={(node) => {
+                    tabRefs.current[index] = node;
+                  }}
+                  type="button"
+                  role="tab"
+                  id={tabId(section.id)}
+                  aria-selected={selected}
+                  aria-controls={panelId(section.id)}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => setActive(section.id)}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
+                  className={cn(
+                    'flex shrink-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-left text-sm whitespace-nowrap transition focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none md:w-full',
+                    selected
+                      ? 'bg-muted font-medium text-foreground'
+                      : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                  )}
+                >
+                  <section.Icon
                     className={cn(
-                      'flex shrink-0 cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs whitespace-nowrap transition focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:outline-none',
-                      selected
-                        ? 'bg-primary/10 font-medium text-foreground'
-                        : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                      'size-4 shrink-0',
+                      selected ? 'text-foreground' : 'text-muted-foreground'
                     )}
-                  >
-                    <section.Icon
-                      className={cn('size-4 shrink-0', selected ? 'text-primary' : undefined)}
-                      aria-hidden="true"
-                    />
-                    <span>{section.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </nav>
+                    aria-hidden="true"
+                  />
+                  <span>{section.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      </aside>
 
-          {/* 右：当前分区的展示与操作 */}
-          <section className="flex min-w-0 flex-1 flex-col">
-            <div className="shrink-0 border-b border-border/60 px-4 py-3">
-              <h2 className="text-xs font-semibold tracking-tight">{activeSection.label}</h2>
-              <p className="mt-0.5 text-[10.5px] leading-relaxed text-muted-foreground">
-                {activeSection.description}
-              </p>
-            </div>
+      {/* 右：当前分区的展示与操作，内容区独立滚动 */}
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-[72rem] flex-col px-5 pt-6 pb-8 md:min-h-full md:px-8 md:pt-9">
+            <header className="mb-8">
+              <h2 className="text-xl font-semibold tracking-tight">{activeSection.label}</h2>
+            </header>
 
-            <div className="px-4 py-4">
+            <div>
               {SETTINGS_SECTIONS.map((section) => (
                 <div
                   key={section.id}
@@ -605,9 +712,11 @@ export function SettingsPage({
                 </div>
               ))}
             </div>
-          </section>
+
+            <p className="mt-10 text-xs text-muted-foreground md:mt-auto md:pt-10">偏好设置会自动保存，无需手动提交。</p>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

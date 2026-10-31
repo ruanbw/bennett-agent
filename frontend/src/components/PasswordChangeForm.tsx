@@ -68,7 +68,7 @@ function PasswordField({
     <div className="min-w-0">
       {/* label 与按钮是兄弟节点，不把交互元素嵌进 label：点眼睛只该切显隐，
           不应触发 label 对输入框的激活。 */}
-      <label htmlFor={id} className="mb-1 block text-[11px] text-muted-foreground">
+      <label htmlFor={id} className="mb-1.5 block text-sm font-medium text-foreground">
         {label}
       </label>
       <div className="relative">
@@ -83,7 +83,7 @@ function PasswordField({
           disabled={disabled}
           aria-invalid={invalid || undefined}
           aria-describedby={describedBy}
-          className="h-9 pr-9"
+          className="h-10 border-border/70 bg-background pr-9"
         />
         <button
           type="button"
@@ -169,7 +169,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
 
   return (
     <form onSubmit={handleSubmit} aria-busy={submitting} className="space-y-2">
-      <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-3">
+      <div className="space-y-4">
         <PasswordField
           id="password-current"
           name="current-password"
@@ -225,7 +225,7 @@ export function PasswordChangeForm({ onPasswordChanged }: PasswordChangeFormProp
 
         {/* 说明在上、按钮在下：并排放时说明会被挤成三行 */}
         <div className="space-y-2">
-          <p className="text-[10.5px] leading-relaxed text-muted-foreground/80">
+          <p className="text-[11px] leading-relaxed text-muted-foreground/80">
             新密码至少需要 {MIN_PASSWORD_LENGTH} 个字符；修改成功后所有设备都需要用新密码重新登录。
           </p>
           <div className="flex justify-end">

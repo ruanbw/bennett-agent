@@ -27,7 +27,7 @@ const panelOpenTag = (html: string, id: SettingsSectionId): string => {
   return html.slice(from, html.indexOf('>', from) + 1);
 };
 
-describe('设置页布局：居中一列，左侧分区菜单 + 右侧内容', () => {
+describe('设置页布局：左侧分区菜单 + 右侧内容', () => {
   it('左侧是分区 tablist，纵向排列', () => {
     const html = renderPage();
 
@@ -190,7 +190,7 @@ describe('对话显示分区', () => {
     expect(section).toContain('简洁');
     expect(section).toContain('详细');
     expect(section.match(/aria-checked="true"/g)).toHaveLength(1);
-    expect(section).toContain('上下文占用环始终显示');
+    expect(renderSection()).toContain('上下文占用环始终显示');
   });
 
   it('四档只改默认展开程度，不是能力开关', () => {
