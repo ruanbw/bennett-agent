@@ -149,12 +149,17 @@ def test_build_tools_adds_tavily_only_with_a_key(monkeypatch):
     from app.tools import build_tools
 
     monkeypatch.setattr(settings, "tavily_api_key", None)
-    assert [tool.__name__ for tool in build_tools()] == ["ask_user_clarification", "get_current_time"]
+    assert [tool.__name__ for tool in build_tools()] == [
+        "ask_user_clarification",
+        "get_current_time",
+        "todo_write",
+    ]
 
     monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
     assert [tool.__name__ for tool in build_tools()] == [
         "ask_user_clarification",
         "get_current_time",
+        "todo_write",
         "tavily_search",
     ]
 
@@ -165,12 +170,14 @@ def test_tavily_tool_follows_config_without_restart(monkeypatch):
     assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {
         "ask_user_clarification",
         "get_current_time",
+        "todo_write",
     }
 
     monkeypatch.setattr(settings, "tavily_api_key", "tvly-test-key")
     assert set(build_agent("openai/gpt-4o")._function_toolset.tools) == {
         "ask_user_clarification",
         "get_current_time",
+        "todo_write",
         "tavily_search",
     }
 
@@ -202,7 +209,7 @@ def test_agent_prompt_lists_exactly_the_tools_it_is_built_with():
     for name in mounted:
         assert name in instructions, f"工具 {name} 挂上了却没写进提示词"
 
-    # 没挂哪个工具，就不能在提示词里「请调用」它——三个工具都按真实装配渲染
+    # 没挂哪个工具，就不能在提示词里「请调用」它——四个工具都按真实装配渲染
     if "tavily_search" not in mounted:
         assert "请调用 `tavily_search`" not in instructions
         assert "本轮**没有**联网搜索工具" in instructions
@@ -416,7 +423,7 @@ def test_prompt_without_any_tool_does_not_teach_calling_one():
     assert "本轮没有澄清提问工具" in text
     assert "本轮**没有**联网搜索工具" in text
     assert "没有时间工具" in text
-    for tool in ("tavily_search", "ask_user_clarification", "get_current_time"):
+    for tool in ("tavily_search", "ask_user_clarification", "get_current_time", "todo_write"):
         assert "请调用 `" + tool + "`" not in text
         assert "先调用 `" + tool + "`" not in text
 
@@ -427,6 +434,7 @@ def test_prompt_with_only_the_time_tool_keeps_gaps_honest():
     assert "先调用 `get_current_time`" in text
     assert "本轮没有澄清提问工具" in text
     assert "本轮**没有**联网搜索工具" in text
+    assert "todo_write" not in text
 
 
 def test_prompt_asks_to_match_the_users_language():
@@ -447,7 +455,7 @@ def test_prompt_requires_honest_reporting_of_tool_failures():
 
 def test_prompt_rules_stay_one_per_line():
     """模板开了 trim_blocks：条件分支写不好会把几条规则挤成一行（改模板时最容易踩的坑）。"""
-    lines = _render(["ask_user_clarification", "get_current_time", "tavily_search"]).splitlines()
+    lines = _render(["ask_user_clarification", "get_current_time", "tavily_search", "todo_write"]).splitlines()
 
     numbered = [line for line in lines if line[:2] in {f"{i}." for i in range(1, 10)} or line[:3] == "10."]
     # 十条：1 工具优先、2 语言、3 澄清、4 搜索、5 时间、6 沙箱、7 外部数据、

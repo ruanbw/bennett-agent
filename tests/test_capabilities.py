@@ -32,7 +32,7 @@ def test_capabilities_without_search_key(monkeypatch):
     capabilities = collect_capabilities()
 
     assert capabilities.web_search is False
-    assert capabilities.tools == ["ask_user_clarification", "get_current_time"]
+    assert capabilities.tools == ["ask_user_clarification", "get_current_time", "todo_write"]
 
 
 def test_capabilities_with_placeholder_key_do_not_claim_search(monkeypatch):
@@ -52,7 +52,12 @@ def test_capabilities_with_configured_key(monkeypatch):
 
     assert capabilities.web_search is True
     # 工具顺序即注册顺序；前端只读 web_search，列表留给排障
-    assert capabilities.tools == ["ask_user_clarification", "get_current_time", "tavily_search"]
+    assert capabilities.tools == [
+        "ask_user_clarification",
+        "get_current_time",
+        "todo_write",
+        "tavily_search",
+    ]
 
 
 def test_sandbox_capability_follows_the_switch(monkeypatch):

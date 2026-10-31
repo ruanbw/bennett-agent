@@ -38,6 +38,8 @@ WEB_SEARCH_TOOL_NAME = "tavily_search"
 CLARIFICATION_TOOL_NAME = "ask_user_clarification"
 #: 当前时间工具名；提示词按真实装配渲染，不在模板里写死工具名。
 CURRENT_TIME_TOOL_NAME = "get_current_time"
+#: 任务清单工具名；提示词按真实装配渲染，未挂载时不教模型调用它。
+TODO_TOOL_NAME = "todo_write"
 #: 沙箱工具的代表名：四个工具（exec/write/read/reset）同生同灭，取执行那个当探针。
 SANDBOX_TOOL_NAME = "sandbox_exec"
 
@@ -312,6 +314,7 @@ def render_system_prompt(tool_names: Sequence[str] | None = None) -> str:
         web_search=WEB_SEARCH_TOOL_NAME in names,
         clarification=CLARIFICATION_TOOL_NAME in names,
         current_time=CURRENT_TIME_TOOL_NAME in names,
+        todo=TODO_TOOL_NAME in names,
         # 沙箱：不告诉模型「什么时候该用」，它只会一直在回答里贴代码。
         sandbox=SANDBOX_TOOL_NAME in names,
         # MCP 工具名带 `server__` 前缀且混在 tools 里，必须单列一段才能让模型知道它们是

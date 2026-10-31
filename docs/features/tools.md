@@ -32,12 +32,13 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 
 ## 内置工具清单
 
-七个内置工具，全部在 `app/tools/__init__.py:_register_all` 登记。工具名就是实现函数的名字（`registry.register` 不传 `name`），所以模型看到的是 `ask_user_clarification`、`get_current_time`，不是 `ask_user`、`current_time`；`clarification_tool`、`tavily_tool` 这类旧导出名只是兼容别名，不进工具清单。
+八个内置工具，全部在 `app/tools/__init__.py:_register_all` 登记。工具名就是实现函数的名字（`registry.register` 不传 `name`），所以模型看到的是 `ask_user_clarification`、`get_current_time`，不是 `ask_user`、`current_time`；`clarification_tool`、`tavily_tool` 这类旧导出名只是兼容别名，不进工具清单。
 
 | 工具名 | 分类 | 风险等级 | 超时 | 启用条件 | 说明 |
 |---|---|---|---|---|---|
 | `ask_user_clarification` | `interaction` | `interactive` | 无 | 始终 | 意图模糊时向用户提问，选项 2~10 个 |
 | `get_current_time` | `system` | `read_only` | 无 | 始终 | 当前日期、时间、星期、时区与 UTC |
+| `todo_write` | `system` | `read_only` | 无 | 始终 | 维护多步任务清单，整表替换，最多 20 项、单条 ≤ 200 字符 |
 | `tavily_search` | `search` | `read_only` | 派生 | `TAVILY_API_KEY` 可用（非空且不是占位值） | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
 | `sandbox_exec` | `data` | `safe_write` | `MAX_EXEC_TIMEOUT_S + 60` 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
 | `sandbox_write_file` | `data` | `safe_write` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
@@ -49,6 +50,14 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 代价是这些调用执行前会先弹一次审批框。这也是本项目的取舍：宁可多问一次，也不让风险等级与实际能力不一致。
 
 「写文件超限拒绝、读文件超限报错」的共同理由：静默截断会让模型在坏数据上继续推理——半截脚本要到下一次执行才炸，而模型不自知。
+
+### 任务清单：整表替换、无服务端状态
+
+`todo_write` 与 DSH 的同名工具对齐：模型每次提交**完整**任务列表，服务端不做增量合并；每项只有 `content` 与 `status` 两个字段，状态只能是 `pending` / `in_progress` / `completed`，同一时间最多一项 `in_progress`。这样模型与用户看到的始终是同一份快照，不会出现「只改了一项、其余项被悄悄丢掉」的半更新状态。空内容、重复内容、超过 20 项或单条超过 200 字符都会被拒绝，并返回中文错误文案供模型修正；空数组表示清空清单。
+
+工具本身不读写数据库，也不接收 `user_id` / `session_id`：清单以对话历史为载体。本服务端无状态、每轮由客户端回放历史，工具调用的参数与结果会一起回来；压缩时摘要提示词也要求保留未完成的待办。代价是清单没有独立的会话投影，无法在历史被完全裁掉后单独恢复——这符合当前「历史即状态」的架构，等需要跨会话共享或独立面板时再引入持久化。
+
+因此它的风险等级是 `read_only` 而不是 `safe_write`：它只校验并渲染模型自己提交的清单，没有外部副作用。若标成 `safe_write`，每次更新计划都会弹一次审批，规划工具就不可用了。
 
 ## 审批：按可撤销性分级
 
