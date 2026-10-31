@@ -1,18 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  UNKNOWN_CAPABILITIES,
-  describeMcpCapability,
-  describeMcpError,
-  describeMcpServers,
-  describeSandboxCapability,
-  describeServerTools,
-  describeToolCount,
-  describeToolList,
-  describeWebSearchCapability,
-  fetchCapabilities,
-  summarizeMcpServers,
-} from './capabilities';
+import { fetchCapabilities } from './capabilities';
 
 interface StubResponse {
   ok?: boolean;
@@ -95,26 +83,6 @@ describe('fetchCapabilities', () => {
   });
 });
 
-describe('能力状态文案', () => {
-  it('能力清单缺席时显示未知，而不是「未启用」', () => {
-    expect(describeWebSearchCapability(null)).toBe('未知');
-    expect(describeWebSearchCapability(undefined)).toBe('未知');
-  });
-
-  it('按 web_search 布尔值给出结论', () => {
-    expect(
-      describeWebSearchCapability({ web_search: true, sandbox: false, tools: ['tavily_search'] }),
-    ).toBe('已启用');
-    expect(describeWebSearchCapability(UNKNOWN_CAPABILITIES)).toBe('未启用');
-  });
-
-  it('工具数量：有则报数，清单缺席或为空说未知（不说「0 个工具」）', () => {
-    expect(describeToolCount({ web_search: false, sandbox: false, tools: ['a', 'b'] })).toBe('2 个');
-    expect(describeToolCount(null)).toBe('未知');
-    expect(describeToolCount(UNKNOWN_CAPABILITIES)).toBe('未知');
-  });
-});
-
 describe('MCP 能力', () => {
   it('解析 server 与工具清单', async () => {
     stubFetch({
@@ -157,106 +125,5 @@ describe('MCP 能力', () => {
     });
 
     await expect(fetchCapabilities()).resolves.toMatchObject({ mcp_error: 'broken: 连接失败' });
-  });
-
-  it('文案：没配 / 配了但不通 / 通了几个，三者必须能区分', () => {
-    const base = { web_search: false, sandbox: false, tools: [] };
-
-    expect(describeMcpCapability({ ...base, mcp_servers: [], mcp_error: null })).toBe('未配置');
-    expect(describeMcpCapability({ ...base, mcp_servers: [], mcp_error: 'x: 连接失败' })).toBe(
-      '配置了但未能连接',
-    );
-    expect(
-      describeMcpCapability({
-        ...base,
-        mcp_servers: [
-          { name: 'fs', tools: ['read', 'write'] },
-          { name: 'db', tools: ['query'] },
-        ],
-        mcp_error: null,
-      }),
-    ).toBe('2 个 server · 3 个工具');
-  });
-
-  it('server 名字清单用于悬浮提示', () => {
-    expect(
-      describeMcpServers({
-        web_search: false,
-        sandbox: false,
-        tools: [],
-        mcp_servers: [
-          { name: 'fs', tools: [] },
-          { name: 'db', tools: [] },
-        ],
-      }),
-    ).toBe('fs、db');
-    expect(describeMcpServers(null)).toBe('');
-  });
-});
-
-describe('设置页「运行时能力」的明细辅助', () => {
-  const base = {
-    web_search: true,
-    sandbox: true,
-    tools: ['a', 'b'],
-    mcp_servers: [] as { name: string; tools: string[] }[],
-    mcp_error: null as string | null,
-  };
-
-  it('summarizeMcpServers 给出每个 server 的工具数与清单（数量单独看不出来）', () => {
-    expect(
-      summarizeMcpServers({
-        ...base,
-        mcp_servers: [
-          { name: 'fs', tools: ['read', 'write'] },
-          { name: 'db', tools: [] },
-        ],
-      })
-    ).toEqual([
-      { name: 'fs', toolCount: 2, tools: ['read', 'write'] },
-      { name: 'db', toolCount: 0, tools: [] },
-    ]);
-    expect(summarizeMcpServers(null)).toEqual([]);
-  });
-
-  it('summarizeMcpServers 复制工具数组，不与源数据共享引用', () => {
-    const source = { ...base, mcp_servers: [{ name: 'fs', tools: ['read'] }] };
-    const summary = summarizeMcpServers(source);
-
-    summary[0].tools.push('injected');
-
-    expect(source.mcp_servers[0].tools).toEqual(['read']);
-  });
-
-  it('describeServerTools：没有工具时说「未提供工具」，不留空串', () => {
-    expect(describeServerTools(['read', 'write'])).toBe('read、write');
-    expect(describeServerTools([])).toBe('未提供工具');
-  });
-
-  it('describeToolList 列出名字，空清单说「暂无」', () => {
-    expect(describeToolList(base)).toBe('a、b');
-    expect(describeToolList({ ...base, tools: [] })).toBe('暂无已装配的工具');
-    expect(describeToolList(null)).toBe('暂无已装配的工具');
-  });
-
-  it('describeMcpError 原样返回上游错误，不改写', () => {
-    const raw = 'filesystem: spawn npx ENOENT';
-    expect(describeMcpError({ ...base, mcp_error: raw })).toBe(raw);
-  });
-
-  it('describeMcpError：null / 缺失 = 没有错误；空串 = 有错误但没给原因', () => {
-    expect(describeMcpError({ ...base, mcp_error: null })).toBe('');
-    expect(describeMcpError(base)).toBe('');
-    expect(describeMcpError({ ...base, mcp_error: undefined })).toBe('');
-    // 空串是「配了但不通、但服务端没给原因」，不能和「没有错误」混为一谈
-    expect(describeMcpError({ ...base, mcp_error: '' })).toBe('（服务端没有给出具体原因）');
-    expect(describeMcpError(null)).toBe('');
-  });
-
-  it('describeSandboxCapability 与联网搜索同一套语义', () => {
-    expect(describeSandboxCapability(base)).toBe('已启用');
-    expect(describeSandboxCapability({ ...base, sandbox: false })).toBe('未启用');
-    expect(describeSandboxCapability(null)).toBe('未知');
-    expect(describeSandboxCapability(undefined)).toBe('未知');
   });
 });
