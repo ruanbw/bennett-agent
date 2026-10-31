@@ -65,6 +65,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { PermissionSelector } from "@/components/PermissionSelector";
 import { TurnAnnouncement, TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
 import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
+import { TodoToolUI } from "@/components/assistant-ui/elements/tool-todo.aui";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
 import { useApproval } from "@/context/approval-context";
 import { useClarification } from "@/context/clarification-context";
@@ -141,6 +142,9 @@ const isMessageIncomplete = (s: AssistantState) =>
 const ASSISTANT_GROUP_BY = groupPartByType({
   reasoning: ["group-trace"],
   "tool-call": ["group-trace"],
+  // 注册为 standalone 的工具（todo_write）不进「过程」组：清单是给用户看的成果，
+  // 收进折叠组等于又藏起来了。空路径 = 留在消息流原位、直接渲染。
+  "standalone-tool-call": [],
 });
 
 /**
@@ -444,6 +448,12 @@ export const Thread: FC<ThreadProps> = ({
               />
             )}
             <ThreadScrollToBottom onClick={handleScrollToBottom} />
+
+            {/*
+              任务清单面板：与审批卡片同位（输入框正上方）。清单是持续的工作状态，
+              放消息流会被后续回答顶上去——数据一多就得滚回去找。
+            */}
+            <TodoToolUI />
 
             {/* 工具审批卡片：位置与澄清浮层一致（输入框正上方），因为它同样在等用户输入。
                 两者不会同时出现——澄清是模型问问题，审批是模型要执行写操作，一轮只有一种。 */}

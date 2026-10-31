@@ -230,3 +230,65 @@
     transition: none;
   }
 }
+
+/*
+ * 任务清单面板的展开/收起（transitions-dev 的 accordion 模式）。
+ *
+ * grid-template-rows 0fr ↔ 1fr：不量高、内容任意尺寸都能干净地动画；
+ * 面板 growth 推开下方输入区是连续的，没有条件挂载那种一帧顶开的抖动。
+ * chevron 用 scaleY 翻转而不是 rotate：过中线时压成一条横线，与高度过渡
+ * 同一节奏，观感比 180° 旋转「转圈」安静。
+ */
+:root {
+  --acc-expand: 250ms;
+  --acc-collapse: 250ms;
+  --acc-chevron: 250ms;
+  --acc-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-acc-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--acc-collapse) var(--acc-ease);
+}
+
+.t-acc[data-open='true'] .t-acc-panel {
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--acc-expand) var(--acc-ease);
+}
+
+.t-acc-panel-inner {
+  overflow: hidden;
+  opacity: 0;
+  filter: blur(2px);
+  transition:
+    opacity var(--acc-collapse) var(--acc-ease),
+    filter var(--acc-collapse) var(--acc-ease);
+}
+
+.t-acc[data-open='true'] .t-acc-panel-inner {
+  opacity: 1;
+  filter: blur(0);
+  transition:
+    opacity var(--acc-expand) var(--acc-ease),
+    filter var(--acc-expand) var(--acc-ease);
+}
+
+.t-acc-chevron {
+  display: inline-flex;
+  transform: scaleY(1);
+  transform-origin: center;
+  transition: transform var(--acc-chevron) var(--acc-ease);
+}
+
+.t-acc[data-open='true'] .t-acc-chevron {
+  transform: scaleY(-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-acc-panel,
+  .t-acc-panel-inner,
+  .t-acc-chevron {
+    transition: none !important;
+  }
+}

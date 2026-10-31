@@ -39,6 +39,8 @@ frontend/brand/.*.png
 .pi-loop
 .agents
 skills-lock.json
+# 本地开发用的 agent 说明：里面是登录测试账号（见该文件开头），换机自行重建
+AGENTS.md
 
 # 演示物料的中间产物（见 scripts/demo/README.md）：
 # 原始录屏与 Playwright 的临时目录都能重录，只有剪好的 mp4/gif/封面需要入库
