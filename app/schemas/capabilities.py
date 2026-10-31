@@ -14,6 +14,24 @@ class McpServerStatus(BaseModel):
     tools: list[str] = Field(default_factory=list, description="该 server 提供、且已装配的工具名（不含前缀）")
 
 
+class PermissionOption(BaseModel):
+    """输入框权限选择器的一项。"""
+
+    key: str = Field(description="权限键（请求体 `permissions` 里的取值）")
+    label: str = Field(description="中文名")
+    description: str = Field(description="这项权限允许做什么、代价是什么")
+    risk: str = Field(default="low", description="视觉分级：low / medium / high")
+
+
+class PermissionPresetOption(BaseModel):
+    """权限选择器的一档预设。"""
+
+    key: str = Field(description="预设键：ask / standard / auto")
+    label: str = Field(description="中文名")
+    description: str = Field(description="这档预设的取舍")
+    permissions: list[str] = Field(default_factory=list, description="预设包含的权限键")
+
+
 class CapabilitiesResponse(BaseModel):
     """当前进程实际具备的能力。"""
 
@@ -42,3 +60,9 @@ class CapabilitiesResponse(BaseModel):
             "只让工具从列表里消失，用户会以为配置从来没生效。"
         ),
     )
+    #: 权限目录：前端渲染选择器用，服务端是唯一事实来源（避免前端另写一份文案后漂移）。
+    permissions: list[PermissionOption] = Field(default_factory=list)
+    #: 预设档位；`custom` 由前端按任意勾选组合派生，不在服务端预设里。
+    permission_presets: list[PermissionPresetOption] = Field(default_factory=list)
+    #: 客户端没传 `permissions` 时服务端实际使用的默认授权。
+    default_permissions: list[str] = Field(default_factory=list)

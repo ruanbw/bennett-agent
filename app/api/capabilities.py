@@ -6,7 +6,17 @@
 
 from fastapi import APIRouter, Depends
 
-from app.schemas.capabilities import CapabilitiesResponse, McpServerStatus
+from app.runtime.permissions import (
+    DEFAULT_PERMISSION_KEYS,
+    PERMISSION_PRESETS,
+    PERMISSION_SPECS,
+)
+from app.schemas.capabilities import (
+    CapabilitiesResponse,
+    McpServerStatus,
+    PermissionOption,
+    PermissionPresetOption,
+)
 from app.services.auth import current_active_user
 from app.tools import build_tools
 from app.tools.mcp_client import get_mcp_registry
@@ -35,6 +45,26 @@ def collect_capabilities() -> CapabilitiesResponse:
         tools=tools,
         mcp_servers=[McpServerStatus(name=name, tools=names) for name, names in sorted(grouped.items())],
         mcp_error=registry.discovery_error,
+        # 权限目录是静态产品契约，但只有服务端能保证「选择器里的键」与「闸门认的键」同源。
+        permissions=[
+            PermissionOption(
+                key=spec.key.value,
+                label=spec.label,
+                description=spec.description,
+                risk=spec.risk,
+            )
+            for spec in PERMISSION_SPECS
+        ],
+        permission_presets=[
+            PermissionPresetOption(
+                key=preset.key,
+                label=preset.label,
+                description=preset.description,
+                permissions=list(preset.permissions),
+            )
+            for preset in PERMISSION_PRESETS
+        ],
+        default_permissions=list(DEFAULT_PERMISSION_KEYS),
     )
 
 

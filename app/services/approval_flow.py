@@ -1,10 +1,12 @@
 """审批（HITL）的状态桥：待审批请求 → 前端事件，客户端决定 → 续跑结果。
 
 服务端无状态且 SSE 单向，审批只能分两段：本轮把拦下的调用交给客户端保存，续跑时按历史里的
-悬空调用逐条取决定（缺失即拒绝）。工具说明与风险等级只向 `ToolCatalog` 要，本层不认识注册表与 MCP。
+悬空调用逐条取决定（缺失即拒绝）。工具说明、风险等级与所需权限只向 `ToolCatalog` 要，
+本层不认识注册表与 MCP。
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic_ai import (
@@ -18,6 +20,7 @@ from pydantic_ai.messages import ModelMessage
 
 from app.runtime.approval import DENIED_RESULT, all_deferred_ids
 from app.runtime.catalog import ToolCatalog, get_catalog
+from app.runtime.permissions import missing_permissions, permission_label
 from app.schemas.events import ApprovalRequiredEvent, ApprovalToolCall
 from app.services.event_translation import _serialize_tool_args
 
@@ -53,11 +56,15 @@ def build_approval_event(
     requests: DeferredToolRequests,
     *,
     catalog: ToolCatalog | None = None,
+    granted_permissions: Sequence[str] | frozenset[str] | None = None,
 ) -> ApprovalRequiredEvent:
-    """把待审批请求翻译成前端事件，补上工具说明与风险等级。
+    """把待审批请求翻译成前端事件，补上工具说明、风险等级与**尚未授予**的权限。
 
     参数常常看不出后果（`{"id": 42}` 删的是什么？），所以这两个字段必需；查不到就留空，
     但不因此拒掉整轮（注册表可能在两轮之间被改配置）。`catalog` 缺省取进程级实现，参数注入优先。
+
+    `granted_permissions` 用来过滤掉已授予的权限：审批卡上的「本次会话允许」只该展示
+    真正能解决这次拦截的权限。`None` 表示不做过滤（老调用点/测试按全部所需权限展示）。
     """
     source = catalog if catalog is not None else get_catalog()
     calls: list[ApprovalToolCall] = []
@@ -65,6 +72,13 @@ def build_approval_event(
         tool_call_id = getattr(part, "tool_call_id", "") or ""
         tool_name = getattr(part, "tool_name", "") or ""
         description, risk_level = _describe_tool(tool_name, source)
+        required_keys, catalog_labels = _describe_permissions(tool_name, source)
+        label_by_key = dict(zip(required_keys, catalog_labels, strict=False))
+        permission_keys = (
+            required_keys
+            if granted_permissions is None
+            else list(missing_permissions(required_keys, granted_permissions))
+        )
         calls.append(
             ApprovalToolCall(
                 tool_call_id=tool_call_id,
@@ -72,6 +86,9 @@ def build_approval_event(
                 args=_serialize_tool_args(getattr(part, "args", None)),
                 description=description,
                 risk_level=risk_level,
+                permissions=permission_keys,
+                # 优先用 catalog 给的文案：未来加入目录之外的权限时仍能显示人话。
+                permission_labels=[label_by_key.get(key, permission_label(key)) for key in permission_keys],
             )
         )
     return ApprovalRequiredEvent(tool_calls=calls)
@@ -84,6 +101,19 @@ def _describe_tool(tool_name: str, catalog: ToolCatalog) -> tuple[str, str]:
     """
     description, risk_level = catalog.describe(tool_name)
     return (description or "", risk_level.value if risk_level is not None else "")
+
+
+def _describe_permissions(tool_name: str, catalog: ToolCatalog) -> tuple[list[str], list[str]]:
+    """查工具所需权限；旧 catalog（只有 describe）按空列表降级，不阻断审批。"""
+    describe_permissions = getattr(catalog, "describe_permissions", None)
+    if describe_permissions is None:
+        return ([], [])
+    try:
+        keys, labels = describe_permissions(tool_name)
+    except Exception:  # noqa: BLE001 - 元数据查询失败不该阻断审批事件
+        logger.warning("读取工具权限失败 (tool=%s)", tool_name, exc_info=True)
+        return ([], [])
+    return ([str(key) for key in (keys or [])], [str(label) for label in (labels or [])])
 
 
 def build_resume_results_for(

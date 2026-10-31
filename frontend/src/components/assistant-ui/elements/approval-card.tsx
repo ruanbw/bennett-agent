@@ -28,16 +28,21 @@ import {
  * 显得严谨」，而是「点错之后没有 undo」——这一层是最后一道拦截。
  */
 
-/** 单条调用的决定：`approve` / `deny` / `undecided`。 */
-type Decision = 'approve' | 'deny';
+/**
+ * 单条调用的决定：`approve`（只批这一次）/ `approve_always`（并授予所需权限到本会话）/
+ * `deny` / `undecided`。
+ */
+type Decision = 'approve' | 'approve_always' | 'deny';
 type Decisions = Record<string, Decision>;
 
 export interface ApprovalCardProps {
   toolCalls: ApprovedToolCallRecord[];
   /**
-   * 提交决定。返回 `false` 表示没能起跑（槽位被占等），卡片据此取消 loading 并允许重试。
+   * 提交决定。`grants` 是所有选择「本次会话允许」的调用所需权限的并集，调用方
+   * 先写回会话权限再续跑。返回 `false` 表示没能起跑（槽位被占等），卡片据此取消
+   * loading 并允许重试。
    */
-  onSubmit: (decisions: Record<string, boolean>) => Promise<boolean>;
+  onSubmit: (decisions: Record<string, boolean>, grants: string[]) => Promise<boolean>;
   onDismiss?: () => void;
 }
 
@@ -128,10 +133,22 @@ export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardPro
   }, [signature]);
 
   const undecided = toolCalls.filter((call) => !decisions[call.toolCallId]);
-  const approveCount = toolCalls.filter((call) => decisions[call.toolCallId] === 'approve').length;
+  const approveCount = toolCalls.filter(
+    (call) => decisions[call.toolCallId] === 'approve' || decisions[call.toolCallId] === 'approve_always',
+  ).length;
   const denyCount = toolCalls.filter((call) => decisions[call.toolCallId] === 'deny').length;
   const hasDangerousApproval = toolCalls.some(
-    (call) => decisions[call.toolCallId] === 'approve' && call.riskLevel !== 'read_only',
+    (call) =>
+      (decisions[call.toolCallId] === 'approve' || decisions[call.toolCallId] === 'approve_always') &&
+      // 风险等级是主要判据；`dangerous` 权限同样需要二次确认（防止只读工具被映射到它）
+      (call.riskLevel !== 'read_only' || (call.permissions ?? []).includes('dangerous')),
+  );
+  const grants = Array.from(
+    new Set(
+      toolCalls
+        .filter((call) => decisions[call.toolCallId] === 'approve_always')
+        .flatMap((call) => call.permissions ?? []),
+    ),
   );
 
   const setOne = (toolCallId: string, decision: Decision) => {
@@ -158,9 +175,12 @@ export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardPro
     setError(null);
     try {
       const payload = Object.fromEntries(
-        toolCalls.map((call) => [call.toolCallId, decisions[call.toolCallId] === 'approve']),
+        toolCalls.map((call) => [
+          call.toolCallId,
+          decisions[call.toolCallId] === 'approve' || decisions[call.toolCallId] === 'approve_always',
+        ]),
       );
-      const ok = await onSubmit(payload);
+      const ok = await onSubmit(payload, grants);
       if (!ok) {
         setError('未能开始执行，已有回复正在生成，请稍后重试');
         submittingRef.current = false;
@@ -242,25 +262,58 @@ export function ApprovalCard({ toolCalls, onSubmit, onDismiss }: ApprovalCardPro
               {call.description && (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">{call.description}</p>
               )}
+              {((call.permissionLabels ?? []).length > 0 || (call.permissions ?? []).length > 0) && (
+                <p className="flex flex-wrap items-center gap-1 text-[10.5px] text-muted-foreground">
+                  <span>需要权限：</span>
+                  {((call.permissionLabels ?? []).length > 0
+                    ? (call.permissionLabels ?? [])
+                    : (call.permissions ?? [])
+                  ).map((label) => (
+                    <span
+                      key={label}
+                      className="rounded bg-primary/10 px-1.5 py-0.5 font-medium text-primary"
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </p>
+              )}
               {/* 参数是这一层的核心内容：工具名不足以判断后果 */}
               <pre className="max-h-32 overflow-auto rounded bg-muted/50 p-1.5 font-mono text-[10.5px] leading-relaxed text-foreground">
                 {prettyArgs(call.argsText)}
               </pre>
-              <div className="flex gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
                 <button
                   type="button"
-                  aria-pressed={decision === 'approve'}
+                  aria-pressed={decision === 'approve' || decision === 'approve_always'}
                   disabled={submitting}
                   onClick={() => setOne(call.toolCallId, 'approve')}
                   className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                    decision === 'approve'
+                    decision === 'approve' || decision === 'approve_always'
                       ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
                       : 'border-border/70 text-muted-foreground hover:bg-muted'
                   }`}
                 >
                   <Check className="size-3" />
-                  批准
+                  批准一次
                 </button>
+                {(call.permissions ?? []).length > 0 && (
+                  <button
+                    type="button"
+                    aria-pressed={decision === 'approve_always'}
+                    disabled={submitting}
+                    onClick={() => setOne(call.toolCallId, 'approve_always')}
+                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                      decision === 'approve_always'
+                        ? 'border-primary/60 bg-primary/10 text-primary'
+                        : 'border-border/70 text-muted-foreground hover:bg-muted'
+                    }`}
+                    title="授予这类操作所需的权限，本次会话内不再逐条询问"
+                  >
+                    <ShieldCheck className="size-3" />
+                    本次会话允许
+                  </button>
+                )}
                 <button
                   type="button"
                   aria-pressed={decision === 'deny'}

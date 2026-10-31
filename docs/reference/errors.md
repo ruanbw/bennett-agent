@@ -160,9 +160,9 @@ description: 按来源分组的错误目录：触发条件、状态码、错误�
 | 同一工具本轮累计失败到第 2 次 | 同上，文案升级 | `工具 X 本轮已连续失败 N 次（内部错误），继续调用它不会成功。请立即停止调用…` | 停止调用该工具 | `app/runtime/guard.py:30`、`app/runtime/guard.py:84-89` |
 | 网络抖动 / 超时（`httpx.TransportError`、`TimeoutError`） | 同上 | `工具暂时失败（网络或上游超时）…可以再试一次；若仍然失败…` | 可重试一次，不升级成「停止调用」 | `app/runtime/guard.py:33-45` |
 | 参数校验失败（`RetryPromptPart`） | `tool_result`，`outcome=failed` | 结果文本即校验错误 | 按错误改参数重发 | `app/services/event_translation.py:83-91` |
-| 用户拒绝了审批 | `tool_result`，`outcome=denied` | `用户拒绝执行这次工具调用，它没有被执行。不要重试同一个调用…` | 不要重试，向用户说明并询问下一步 | `app/runtime/approval.py:32-36` |
-| 工具需要审批但还没拿到批准 | `approval_required` 事件 | 本轮以审批请求结束，**不是错误** | 客户端回传 `approvals` 续跑 | `app/runtime/approval.py:68-92` |
-| 需要审批的调用没有审批记录（`tool_call_approved` 不是 `True`） | 同上 | 一律拦下 | 同上 | `app/runtime/approval.py:76-90` |
+| 用户拒绝了审批 | `tool_result`，`outcome=denied` | `用户拒绝执行这次工具调用，它没有被执行。不要重试同一个调用…` | 不要重试，向用户说明并询问下一步 | `app/runtime/approval.py:44-48` |
+| 工具需要审批但还没拿到批准 | `approval_required` 事件 | 本轮以审批请求结束，**不是错误** | 客户端回传 `approvals` 与更新后的 `permissions` 续跑 | `app/runtime/approval.py:109-144` |
+| 需要审批的调用没有审批记录（`tool_call_approved` 不是 `True`） | 同上 | 一律拦下 | 同上 | `app/runtime/approval.py:117-144` |
 
 内置工具自己也会返回「错误文案」而不是抛异常，这些文案同样只给模型看：
 

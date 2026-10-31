@@ -99,6 +99,7 @@ export default defineConfig({
             { text: '后端分层与装配', link: '/design/backend' },
             { text: '数据模型', link: '/design/data-model' },
             { text: 'API 与 SSE 契约', link: '/design/api' },
+            { text: '权限与审批', link: '/design/permissions' },
             { text: '安全设计', link: '/design/security' },
             { text: '质量平台', link: '/design/quality-platform' },
           ],

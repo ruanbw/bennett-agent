@@ -9,6 +9,7 @@
 
 import type { Capabilities, McpServerStatus } from '../types';
 import { apiFetch } from './api';
+import { normalizeCatalog, normalizePresets, sanitizePermissionList } from './permissions';
 
 /**
  * 能力探测的超时。
@@ -31,7 +32,7 @@ export async function fetchCapabilities(): Promise<Capabilities> {
 
   const data: unknown = await res.json();
   const record = (data ?? {}) as Partial<Capabilities>;
-  return {
+  const base: Capabilities = {
     web_search: record.web_search === true,
     sandbox: record.sandbox === true,
     tools: Array.isArray(record.tools)
@@ -39,6 +40,19 @@ export async function fetchCapabilities(): Promise<Capabilities> {
       : [],
     mcp_servers: sanitizeMcpServers(record.mcp_servers),
     mcp_error: typeof record.mcp_error === 'string' && record.mcp_error ? record.mcp_error : null,
+  };
+
+  // 老服务端不返回权限目录：保持响应原形状，不凭空注入一堆字段；权限选择器自己会
+  // 退回内置目录。新服务端返回目录时再收窄，避免把非法条目透传给渲染层。
+  if (!Array.isArray(record.permissions) || record.permissions.length === 0) return base;
+  const permissions = normalizeCatalog(record.permissions);
+  const defaultPermissions = sanitizePermissionList(record.default_permissions, permissions);
+  return {
+    ...base,
+    permissions,
+    permission_presets: normalizePresets(record.permission_presets, permissions),
+    default_permissions:
+      defaultPermissions.length > 0 ? defaultPermissions : ['read', 'network'],
   };
 }
 

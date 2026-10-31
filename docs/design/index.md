@@ -118,13 +118,15 @@ CORS → Origin 守卫 → 请求体上限。注册顺序是刻意的：请求�
 
 ### 3. 工具受管，执行前有闸门
 
-工具不是裸函数。每个工具在 `app/runtime/tool_registry.py` 里带分类、风险等级、超时、
-启用开关。风险等级的分界是**能不能撤销**，不是有多危险：`read_only` 与 `interactive` 直接执行，
-`safe_write` 与 `dangerous` 执行前必须拿到用户批准（`app/runtime/approval.py`）。
+工具不是裸函数。每个工具在 `app/runtime/tool_registry.py` 里带分类、风险等级、所需权限、
+超时、启用开关。风险等级的分界是**能不能撤销**，不是有多危险：`read_only` 与 `interactive`
+直接执行，`safe_write` 与 `dangerous` 默认需要用户批准（`app/runtime/approval.py`）。
 
+用户在输入框选择会话级权限（`read` / `write` / `execute` / `network` / `external` /
+`manage` / `dangerous`），工具声明的权限全部已授予时闸门跳过审批；未授予的调用仍然拦下。
 审批在无状态 SSE 上分两段实现：本轮抛 `ApprovalRequired` 变成 `DeferredToolRequests`，
-客户端把待审批的调用原样存下来，用户点完之后带同一个 `tool_call_id` 续跑。
-**缺失的决定一律按拒绝处理**：关掉页面不等于同意删除。
+客户端把待审批的调用原样存下来，用户点完之后带同一个 `tool_call_id` 与更新后的权限续跑。
+**缺失的决定一律按拒绝处理**：关掉页面不等于同意删除。详见 [权限与审批](./permissions.md)。
 
 工具抛出的意外异常不会作废整轮，由 `app/runtime/guard.py` 降级成一条失败结果回灌给模型。
 

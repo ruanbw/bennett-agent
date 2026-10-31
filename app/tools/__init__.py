@@ -16,6 +16,7 @@ from app.runtime.guard import (
     collect_tool_failures,
     failure_result_message,
 )
+from app.runtime.permissions import Permission
 from app.runtime.tool_registry import (
     ManagedTool,
     RiskLevel,
@@ -91,6 +92,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.INTERACTION,
         risk_level=RiskLevel.INTERACTIVE,
+        permissions=[],
         tags=["interaction", "clarification"],
         description=(
             "当用户意图模糊、缺少必要关键信息、存在多种理解路径或分支选择时，向用户发起澄清提问。"
@@ -104,6 +106,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.SYSTEM,
         risk_level=RiskLevel.READ_ONLY,
+        permissions=[],
         tags=["time", "clock"],
         description=(
             "获取当前的日期、时间与星期，并附带时区与 UTC 时间。"
@@ -117,6 +120,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.SEARCH,
         risk_level=RiskLevel.READ_ONLY,
+        permissions=[Permission.NETWORK.value],
         tags=["search", "web"],
         description="使用 Tavily 搜索引擎在互联网上实时搜索最新信息、新闻、网页资料等。",
         timeout=TAVILY_TOOL_TIMEOUT_SECONDS,
@@ -137,6 +141,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.DATA,
         risk_level=RiskLevel.SAFE_WRITE,
+        permissions=[Permission.EXECUTE.value],
         tags=["sandbox", "code", "compute"],
         description=(
             "在用户自己的执行环境（同一用户跨会话共用一台机器）里跑一条 shell 命令，返回退出码与输出。"
@@ -152,6 +157,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.DATA,
         risk_level=RiskLevel.SAFE_WRITE,
+        permissions=[Permission.WRITE.value],
         tags=["sandbox", "files"],
         description=(
             "把文本内容写入用户执行环境里的文件（父目录会自动创建；同一用户的其它会话也能看到）。"
@@ -165,6 +171,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.DATA,
         risk_level=RiskLevel.READ_ONLY,
+        permissions=[Permission.READ.value],
         tags=["sandbox", "files"],
         description=(
             "读取用户执行环境里的文件内容（超过 max_bytes 会报错而不是截断——"
@@ -178,6 +185,7 @@ def _register_all(registry: ToolRegistry) -> None:
     registry.register(
         category=ToolCategory.DATA,
         risk_level=RiskLevel.SAFE_WRITE,
+        permissions=[Permission.MANAGE.value],
         tags=["sandbox", "reset"],
         description=(
             "重置用户的执行环境：销毁现有机器，下次执行时会重新创建一个干净的。"

@@ -436,6 +436,9 @@ function AuthenticatedShell({
                 currentSessionId={currentSessionId}
                 currentModel={currentModel}
                 currentReasoningEffort={currentReasoningEffort}
+                permissionCatalog={capabilities?.permissions}
+                permissionPresets={capabilities?.permission_presets}
+                defaultPermissions={capabilities?.default_permissions}
               >
                 <ChatContainer
                   sessionTitle={sessions.find((s) => s.id === currentSessionId)?.title}
@@ -451,6 +454,9 @@ function AuthenticatedShell({
                   modelsError={modelsError}
                   webSearchAvailable={capabilities?.web_search ?? false}
                   sandboxAvailable={capabilities?.sandbox ?? false}
+                  permissionCatalog={capabilities?.permissions}
+                  permissionPresets={capabilities?.permission_presets}
+                  defaultPermissions={capabilities?.default_permissions}
                   currentModel={currentModel}
                   currentReasoningEffort={currentReasoningEffort}
                   onSelectModel={selectModel}

@@ -38,7 +38,7 @@ HttpOnly Cookie 会话。这页给的是接口面的契约与约定：路径、�
 
 | 方法 | 路径 | 认证 | 限流 | 说明 |
 |---|---|---|---|---|
-| GET | `/api/capabilities` | Cookie | 无 | 运行时能力快照：实际装配的工具、是否可联网、是否可跑代码、MCP server 状态 |
+| GET | `/api/capabilities` | Cookie | 无 | 运行时能力快照：实际装配的工具、是否可联网、是否可跑代码、MCP server 状态、权限目录与预设 |
 
 要求登录：能力清单暴露服务端装了哪些工具，属于部署信息。
 
@@ -155,6 +155,7 @@ X-RateLimit-Reset: 12
 | `messages` | 1..100 条 | 首条必须 user、严格交替、末条 user（续跑时可为带 `tool_calls` 的 assistant） |
 | `context_anchor` | 可选 | 上一轮真实用量锚点；下标须指向 assistant |
 | `session_id` | `sess_` 前缀，≤64 字符 | 会话标识，不是身份 |
+| `permissions` | ≤32 个键 | 本会话授予的权限；`null`/缺失用默认 `read` + `network`，`[]` 表示不预授权；未知键 422 |
 | `approvals` | ≤50 条 | `tool_call_id → bool`；id 必须出现在历史里 |
 
 消息内容上限：`content` 32000 字符、`thinking` 64000 字符、历史总量 400000 字符。
@@ -202,7 +203,7 @@ data: {"type":"content","delta":"你"}
 | `tool_call` | `tool_call_id`、`tool_name`、`args`（字符串） | 工具开始调用 |
 | `tool_result` | `result`、`outcome` | 工具返回；`outcome` ∈ success/failed/denied/interrupted |
 | `clarification` | `question`、`options`、`allow_custom_input` | 模型发起澄清提问 |
-| `approval_required` | `tool_calls[]`（含 `description`、`risk_level`） | 有调用待批准，本轮到此结束 |
+| `approval_required` | `tool_calls[]`（含 `description`、`risk_level`、`permissions`、`permission_labels`） | 有调用待批准，本轮到此结束 |
 | `fallback` | `from_model`、`to_model`、`reason` | 已切到备用模型 |
 | `compaction` | `strategy`、`dropped_messages`、`used_tokens_before/after`、`limit_tokens` | 本轮开始前做过压缩 |
 | `usage` | `context_tokens`、`context_window`、`context_limit_tokens`、`output_tokens`、`cache_read_tokens`、`timing` | 流结束前；上游没报就不发 |
@@ -233,11 +234,13 @@ X-Accel-Buffering: no
 ### 审批续跑
 
 审批在 SSE 上分两段。首轮以 `approval_required` 结束，客户端把 `tool_calls` 原样持久化
-（含 `tool_call_id` 与 `args`）。用户决定后，客户端把历史与
-`approvals: {tool_call_id: bool}` 一起回传。
+（含 `tool_call_id`、`args` 与 `permissions`）。用户决定后，客户端把历史、
+`approvals: {tool_call_id: bool}` 与更新后的 `permissions: string[]` 一起回传。
+「本次会话允许」把该调用需要的权限并入会话权限；只批准一次的调用靠
+`tool_call_approved` 放行，不改变后续调用的授权。
 
 服务端只看历史形状，不看客户端声明：历史里「有调用、无结果」的 id 才需要决定，
-**缺失的一律按拒绝处理**。
+**缺失的一律按拒绝处理**。权限键由服务端目录校验，未知键 422。
 
 ## 错误映射
 

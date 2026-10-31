@@ -156,6 +156,11 @@ export interface StartChatRunParams {
   model: string | null;
   reasoningEffort: string | null;
   /**
+   * 本会话授予的权限键。调用方在起跑前从 `lib/permissions` 的会话存储读取，
+   * 保证「用户刚在输入框勾选」立刻作用于这一轮，而不是等下一次渲染。
+   */
+  permissions?: string[] | null;
+  /**
    * 审批续跑：`tool_call_id` → 是否批准。
    *
    * 带上它就改变了这次请求的形状：历史必须以一条带工具调用的助手消息结尾，
@@ -246,7 +251,12 @@ export function startChatRun(params: StartChatRunParams): RunState | null {
   if (!run) return null;
 
   // 故意不 await：调用方（onNew / onReload）不需要等整段流结束
-  void executeRun(run, params.approvals ?? null, params.resumeToolCalls ?? null);
+  void executeRun(
+    run,
+    params.approvals ?? null,
+    params.resumeToolCalls ?? null,
+    params.permissions ?? null,
+  );
   return run;
 }
 
@@ -254,6 +264,7 @@ async function executeRun(
   run: RunState,
   approvals: Record<string, boolean> | null,
   resumeToolCalls: ContextToolCall[] | null,
+  permissions: string[] | null,
 ): Promise<void> {
   const { sessionId, assistantMsgId, model, reasoningEffort, controller } = run;
 
@@ -307,6 +318,8 @@ async function executeRun(
       messages: contextMessages,
       // 上一轮上游回报的真实用量：有了它，服务端只估算它之后的那几条消息
       contextAnchor,
+      // 本轮授权集合：审批闸门据此跳过已授权的工具、拦下未授权的调用。
+      permissions,
       approvals: resuming ? approvals : null,
       signal: controller.signal,
     })) {
@@ -415,6 +428,7 @@ export async function resumeApprovalRun({
   toolCalls,
   model,
   reasoningEffort,
+  permissions,
 }: {
   sessionId: string;
   assistantMsgId: string;
@@ -424,6 +438,8 @@ export async function resumeApprovalRun({
   toolCalls: ContextToolCall[];
   model: string | null;
   reasoningEffort: string | null;
+  /** 续跑时的授权集合；「本次会话允许」写入后要立刻带上，否则下一轮还会被拦。 */
+  permissions?: string[] | null;
 }): Promise<boolean> {
   if (Object.keys(decisions).length === 0) return false;
 
@@ -434,6 +450,7 @@ export async function resumeApprovalRun({
     reasoningEffort,
     approvals: decisions,
     resumeToolCalls: toolCalls,
+    permissions,
   });
   if (!started) return false;
 

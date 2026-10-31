@@ -22,6 +22,7 @@ from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 
 from app.config import settings
 from app.runtime.approval import RISK_METADATA_KEY
+from app.runtime.permissions import PERMISSIONS_METADATA_KEY, Permission
 from app.services.metrics import metrics
 from app.services.sandbox.base import MAX_OUTPUT_HEAD_CHARS, MAX_OUTPUT_TAIL_CHARS
 
@@ -230,6 +231,9 @@ class McpToolsetBinding:
 #: （`RiskLevel` 对此有承诺）。
 MCP_TOOL_RISK_LEVEL = "safe_write"
 
+#: MCP 工具统一需要「外部工具」权限：用户可在输入框一次性放开，否则每次调用都问。
+MCP_TOOL_PERMISSIONS: tuple[str, ...] = (Permission.EXTERNAL.value,)
+
 
 #: 运行期故障的上报签名 (server 名, 原因)。注册中心用它写进 `discovery_error`（`/api/capabilities` 读它），
 #: 让「配了但用不了」在探针里看得见，而不是只留在日志里。
@@ -267,7 +271,11 @@ class RiskAnnotatingToolset(WrapperToolset[None]):
                 tool,
                 tool_def=replace(
                     tool.tool_def,
-                    metadata={**(tool.tool_def.metadata or {}), RISK_METADATA_KEY: MCP_TOOL_RISK_LEVEL},
+                    metadata={
+                        **(tool.tool_def.metadata or {}),
+                        RISK_METADATA_KEY: MCP_TOOL_RISK_LEVEL,
+                        PERMISSIONS_METADATA_KEY: list(MCP_TOOL_PERMISSIONS),
+                    },
                 ),
             )
         return accepted

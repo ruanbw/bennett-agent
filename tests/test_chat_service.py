@@ -931,3 +931,54 @@ def test_retry_backoff_is_capped_exponential_with_full_jitter():
     assert len(set(samples)) > 1
     # 上界随尝试次数增长但不能超过封顶值
     assert chat_service._retry_backoff_seconds(10) <= chat_service.STREAM_RETRY_BACKOFF_CAP_SECONDS
+
+
+async def test_stream_chat_events_passes_permissions_into_agent_deps(monkeypatch):
+    """权限从请求体到审批闸门的接线：少这一跳，用户选择器就只是装饰。"""
+    from app.runtime.permissions import AgentRunDeps
+
+    captured: dict[str, object] = {}
+
+    class _CapturingAgent(_FakeAgent):
+        def run_stream_events(self, *_args, **kwargs):
+            captured.update(kwargs)
+            return super().run_stream_events(*_args, **kwargs)
+
+    scripts = [[_result_event(_FakeRunResult([_response()]))]]
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_args, **_kwargs: _CapturingAgent(scripts))
+
+    async for _event in chat_service.stream_chat_events(
+        _stream_snapshot(),
+        [ChatMessage(role="user", content="你好")],
+        permissions=["read", "execute"],
+    ):
+        pass
+
+    deps = captured.get("deps")
+    assert isinstance(deps, AgentRunDeps)
+    assert deps.permissions == frozenset({"read", "execute"})
+
+
+async def test_stream_chat_events_uses_default_permissions_when_omitted(monkeypatch):
+    """老客户端不带 permissions：服务端必须退回默认只读+联网，而不是「无授权」或「全授权」。"""
+    from app.runtime.permissions import DEFAULT_PERMISSIONS, AgentRunDeps
+
+    captured: dict[str, object] = {}
+
+    class _CapturingAgent(_FakeAgent):
+        def run_stream_events(self, *_args, **kwargs):
+            captured.update(kwargs)
+            return super().run_stream_events(*_args, **kwargs)
+
+    scripts = [[_result_event(_FakeRunResult([_response()]))]]
+    monkeypatch.setattr(chat_service, "build_agent", lambda *_args, **_kwargs: _CapturingAgent(scripts))
+
+    async for _event in chat_service.stream_chat_events(
+        _stream_snapshot(),
+        [ChatMessage(role="user", content="你好")],
+    ):
+        pass
+
+    deps = captured.get("deps")
+    assert isinstance(deps, AgentRunDeps)
+    assert deps.permissions == DEFAULT_PERMISSIONS

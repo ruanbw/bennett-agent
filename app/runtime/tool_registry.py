@@ -15,6 +15,8 @@ from pydantic_ai.tools import (
     ToolPrepareFunc,
 )
 
+from app.runtime.permissions import PERMISSIONS_METADATA_KEY
+
 
 class RiskLevel(str, Enum):
     """工具风险等级，分级在 `app/runtime/approval.py` 真正生效。
@@ -76,12 +78,16 @@ class ManagedTool(Tool[ToolAgentDepsT]):
         strict: bool | None = None,
         sequential: bool = False,
         requires_approval: bool = False,
+        permissions: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
     ):
         meta = dict(metadata or {})
         meta.setdefault("category", category.value if isinstance(category, Enum) else str(category))
         meta.setdefault("risk_level", risk_level.value if isinstance(risk_level, Enum) else str(risk_level))
         meta.setdefault("tags", list(tags or []))
+        # 所需权限也写进 metadata：ApprovalGate 读的是 ToolDefinition.metadata，与 risk_level
+        # 同一条装配链。没声明的工具保持空元组，由风险等级兜底（未知即拦）。
+        meta.setdefault(PERMISSIONS_METADATA_KEY, list(permissions or ()))
 
         super().__init__(
             function,
@@ -102,6 +108,8 @@ class ManagedTool(Tool[ToolAgentDepsT]):
         self.category = category
         self.risk_level = risk_level
         self.tags = list(tags or [])
+        #: 执行这个工具需要用户预先授予的权限键。空表示没有额外权限要求（仍受风险等级约束）。
+        self.permissions = tuple(permissions or ())
         self.enabled_checker = enabled_checker
 
     @property
@@ -144,6 +152,7 @@ class ToolRegistry:
         takes_ctx: bool | None = None,
         prepare: ToolPrepareFunc[Any] | None = None,
         requires_approval: bool = False,
+        permissions: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Callable[[Callable[..., Any]], ManagedTool[Any]]:
         """装饰器：将函数封装并注册为 ManagedTool。"""
@@ -162,6 +171,7 @@ class ToolRegistry:
                 takes_ctx=takes_ctx,
                 prepare=prepare,
                 requires_approval=requires_approval,
+                permissions=permissions,
                 metadata=metadata,
             )
             self._tools[tool.name] = tool

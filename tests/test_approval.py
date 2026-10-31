@@ -135,7 +135,11 @@ async def _write_tool(thing_id: int) -> str:
     return f"deleted {thing_id}"
 
 
-def _build_agent(risk: RiskLevel = RiskLevel.DANGEROUS) -> Agent[None, str | DeferredToolRequests]:
+def _build_agent(
+    risk: RiskLevel = RiskLevel.DANGEROUS,
+    *,
+    permissions: tuple[str, ...] = (),
+) -> Agent[None, str | DeferredToolRequests]:
     """装配一个「第一轮调用工具、看到结果后收尾」的假模型 Agent。"""
 
     def model_fn(messages: list[ModelMessage], info: object) -> ModelResponse:  # noqa: ANN401
@@ -167,7 +171,11 @@ def _build_agent(risk: RiskLevel = RiskLevel.DANGEROUS) -> Agent[None, str | Def
     tool = Tool(
         _write_tool,
         name="write_tool",
-        metadata={"risk_level": risk.value, "description": "删除一条记录"},
+        metadata={
+            "risk_level": risk.value,
+            "description": "删除一条记录",
+            "permissions": list(permissions),
+        },
     )
     return Agent(
         FunctionModel(model_fn, stream_function=stream_fn),
@@ -206,6 +214,45 @@ async def test_read_only_tool_runs_without_approval():
 
     assert isinstance(result.output, str)
     assert EXECUTED == [{"thing_id": 7}]
+
+
+async def test_preauthorized_write_tool_runs_without_approval():
+    """用户已在输入框授予「写入文件」：这类调用不再逐条弹审批框。
+
+    这是权限功能的核心承诺。反过来（授予了仍被拦）会让用户觉得选择器是摆设。
+    """
+    from app.runtime.permissions import AgentRunDeps
+
+    agent = _build_agent(RiskLevel.SAFE_WRITE, permissions=("write",))
+
+    result = await agent.run("删掉 7", deps=AgentRunDeps(permissions=frozenset({"write"})))
+
+    assert isinstance(result.output, str)
+    assert EXECUTED == [{"thing_id": 7}]
+
+
+async def test_preauthorization_does_not_cover_a_different_permission():
+    """授予「读取」不能放行写入：权限必须逐项匹配，不能按「有任意授权」放行。"""
+    from app.runtime.permissions import AgentRunDeps
+
+    agent = _build_agent(RiskLevel.SAFE_WRITE, permissions=("write",))
+
+    result = await agent.run("删掉 7", deps=AgentRunDeps(permissions=frozenset({"read"})))
+
+    assert isinstance(result.output, DeferredToolRequests)
+    assert EXECUTED == []
+
+
+async def test_revoked_read_permission_blocks_a_read_only_tool():
+    """只读工具也要尊重用户的明确选择：取消「读取」后，读取文件应先问一次。"""
+    from app.runtime.permissions import AgentRunDeps
+
+    agent = _build_agent(RiskLevel.READ_ONLY, permissions=("read",))
+
+    result = await agent.run("删掉 7", deps=AgentRunDeps(permissions=frozenset()))
+
+    assert isinstance(result.output, DeferredToolRequests)
+    assert EXECUTED == []
 
 
 async def test_approved_tool_executes_exactly_once():
@@ -461,6 +508,27 @@ def test_unknown_tool_still_gets_an_approval_event():
     call = event.tool_calls[0]
     assert (call.description, call.risk_level) == ("", "")
     assert call.args == '{"id": 1}'
+    # 旧 catalog 没有 describe_permissions：按空列表降级，不阻断事件
+    assert (call.permissions, call.permission_labels) == ([], [])
+
+
+def test_approval_event_carries_required_permissions():
+    """审批卡要告诉用户「放开哪一项权限」，否则「本次会话允许」无从选择。"""
+    requests = DeferredToolRequests(approvals=[ToolCallPart("sandbox_exec", {"command": "ls"}, tool_call_id="c3")])
+
+    class _Catalog:
+        def describe(self, name: str) -> tuple[str, RiskLevel | None]:
+            return ("在隔离环境里执行命令", RiskLevel.SAFE_WRITE)
+
+        def describe_permissions(self, name: str) -> tuple[list[str], list[str]]:
+            assert name == "sandbox_exec"
+            return (["execute"], ["执行命令"])
+
+    event = build_approval_event(requests, catalog=_Catalog())
+
+    call = event.tool_calls[0]
+    assert call.permissions == ["execute"]
+    assert call.permission_labels == ["执行命令"]
 
 
 # ---------------------------------------------------------------------
@@ -537,3 +605,35 @@ def test_replayed_tool_calls_are_capped():
                 {"tool_call_id": f"c{i}", "tool_name": "x", "args": "{}"} for i in range(MAX_REPLAYED_TOOL_CALLS + 1)
             ],
         )
+
+
+def test_approval_event_reads_permissions_from_the_default_catalog():
+    """真实注册表 → catalog → 审批事件：用户看到的「需要权限」不是前端猜的。"""
+    requests = DeferredToolRequests(approvals=[ToolCallPart("sandbox_exec", {"command": "ls"}, tool_call_id="c4")])
+
+    event = build_approval_event(requests)
+
+    call = event.tool_calls[0]
+    assert call.permissions == ["execute"]
+    assert call.permission_labels == ["执行命令"]
+
+
+async def test_write_permission_is_not_granted_by_default():
+    """默认授权只有 read + network：没传 deps 时写入仍要审批。"""
+    agent = _build_agent(RiskLevel.SAFE_WRITE, permissions=("write",))
+
+    result = await agent.run("删掉 7")
+
+    assert isinstance(result.output, DeferredToolRequests)
+    assert EXECUTED == []
+
+
+def test_approval_event_only_shows_permissions_that_are_still_missing():
+    """已授予的权限不该出现在「本次会话允许」里：授了也解决不了这次拦截。"""
+    requests = DeferredToolRequests(approvals=[ToolCallPart("sandbox_exec", {"command": "ls"}, tool_call_id="c5")])
+
+    event = build_approval_event(requests, granted_permissions={"execute"})
+
+    call = event.tool_calls[0]
+    assert call.permissions == []
+    assert call.permission_labels == []

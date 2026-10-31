@@ -24,6 +24,15 @@ def test_local_registry_is_the_first_source():
     assert risk_level is RiskLevel.SAFE_WRITE
 
 
+def test_permissions_come_from_the_same_registry_metadata():
+    """审批卡展示的权限必须与闸门读的元数据同源，不能是 catalog 里另写一份。"""
+    catalog = tool_catalog.DefaultToolCatalog()
+
+    assert catalog.describe_permissions("sandbox_exec") == (["execute"], ["执行命令"])
+    assert catalog.describe_permissions("sandbox_write_file") == (["write"], ["写入文件"])
+    assert catalog.describe_permissions("unknown_tool") == ([], [])
+
+
 def test_unknown_tool_degrades_to_empty():
     assert tool_catalog.DefaultToolCatalog().describe("no_such_tool") == ("", None)
 

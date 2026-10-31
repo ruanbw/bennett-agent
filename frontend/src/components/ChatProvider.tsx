@@ -37,17 +37,34 @@ import {
 import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
 import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
+import {
+  FALLBACK_DEFAULT_PERMISSIONS,
+  FALLBACK_PERMISSION_CATALOG,
+  FALLBACK_PERMISSION_PRESETS,
+  addSessionPermissions,
+  sessionPermissionStorage,
+  readSessionPermissions,
+} from '../lib/permissions';
 import { useSandboxHeartbeat } from '../hooks/use-sandbox-heartbeat';
 import { ApprovalProvider } from '../context/approval-context';
 import { ClarificationProvider } from '../context/clarification-context';
 import { ChatSessionContext, type ChatSessionContextValue } from '../context/chat-session';
-import type { ApprovedToolCallRecord, RuntimeMessage } from '../types';
+import type {
+  ApprovedToolCallRecord,
+  PermissionOption,
+  PermissionPreset,
+  RuntimeMessage,
+} from '../types';
 
 export interface ChatProviderProps {
   children: ReactNode;
   currentSessionId: string;
   currentModel: string | null;
   currentReasoningEffort: string;
+  /** 服务端权限目录；缺省时使用内置兜底，保证能力接口没回来时选择器仍可用。 */
+  permissionCatalog?: PermissionOption[];
+  permissionPresets?: PermissionPreset[];
+  defaultPermissions?: string[];
 }
 
 /**
@@ -80,7 +97,18 @@ export function ChatProvider({
   currentSessionId,
   currentModel,
   currentReasoningEffort,
+  permissionCatalog,
+  permissionPresets,
+  defaultPermissions,
 }: ChatProviderProps) {
+  // 服务端目录优先；接口失败/未返回时退回内置目录。数组引用来自 App 的 capabilities
+  // 快照，保持稳定，回调依赖不会每帧失效。
+  const permissionOptions =
+    permissionCatalog && permissionCatalog.length > 0 ? permissionCatalog : FALLBACK_PERMISSION_CATALOG;
+  const permissionPresetOptions =
+    permissionPresets && permissionPresets.length > 0 ? permissionPresets : FALLBACK_PERMISSION_PRESETS;
+  const permissionDefaults =
+    defaultPermissions && defaultPermissions.length > 0 ? defaultPermissions : FALLBACK_DEFAULT_PERMISSIONS;
   const [dbMessages, setDbMessages] = useState<RuntimeMessage[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const messageSeqRef = useRef(0);
@@ -208,8 +236,28 @@ export function ChatProvider({
    * 模型会以为存在这么一次追问。见 `lib/chat-runs.ts:resumeApprovalRun`。
    */
   const submitApproval = useCallback(
-    async (decisions: Record<string, boolean>): Promise<boolean> => {
+    async (decisions: Record<string, boolean>, grants: string[] = []): Promise<boolean> => {
       if (!activeApproval || !currentSessionId) return false;
+      // 「本次会话允许」先写回本机权限，再带着新集合续跑：否则这一个调用会执行，
+      // 但模型在同一轮里紧接着的同类调用又会弹一次审批框。
+      const storage = sessionPermissionStorage();
+      const selection =
+        grants.length > 0
+          ? addSessionPermissions(
+              storage,
+              currentSessionId,
+              grants,
+              permissionOptions,
+              permissionPresetOptions,
+              permissionDefaults,
+            )
+          : readSessionPermissions(
+              storage,
+              currentSessionId,
+              permissionOptions,
+              permissionPresetOptions,
+              permissionDefaults,
+            );
       const ok = await resumeApprovalRun({
         sessionId: currentSessionId,
         assistantMsgId: activeApproval.messageId,
@@ -221,11 +269,20 @@ export function ChatProvider({
         })),
         model: currentModel,
         reasoningEffort: currentReasoningEffort,
+        permissions: selection.permissions,
       });
       if (ok) setNotice(null);
       return ok;
     },
-    [activeApproval, currentSessionId, currentModel, currentReasoningEffort]
+    [
+      activeApproval,
+      currentSessionId,
+      currentModel,
+      currentReasoningEffort,
+      permissionOptions,
+      permissionPresetOptions,
+      permissionDefaults,
+    ]
   );
 
   const dismissPendingApproval = useCallback(() => {
@@ -319,6 +376,14 @@ export function ChatProvider({
           assistantMsgId,
           model: currentModel,
           reasoningEffort: currentReasoningEffort,
+          // 发送时现读：用户可能刚在输入框改完权限，不依赖任何异步 state 的同步时机。
+          permissions: readSessionPermissions(
+            sessionPermissionStorage(),
+            currentSessionId,
+            permissionOptions,
+            permissionPresetOptions,
+            permissionDefaults,
+          ).permissions,
         });
         if (!startedRun) {
           // 并发发送抢走了 run 槽位：必须回滚，否则库里与界面上都会留下一条永远没有
@@ -355,6 +420,9 @@ export function ChatProvider({
       dismissPendingClarification,
       invalidateInFlightLoad,
       showNotice,
+      permissionOptions,
+      permissionPresetOptions,
+      permissionDefaults,
     ]
   );
 
@@ -385,6 +453,13 @@ export function ChatProvider({
         assistantMsgId: targetId,
         model: currentModel,
         reasoningEffort: currentReasoningEffort,
+        permissions: readSessionPermissions(
+          sessionPermissionStorage(),
+          currentSessionId,
+          permissionOptions,
+          permissionPresetOptions,
+          permissionDefaults,
+        ).permissions,
       });
       if (!startedRun) {
         // run 槽位被别处抢占：先别清内容，否则这条回答会白丢
@@ -433,6 +508,9 @@ export function ChatProvider({
       dismissPendingClarification,
       invalidateInFlightLoad,
       showNotice,
+      permissionOptions,
+      permissionPresetOptions,
+      permissionDefaults,
     ]
   );
 

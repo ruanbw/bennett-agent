@@ -96,6 +96,12 @@ export interface StreamChatParams {
    */
   contextAnchor?: { messageIndex: number; contextTokens: number } | null;
   /**
+   * 本会话授予的权限键。总是发送（空数组也是有效值）：
+   * - `null`/缺省表示「客户端没选择」，服务端会退回默认只读+联网；
+   * - `[]` 表示用户明确不预先授权任何能力，连只读工具也会先询问。
+   */
+  permissions?: string[] | null;
+  /**
    * 审批决定（`tool_call_id` → 是否批准）。只在续跑被拦下的工具调用时带上。
    *
    * 缺失的决定由服务端按**拒绝**处理——所以这里只发用户真的点过的那些。
@@ -279,6 +285,7 @@ export async function* streamChat({
   reasoningEffort,
   messages,
   contextAnchor = null,
+  permissions = null,
   approvals = null,
   signal,
 }: StreamChatParams): AsyncGenerator<ChatEvent> {
@@ -304,6 +311,9 @@ export async function* streamChat({
             },
           }
         : {}),
+      // 权限：总是显式发送当前会话的选择（含空数组）。`undefined/null` 与 `[]` 语义不同，
+      // 前者交给服务端默认值，后者是「什么都不预先授权」。
+      ...(permissions !== null && permissions !== undefined ? { permissions } : {}),
       // 审批续跑：只有真的带着决定时才出现这个字段。空对象也要省掉——
       // 服务端会把它当成「有审批决定」，进而去找对应的工具调用。
       ...(approvals && Object.keys(approvals).length > 0 ? { approvals } : {}),

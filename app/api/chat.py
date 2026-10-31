@@ -172,6 +172,8 @@ async def chat_stream(request: ChatRequest, user: User = Depends(current_active_
                 session_id=request.session_id,
                 # 批准/拒绝原样透传；是否真的续跑由服务层看历史形状决定（以带工具调用的 assistant 结尾）。
                 approvals=request.approvals,
+                # 本会话授予的权限；`None` 表示客户端未指定，由服务层使用默认授权。
+                permissions=request.permissions,
             ):
                 yield to_sse_frame(event)
         finally:

@@ -16,7 +16,7 @@ description: 从 POST /api/chat 到 SSE 结束的一轮完整时序，含失败�
 
 ```text
 客户端
-  │ POST /api/chat {model, reasoning_effort, messages, session_id, approvals}
+  │ POST /api/chat {model, reasoning_effort, messages, session_id, permissions, approvals}
   ▼
 [1] 中间件（由外到内）：安全头 → 请求 ID → 指标 → CORS → Origin 守卫(403) → 请求体上限(413)
   ▼
@@ -179,16 +179,18 @@ with (
 
 #### 审批中断与续跑
 
-风险等级是 `safe_write` 或 `dangerous` 的调用被 `ApprovalGate.before_tool_execute` 拦下，
-抛 `ApprovalRequired`。本轮随即以 `approval_required` 事件结束，事件里带每条调用的
-`tool_call_id`、入参、工具说明与风险等级（`app/services/approval_flow.py` 从
-`app/runtime/catalog.py` 取说明）。
+工具声明的权限没有全部授予，或风险等级是 `safe_write` / `dangerous` 且未被预授权时，
+`ApprovalGate.before_tool_execute` 抛 `ApprovalRequired`。本轮随即以 `approval_required`
+事件结束，事件里带每条调用的 `tool_call_id`、入参、工具说明、风险等级与所需权限
+（`app/services/approval_flow.py` 从 `app/runtime/catalog.py` 取说明与权限）。
 
-用户决定后，客户端带同一个 `tool_call_id` 续跑。续跑时：
+用户决定后，客户端带同一个 `tool_call_id` 与更新后的 `permissions` 续跑。续跑时：
 
 - `build_resume_results_for` 按历史里「有调用但没有结果」的 id 逐条取决定，
   **缺失即拒绝**（`ToolDenied`）。
 - 服务端不看客户端声明，只看历史形状（`all_deferred_ids`）。
+- 「本次会话允许」先把权限写回会话（`frontend/src/lib/permissions.ts`），
+  续跑请求里的 `permissions` 就是这一轮的完整授权快照。
 - 续跑时 `current_prompt` 是 `None` 而不是空串：空串会产出一条 content 为空的 user 消息，
   Anthropic 系直接 400。
 

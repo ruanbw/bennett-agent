@@ -47,6 +47,24 @@ export interface ModelListResponse {
 // =====================================================================
 // GET /api/capabilities（app/schemas/capabilities.py）
 // =====================================================================
+/** 输入框权限选择器的一项；字段与 `app/schemas/capabilities.py:PermissionOption` 对齐。 */
+export interface PermissionOption {
+  /** 权限键：请求体 `permissions` 里的取值（与后端 `Permission` 枚举同源） */
+  key: string;
+  label: string;
+  description: string;
+  /** 视觉分级：low / medium / high */
+  risk: 'low' | 'medium' | 'high' | string;
+}
+
+export interface PermissionPreset {
+  /** ask / standard / auto */
+  key: string;
+  label: string;
+  description: string;
+  permissions: string[];
+}
+
 /**
  * 当前服务端**实际装配**的能力快照。
  *
@@ -76,6 +94,16 @@ export interface Capabilities {
    * 会让配置看起来从来没生效。
    */
   mcp_error?: string | null;
+  /**
+   * 权限目录（服务端渲染选择器用）。
+   *
+   * 可选：老服务端不返回时前端退回内置目录；新服务端是唯一事实来源，避免两边文案漂移。
+   */
+  permissions?: PermissionOption[];
+  /** 权限预设档位；`custom` 由前端按任意勾选组合派生。 */
+  permission_presets?: PermissionPreset[];
+  /** 客户端没传 `permissions` 时服务端实际使用的默认授权。 */
+  default_permissions?: string[];
 }
 
 /** 一个 MCP server 的运行时状态。`name` 同时也是它的工具名前缀。 */
@@ -160,6 +188,10 @@ export interface ApprovalToolCall {
   description: string;
   /** 风险等级（`read_only` / `safe_write` / `dangerous` …）。 */
   risk_level: string;
+  /** 尚未授予、需要用户放开的权限键（如 `execute`）；空表示只是风险等级触发的审批。 */
+  permissions?: string[];
+  /** 与 `permissions` 一一对应的中文名。 */
+  permission_labels?: string[];
 }
 
 /**
@@ -397,6 +429,10 @@ export interface ApprovedToolCallRecord {
   argsText: string;
   description: string;
   riskLevel: string;
+  /** 尚未授予的权限键；「本次会话允许」按它写回会话权限。老记录缺省为空。 */
+  permissions?: string[];
+  /** 与 `permissions` 一一对应的中文名。 */
+  permissionLabels?: string[];
 }
 
 export interface ApprovalState {

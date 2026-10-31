@@ -15,12 +15,12 @@ export interface ApprovalContextValue {
   /** 当前待审批的调用（含 messageId），无则 null */
   pending: PendingApproval | null;
   /**
-   * 用户做出决定后提交：`tool_call_id` → 是否批准。
+   * 用户做出决定后提交：`tool_call_id` → 是否批准，另带「本次会话允许」要授予的权限键。
    *
    * 返回 Promise<boolean>：`false` 表示没能起跑（槽位被占/没有决定），卡片据此解锁并
    * 让用户重试——否则点完按钮卡片会变灰卡在那里，既没发出去也没法再点。
    */
-  submit: (decisions: Record<string, boolean>) => Promise<boolean>;
+  submit: (decisions: Record<string, boolean>, grants?: string[]) => Promise<boolean>;
   /** 用户不打算处理这些调用（关掉卡片）：清掉标记，本轮就此作废 */
   dismiss: () => void;
 }

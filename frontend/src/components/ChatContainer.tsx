@@ -6,7 +6,7 @@ import { SandboxStatusIndicator } from './SandboxStatus/SandboxStatusIndicator';
 import { clampTitle, titleLength, TITLE_MAX_LENGTH } from '../lib/session-list';
 import { notify } from '../lib/toast';
 import { ChatSessionNotices } from './ChatProvider';
-import type { ModelItem } from '../types';
+import type { ModelItem, PermissionOption, PermissionPreset } from '../types';
 
 export interface ChatContainerProps {
   sessionTitle?: string;
@@ -16,6 +16,10 @@ export interface ChatContainerProps {
   /** 服务端是否装配了联网搜索（`/api/capabilities`）；用于裁剪空对话页的起步建议。 */
   webSearchAvailable?: boolean;
   sandboxAvailable?: boolean;
+  /** 服务端权限目录 / 预设 / 默认授权；直接透传给输入框里的权限选择器。 */
+  permissionCatalog?: PermissionOption[];
+  permissionPresets?: PermissionPreset[];
+  defaultPermissions?: string[];
   currentModel: string | null;
   currentReasoningEffort?: string;
   onSelectModel: (modelId: string) => void;
@@ -49,6 +53,9 @@ export function ChatContainer({
   modelsError,
   webSearchAvailable,
   sandboxAvailable,
+  permissionCatalog,
+  permissionPresets,
+  defaultPermissions,
   currentModel,
   currentReasoningEffort,
   onSelectModel,
@@ -300,6 +307,9 @@ export function ChatContainer({
           modelsError={modelsError}
           webSearchAvailable={webSearchAvailable}
           sandboxAvailable={sandboxAvailable}
+          permissionCatalog={permissionCatalog}
+          permissionPresets={permissionPresets}
+          defaultPermissions={defaultPermissions}
           currentModel={currentModel}
           currentReasoningEffort={currentReasoningEffort}
           onSelectModel={onSelectModel}

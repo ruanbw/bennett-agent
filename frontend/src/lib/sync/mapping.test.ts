@@ -511,6 +511,30 @@ describe('sanitizeMessagePayload：approval（M4 跨设备）', () => {
     expect(pulled.approval).toEqual(original.approval);
   });
 
+  it('权限字段随审批记录跨设备同步：否则另一台设备点「本次会话允许」没有键可写', () => {
+    const withPermissions = call({
+      permissions: ['execute'],
+      permissionLabels: ['执行命令'],
+    });
+    const original = { approval: { toolCalls: [withPermissions] } };
+    const pushed = toMessagePushRow(message(original)).payload;
+    const pulled = sanitizeMessagePayload(JSON.parse(JSON.stringify(pushed)));
+
+    expect(pulled.approval).toEqual({
+      toolCalls: [
+        {
+          toolCallId: 'call_1',
+          toolName: 'delete_document',
+          argsText: '{"document_id": 42}',
+          description: '删除一篇知识库文档（不可撤销）',
+          riskLevel: 'dangerous',
+          permissions: ['execute'],
+          permissionLabels: ['执行命令'],
+        },
+      ],
+    });
+  });
+
   it('只要有一条调用坏掉就整块丢掉：半个审批框比没有更危险', () => {
     // 少一条调用 → 用户在一个不完整的清单上「提交决定」，
     // 提交出去的决定集合与那一轮真实被拦下的调用对不上

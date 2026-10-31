@@ -62,6 +62,7 @@ import { describeCompactionNotice } from "@/lib/run-error";
 import { describeErrorHint, readKnownErrorCode } from "@/lib/run-error";
 import { describeCooldown, remainingCooldownMs } from "@/lib/rate-limit-cooldown";
 import { ModelSelector } from "@/components/ModelSelector";
+import { PermissionSelector } from "@/components/PermissionSelector";
 import { TurnAnnouncement, TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
 import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
@@ -86,6 +87,8 @@ import type {
   FallbackState,
   MessageCustomMetadata,
   ModelItem,
+  PermissionOption,
+  PermissionPreset,
   RunError,
 } from "@/types";
 
@@ -192,6 +195,10 @@ interface ThreadProps {
   onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void | Promise<unknown>;
+  /** 服务端权限目录与预设；缺省时选择器使用内置兜底。 */
+  permissionCatalog?: PermissionOption[];
+  permissionPresets?: PermissionPreset[];
+  defaultPermissions?: string[];
   /** 上下文已满时的出路：开一个新会话。由 ChatContainer 透传（App 提供）。 */
   onCreateSession?: () => void | Promise<unknown>;
 }
@@ -206,6 +213,9 @@ export const Thread: FC<ThreadProps> = ({
   onSelectModel = () => {},
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  permissionCatalog,
+  permissionPresets,
+  defaultPermissions,
   onCreateSession,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
@@ -463,6 +473,9 @@ export const Thread: FC<ThreadProps> = ({
               onSelectModel={onSelectModel}
               onSelectReasoningEffort={onSelectReasoningEffort}
               onRefreshModels={onRefreshModels}
+              permissionCatalog={permissionCatalog}
+              permissionPresets={permissionPresets}
+              defaultPermissions={defaultPermissions}
               contextLocked={contextLocked}
               onCreateSession={onCreateSession}
             />
@@ -507,6 +520,9 @@ const Composer: FC<{
   onSelectModel: (id: string) => void;
   onSelectReasoningEffort?: (effort: string) => void;
   onRefreshModels?: () => void | Promise<unknown>;
+  permissionCatalog?: PermissionOption[];
+  permissionPresets?: PermissionPreset[];
+  defaultPermissions?: string[];
   inputRef?: RefObject<HTMLTextAreaElement | null>;
   /** 本会话上下文已满：锁住输入框并给出「新建会话」按钮。 */
   contextLocked?: boolean;
@@ -519,6 +535,9 @@ const Composer: FC<{
   onSelectModel,
   onSelectReasoningEffort = () => {},
   onRefreshModels,
+  permissionCatalog,
+  permissionPresets,
+  defaultPermissions,
   inputRef,
   contextLocked = false,
   onCreateSession,
@@ -660,10 +679,11 @@ const Composer: FC<{
           }}
         />
 
-        {/* 输入框底部工具条：附件/模型选择器在左侧，发送/停止在右侧。
+        {/* 输入框底部工具条：附件/模型/权限选择器在左侧，发送/停止在右侧。
             模型与思考等级已经合成**一个**触发器（`模型名 · 等级`）：DSH 里它们是同一次
             选择的两个维度，拆成两个并排按钮会让人以为可以分别生效，也会在窄屏上把
-            发送按钮顶到第二行。min-w-0 让模型名先被截断而不是撑破工具栏。 */}
+            发送按钮顶到第二行。min-w-0 让模型名先被截断而不是撑破工具栏；权限选择器
+            在窄屏只留盾牌图标。 */}
         <div className="flex flex-nowrap items-center justify-between gap-x-1 gap-y-1 px-2 pb-2.5 pt-1 sm:gap-x-2 sm:px-3">
           <div className="flex min-w-0 items-center gap-1 sm:gap-2">
             <ComposerAddAttachment />
@@ -679,6 +699,12 @@ const Composer: FC<{
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectReasoningEffort}
               onRefreshModels={onRefreshModels}
+            />
+            <PermissionSelector
+              catalog={permissionCatalog}
+              presets={permissionPresets}
+              defaultPermissions={defaultPermissions}
+              disabled={contextLocked}
             />
           </div>
 

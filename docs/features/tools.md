@@ -34,15 +34,15 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 
 七个内置工具，全部在 `app/tools/__init__.py:_register_all` 登记。工具名就是实现函数的名字（`registry.register` 不传 `name`），所以模型看到的是 `ask_user_clarification`、`get_current_time`，不是 `ask_user`、`current_time`；`clarification_tool`、`tavily_tool` 这类旧导出名只是兼容别名，不进工具清单。
 
-| 工具名 | 分类 | 风险等级 | 超时 | 启用条件 | 说明 |
-|---|---|---|---|---|---|
-| `ask_user_clarification` | `interaction` | `interactive` | 无 | 始终 | 意图模糊时向用户提问，选项 2~10 个 |
-| `get_current_time` | `system` | `read_only` | 无 | 始终 | 当前日期、时间、星期、时区与 UTC |
-| `tavily_search` | `search` | `read_only` | 派生 | `TAVILY_API_KEY` 可用（非空且不是占位值） | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
-| `sandbox_exec` | `data` | `safe_write` | `MAX_EXEC_TIMEOUT_S + 60` 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
-| `sandbox_write_file` | `data` | `safe_write` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
-| `sandbox_read_file` | `data` | `read_only` | 60 秒 | `SANDBOX_ENABLED` | 读文件，≤ 200000 字节，超限**报错**而非截断 |
-| `sandbox_reset` | `data` | `safe_write` | 120 秒 | `SANDBOX_ENABLED` | 销毁现有执行环境，下次执行时重建（不当场重建） |
+| 工具名 | 分类 | 风险等级 | 所需权限 | 超时 | 启用条件 | 说明 |
+|---|---|---|---|---|---|---|
+| `ask_user_clarification` | `interaction` | `interactive` | 无 | 无 | 始终 | 意图模糊时向用户提问，选项 2~10 个 |
+| `get_current_time` | `system` | `read_only` | 无 | 无 | 始终 | 当前日期、时间、星期、时区与 UTC |
+| `tavily_search` | `search` | `read_only` | `network` | 派生 | `TAVILY_API_KEY` 可用（非空且不是占位值） | 联网搜索，单条正文 ≤ 600 字符、全文 ≤ 6000 字符 |
+| `sandbox_exec` | `data` | `safe_write` | `execute` | `MAX_EXEC_TIMEOUT_S + 60` 秒 | `SANDBOX_ENABLED` | 跑一条 shell 命令，返回退出码与输出 |
+| `sandbox_write_file` | `data` | `safe_write` | `write` | 60 秒 | `SANDBOX_ENABLED` | 写文件，≤ 200000 字符，超限**拒绝**而非截断 |
+| `sandbox_read_file` | `data` | `read_only` | `read` | 60 秒 | `SANDBOX_ENABLED` | 读文件，≤ 200000 字节，超限**报错**而非截断 |
+| `sandbox_reset` | `data` | `safe_write` | `manage` | 120 秒 | `SANDBOX_ENABLED` | 销毁现有执行环境，下次执行时重建（不当场重建） |
 
 分类的依据是**能不能撤销**，不是「有多危险」。所以四个沙箱工具里三个是 `safe_write`（要审批）：一条任意 shell 命令能删文件、能联网外带、能改工作目录之外的东西，标成 `read_only`（定义是「无外部副作用」）等于给唯一的执行闸门喂一条假事实——将来任何「按等级限流 / 按等级强制审计」的策略都会把它当只读放过去。只有 `sandbox_read_file` 真的是 `read_only`。
 
@@ -50,25 +50,32 @@ pydantic-ai 的 `anyio.fail_after` 先触发时抛 `ModelRetry`，工具内部�
 
 「写文件超限拒绝、读文件超限报错」的共同理由：静默截断会让模型在坏数据上继续推理——半截脚本要到下一次执行才炸，而模型不自知。
 
-## 审批：按可撤销性分级
+## 审批：按可撤销性分级，按权限跳过重复询问
 
 闸门在 `app/runtime/approval.py`，实现为 pydantic-ai 的 capability（`ApprovalGate.before_tool_execute`）。
 
-需要批准的风险等级：`safe_write` 与 `dangerous`。分界线是**能不能撤销**——本项目删了没有回收站，所以低风险的写入也要先问。
+两条判据共同决定一次调用要不要问：
+
+1. **风险等级**：`safe_write` 与 `dangerous` 默认需要批准。分界线是**能不能撤销**——本项目删了没有回收站，所以低风险的写入也要先问。
+2. **权限**：工具声明的 `permissions` 必须全部在用户当前授权集合里。用户在输入框选择「执行命令」后，`sandbox_exec` 就不再逐条询问；没选的权限仍然会拦下并弹出审批框。
 
 用 capability 而不是 `Tool(requires_approval=True)`，是因为工具动态装配，MCP 工具的风险等级运行时才知道。
 
 | 场景 | 结果 |
 |---|---|
-| `read_only` / `interactive` | 直接执行 |
-| `safe_write` / `dangerous` | 抛 `ApprovalRequired`，本轮输出变成 `DeferredToolRequests`，下发 `approval_required` 事件后结束本轮 |
+| `read_only` / `interactive`，且所需权限已授予 | 直接执行 |
+| 只读工具，但用户取消了对应用权限（如 `network`） | 拦下，等用户批准 |
+| `safe_write` / `dangerous`，所需权限已全部授予 | 视为用户预授权，直接执行 |
+| `safe_write` / `dangerous`，没有权限声明或权限未授予 | 抛 `ApprovalRequired`，本轮输出变成 `DeferredToolRequests`，下发 `approval_required` 事件后结束本轮 |
 | 未知风险等级字符串 | 按**需要审批**处理：新等级默认从严，漏审比多问一次代价大得多 |
-| 没有风险等级（`None`） | 同样按**需要审批**处理。早先缺省是「放行」，与「未知字符串要审批」正好相反：`None` 恰恰是最没把握的一类（包装层没补上、远端工具定义缺 metadata），却享受了最宽的待遇。现在 `requires_approval(None)` 为真并打一条 WARNING——放行的默认值只能给「确实读过这段代码」的等级，不能给「不知道」 |
+| 没有风险等级（`None`） | 同样按**需要审批**处理，权限授予不能覆盖「不知道」。早先缺省是「放行」，与「未知字符串要审批」正好相反：`None` 恰恰是最没把握的一类（包装层没补上、远端工具定义缺 metadata），却享受了最宽的待遇。现在 `requires_approval(None)` 为真并打一条 WARNING |
 | 已批准过的调用（`ctx.tool_call_approved is True`） | 放行，不再看风险等级——否则「批准了仍被拦」会让续跑死循环 |
+
+权限目录、预设与输入框选择器的完整设计见 [权限与审批](../design/permissions.md)。
 
 审批分两段的完整流程见 [对话与流式事件](./chat.md) 的「审批：只能分两段」一节。缺失的决定一律按拒绝处理。
 
-MCP 工具统一标为 `safe_write`（`MCP_TOOL_RISK_LEVEL`）：第三方实现，无法确认有无副作用。也就是说每个 MCP 工具调用都要先拿到用户批准。这条元数据由 `RiskAnnotatingToolset` 在包装层补上——远端 `ToolDefinition` 没有 metadata，而闸门取到 `None` 现在会**拒绝并要求审批**（`app/runtime/approval.py:requires_approval`），所以包装层漏补的后果是「多问一次」而不是「静默放行」。
+MCP 工具统一标为 `safe_write`（`MCP_TOOL_RISK_LEVEL`）并声明 `external` 权限：第三方实现，无法确认有无副作用。用户没有授予「外部工具」时，每个 MCP 调用都要先拿到批准；授予后才会跳过审批。这条元数据由 `RiskAnnotatingToolset` 在包装层补上——远端 `ToolDefinition` 没有 metadata，而闸门取到 `None` 现在会**拒绝并要求审批**（`app/runtime/approval.py:requires_approval`），所以包装层漏补的后果是「多问一次」而不是「静默放行」。
 
 ## 异常隔离
 

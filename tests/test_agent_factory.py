@@ -513,3 +513,10 @@ def test_system_prompt_survives_the_second_turn():
     assert settings.assistant_name in turn2, "第 2 轮的系统提示词丢了"
     # 抽查一条只可能来自系统提示词的行为准则，防止「注入了但注入了空串」
     assert "不要向用户复述" in turn2
+
+
+def test_build_agent_uses_permission_deps_type():
+    """权限集合从请求传到审批闸门的唯一通道是 `ctx.deps`；装配点必须声明这个类型。"""
+    from app.runtime.permissions import AgentRunDeps
+
+    assert build_agent("openai/gpt-4o").deps_type is AgentRunDeps

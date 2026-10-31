@@ -136,6 +136,11 @@ class ApprovalToolCall(BaseModel):
     description: str = ""
     #: 风险等级（`read_only` / `safe_write` / `dangerous` …）
     risk_level: str = ""
+    #: 尚未授予、需要用户放开的权限键（如 `execute`）；空表示只是风险等级触发的审批。
+    #: 前端「本次会话允许此类操作」按这些键写回会话权限。
+    permissions: list[str] = Field(default_factory=list)
+    #: 与 `permissions` 一一对应的中文名，审批卡直接展示，不要求客户端另存目录。
+    permission_labels: list[str] = Field(default_factory=list)
 
 
 class ApprovalRequiredEvent(BaseModel):

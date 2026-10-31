@@ -30,6 +30,18 @@ const readOnlyCall = {
   argsText: '{"query": "退款"}',
   description: '在知识库里检索',
   riskLevel: 'read_only',
+  permissions: [] as string[],
+  permissionLabels: [] as string[],
+};
+
+const execCall = {
+  toolCallId: 'c3',
+  toolName: 'sandbox_exec',
+  argsText: '{"command": "ls -la"}',
+  description: '在隔离环境里执行 shell 命令',
+  riskLevel: 'safe_write',
+  permissions: ['execute'],
+  permissionLabels: ['执行命令'],
 };
 
 function render(toolCalls = [dangerousCall]) {
@@ -56,6 +68,16 @@ describe('ApprovalCard', () => {
 
   it('说清「尚未执行」', () => {
     expect(render()).toContain('尚未执行');
+  });
+
+  it('显示调用需要的权限，并给出「本次会话允许」入口', () => {
+    const html = render([execCall]);
+
+    expect(html).toContain('需要权限：');
+    expect(html).toContain('执行命令');
+    expect(html).toContain('本次会话允许');
+    // 没有声明权限的调用（例如未知风险触发的审批）不该出现一个无意义的「允许」按钮
+    expect(render([readOnlyCall])).not.toContain('本次会话允许');
   });
 
   /**

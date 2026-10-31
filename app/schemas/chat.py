@@ -171,6 +171,14 @@ class ChatRequest(BaseModel):
         pattern=SESSION_ID_PATTERN,
         description="客户端生成的会话标识（sess_<...>）；沙箱按会话分配机器时使用",
     )
+    #: 本会话已授予的权限键。`None` = 客户端未指定（服务端使用默认只读+联网）；
+    #: `[]` = 明确不授予任何权限（连只读工具也会先询问）。
+    #: 权限不是身份：它只决定「工具能不能跳过审批」，真正的身份与作用域仍由服务端注入。
+    permissions: list[str] | None = Field(
+        default=None,
+        max_length=32,
+        description="本会话授予的权限键（如 read/write/execute/network/external/manage/dangerous）",
+    )
     #: 审批决定：`tool_call_id` → 是否批准，只用于续跑被拦下的工具调用。
     #: 缺失的一律按拒绝处理（见 `app/tools/approval.py`）：关掉页面不能等于同意删除。
     approvals: dict[str, bool] = Field(
@@ -179,6 +187,16 @@ class ChatRequest(BaseModel):
     )
 
     _strip_model = field_validator("model", mode="before")(_strip_optional_model)
+
+    @field_validator("permissions")
+    @classmethod
+    def _check_permissions(cls, value: list[str] | None) -> list[str] | None:
+        """未知权限键直接拒绝：静默忽略会让用户以为已授权、实际仍被逐次拦截。"""
+        if value is None:
+            return None
+        from app.runtime.permissions import validate_permission_keys
+
+        return validate_permission_keys(value)
 
     @model_validator(mode="after")
     def _check_approvals(self) -> "ChatRequest":

@@ -46,6 +46,7 @@ npm run build                            # 产物在 docs/.vitepress/dist/
 
 - **多提供商模型接入**：所有提供商统一走 OpenAI 兼容端点 + LiteLLM 路由格式（如 `openai/gpt-4o`）。管理后台内置主流厂商预设（OpenAI、Anthropic、Google、DeepSeek、Kimi、通义千问、智谱、OpenRouter、Groq、xAI、硅基流动、火山方舟等），也支持 Ollama / LM Studio 本地模型；API Key 加密落库，首次启动可由环境变量引导。
 - **Agent 工具**：联网搜索（Tavily）、沙箱代码执行、澄清提问，以及通过 MCP 动态发现的外部工具（http 与 stdio 两种传输）。
+- **权限选择与按需审批**：输入框里按会话选择「每次询问 / 标准 / 自动执行」或逐项勾选权限（读取、写入、执行命令、联网、外部工具、环境管理、高风险操作）。已授权的工具直接执行，越出授权范围的调用在执行前弹出审批卡，可「批准一次」或「本次会话允许」；服务端闸门按工具声明的权限判定，不依赖模型自觉。
 - **沙箱执行**：每用户一台隔离执行环境（[OpenSandbox](https://github.com/opencode-ai/opensandbox)，本地 Docker 运行时 / 生产 K8s + Firecracker），心跳续命 + 自动回收。
 - **上下文预算**：每轮生成前估算 token 用量，超限自动两级压缩（截断超长单条 → 折叠旧轮次为摘要），压缩对用户可见；也支持直接拒绝或不设防。
 - **模型容灾**：主模型返回 5xx / 429 / 超时时自动切换备用模型重试。

@@ -218,10 +218,26 @@ function sanitizeApproval(value: unknown): ApprovalState | undefined {
     // 这是安全的一侧，不需要因此丢掉整块。
     const description = typeof call.description === 'string' ? call.description : '';
     const riskLevel = typeof call.riskLevel === 'string' ? call.riskLevel : '';
+    // 权限字段来自新服务端；旧记录缺失时不写空数组，保持同步载荷的旧形状（老客户端
+    // 不认识这两个字段也能原样往返）。审批卡按 `?? []` 处理缺失。
+    const permissions = Array.isArray(call.permissions)
+      ? call.permissions.filter((permission): permission is string => typeof permission === 'string')
+      : [];
+    const permissionLabels = Array.isArray(call.permissionLabels)
+      ? call.permissionLabels.filter((label): label is string => typeof label === 'string')
+      : [];
     // 前三个是提交决定的必需键：`toolCallId` 是决定的 key，缺了就没法表态；
     // `toolName` / `argsText` 是用户判断后果的唯一依据，缺了就是让用户盲签。
     if (toolCallId === undefined || toolName === undefined || argsText === undefined) return undefined;
-    toolCalls.push({ toolCallId, toolName, argsText, description, riskLevel });
+    toolCalls.push({
+      toolCallId,
+      toolName,
+      argsText,
+      description,
+      riskLevel,
+      ...(permissions.length > 0 ? { permissions } : {}),
+      ...(permissionLabels.length > 0 ? { permissionLabels } : {}),
+    });
   }
   return { toolCalls };
 }

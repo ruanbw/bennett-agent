@@ -136,6 +136,7 @@ X-RateLimit-Reset: 12
 | `messages` | `ChatMessage[]`（1..100） | 是 | 历史与当前对话，首条必须 user、严格交替、末条 user（续跑审批时可为带 `tool_calls` 的 assistant） |
 | `context_anchor` | `ContextAnchor` \| null | 否 | 上一轮的真实用量锚点；缺失时服务端自己估算，不报错 |
 | `session_id` | str \| null（`sess_...`，≤64） | 否 | 客户端生成的会话标识，供沙箱按会话分配机器；不是身份 |
+| `permissions` | str[]（≤32） | 否 | 本会话授予的权限键；`null`/缺失用服务端默认（`read` + `network`），`[]` 表示不预授权。未知键 422 |
 | `approvals` | `{tool_call_id: bool}`（≤50 条） | 否 | 待审批工具调用的决定；id 必须在历史里出现过，缺失的一律按拒绝处理 |
 
 历史总长度上限 `MAX_HISTORY_CHARS` = 400000 字符（`content` 与 `thinking` 之和）。
@@ -216,6 +217,9 @@ X-RateLimit-Reset: 12
 | `tools` | str[] | 本轮装配给 Agent 的工具名，按注册顺序 |
 | `mcp_servers` | `McpServerStatus[]` | 已配置且连通的 MCP server；连不上的不在这里 |
 | `mcp_error` | str \| null | 配了但没连上的原因；全部连通或未配置时为 `null` |
+| `permissions` | `PermissionOption[]` | 权限目录：`key` / `label` / `description` / `risk` |
+| `permission_presets` | `PermissionPresetOption[]` | 预设档位：`key` / `label` / `description` / `permissions` |
+| `default_permissions` | str[] | 客户端不传 `permissions` 时服务端使用的默认授权 |
 
 `McpServerStatus` 两个字段：`name`（server 名，也是工具名前缀）、`tools`（该 server 的工具名，不含前缀）。
 

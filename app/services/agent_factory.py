@@ -22,6 +22,7 @@ from pydantic_ai.tools import Tool
 from app.config import is_usable_api_key, settings
 from app.config.proxy_env import sanitize_no_proxy_env
 from app.prompts import prompt_manager
+from app.runtime.permissions import AgentRunDeps
 from app.services.fallback_config import configured_fallback_name
 from app.services.fallback_tracker import record_fallback
 from app.services.http_client import DEFAULT_LIMITS
@@ -355,7 +356,7 @@ def _build_agent_cached(
     effort: str | None,
     cache_key: tuple[object, ...],
     target: ModelTarget | None,
-) -> Agent:  # noqa: ANN401
+) -> Agent[AgentRunDeps]:  # noqa: ANN401
     """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
 
     `effort` 须已归一化、`cache_key` 来自 `_settings_cache_key()`、`target` 来自
@@ -378,6 +379,9 @@ def _build_agent_cached(
 
     return Agent(
         model=model,
+        # 权限集合随每一轮请求显式传入（`AgentRunDeps`），审批闸门从 `ctx.deps` 读取。
+        # 不能在装配期固化：同一个缓存 Agent 会被不同会话、不同权限选择复用。
+        deps_type=AgentRunDeps,
         # 系统提示词必须走 `instructions`：`system_prompt` 只在历史为空时注入，而服务端无状态、
         # 每轮由客户端回放历史 → 第 2 轮起整份行为准则全丢（标题/摘要 agent 单轮无历史，用 system_prompt）。
         instructions=system_prompt,
@@ -417,7 +421,7 @@ def build_agent(
     reasoning_effort: str | None = None,
     *,
     target: ModelTarget | None = None,
-) -> Agent:  # noqa: ANN401
+) -> Agent[AgentRunDeps]:  # noqa: ANN401
     """装配主对话 Agent；CLI 与 Web 都必须走这里，否则两者会再次漂移。
 
     归一化必须在进缓存之前完成，否则 `"HIGH"` / `"high"` / `" high "` 各占一个槽，

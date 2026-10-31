@@ -69,6 +69,30 @@ describe('fetchCapabilities', () => {
     });
   });
 
+  it('解析权限目录与预设；非法权限键不会漏进选择器', async () => {
+    stubFetch({
+      json: async () => ({
+        web_search: false,
+        tools: [],
+        permissions: [
+          { key: 'read', label: '读取数据', description: '只读', risk: 'low' },
+          { key: 'execute', label: '执行命令', description: '执行', risk: 'medium' },
+          { key: '', label: '坏条目' },
+        ],
+        permission_presets: [
+          { key: 'ask', label: '每次询问', description: '', permissions: ['read', 'future'] },
+        ],
+        default_permissions: ['read', 'future'],
+      }),
+    });
+
+    const capabilities = await fetchCapabilities();
+
+    expect(capabilities.permissions?.map((option) => option.key)).toEqual(['read', 'execute']);
+    expect(capabilities.permission_presets?.[0].permissions).toEqual(['read']);
+    expect(capabilities.default_permissions).toEqual(['read']);
+  });
+
   it('响应不是对象时同样不抛，返回保守值', async () => {
     stubFetch({ json: async () => null });
 

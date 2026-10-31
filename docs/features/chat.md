@@ -20,6 +20,7 @@ description: 一轮对话怎么跑：服务端无状态、SSE 分帧、全部事
   ],
   "context_anchor": {"message_index": 1, "context_tokens": 4210},
   "session_id": "sess_abc123",
+  "permissions": ["read", "execute"],
   "approvals": {"call_1": true}
 }
 ```
@@ -31,6 +32,7 @@ description: 一轮对话怎么跑：服务端无状态、SSE 分帧、全部事
 - `tool_calls` 只能挂在 `assistant` 消息上，且只接受 `tool_call_id` / `tool_name` / `args` 三个字段——**不接受结果**。回放结果等于允许伪造「删除已成功」。
 - 单条消息 ≤ 32000 字符、单条 thinking ≤ 64000 字符、消息条数 ≤ 100、历史总量 ≤ 400000 字符、单个工具入参 ≤ 64000 字符。
 - 单条 assistant 消息最多 50 个工具调用、单个 `tool_call_id` ≤ 200 字符、单次请求最多 50 条审批决定（`MAX_REPLAYED_TOOL_CALLS`、`MAX_TOOL_CALL_ID_CHARS`）。
+- `permissions` 最多 32 个键，未知键 422；缺失表示使用服务端默认授权，`[]` 表示不预授权任何能力。
 - 非文本内容分片直接拒绝，而不是静默丢弃：用户以为图片传上去了、模型只看到一句文字，比报错更糟。
 
 请求体校验失败一律 422，请求体不进对话流。`approvals` 里的 id 还必须能在历史里找到，否则同样 422——不在历史里的 id 会让 pydantic-ai 抛内部错误。历史转换层（`app/services/chat_history.py`）保留了一组等价检查作防御，它失败时下发 `error` 事件而不是 422。
@@ -71,7 +73,7 @@ data: {"type":"done"}
 | `tool_call` | `tool_call_id`、`tool_name`、`args` | 插入一条「运行中」的工具记录；同 id 不重复插入 |
 | `tool_result` | `tool_call_id`、`tool_name`、`result`、`outcome` | 把同 id 记录改成完成态；`outcome` 决定显示成功还是失败 |
 | `clarification` | `tool_call_id`、`question`、`options`、`allow_custom_input` | 弹出选项卡片；允许时带自定义输入框 |
-| `approval_required` | `tool_calls[]`（含 `args`、`description`、`risk_level`） | 渲染审批卡片，**本轮到此结束**，等用户决定后续跑 |
+| `approval_required` | `tool_calls[]`（含 `args`、`description`、`risk_level`、`permissions`、`permission_labels`） | 渲染审批卡片，**本轮到此结束**，等用户决定后续跑；「本次会话允许」把 `permissions` 写回会话权限 |
 | `fallback` | `from_model`、`to_model`、`reason` | 显示一行「已切换到备用模型」；不拼进正文 |
 | `compaction` | `strategy`、`dropped_messages`、`truncated_messages`、`used_tokens_before/after`、`limit_tokens` | 显示一行压缩提示（含省了多少） |
 | `usage` | `context_tokens`、`context_window`、`context_limit_tokens`、`output_tokens`、`cache_read_tokens`、`timing` | 更新上下文预算进度条与计时药丸 |
@@ -94,13 +96,13 @@ data: {"type":"done"}
 
 SSE 是单向的，服务端无状态，所以「等用户点批准」不能靠阻塞。pydantic-ai 的机制是：需要批准的调用不执行，本轮输出变成 `DeferredToolRequests`，服务端把它翻成 `approval_required` 事件（`app/services/approval_flow.py`），**本轮到此结束**。
 
-拦下调用的闸门是 `app/runtime/approval.py` 的 `ApprovalGate.before_tool_execute`：风险等级为 `safe_write` 与 `dangerous` 的调用在执行前抛 `ApprovalRequired`；`ctx.tool_call_approved is True` 时直接放行，不再看等级（否则「批准了仍被拦」会让续跑死循环）。事件里的 `description` 与 `risk_level` 由 `app/services/approval_flow.py` 向 `ToolCatalog` 查得——参数常常看不出后果。
+拦下调用的闸门是 `app/runtime/approval.py` 的 `ApprovalGate.before_tool_execute`：工具声明的权限没有全部授予、或风险等级为 `safe_write` / `dangerous` 且未被预授权时，执行前抛 `ApprovalRequired`；`ctx.tool_call_approved is True` 时直接放行，不再看等级（否则「批准了仍被拦」会让续跑死循环）。事件里的 `description`、`risk_level`、`permissions` 与 `permission_labels` 由 `app/services/approval_flow.py` 向 `ToolCatalog` 查得——参数常常看不出后果，而用户需要知道放开哪一项权限。
 
 客户端要做的：
 
-1. 把 `tool_calls` 原样持久化（含 `tool_call_id` 与 `args`）。
-2. 用户逐条决定。
-3. 续跑时把决定放进 `approvals`（`tool_call_id` → 布尔），并把带 `tool_calls` 的那条 assistant 消息原样回放。
+1. 把 `tool_calls` 原样持久化（含 `tool_call_id`、`args` 与 `permissions`）。
+2. 用户逐条决定；选择「本次会话允许」时，把该调用需要的权限并入会话权限（`frontend/src/lib/permissions.ts`）。
+3. 续跑时把决定放进 `approvals`（`tool_call_id` → 布尔），把更新后的 `permissions` 一起发回，并把带 `tool_calls` 的那条 assistant 消息原样回放。
 
 服务端怎么认这是续跑：**看历史形状**——`approvals` 非空且历史最后一条是 assistant。只看 `approvals` 不够：客户端可能顺手带上旧审批记录，那种应按普通请求处理。
 

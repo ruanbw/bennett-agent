@@ -552,6 +552,11 @@ export function applyEvent(sessionId: string, event: ChatEvent): boolean {
           argsText: call.args,
           description: call.description ?? '',
           riskLevel: call.risk_level ?? '',
+          // 老服务端没有这两个字段：按空数组处理，审批卡退化成「只能批准一次」。
+          permissions: Array.isArray(call.permissions) ? call.permissions.filter((p): p is string => typeof p === 'string') : [],
+          permissionLabels: Array.isArray(call.permission_labels)
+            ? call.permission_labels.filter((label): label is string => typeof label === 'string')
+            : [],
         })),
       };
       break;

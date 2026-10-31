@@ -17,6 +17,7 @@ from pydantic_ai.run import AgentRunResultEvent
 
 from app.config import settings
 from app.runtime.guard import collect_tool_failures
+from app.runtime.permissions import AgentRunDeps, resolve_granted_permissions
 from app.runtime.scopes import cache_scope, sandbox_scope
 from app.schemas.chat import ChatMessage, ContextAnchor
 from app.schemas.events import (
@@ -346,10 +347,12 @@ async def stream_chat_events(
     user_id: uuid.UUID | None = None,
     session_id: str | None = None,
     approvals: dict[str, bool] | None = None,
+    permissions: list[str] | None = None,
 ) -> AsyncGenerator[ChatEvent, None]:
     """产出本轮对话的聊天事件流，必以 `Done` 或 `StreamError` 收尾。
 
     `snapshot` 由调用方（`app/api/chat.py`）解析后传入：白名单、目标与窗口上限共用同一次读库结果。
+    `permissions` 是本会话已授予的权限键（`None` 表示客户端未指定，使用默认授权）。
     超预算以 `context_overflow` 收尾；上游瞬时失败只在还没向客户端产出任何事件时才重试。
     """
     seen_clarification_ids: set[str] = set()
@@ -473,6 +476,9 @@ async def stream_chat_events(
 
     try:
         agent = build_agent(model_name, reasoning_effort=reasoning_effort, target=target)
+        # 权限集合在每轮开始时解析一次：同一条流里的工具调用共享同一个视图，中途改配置
+        # 不会出现「前半轮按旧权限、后半轮按新权限」的漂移。
+        run_deps = AgentRunDeps(permissions=resolve_granted_permissions(permissions))
     except Exception:
         error_id = _new_error_id()
         logger.exception("模型初始化失败 (error_id=%s, model=%s)", error_id, model_name)
@@ -530,6 +536,8 @@ async def stream_chat_events(
                         instructions=digest_instructions,
                         # 续跑审批：`None` 表示本轮不是续跑。
                         deferred_tool_results=resume_results,
+                        # 本会话的授权集合：审批闸门按它决定跳过还是拦下工具调用。
+                        deps=run_deps,
                     ) as stream:
                         async for event in _iterate_with_total_budget(stream, remaining):
                             # 刷新必须在终态事件之前：它被下面 continue 掉，若排在最前面会漏报切换、
@@ -574,7 +582,10 @@ async def stream_chat_events(
                         emitted = True
                         # 单独记一个 outcome：否则「用户点了拒绝」会看起来像服务端出错。
                         outcome = "approval_required"
-                        yield build_approval_event(pending)
+                        yield build_approval_event(
+                            pending,
+                            granted_permissions=run_deps.permissions,
+                        )
                         break
 
                     # 用量在流结束这一刻才齐，放在正文之后、`Done` 之前。

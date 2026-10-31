@@ -212,7 +212,7 @@ stderr 阈值比 stdout 短：几万行 stderr 多是重复报错，对新信息
 
 ## reset 审批
 
-`sandbox_reset` 的风险等级是 `safe_write`，执行前需要用户批准——它会销毁现有机器，下次执行时重新创建一个干净的，已安装的依赖与工作目录里的文件全丢。
+`sandbox_reset` 的风险等级是 `safe_write`，并声明 `manage` 权限：默认执行前需要用户批准；用户在输入框授予「环境管理」后才会跳过审批。它会销毁现有机器，下次执行时重新创建一个干净的，已安装的依赖与工作目录里的文件全丢。
 
 流程（`app/tools/sandbox.py:sandbox_reset` → `app/services/sandbox/lease_service.py`）：
 
