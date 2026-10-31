@@ -28,6 +28,7 @@ import {
   FoldVertical,
   KeyRound,
   Laptop,
+  ListEnd,
   ListTree,
   Moon,
   Rows3,
@@ -44,6 +45,7 @@ import { PasswordChangeForm } from './PasswordChangeForm';
 import { useTheme, type ThemePreference } from '../context/theme-context';
 import { useDetailLevel } from '../context/detail-level-context';
 import { usePerformanceUsageState } from '../context/performance-usage-context';
+import { useMessageQueuePref } from '../context/message-queue-pref-context';
 import { useIsMobileViewport } from '../hooks/use-media-query';
 import { ROLE_LABELS } from '../lib/auth';
 import {
@@ -53,6 +55,10 @@ import {
   type DetailLevel,
 } from '../lib/detail-level';
 import { PERFORMANCE_USAGE_OPTIONS, type PerformanceUsage } from '../lib/performance-usage';
+import {
+  MESSAGE_QUEUE_PREF_OPTIONS,
+  type MessageQueuePreference,
+} from '../lib/message-queue-pref';
 import {
   DEFAULT_SETTINGS_SECTION,
   SETTINGS_SECTIONS,
@@ -323,6 +329,17 @@ const PERFORMANCE_USAGE_ICONS: Record<PerformanceUsage, LucideIcon> = {
   detailed: Activity,
 };
 
+/**
+ * 「生成中发送」两档的图标。
+ *
+ * 与「性能与用量」同理，图标要能一眼分开：禁止档用一个列表截断的形状（生成期间
+ * 不再接新消息），排队档用列表末尾追加的形状（新消息排在队尾等本轮结束）。
+ */
+const MESSAGE_QUEUE_PREF_ICONS: Record<MessageQueuePreference, LucideIcon> = {
+  block: Rows3,
+  insert: ListEnd,
+};
+
 const DETAIL_LEVEL_CARDS: ReadonlyArray<OptionCard<DetailLevel>> = DETAIL_LEVEL_OPTIONS.map(
   ({ value, label, description }) => ({ value, label, description, Icon: DETAIL_LEVEL_ICONS[value] })
 );
@@ -341,6 +358,14 @@ const PERFORMANCE_USAGE_CARDS: ReadonlyArray<OptionCard<PerformanceUsage>> =
     label,
     description,
     Icon: PERFORMANCE_USAGE_ICONS[value],
+  }));
+
+const MESSAGE_QUEUE_PREF_CARDS: ReadonlyArray<OptionCard<MessageQueuePreference>> =
+  MESSAGE_QUEUE_PREF_OPTIONS.map(({ value, label, description }) => ({
+    value,
+    label,
+    description,
+    Icon: MESSAGE_QUEUE_PREF_ICONS[value],
   }));
 
 export interface AccountSectionProps {
@@ -470,6 +495,7 @@ export function AppearanceSection() {
 export function ConversationSection() {
   const { level, setLevel, collapseTiming, setCollapseTiming } = useDetailLevel();
   const performanceUsage = usePerformanceUsageState();
+  const messageQueuePref = useMessageQueuePref();
 
   return (
     <div className="divide-y divide-border/60">
@@ -512,6 +538,21 @@ export function ConversationSection() {
           options={PERFORMANCE_USAGE_CARDS}
           value={performanceUsage.mode}
           onChange={performanceUsage.setMode}
+        />
+      </SettingBlock>
+
+      {/* 生成中发送：决定回复生成期间输入框的行为——排队还是锁定。
+          与「工作步骤展示」等三组正交：那三组改「怎么显示」，这一组改「发送怎么办」。 */}
+      <SettingBlock
+        Icon={ListEnd}
+        title="生成中发送"
+        description="回复正在生成时再发消息怎么办：插入排队会在输入框上方列出待发消息，可改可删，也能让它跳过等待立即发送。"
+      >
+        <PreferenceGroup
+          ariaLabel="生成中发送"
+          options={MESSAGE_QUEUE_PREF_CARDS}
+          value={messageQueuePref.mode}
+          onChange={messageQueuePref.setMode}
         />
       </SettingBlock>
     </div>

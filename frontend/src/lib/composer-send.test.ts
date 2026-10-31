@@ -34,4 +34,37 @@ describe('resolveSendGate', () => {
       tooltip: '本会话上下文已满，请新建会话',
     });
   });
+
+  it('插队模式下生成中的发送不禁用，提示改成排队口径', () => {
+    expect(gate({ queueInsert: true, isRunning: true })).toEqual({
+      disabled: false,
+      tooltip: '发送并排入队列，本轮结束后依次发出',
+    });
+  });
+
+  it('插队模式空闲时的发送就是普通发送：文案不变', () => {
+    expect(gate({ queueInsert: true, isRunning: false })).toEqual({
+      disabled: false,
+      tooltip: '发送消息',
+    });
+  });
+
+  it('插队模式的硬闸门不变：上下文锁、附件、空输入仍然禁用', () => {
+    expect(gate({ queueInsert: true, isRunning: true, isEmpty: true })).toEqual({
+      disabled: true,
+      tooltip: '输入内容后发送',
+    });
+    expect(gate({ queueInsert: true, isRunning: true, hasAttachments: true })).toEqual({
+      disabled: true,
+      tooltip: '本项目暂未开放附件上传，请先移除',
+    });
+    expect(gate({ queueInsert: true, isRunning: true, contextLocked: true })).toEqual({
+      disabled: true,
+      tooltip: '本会话上下文已满，请新建会话',
+    });
+  });
+
+  it('普通模式下生成中不受 sendGate 影响（runtime 另有判定），文案保持原样', () => {
+    expect(gate({ isRunning: true })).toEqual({ disabled: false, tooltip: '发送消息' });
+  });
 });

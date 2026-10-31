@@ -66,6 +66,7 @@ import { PermissionSelector } from "@/components/PermissionSelector";
 import { TurnAnnouncement, TurnStatusRow } from "@/components/assistant-ui/elements/turn-status-row";
 import { ApprovalCard } from "@/components/assistant-ui/elements/approval-card";
 import { ClarificationInputPopup } from "@/components/assistant-ui/elements/clarification-input-popup";
+import { MessageQueueBar } from "@/components/assistant-ui/elements/message-queue-bar";
 import { useApproval } from "@/context/approval-context";
 import { useClarification } from "@/context/clarification-context";
 import { useChatSessionId } from "@/context/chat-session";
@@ -73,6 +74,7 @@ import { getDraftStorage, readDraft, shouldClearDraft, writeDraft } from "@/lib/
 import { attachmentUnsupportedMessage } from "@/lib/attachment-labels";
 import { contextExhausted } from "@/lib/chat-message";
 import { resolveSendGate } from "@/lib/composer-send";
+import { useMessageQueuePref } from "@/context/message-queue-pref-context";
 import { formatMessageTime, formatMessageTimeFull } from "@/lib/message-time";
 import { readUsageTiming } from "@/lib/usage-timing";
 import { formatRunDurationText, type TurnEndReason } from "@/lib/step-process";
@@ -445,6 +447,10 @@ export const Thread: FC<ThreadProps> = ({
             )}
             <ThreadScrollToBottom onClick={handleScrollToBottom} />
 
+            {/* 插入排队的「待发消息」叠层：与审批/澄清卡片同一站位（输入框正上方）。
+                三者不会互相冲突——排队是用户主动攒的消息，审批/澄清是模型在等输入。 */}
+            <MessageQueueBar />
+
             {/* 工具审批卡片：位置与澄清浮层一致（输入框正上方），因为它同样在等用户输入。
                 两者不会同时出现——澄清是模型问问题，审批是模型要执行写操作，一轮只有一种。 */}
             {approval.pending && (
@@ -543,6 +549,10 @@ const Composer: FC<{
   onCreateSession,
 }) => {
   const selectedModel = models.find((m) => m.id === currentModel);
+  // 「生成中发送」偏好：插队档下生成期间发送按钮保持可用（消息进队列），
+  // 提示文案也要换成排队口径。
+  const { mode: queueMode } = useMessageQueuePref();
+  const queueInsert = queueMode === "insert";
   // 草稿按会话存：切走再回来、或刷新页面，正在组织的那句话都还在。
   // 草稿是增强手段——取不到 storage 时（隐私模式）读为空、写静默失败，不打扰用户。
   const sessionId = useChatSessionId();
@@ -588,12 +598,16 @@ const Composer: FC<{
   // 两个禁用理由共存时以上下文为准：附件可以移除，换模型/新会话不能省
   const blocked = contextLocked || blockedByAttachments;
   const inputPlaceholder = contextLocked ? "本会话上下文已满，请新建会话继续" : "问点什么吧...";
+  // 生成中：插队档下发送可用（入队），否则按 runtime 能力走旧有禁用逻辑。
+  const isRunning = useAuiState((s) => s.thread.isRunning);
   // 空输入也要禁用：ComposerPrimitive.Send 内部会拒绝发送，但 asChild 会把按钮
   // 自身的 disabled 保留下来，不显式传就渲染成「看起来能点、点了没反应」。
   const sendGate = resolveSendGate({
     contextLocked,
     hasAttachments: blockedByAttachments,
     isEmpty: composerEmpty,
+    queueInsert,
+    isRunning,
   });
   const { disabled: sendDisabled, tooltip: sendTooltip } = sendGate;
 
@@ -708,7 +722,9 @@ const Composer: FC<{
             />
           </div>
 
-          {/* 发送/停止合并为同一个位置：生成中显示停止，空闲时显示发送 */}
+          {/* 发送/停止：生成中默认显示停止；插队模式下生成中**同时**保留发送——
+              发送会把消息排进队列（capabilities.queue 打开了 composer 的入队路径），
+              停止按钮负责中止本轮。两个按钮并排，语义互斥（停止 vs 继续攒问题）。 */}
           <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>
@@ -731,7 +747,7 @@ const Composer: FC<{
               </ComposerPrimitive.Cancel>
             </AuiIf>
 
-            <AuiIf condition={(s) => !s.thread.isRunning}>
+            <AuiIf condition={(s) => !s.thread.isRunning || queueMode === "insert"}>
               <ComposerPrimitive.Send asChild>
                 <TooltipIconButton
                   tooltip={sendTooltip}
