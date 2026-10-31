@@ -89,6 +89,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 共享依赖版本一致性
+        # job 的默认 working-directory 在各自前端包里;脚本自己用 __file__
+        # 定位仓库根,所以按仓库根的相对路径跑即可
+        run: python3 scripts/check_frontend_deps.py
+
       - name: Lint
         run: npm run lint
 
@@ -121,6 +126,11 @@ jobs:
 
       - name: 安装依赖
         run: npm ci
+
+      - name: 共享依赖版本一致性
+        # job 的默认 working-directory 在各自前端包里;脚本自己用 __file__
+        # 定位仓库根,所以按仓库根的相对路径跑即可
+        run: python3 scripts/check_frontend_deps.py
 
       - name: Lint
         run: npm run lint
