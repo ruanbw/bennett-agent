@@ -10,6 +10,12 @@
  * 会让用户以为部署出了问题、去催运维。真实情况是这个产品本身还没开放附件上传。
  * 文案只陈述「暂未开放」（与 `lib/attachment-labels.ts` 的
  * `attachmentUnsupportedMessage` 保持一致），不暗示任何一方坏了。
+ *
+ * ## 插队模式
+ *
+ * `queueInsert`（「生成中发送」= 插入排队）改变**生成期间**的发送语义：不再禁用，
+ * 消息进队列等本轮结束。这只影响提示文案——能否真的入队由 runtime 的 queue 能力
+ * 判定；空闲时的发送（以及上下文锁、附件、空输入三个硬闸门）与普通模式完全一致。
  */
 
 export interface SendGateInput {
@@ -19,6 +25,10 @@ export interface SendGateInput {
   hasAttachments: boolean;
   /** 输入框没有有效内容（只有空白也算空）。 */
   isEmpty: boolean;
+  /** 插队模式：生成期间的发送会进队列（只改文案，不加禁用）。 */
+  queueInsert?: boolean;
+  /** 本轮正在生成（配合 `queueInsert` 决定文案口径）。 */
+  isRunning?: boolean;
 }
 
 export interface SendGate {
@@ -27,10 +37,17 @@ export interface SendGate {
   tooltip: string;
 }
 
-export function resolveSendGate({ contextLocked, hasAttachments, isEmpty }: SendGateInput): SendGate {
+export function resolveSendGate({
+  contextLocked,
+  hasAttachments,
+  isEmpty,
+  queueInsert = false,
+  isRunning = false,
+}: SendGateInput): SendGate {
   // 先解释「为什么不能继续」，再解释临时性原因；附件可以移除，上下文锁不能。
   if (contextLocked) return { disabled: true, tooltip: '本会话上下文已满，请新建会话' };
   if (hasAttachments) return { disabled: true, tooltip: '本项目暂未开放附件上传，请先移除' };
   if (isEmpty) return { disabled: true, tooltip: '输入内容后发送' };
+  if (queueInsert && isRunning) return { disabled: false, tooltip: '发送并排入队列，本轮结束后依次发出' };
   return { disabled: false, tooltip: '发送消息' };
 }

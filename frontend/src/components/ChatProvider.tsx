@@ -10,9 +10,11 @@ import {
 import type { PropsWithChildren, ReactNode } from 'react';
 import {
   AssistantRuntimeProvider,
+  createMessageQueue,
   MessageNotSentError,
   useExternalStoreRuntime,
 } from '@assistant-ui/react';
+import type { MessageQueueController } from '@assistant-ui/react';
 import { XIcon } from 'lucide-react';
 import { db, deleteMessages } from '../db';
 import {
@@ -37,6 +39,7 @@ import {
 import { apiFetch } from '../lib/api';
 import { countSessionMessages, loadSessionMessages } from '../lib/chat-persistence';
 import { FALLBACK_TITLE_CHARS, newMessageId } from '../lib/constants';
+import { notify } from '../lib/toast';
 import {
   FALLBACK_DEFAULT_PERMISSIONS,
   FALLBACK_PERMISSION_CATALOG,
@@ -49,6 +52,7 @@ import { useSandboxHeartbeat } from '../hooks/use-sandbox-heartbeat';
 import { ApprovalProvider } from '../context/approval-context';
 import { ClarificationProvider } from '../context/clarification-context';
 import { ChatSessionContext, type ChatSessionContextValue } from '../context/chat-session';
+import { useMessageQueuePref } from '../context/message-queue-pref-context';
 import type {
   ApprovedToolCallRecord,
   PermissionOption,
@@ -73,6 +77,18 @@ export interface ChatProviderProps {
  * 这里按实际用到的契约声明局部结构类型，调用处结构赋值即可通过。
  */
 interface AppendMessageInput {
+  content: ReadonlyArray<{ type: string; text?: string }>;
+}
+
+/**
+ * 队列派发进 `onNew` 的消息形状。
+ *
+ * `useExternalStoreRuntime` 的 `onNew` 实参是 assistant-ui 的 `AppendMessage`（比我们
+ * 这里声明的字段多得多：parentId / runConfig / metadata…），但发送路径上真正被
+ * `onNew` 读的只有 `content`——`ChatProvider.onNew` 只取 text 部件拼正文。按实际
+ * 消费的契约声明，调用处结构与实现解耦。
+ */
+interface QueueDispatchMessage {
   content: ReadonlyArray<{ type: string; text?: string }>;
 }
 
@@ -130,8 +146,123 @@ export function ChatProvider({
     useCallback(() => getRunVersion(currentSessionId), [currentSessionId])
   );
 
+  // 「生成中发送」偏好：插入排队时才装配队列适配器；block 档 queue 为 undefined，
+  // assistant-ui 按旧有行为禁用生成期间的发送。
+  const queueMode = useMessageQueuePref().mode;
+  const queueEnabled = queueMode === 'insert';
+
   const run = getRun(currentSessionId);
   const isRunning = Boolean(run && !run.finished);
+
+  // ---------------------------------------------------------------------
+  // 插入排队（「生成中发送」= 插入排队 时）
+  // ---------------------------------------------------------------------
+  // driver.run 里要调用的「发送核心」此时还没有定义（它在下面几百行处），所以经
+  // dispatchCoreRef 间接引用。ref 的写入全部发生在 effect 里（见队列组装 effect）。
+  const sendMessageCoreRef = useRef<(text: string) => Promise<void>>(async () => {});
+
+  // 队列控制器：useMemo 按开关创建（queueEnabled=false 时为 null——runtime 收到
+  // undefined 的 queue 就按「无队列能力」处理，生成期间照旧锁发送）。驱动闭包引用
+  // sendMessageCoreRef：ref 对象跨渲染恒定，派发时读到的 .current 永远是最近一次
+  // effect 挂上的发送核心。
+  const queueController = useMemo(() => {
+    if (!queueEnabled) return null;
+    return createMessageQueue({
+      /**
+       * 队列头部的消息离开队列：走与直接发送完全相同的「落库 → 乐观上屏 → 起跑」
+       * 路径（发送核心），只是不带「已有回复正在生成」的抢占检查——驱动只在本轮
+       * 结束后被调用，槽位理论上必然空闲。
+       *
+       * 发送核心是 async：失败时**必须**上报 notifyIdle。队列的推进位由 driver.run
+       * 占住（占位到下一次 notifyIdle），而正常路径的 notifyIdle 来自 run 收尾的
+       * isRunning 翻转——core 失败意味着根本不会有 run 收尾，不上报这条 idle 队列
+       * 就永久卡住（后面的消息谁都放不出来）。失败的消息本身不还原回队列：发送核心
+       * 内部已有完整的回滚与可见提示（与直接发送同一条路径），自动重发只会造成
+       * 重复提问。
+       */
+      run: (message) => {
+        const text = message.content
+          .filter((c) => c.type === 'text')
+          .map((c) => c.text)
+          .join('\n');
+        if (!text.trim()) return;
+
+        const queue = queueController;
+        sendMessageCoreRef.current(text).catch((err: unknown) => {
+          console.warn('队列消息派发失败:', err);
+          // 本轮没有 run 收尾，手动交回推进位，放行下一条等待中的消息
+          queue?.notifyIdle();
+        });
+      },
+      // 不提供 cancel：「立即发送」不打断正在生成的回复——被打断的半截回复既浪费
+      // 已产出的 token，也会让用户以为回答丢了。跳队只改变**下一条**是谁。
+    });
+    // 依赖只有开关：队列在「插队 ↔ 阻塞」切换时重建，清掉等待中的消息——切回
+    // 阻塞档时用户显然不想让它们继续排队（列表也不可见了）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueEnabled]);
+
+  // adapter 的引用必须稳定：useExternalStoreRuntime 对 adapter 做字段级比较，
+  // 每次渲染新建对象会让 runtime 以为队列被换掉（重新挂 dispatch transform）。
+  // enqueue/steer 包一层补齐 AppendMessage 的必填字段：composer.send 的直连路径
+  // 由 assistant-ui 的 composerQueue 包装补齐过，这里兜住其余调用入口。
+  const queueAdapter = useMemo(
+    () =>
+      queueController
+        ? {
+            ...queueController.adapter,
+            enqueue: (message: QueueDispatchMessage) =>
+              queueController.adapter.enqueue({
+                ...message,
+                parentId: null,
+                sourceId: null,
+                role: 'user',
+                attachments: [],
+                createdAt: new Date(),
+                metadata: { custom: {} },
+                runConfig: {},
+              } as Parameters<MessageQueueController['adapter']['enqueue']>[0]),
+            steer: (message: QueueDispatchMessage) =>
+              queueController.adapter.steer({
+                ...message,
+                parentId: null,
+                sourceId: null,
+                role: 'user',
+                attachments: [],
+                createdAt: new Date(),
+                metadata: { custom: {} },
+                runConfig: {},
+              } as Parameters<MessageQueueController['adapter']['steer']>[0]),
+          }
+        : null,
+    [queueController]
+  );
+
+  // 用户点「停止」时暂停队列推进：被取消那一轮的收尾不该顺手把队头放出来——
+  // 「停止」的语义是「别再生成」，不是「接着发下一条」。下一条消息在用户再次发送
+  // （enqueue 解除暂停）时出现，与 assistant-ui 内建队列的取消语义一致。
+  const onCancelRunRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    onCancelRunRef.current = queueController && (() => queueController.notifyCancelled());
+    return () => {
+      onCancelRunRef.current = null;
+    };
+  }, [queueController]);
+
+  // 会话切换（ChatProvider 按 sessionId 重挂载）即卸载：队列是会话私有的短期意图
+  //（「本轮结束后发」），随组件一起消失。不静默丢弃——等待中的消息没发出去也没进
+  // 历史，给一条可见提示；草稿不受影响（排队编辑时放回输入框的部分本来就没落草稿）。
+  useEffect(() => {
+    const queue = queueController;
+    if (!queue) return undefined;
+    return () => {
+      const pending = queue.adapter.items.length + queue.adapter.steerItems.length;
+      if (pending > 0) {
+        queue.clear();
+        notify('info', `已取消 ${pending} 条排队消息（已切换会话）`);
+      }
+    };
+  }, [queueController]);
 
   // 会话一打开就给它名下的机器续命：服务端只按心跳与工具调用判定「这台机器还在被用」，
   // 没有心跳的机器 10 分钟后回收。放在 ChatProvider 而不是 ChatContainer：会话 id 只有
@@ -224,6 +355,25 @@ export function ChatProvider({
   // 用户白点一次发送，并给出去处——见 lib/chat-message.ts:contextExhausted。
   const contextLocked = contextExhausted(messages, currentModel);
 
+  // 队列开始/结束推进。run 的生死就是 busy 边沿：起跑 notifyBusy（此后的发送进
+  // 队列等待），收尾 notifyIdle（放行队头）。空闲时（没有 run）enqueue 会立即
+  // 派发——所以「空闲时的发送」与旧路径等价，队列只是不再拦它。
+  //
+  // 模型在等用户输入（待答提问 / 待审批）时**不放行**：那个卡片需要用户先决定，
+  // 下一轮的答案取决于这一轮怎么续。放行会让排队消息抢在回答前面，也把用户正在
+  // 看的提问/审批卡顶走。等卡片处理完（推导状态消失），这个 effect 再跑一次 idle。
+  // 上下文已满同理：放了也只会被服务端拒掉，消息反而从队列里消失。
+  useEffect(() => {
+    if (!queueController) return undefined;
+    if (isRunning) {
+      queueController.notifyBusy();
+      return undefined;
+    }
+    if (activeClarification || activeApproval || contextLocked) return undefined;
+    queueController.notifyIdle();
+    return undefined;
+  }, [isRunning, activeClarification, activeApproval, contextLocked, currentSessionId, queueController]);
+
   const dismissPendingClarification = useCallback(() => {
     if (!activeClarification) return;
     dismissClarification(currentSessionId, activeClarification.messageId);
@@ -294,26 +444,15 @@ export function ChatProvider({
   const dismissNotice = useCallback(() => setNotice(null), []);
 
   /**
-   * 发送新消息。
+   * 发送核心：把一段用户文本落库、乐观上屏并起跑。**不做**「已有回复正在生成」的
+   * 抢占检查（那属于发送门，见 `onNew`），调用方各按自己的时机判定。
    *
-   * 顺序是刻意的：落库 → 乐观上屏 → 启动 run，这三步都不等任何远端请求；标题生成放到
-   * 最后且不 await。此前标题请求压在中间，首条消息既不显示也没有「生成中」，首 token
-   * 还要多等一整次标题调用的时间；更糟的是那段 await 期间 `isRunActive` 仍是 false，
-   * 第二个发送者会抢走 run 槽位，让第一条消息留下永远没有回复的空白气泡。
+   * 单独抽出来的原因：队列派发（`driver.run`）与直接发送（`onNew`）要走**完全相同**
+   * 的路径——同一个事务写两条记录、同一次乐观上屏、同一个标题生成入口。复制一份
+   * 迟早漂移（比如有人只在其中一条路径上修回滚）。
    */
-  const onNew = useCallback(
-    async (message: AppendMessageInput) => {
-      if (!currentSessionId) return;
-      // 已有生成在跑：抛给 composer 恢复草稿，而不是静默丢掉用户刚输入的内容
-      if (isRunActive(currentSessionId)) throw new MessageNotSentError('已有回复正在生成');
-
-      const userText = message.content
-        .filter((c) => c.type === 'text')
-        .map((c) => c.text)
-        .join('\n');
-
-      if (!userText.trim()) return;
-
+  const sendUserTextCore = useCallback(
+    async (sessionId: string, userText: string): Promise<void> => {
       const userMsgId = newMessageId();
       const assistantMsgId = newMessageId();
       const userCreatedAt = nextTimestamp();
@@ -335,11 +474,11 @@ export function ChatProvider({
         // 首轮判定与写入放进同一个事务：不留「数完还没写」的窗口，也不多一次往返
         let priorCount = 0;
         await db.transaction('rw', db.messages, async () => {
-          priorCount = await countSessionMessages(currentSessionId);
+          priorCount = await countSessionMessages(sessionId);
 
           await db.messages.add({
             id: userMsgId,
-            sessionId: currentSessionId,
+            sessionId,
             role: 'user',
             content: userText,
             thinking: null,
@@ -348,7 +487,7 @@ export function ChatProvider({
 
           await db.messages.add({
             id: assistantMsgId,
-            sessionId: currentSessionId,
+            sessionId,
             role: 'assistant',
             content: '',
             thinking: '',
@@ -372,14 +511,14 @@ export function ChatProvider({
         ]);
 
         const startedRun = startChatRun({
-          sessionId: currentSessionId,
+          sessionId,
           assistantMsgId,
           model: currentModel,
           reasoningEffort: currentReasoningEffort,
           // 发送时现读：用户可能刚在输入框改完权限，不依赖任何异步 state 的同步时机。
           permissions: readSessionPermissions(
             sessionPermissionStorage(),
-            currentSessionId,
+            sessionId,
             permissionOptions,
             permissionPresetOptions,
             permissionDefaults,
@@ -400,7 +539,7 @@ export function ChatProvider({
 
         if (priorCount === 0) {
           // 标题只是装饰：与消息显示、生成完全解耦，失败也不该打扰用户
-          void nameSessionFromFirstMessage(currentSessionId, userText, currentModel).catch(
+          void nameSessionFromFirstMessage(sessionId, userText, currentModel).catch(
             (err: unknown) => console.warn('自动生成会话标题失败:', err)
           );
         }
@@ -413,7 +552,6 @@ export function ChatProvider({
       }
     },
     [
-      currentSessionId,
       currentModel,
       currentReasoningEffort,
       nextTimestamp,
@@ -424,6 +562,53 @@ export function ChatProvider({
       permissionPresetOptions,
       permissionDefaults,
     ]
+  );
+
+  // 队列驱动引用的发送核心：ref 保证 createMessageQueue 只建一次的前提下，
+  // 派发时拿到最新的回调（模型/权限等变了也能反映在下一次派发上）。effect 里
+  // 同步赋值：effect 在 commit 后立即跑，早于任何一次用户交互触发的派发。
+  useEffect(() => {
+    sendMessageCoreRef.current = (text) => {
+      if (!currentSessionId) return Promise.resolve();
+      return sendUserTextCore(currentSessionId, text);
+    };
+    return () => {
+      sendMessageCoreRef.current = async () => {};
+    };
+  }, [currentSessionId, sendUserTextCore]);
+
+  /**
+   * 发送新消息。
+   *
+   * 顺序是刻意的：落库 → 乐观上屏 → 启动 run，这三步都不等任何远端请求；标题生成放到
+   * 最后且不 await。此前标题请求压在中间，首条消息既不显示也没有「生成中」，首 token
+   * 还要多等一整次标题调用的时间；更糟的是那段 await 期间 `isRunActive` 仍是 false，
+   * 第二个发送者会抢走 run 槽位，让第一条消息留下永远没有回复的空白气泡。
+   */
+  const onNew = useCallback(
+    async (message: AppendMessageInput) => {
+      if (!currentSessionId) return;
+      // 已有生成在跑：抛给 composer 恢复草稿，而不是静默丢掉用户刚输入的内容。
+      // 插入排队模式下这里不拦——队列适配器（capabilities.queue）会让 composer 把
+      // 生成期间的发送直接送进队列，走不到这条路径。
+      if (!queueEnabled && isRunActive(currentSessionId))
+        throw new MessageNotSentError('已有回复正在生成');
+
+      const userText = message.content
+        .filter((c) => c.type === 'text')
+        .map((c) => c.text)
+        .join('\n');
+
+      if (!userText.trim()) return;
+
+      // 起跑前最后一次确认：队列模式下空闲发送与队列派发共用这条路径，槽位若在
+      // await 落库期间被抢走，靠 startChatRun 的返回值判定并回滚。
+      if (queueEnabled && isRunActive(currentSessionId))
+        throw new MessageNotSentError('已有回复正在生成');
+
+      await sendUserTextCore(currentSessionId, userText);
+    },
+    [currentSessionId, queueEnabled, sendUserTextCore]
   );
 
   /**
@@ -516,7 +701,12 @@ export function ChatProvider({
 
   // adapter 声明 onCancel 返回 Promise<void>；实现里是同步 abort，包成 async 只是满足返回类型
   const onCancel = useCallback(async () => {
-    if (currentSessionId) abortChatRun(currentSessionId);
+    if (currentSessionId) {
+      // 先暂停队列推进再中止：中止那一轮的收尾（finishRun → notifyIdle）不应把队头
+      // 放出来，否则「停止生成」会变成「跳到下一条排队消息」。
+      onCancelRunRef.current?.();
+      abortChatRun(currentSessionId);
+    }
   }, [currentSessionId]);
 
   /**
@@ -547,6 +737,9 @@ export function ChatProvider({
     onNew,
     onReload,
     onCancel,
+    // 插入排队时把适配器交给 runtime：capabilities.queue 随之打开——生成期间发送
+    // 按钮可用、Enter 直接入队；派发（driver.run）由上面的 busy/idle 边沿驱动。
+    queue: queueAdapter ?? undefined,
     convertMessage,
   });
 

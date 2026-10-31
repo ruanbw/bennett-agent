@@ -185,12 +185,24 @@ describe('对话显示分区', () => {
   });
 
   it('性能与用量两档独立成组，并说明不影响记账与上下文圆环', () => {
-    const section = group(renderSection(), '性能与用量');
+    const section = group(renderSection(), '性能与用量', '生成中发送');
 
     expect(section).toContain('简洁');
     expect(section).toContain('详细');
     expect(section.match(/aria-checked="true"/g)).toHaveLength(1);
     expect(renderSection()).toContain('上下文占用环始终显示');
+  });
+
+  it('生成中发送两档独立成组，默认「禁止」（维持既有行为）', () => {
+    const section = group(renderSection(), '生成中发送');
+
+    expect(section).toContain('禁止');
+    expect(section).toContain('插入排队');
+    expect(section.match(/aria-checked="true"/g)).toHaveLength(1);
+    expect(section.match(/aria-checked="false"/g)).toHaveLength(1);
+    // 选中的是「禁止」：aria-checked 出现在「禁止」按钮上、不在「插入排队」上
+    const blockRadio = section.slice(0, section.indexOf('>插入排队'));
+    expect(blockRadio).toContain('aria-checked="true"');
   });
 
   it('四档只改默认展开程度，不是能力开关', () => {

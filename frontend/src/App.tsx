@@ -11,6 +11,7 @@ import { Toaster } from './components/Toaster';
 import { ThemeProvider } from './context/ThemeContext';
 import { DetailLevelProvider } from './context/DetailLevelContext';
 import { PerformanceUsageProvider } from './context/PerformanceUsageContext';
+import { MessageQueuePrefProvider } from './context/MessageQueuePrefContext';
 import { useAuth } from './hooks/use-auth';
 import { useCapabilities } from './hooks/use-capabilities';
 import { useChatSessions } from './hooks/use-chat-sessions';
@@ -538,6 +539,9 @@ export function App() {
       {/* 「性能与用量」偏好（统计药丸的详细程度）：与对话显示正交，
           同样要覆盖设置页与聊天界面两侧，所以挂在这一层。 */}
       <PerformanceUsageProvider>
+      {/* 「生成中发送」偏好（排队 / 阻塞）：消费方是 ChatProvider 的队列装配与
+          输入框发送门，同样横跨设置页与聊天界面，挂在同一层。 */}
+      <MessageQueuePrefProvider>
       {/* 动作反馈（导出完成 / 新建失败）：持久状态仍用页面内联条，不用 toast */}
       <Toaster />
       {status === 'loading' ? (
@@ -560,6 +564,7 @@ export function App() {
           onLogout={logout}
         />
       )}
+      </MessageQueuePrefProvider>
       </PerformanceUsageProvider>
       </DetailLevelProvider>
     </ThemeProvider>
