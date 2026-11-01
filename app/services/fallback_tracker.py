@@ -47,4 +47,4 @@ def record_fallback(primary_model: str, fallback_model: str, reason: str = "") -
     if occurrences is not None:
         occurrences.append(FallbackOccurrence(primary_model, fallback_model, reason))
     # 标签值来自配置里的模型 id（有限集合），不会有基数问题
-    metrics.increment(FALLBACKS_TOTAL, **{"from": primary_model, "to": fallback_model})
+    metrics.increment(FALLBACKS_TOTAL, **{"from": primary_model, "to": fallback_model})  # type: ignore[arg-type]  # ** 解包把 str 标签宽化成 str|float，运行时恒为 str 标签

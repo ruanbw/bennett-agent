@@ -51,9 +51,10 @@ def main() -> None:
                 "--reload 是开发期功能，禁止在 APP_ENV=production 下使用；"
                 "生产环境改配置请走重启/重建镜像，并接受在飞请求会被中断。"
             )
-        return _run_dev_reload(host=args.host, port=args.port)
+        _run_dev_reload(host=args.host, port=args.port)
+        return
 
-    return asyncio.run(_run_all(host=args.host, port=args.port))
+    asyncio.run(_run_all(host=args.host, port=args.port))
 
 
 async def _run_all(host: str, port: int) -> None:

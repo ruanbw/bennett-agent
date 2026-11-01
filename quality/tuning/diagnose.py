@@ -68,7 +68,7 @@ def cluster_failures(
     只统计 `passed=False` 的样本：通过的样本里也可能有低分 rubric 项（阈值内的抖动），
     把那些算进来会让「失败聚簇」变成「分数分布统计」，调优会去修没坏的东西。
     """
-    categories = {summary.task_id: summary.category for summary in report.tasks}
+    categories: dict[str, Dimension] = {summary.task_id: summary.category for summary in report.tasks}
     failed_items_by_task = {summary.task_id: set(summary.failed_items) for summary in report.tasks}
     buckets: dict[str, _Bucket] = {}
 

@@ -6,7 +6,8 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sse_starlette.sse import EventSourceResponse, ServerSentEvent
+from sse_starlette.event import ServerSentEvent
+from sse_starlette.sse import EventSourceResponse
 
 from app.api.rate_limit import inflight_stream_slot, make_limiter, too_many
 from app.config import settings

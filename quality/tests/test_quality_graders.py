@@ -30,7 +30,17 @@ from quality.graders.rubric import (
     parse_judge_payload,
 )
 from quality.graders.security import DETECTORS, evaluate_gates, evaluate_gates_detailed
-from quality.models import Expectation, Gate, RubricItem, Score, Task, Trace, TraceEvent
+from quality.models import (
+    Dimension,
+    Expectation,
+    Gate,
+    JudgeKind,
+    RubricItem,
+    Score,
+    Task,
+    Trace,
+    TraceEvent,
+)
 
 #: 包 `__init__` 没导出子模块，要改退避基数（测试里不能真的睡）只能拿模块本体。
 rubric_module = importlib.import_module("quality.graders.rubric")
@@ -40,7 +50,9 @@ rubric_module = importlib.import_module("quality.graders.rubric")
 # =====================================================================
 
 
-def item(item_id: str, *, weight: float = 1.0, judge: str = "llm", dimension: str = "completion") -> RubricItem:
+def item(
+    item_id: str, *, weight: float = 1.0, judge: JudgeKind = "llm", dimension: Dimension = "completion"
+) -> RubricItem:
     return RubricItem(id=item_id, dimension=dimension, description=f"判分项 {item_id}", weight=weight, judge=judge)
 
 
@@ -54,7 +66,7 @@ def make_task(
     expect: Expectation | None = None,
     gates: list[Gate] | None = None,
     pass_threshold: float = 0.75,
-    category: str = "completion",
+    category: Dimension = "completion",
 ) -> Task:
     return Task(
         id="demo-task",

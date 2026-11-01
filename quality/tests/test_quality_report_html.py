@@ -9,14 +9,15 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from quality.models import RunReport, SampleVerdict, Score, TaskSummary, Trace, TraceEvent
 from quality.report.html import render
 
 
-def _summary(**overrides: object) -> TaskSummary:
+def _summary(**overrides: Any) -> TaskSummary:
     """一条任务的汇总。用例只覆盖自己关心的字段，其余取默认值。"""
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "task_id": "time-today",
         "category": "completion",
         "samples": 2,
@@ -29,7 +30,7 @@ def _summary(**overrides: object) -> TaskSummary:
     return TaskSummary(**payload)
 
 
-def _verdict(**overrides: object) -> SampleVerdict:
+def _verdict(**overrides: Any) -> SampleVerdict:
     """一次样本的结论 + 轨迹。轨迹覆盖 message/tool_call/tool_result 三种事件。"""
     trace = Trace(
         task_id="time-today",
@@ -45,7 +46,7 @@ def _verdict(**overrides: object) -> SampleVerdict:
         output_tokens=210,
         cost_usd=0.0021,
     )
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "task_id": "time-today",
         "sample": 0,
         "passed": True,
@@ -57,8 +58,8 @@ def _verdict(**overrides: object) -> SampleVerdict:
     return SampleVerdict(**payload)
 
 
-def _report(tasks: list[TaskSummary] | None = None, **overrides: object) -> RunReport:
-    payload: dict[str, object] = {
+def _report(tasks: list[TaskSummary] | None = None, **overrides: Any) -> RunReport:
+    payload: dict[str, Any] = {
         "run_id": "20260305-1200-abcdef",
         "created_at": datetime(2026, 3, 5, 4, 0, tzinfo=timezone.utc),
         "suite_id": "core-behavior",

@@ -134,6 +134,7 @@ def test_cmd_scan_reports_errored_attempts_and_stays_green(
     from quality.models import SecurityReport
 
     async def fake_scan(target, suite, *, samples=1, budget=None, audit=None):  # noqa: ANN001 - 替身与 scan 同形
+        assert audit is not None
         audit.append("scan.errored", "run-x", count=2, samples=["sec-a#0", "sec-b#0"])
         return SecurityReport(
             run_id="run-x",

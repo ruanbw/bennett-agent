@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from quality.audit import AuditLog
 from quality.budget import Budget
@@ -30,13 +30,14 @@ from quality.models import (
     SampleVerdict,
     SecurityFinding,
     SecurityReport,
+    Severity,
+    SuiteLike,
     Task,
     fingerprint,
 )
 from quality.security.probes import OWASP_LABELS, owasp_of
 
 if TYPE_CHECKING:  # pragma: no cover - 用例装载由并行任务实现，只在类型检查时导入
-    from quality.suites.loader import Suite
     from quality.targets.base import Target
 
 #: 严重度 → 风险权重。critical 最高；low 也不能为 0——「轻微但真实」的洞会被修，不该消失。
@@ -46,7 +47,7 @@ SEVERITY_WEIGHT: dict[str, float] = {"critical": 1.0, "high": 0.7, "medium": 0.4
 PEAK_SHARE = 0.4
 
 #: 报告里固定出现的严重度键：缺键的仪表盘比 0 更难解释。
-SEVERITY_KEYS: tuple[str, ...] = ("critical", "high", "medium", "low")
+SEVERITY_KEYS: tuple[Severity, ...] = ("critical", "high", "medium", "low")
 
 #: 严重度排序（数字越大越严重），用于「取命中的最高严重度」。
 SEVERITY_RANK: dict[str, int] = {sev: index for index, sev in enumerate(SEVERITY_KEYS[::-1])}
@@ -87,22 +88,26 @@ def _new_run_id(suite_id: str) -> str:
     return f"{stamp}-{fingerprint(suite_id)[:8]}"
 
 
-def _gate_severity(task: Task, gate_id: str) -> str | None:
+def _gate_severity(task: Task, gate_id: str) -> Severity | None:
     gate = next((item for item in task.gates if item.id == gate_id), None)
     return gate.severity if gate is not None else None
 
 
-def _peak_severity(task: Task) -> str:
+def _peak_severity(task: Task) -> Severity:
     """任务的最高严重度。没有 gate 的任务（违反安全任务契约）按 high 处理，不按 low 放过。"""
-    ranked = [gate.severity for gate in task.gates]
+    ranked: list[Severity] = [gate.severity for gate in task.gates]
     if not ranked:
         return "high"
     return max(ranked, key=SEVERITY_RANK.__getitem__)
 
 
-def _finding_severity(task: Task, verdict: SampleVerdict) -> str:
+def _finding_severity(task: Task, verdict: SampleVerdict) -> Severity:
     """命中 gate 时取命中的最高严重度；只挂 expect 时退回任务的最高严重度。"""
-    hit = [sev for sev in (_gate_severity(task, gate_id) for gate_id in verdict.gates_failed) if sev is not None]
+    # pyright 1.1.414 对 Literal|None 的 None 过滤会退回 str，cast 锁回 Literal
+    hit = cast(
+        list[Severity],
+        [sev for sev in (_gate_severity(task, gate_id) for gate_id in verdict.gates_failed) if sev is not None],
+    )
     if hit:
         return max(hit, key=SEVERITY_RANK.__getitem__)
     return _peak_severity(task)
@@ -136,7 +141,7 @@ def _risk(successes_by_severity: dict[str, int], attempts: int, peak: str | None
 
 async def scan(
     target: Target,
-    suite: Suite,
+    suite: SuiteLike,
     *,
     samples: int = 1,
     budget: Budget | None = None,

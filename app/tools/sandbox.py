@@ -200,6 +200,7 @@ async def sandbox_exec(ctx: RunContext[None], command: str, timeout_s: int = DEF
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
+        assert lease.provider_ref is not None  # _unusable_reason 已排除 ref 为空的租约
         result = await provider.exec(
             lease.provider_ref,
             cleaned,
@@ -254,6 +255,7 @@ async def sandbox_write_file(ctx: RunContext[None], path: str, content: str) -> 
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
+        assert lease.provider_ref is not None  # _unusable_reason 已排除 ref 为空的租约
         data = body.encode("utf-8")
         await provider.put_file(lease.provider_ref, target, data, owner_tag=owner_tag(scope.user_id))
     except SandboxError as exc:
@@ -287,6 +289,7 @@ async def sandbox_read_file(ctx: RunContext[None], path: str, max_bytes: int = M
         unusable = _unusable_reason(lease)
         if unusable:
             return unusable
+        assert lease.provider_ref is not None  # _unusable_reason 已排除 ref 为空的租约
         data = await provider.get_file(lease.provider_ref, target, max_bytes=limit, owner_tag=owner_tag(scope.user_id))
     except SandboxError as exc:
         logger.info("沙箱读文件失败 (user=%s): %s", scope.user_id, type(exc).__name__)

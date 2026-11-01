@@ -160,7 +160,7 @@ async def run_suite(
     *,
     samples: int,
     concurrency: int = 4,
-    graders: list[Grader] | None = None,
+    graders: Sequence[Grader] | None = None,
     budget: Budget | None = None,
     config: dict[str, Any] | None = None,
     audit: AuditLog | None = None,

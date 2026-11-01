@@ -76,7 +76,7 @@ def _manager(session) -> _ScriptedUserManager:  # noqa: ANN001 - AsyncSession
 
 async def _find_user(email: str) -> User | None:
     async with async_session_maker() as session:
-        return await session.scalar(select(User).where(User.email == email))
+        return await session.scalar(select(User).where(User.__table__.c.email == email))
 
 
 async def _create_superadmin(email: str, password: str) -> User:

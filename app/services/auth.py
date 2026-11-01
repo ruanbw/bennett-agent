@@ -13,7 +13,7 @@ from typing import Any
 import anyio
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin, schemas
+from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport
 from fastapi_users.authentication.strategy.db import AccessTokenDatabase, DatabaseStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
@@ -34,6 +34,7 @@ from app.db import (
     hash_access_token,
 )
 from app.roles import ADMIN_LEVEL, ROLE_SUPERADMIN, Role
+from app.schemas.user import UserCreate
 from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
@@ -166,7 +167,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     reset_password_token_secret = settings.auth_secret
     verification_token_secret = settings.auth_secret
 
-    async def validate_password(self, password: str, user: schemas.UC | User) -> None:
+    async def validate_password(self, password: str, user: UserCreate | User) -> None:
         """密码强度校验：只设长度上下限，强制大小写/符号只会把人逼向 `Password1!` 这类可预测模式。
 
         上下限都在这里判一次：注册、改密、种子脚本共用同一个判据，两处规则分叉的后果是
@@ -179,7 +180,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
 
     async def create(
         self,
-        user_create: schemas.UC,
+        user_create: UserCreate,
         safe: bool = False,
         request: Request | None = None,
     ) -> User:

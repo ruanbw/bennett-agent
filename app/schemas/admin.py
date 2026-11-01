@@ -111,9 +111,9 @@ class ProviderPresetRead(BaseModel):
 class ProviderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=MAX_NAME_CHARS)
     #: 选了厂商预设时可省略（用预设地址）；自定义添加必填。
-    base_url: str | None = Field(None, max_length=MAX_URL_CHARS)
-    preset_key: str | None = Field(None, max_length=40)
-    api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
+    base_url: str | None = Field(default=None, max_length=MAX_URL_CHARS)
+    preset_key: str | None = Field(default=None, max_length=40)
+    api_key: str | None = Field(default=None, max_length=MAX_API_KEY_CHARS)
     #: API Key 放进哪个头。不传时跟随预设/默认 `bearer`；Azure OpenAI 必须选 `api-key`
     #: （它不收 `Authorization: Bearer`，头名也不是 `x-api-key`）。
     auth_style: str | None = None
@@ -166,11 +166,11 @@ class ProviderCreate(BaseModel):
 
 
 class ProviderUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=MAX_NAME_CHARS)
-    base_url: str | None = Field(None, min_length=1, max_length=MAX_URL_CHARS)
+    name: str | None = Field(default=None, min_length=1, max_length=MAX_NAME_CHARS)
+    base_url: str | None = Field(default=None, min_length=1, max_length=MAX_URL_CHARS)
     #: None = 不修改；空串 = 清空；非空 = 更新。用 `model_fields_set` 区分「没传」与
     #: 「显式传 null」，路由层只把请求里真正出现的键往下传。
-    api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS)
+    api_key: str | None = Field(default=None, max_length=MAX_API_KEY_CHARS)
     auth_style: str | None = None
     #: 与 `api_key` 一样是凭据配置：传 `{}` 表示清空全部固定头，不传则保持不变。
     extra_headers: dict[str, str] | None = None
@@ -225,14 +225,14 @@ class ModelRead(BaseModel):
 
 class ModelCreate(BaseModel):
     model_id: str = Field(..., min_length=1, max_length=MAX_MODEL_ID_CHARS)
-    display_name: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS)
-    description: str | None = Field(None, max_length=1000)
+    display_name: str | None = Field(default=None, max_length=MAX_MODEL_ID_CHARS)
+    description: str | None = Field(default=None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] = Field(default_factory=list)
     #: 下界 1024：`build_budget` 先扣约 1.5k 固定开销再乘安全系数，填 1 会让该模型下每条对话都
     #: 超限；上界 10M：列是 PG `INTEGER`，2^31 会让 asyncpg 抛 DataError 变 500，而它已远超真实模型。
-    context_window: int | None = Field(None, ge=1024, le=10_000_000)
-    max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
+    context_window: int | None = Field(default=None, ge=1024, le=10_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1024, le=10_000_000)
     enabled: bool = True
     is_default: bool = False
 
@@ -246,14 +246,14 @@ class ModelCreate(BaseModel):
 
 
 class ModelUpdate(BaseModel):
-    display_name: str | None = Field(None, min_length=1, max_length=MAX_MODEL_ID_CHARS)
-    description: str | None = Field(None, max_length=1000)
+    display_name: str | None = Field(default=None, min_length=1, max_length=MAX_MODEL_ID_CHARS)
+    description: str | None = Field(default=None, max_length=1000)
     reasoning: bool | None = None
     supported_reasoning_levels: list[str] | None = None
     #: 量纲约束与 `ModelCreate` 同一套理由：填 1 会让该模型下每条对话都被判超限，
     #: 填 2^31 会让 PG INTEGER 溢出成 500。
-    context_window: int | None = Field(None, ge=1024, le=10_000_000)
-    max_output_tokens: int | None = Field(None, ge=1024, le=10_000_000)
+    context_window: int | None = Field(default=None, ge=1024, le=10_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1024, le=10_000_000)
     enabled: bool | None = None
     is_default: bool | None = None
 

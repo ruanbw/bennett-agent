@@ -94,6 +94,7 @@ class SandboxProvider(Protocol):
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """创建并等到可执行。失败抛 `SandboxCapacityError` / `SandboxError`。"""
+        ...
 
     async def exec(
         self,
@@ -107,21 +108,26 @@ class SandboxProvider(Protocol):
         """在沙箱内跑一条 shell 命令。超时由 provider 在沙箱内部保证，返回 `timed_out=True` 而非抛错。
         `owner_tag` 非空时必须核对机器自己的标记，不一致抛 `SandboxNotFound`。
         """
+        ...
 
     async def put_file(self, ref: str, path: str, data: bytes, *, owner_tag: str | None = None) -> None:
         """写入文件（父目录不存在时创建）。`owner_tag` 语义同 `exec`。"""
+        ...
 
     async def get_file(self, ref: str, path: str, *, max_bytes: int, owner_tag: str | None = None) -> bytes:
         """读取文件。超过 `max_bytes` 抛 `SandboxError`，不要静默截断——坏文件只会在下游炸。
         `owner_tag` 语义同 `exec`。"""
+        ...
 
     async def destroy(self, ref: str, *, owner_tag: str | None = None) -> None:
         """销毁。幂等：已经不存在时正常返回，回收循环会重复调用。
         `owner_tag` 语义同 `exec`：不匹配时抛 `SandboxNotFound`，不要删别人的机器。
         """
+        ...
 
     async def is_alive(self, ref: str) -> bool:
         """ref 是否仍然可用。用于回收前确认与「库里有、机器没了」的核对。"""
+        ...
 
 
 def owner_tag(user_id: uuid.UUID | str) -> str:

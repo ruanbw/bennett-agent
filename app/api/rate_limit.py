@@ -60,7 +60,7 @@ __all__ = [
 # 认证端点限流
 # ---------------------------------------------------------------------
 #: 认证限流桶。与对话限流分开：键的语义（IP vs 账号）与配额都不同。
-_auth_limiter: SlidingWindowLimiter | None = None
+_auth_limiter: SlidingWindowLimiter | RedisSlidingWindowLimiter | None = None
 
 
 def too_many(retry_after: float, limit: int | None = None) -> HTTPException:

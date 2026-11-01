@@ -8,6 +8,7 @@ import logging
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.routing import APIRoute
 from fastapi_users.exceptions import InvalidPasswordException, UserAlreadyExists
 
 from app.api.rate_limit import enforce_auth_rate_limit, make_limiter, too_many
@@ -56,6 +57,8 @@ def _localize_generated_routes(auth_router: APIRouter) -> None:
     for route in auth_router.routes:
         text = _FRAMEWORK_ROUTE_TEXT.get(getattr(route, "path", ""))
         if text is not None:
+            # fastapi 把 route 声明为 BaseRoute；这里的元素实际是 APIRoute，中文文案就挂在其上
+            assert isinstance(route, APIRoute)
             route.summary, route.description = text
 
 
@@ -66,6 +69,7 @@ def _limit_login_only(auth_router: APIRouter) -> None:
     """
     for route in auth_router.routes:
         if getattr(route, "path", None) == "/login":
+            assert isinstance(route, APIRoute)  # 同上：框架路由列表的静态类型宽于实际元素
             route.dependencies.append(Depends(enforce_auth_rate_limit))
 
 
@@ -212,7 +216,7 @@ async def change_password(
         domain=cookie_transport.cookie_domain,
         secure=cookie_transport.cookie_secure,
         httponly=cookie_transport.cookie_httponly,
-        samesite=cookie_transport.cookie_samesite,
+        samesite=cookie_transport.cookie_samesite,  # type: ignore[arg-type]  # 上游声明窄于运行时赋值，构造处已用 resolved_cookie_samesite 校验
     )
     return response
 

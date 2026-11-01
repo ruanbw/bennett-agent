@@ -39,7 +39,7 @@ class SearchResultCache:
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
         #: OrderedDict 天然就是 LRU 顺序：命中时 move_to_end。
-        self._entries: OrderedDict[tuple[str, int], _Entry] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, str, int], _Entry] = OrderedDict()
 
     @staticmethod
     def make_key(query: str, max_results: int, scope: str = "") -> tuple[str, str, int]:
@@ -116,6 +116,8 @@ class SearchCache:
         if not raw:
             return None
         # 写入时按 UTF-8 编码；解码失败说明键被别人/别的版本写过，按 miss 处理
+        if isinstance(raw, str):
+            return raw
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError:

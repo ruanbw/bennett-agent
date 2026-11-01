@@ -260,6 +260,9 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# pyright: reportUnsupportedDunderAll=false
+# __all__ 里全部旧导出名都由模块级 `__getattr__` 惰性供给（见上：工具对象随注册表惰性产生），
+# 静态分析看不见它们；改成显式赋值等于放弃惰性加载，不值。
 __all__ = [
     "ALL_TOOLS",
     "ManagedTool",
