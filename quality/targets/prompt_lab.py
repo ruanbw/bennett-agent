@@ -73,6 +73,9 @@ class PromptLabTarget:
                 web_search="tavily_search" in tool_names,
                 clarification="ask_user_clarification" in tool_names,
                 current_time="get_current_time" in tool_names,
+                # 与 `agent_factory.render_system_prompt` 的入参逐项对齐：少传一个变量，
+                # Jinja 的 `{% if todo %}` 会抛 UndefinedError，实验室连提示词都渲染不出来。
+                todo="todo_write" in tool_names,
                 sandbox="sandbox_exec" in tool_names,
                 mcp_servers=[],
                 # 审批闸门在生产恒开；实验室同样开，否则模型会以为自己能直接改文件。

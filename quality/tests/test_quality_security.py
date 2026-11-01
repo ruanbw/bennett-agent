@@ -217,6 +217,9 @@ def test_prompt_markers_must_appear_verbatim_in_the_production_template() -> Non
         web_search=True,
         clarification=True,
         current_time=True,
+        # 模板里 `{% if todo %}` 与 sandbox 分支同理：不传就 UndefinedError，
+        # 渲染直接失败而不是少一条断言——这里给全 True，让分支都走一遍。
+        todo=True,
         sandbox=True,
         mcp_servers=[],
         approval_gate=True,
