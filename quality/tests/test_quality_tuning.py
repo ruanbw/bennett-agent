@@ -15,7 +15,9 @@ import pytest
 
 from quality.audit import AuditLog
 from quality.budget import Budget
+from quality.graders.base import Grader
 from quality.models import (
+    Dimension,
     FailureCluster,
     Patch,
     RunReport,
@@ -74,7 +76,7 @@ def make_verdict(
     score: float,
     item_id: str | None = None,
     item_rationale: str = "",
-    dimension: str = "completion",
+    dimension: Dimension = "completion",
     gate: str | None = None,
     expectation_failure: str | None = None,
     sample: int = 0,
@@ -117,7 +119,7 @@ def make_report(
     )
 
 
-def summary(task_id: str, *, category: str = "completion", failed_items: list[str] | None = None) -> TaskSummary:
+def summary(task_id: str, *, category: Dimension = "completion", failed_items: list[str] | None = None) -> TaskSummary:
     return TaskSummary(
         task_id=task_id,
         category=category,
@@ -566,7 +568,7 @@ def test_optimize_reuses_the_same_graders_for_candidates(
         return report, failing_verdicts()
 
     monkeypatch.setattr(loop, "_resolve_run_suite", lambda: run)
-    graders = [object()]
+    graders: list[Grader] = [object()]  # type: ignore[list-item]  # 真实执行器被替换，对象只验证透传
 
     _run(
         optimize(

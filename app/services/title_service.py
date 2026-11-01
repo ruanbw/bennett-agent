@@ -5,6 +5,8 @@
 
 import logging
 
+from pydantic_ai.settings import ModelSettings
+
 from app.services.agent_factory import TITLE_TIMEOUT_SECONDS, build_title_agent
 from app.services.model_service import ChatModelSnapshot
 from app.services.title_text import fallback_title, normalize_title
@@ -20,13 +22,13 @@ DEFAULT_TITLE = "新对话"
 TITLE_INPUT_TAG = "user_message"
 
 
-def _title_model_settings(snapshot: ChatModelSnapshot) -> dict[str, object]:
+def _title_model_settings(snapshot: ChatModelSnapshot) -> ModelSettings:
     """标题这一次调用的运行期参数：超时，以及（仅在模型声明支持时）关掉思考。
 
     思考开关不能无条件传：不认 `reasoning_effort` 的模型会因此 400，标题随即静默退回截断。
     供应商同步进库的 `reasoning_levels` 含 `none` 才说明它接受「关闭思考」。
     """
-    model_settings: dict[str, object] = {"timeout": TITLE_TIMEOUT_SECONDS}
+    model_settings: ModelSettings = {"timeout": TITLE_TIMEOUT_SECONDS}
     if "none" in snapshot.reasoning_levels:
         model_settings["extra_body"] = {"reasoning_effort": "none"}
     return model_settings

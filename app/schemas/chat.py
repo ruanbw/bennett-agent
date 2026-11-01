@@ -94,7 +94,7 @@ class ChatMessage(BaseModel):
     # 只允许 user/assistant：system 会被当成 SystemPromptPart 插进历史，等于让调用方注入系统提示词。
     role: Literal["user", "assistant"]
     content: str = Field(..., max_length=MAX_MESSAGE_CHARS)
-    thinking: str | None = Field(None, max_length=MAX_THINKING_CHARS)
+    thinking: str | None = Field(default=None, max_length=MAX_THINKING_CHARS)
     #: 这条助手消息里发起过的工具调用（只用于审批续跑，见 `ReplayedToolCall`）；
     #: 只有 assistant 允许带，user 带了等于伪造模型行为。
     tool_calls: list[ReplayedToolCall] = Field(default_factory=list)
@@ -143,7 +143,7 @@ class ContextAnchor(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    model: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS, description="选用的模型标识符")
+    model: str | None = Field(default=None, max_length=MAX_MODEL_ID_CHARS, description="选用的模型标识符")
     reasoning_effort: str | None = Field(
         None,
         max_length=MAX_REASONING_EFFORT_CHARS,
@@ -300,7 +300,7 @@ class ModelListResponse(BaseModel):
 
 
 class TitleGenerateRequest(BaseModel):
-    model: str | None = Field(None, max_length=MAX_MODEL_ID_CHARS, description="使用的模型名称")
+    model: str | None = Field(default=None, max_length=MAX_MODEL_ID_CHARS, description="使用的模型名称")
     prompt: str = Field(..., min_length=1, max_length=MAX_TITLE_PROMPT_CHARS, description="首条提示词内容")
 
     _strip_model = field_validator("model", mode="before")(_strip_optional_model)

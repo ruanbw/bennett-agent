@@ -45,6 +45,11 @@ jobs:
         # 这条检查保证「行长合规」不是靠人手维护。
         run: uv run ruff format --check .
 
+      - name: 类型检查（pyright）
+        # uvx 拉起而不进依赖：版本策略与 pyproject [tool.pyright] 注释一致。
+        # runner 自带 node（pyright 的运行时），uv sync 已建好 .venv 供 venvPath 解析。
+        run: uvx pyright
+
       - name: 测试
         # 不需要真实模型网关、数据库、Redis 或对象存储：涉及上游的用例替换掉客户端或生成器，
         # Redis 用进程内 fakeredis，其余协作者传替身。

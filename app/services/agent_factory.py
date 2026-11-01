@@ -17,7 +17,9 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import Tool
+from pydantic_ai.toolsets import AbstractToolset
 
 from app.config import is_usable_api_key, settings
 from app.config.proxy_env import sanitize_no_proxy_env
@@ -244,7 +246,7 @@ def _build_fallback_handler(
 
 def _build_chat_model(
     model_name: str,
-    model_settings: dict[str, object],
+    model_settings: ModelSettings,
     target: ModelTarget | None = None,
 ) -> Model:
     """构造主对话模型；配置了备用模型时包一层 `FallbackModel`。
@@ -359,7 +361,7 @@ def _build_agent_cached(
     effort: str | None,
     cache_key: tuple[object, ...],
     target: ModelTarget | None,
-) -> Agent[AgentRunDeps]:  # noqa: ANN401
+) -> Agent[AgentRunDeps, str | DeferredToolRequests]:  # noqa: ANN401 - 透传 DeferredToolRequests，消费方按 isinstance 分支
     """装配主对话 Agent 的缓存实现，只应由 `build_agent` 调用。
 
     `effort` 须已归一化、`cache_key` 来自 `_settings_cache_key()`、`target` 来自
@@ -370,7 +372,7 @@ def _build_agent_cached(
     tools = _TOOL_BUILDER()
     system_prompt = render_system_prompt([tool.name for tool in tools])
 
-    model_settings: dict[str, object] = {}
+    model_settings: ModelSettings = {}
     if effort:
         model_settings["extra_body"] = {"reasoning_effort": effort}
 
@@ -401,7 +403,7 @@ def _build_agent_cached(
     )
 
 
-def _mcp_toolsets() -> list[object]:
+def _mcp_toolsets() -> list[AbstractToolset[Any]]:
     """取当前配置下的 MCP toolset 列表；未配置时为空。
 
     装配失败不让 agent 构建失败（MCP 只是增强能力）。这里只取已缓存实例不做发现：发现是
@@ -424,7 +426,7 @@ def build_agent(
     reasoning_effort: str | None = None,
     *,
     target: ModelTarget | None = None,
-) -> Agent[AgentRunDeps]:  # noqa: ANN401
+) -> Agent[AgentRunDeps, str | DeferredToolRequests]:  # noqa: ANN401 - 透传 DeferredToolRequests，消费方按 isinstance 分支
     """装配主对话 Agent；CLI 与 Web 都必须走这里，否则两者会再次漂移。
 
     归一化必须在进缓存之前完成，否则 `"HIGH"` / `"high"` / `" high "` 各占一个槽，
@@ -450,7 +452,7 @@ def _build_title_agent_cached(
     """
     timeout = build_upstream_timeout()
     upstream_name = target.upstream_model if target is not None else model_name
-    title_settings: dict[str, object] = {
+    title_settings: ModelSettings = {
         # 标题只输出十几个字：封顶避免思考型模型把预算全花在「想」上
         "max_tokens": TITLE_MAX_TOKENS,
         # 标题没有创作空间：同一条消息重复触发（重发/多标签页）应得到同一个标题

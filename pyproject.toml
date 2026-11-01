@@ -61,3 +61,14 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+[tool.pyright]
+# CI 与本地统一走 `uvx pyright`（不进 dev 依赖：类型检查器版本由 uvx 每次解析最新，
+# 收口动作在独立分支做，日常提交不背升级成本）。
+include = ["app", "main.py", "scripts", "evals", "quality"]
+pythonVersion = "3.10"
+# uv 的虚拟环境固定在仓库根 .venv；不指到这里 pyright 会退回解释器搜索，
+# 所有第三方包报 reportMissingImports（基线 232 错里 160 个是它）。
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"

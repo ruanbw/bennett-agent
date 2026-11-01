@@ -4,9 +4,9 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
+from pydantic.json_schema import GenerateJsonSchema
 from pydantic_ai.tools import (
     DocstringFormat,
-    GenerateJsonSchema,
     GenerateToolJsonSchema,
     Tool,
     ToolAgentDepsT,

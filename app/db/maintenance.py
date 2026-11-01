@@ -56,9 +56,13 @@ async def cleanup_expired_access_tokens(lifetime_seconds: int) -> int:
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=lifetime_seconds)
     async with async_session_maker() as session:
-        stale = (await session.execute(select(AccessToken.token).where(AccessToken.created_at < cutoff))).scalars()
+        stale = (
+            await session.execute(
+                select(AccessToken.__table__.c.token).where(AccessToken.__table__.c.created_at < cutoff)
+            )
+        ).scalars()
         tokens = list(stale)
-        await session.execute(delete(AccessToken).where(AccessToken.created_at < cutoff))
+        await session.execute(delete(AccessToken).where(AccessToken.__table__.c.created_at < cutoff))
         await session.commit()
 
     # 缓存与库一起清：只删库时，已登出的会话还能从 Redis 里取出来用（最坏到 TTL）。
@@ -75,14 +79,20 @@ async def delete_user_access_tokens(user_id: uuid.UUID) -> int:
     """
     async with async_session_maker() as session:
         tokens = list(
-            (await session.execute(select(AccessToken.token).where(AccessToken.user_id == user_id))).scalars()
+            (
+                await session.execute(
+                    select(AccessToken.__table__.c.token).where(AccessToken.__table__.c.user_id == user_id)
+                )
+            ).scalars()
         )
-        result = await session.execute(delete(AccessToken).where(AccessToken.user_id == user_id))
+        result = await session.execute(delete(AccessToken).where(AccessToken.__table__.c.user_id == user_id))
         await session.commit()
 
     for token in tokens:
         await _session_cache_delete(token)
-    return result.rowcount or 0
+    rowcount = getattr(result, "rowcount", 0)
+    assert isinstance(rowcount, int)  # DML 结果才有 rowcount；替身也按此契约供给
+    return rowcount or 0
 
 
 async def cleanup_sandbox_history(older_than_days: int) -> int:
@@ -111,4 +121,6 @@ async def cleanup_sandbox_history(older_than_days: int) -> int:
             )
         )
         await session.commit()
-    return result.rowcount or 0
+    rowcount = getattr(result, "rowcount", 0)
+    assert isinstance(rowcount, int)  # DML 结果才有 rowcount；替身也按此契约供给
+    return rowcount or 0

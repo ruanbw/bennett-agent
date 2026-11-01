@@ -60,7 +60,8 @@ SYNC_MAX_PAGES = 20
 DEFAULT_PROVIDER_NAME = "默认网关"
 
 #: 「未提供」哨兵；不能拿 None 表示不改，管理员需要能把 API key 清空。
-_UNSET = object()
+_UnsetType = type("_UNSET_SENTINEL", (), {})  # 哨兵类型：参数声明里用于排除 None 语义
+_UNSET = _UnsetType()
 
 #: 引导地址必须带 http(s) scheme：写成 `localhost:4000` 时 httpx 在首次请求前抛
 #: `UnsupportedProtocol`，而用户看到的只是「模型不可用」。
@@ -228,7 +229,7 @@ async def update_provider(
     base_url: object = _UNSET,
     api_key: object = _UNSET,
     auth_style: object = _UNSET,
-    extra_headers: object = _UNSET,
+    extra_headers: dict[str, str] | None | _UnsetType = _UNSET,
     enabled: object = _UNSET,
     actor: uuid.UUID | None = None,
 ) -> ModelProvider | None:
@@ -251,6 +252,7 @@ async def update_provider(
             provider.auth_style = resolved_auth
         if extra_headers is not _UNSET:
             # 空 dict = 清空：固定头属于凭据配置，填错了要能撤掉。`None` 在路由层已被当作「不修改」丢掉。
+            assert extra_headers is None or isinstance(extra_headers, dict)
             provider.extra_headers = {str(k): str(v) for k, v in (extra_headers or {}).items()}
         if base_url is not _UNSET:
             # 只校验变化过的新地址：不动地址的保存不该因旧行违规而失败（那样由 `_build_target` 出站时拦）。
@@ -414,10 +416,13 @@ async def update_provider_model(
         if reasoning is not _UNSET:
             model.reasoning = bool(reasoning) if reasoning is not None else None
         if supported_reasoning_levels is not _UNSET:
+            assert isinstance(supported_reasoning_levels, (list, tuple)) or supported_reasoning_levels is None
             model.supported_reasoning_levels = list(supported_reasoning_levels or [])
         if context_window is not _UNSET:
+            assert isinstance(context_window, (int, str, float, bytes, bool)) or context_window is None
             model.context_window = int(context_window) if context_window is not None else None
         if max_output_tokens is not _UNSET:
+            assert isinstance(max_output_tokens, (int, str, float, bytes, bool)) or max_output_tokens is None
             model.max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else None
         if enabled is not _UNSET:
             model.enabled = bool(enabled)

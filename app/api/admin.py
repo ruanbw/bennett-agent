@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import User, delete_user_access_tokens, get_async_session
@@ -330,9 +331,9 @@ async def list_users(
         pattern = f"%{escape_like_pattern(cleaned.lower())}%"
         stmt = stmt.where(func.lower(User.email).like(pattern, escape="\\"))
     if status_filter == "active":
-        stmt = stmt.where(User.is_active.is_(True))
+        stmt = stmt.where(User.__table__.c.is_active.is_(True))  # 基类 TYPE_CHECKING 声明裸 bool，注释见 maintenance.py
     elif status_filter == "banned":
-        stmt = stmt.where(User.is_active.is_(False))
+        stmt = stmt.where(User.__table__.c.is_active.is_(False))
 
     total = await session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     users = (await session.scalars(stmt.order_by(User.email).limit(limit).offset(offset))).all()
@@ -446,7 +447,7 @@ async def set_user_role(
         statement = (
             update(User)
             .where(
-                User.id == user_id,
+                User.__table__.c.id == user_id,
                 User.role == Role.SUPERADMIN.value_str,
                 remaining_superadmins > 1,
             )
@@ -454,6 +455,7 @@ async def set_user_role(
             .execution_options(synchronize_session=False)
         )
         result = await session.execute(statement)
+        assert isinstance(result, CursorResult)  # DML 的 execute 返回 CursorResult
         if result.rowcount == 0:
             await session.rollback()
             raise HTTPException(status_code=400, detail="不能降级最后一个超级管理员，后台将无人可管")

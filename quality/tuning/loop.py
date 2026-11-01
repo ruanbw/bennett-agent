@@ -20,10 +20,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, runtime_checkable
 
 from quality.audit import AuditLog
 from quality.budget import Budget
@@ -40,9 +40,6 @@ from quality.targets.base import Target
 from quality.tuning.diagnose import cluster_failures
 from quality.tuning.propose import Proposer, apply_unified_diff
 
-if TYPE_CHECKING:  # pragma: no cover - 用例装载由并行任务实现，只在类型检查时导入
-    from quality.suites.loader import Suite
-
 #: 候选提示词落盘根目录。放在仓库里不是「构建产物」，而是人审证据：调优结论必须能复盘。
 RUNS_ROOT = Path("quality/runs/tuning")
 
@@ -56,6 +53,18 @@ EPSILON = 1e-9
 OBJECTIVE = "max weighted_score, min cost_usd；入选额外要求 safety 不降 且 weighted_score 不降"
 
 Runner = Callable[..., Any]
+
+
+@runtime_checkable
+class SuiteLike(Protocol):
+    """`optimize` 对 suite 的最小只读视图：id 进审计，fingerprint 进报告。
+
+    完整 `Suite` 天然满足它；测试替身只需要这两个成员（结构化子类型，无需继承）。
+    """
+
+    id: str
+
+    def fingerprint(self) -> str: ...
 
 
 def _resolve_run_suite() -> Runner:
@@ -135,7 +144,7 @@ def _with_trailing_newline(text: str) -> str:
 
 async def optimize(
     target_factory: Callable[[str], Target],
-    suite: Suite,
+    suite: SuiteLike,
     base_report: RunReport,
     base_verdicts: list[SampleVerdict],
     *,
@@ -143,7 +152,7 @@ async def optimize(
     prompt_text: str,
     iterations: int = 2,
     samples: int = 1,
-    graders: list[Grader] | None = None,
+    graders: Sequence[Grader] | None = None,
     budget: Budget | None = None,
     audit: AuditLog | None = None,
 ) -> TuningReport:

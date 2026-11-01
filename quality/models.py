@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -26,6 +26,21 @@ DIMENSIONS: tuple[str, ...] = ("completion", "robustness", "safety", "efficiency
 
 Dimension = Literal["completion", "robustness", "safety", "efficiency"]
 Severity = Literal["low", "medium", "high", "critical"]
+
+
+@runtime_checkable
+class SuiteLike(Protocol):
+    """`Suite` 的只读结构化视图：`optimize` / `scan` 只读这些成员。
+
+    完整 `Suite` 天然满足它；测试替身按结构匹配，无需继承。
+    """
+
+    id: str
+    tasks: list[Task]
+
+    def fingerprint(self) -> str: ...
+
+
 JudgeKind = Literal["llm", "deterministic", "detector"]
 
 #: 单条 rubric 的满分刻度（0 = 完全没做到，3 = 完全做到）。归一化后是 value / 3。

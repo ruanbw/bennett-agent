@@ -12,6 +12,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelResponsePart,
     TextPart,
     ThinkingPart,
     ToolCallPart,
@@ -76,7 +77,7 @@ def convert_chat_history(
             if msg.content:
                 converted_history.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
         else:
-            parts: list[object] = []
+            parts: list[ModelResponsePart] = []
             if msg.thinking:
                 parts.append(ThinkingPart(content=msg.thinking))
             if msg.content:

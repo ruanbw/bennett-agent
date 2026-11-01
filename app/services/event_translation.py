@@ -6,7 +6,7 @@
 import json
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import DeferredToolRequestsEvent
 from pydantic_ai.messages import (
@@ -74,16 +74,18 @@ def _stringify(value: Any) -> str:  # noqa: ANN401
         return str(value)
 
 
-_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
+ToolOutcome = Literal["success", "failed", "denied", "interrupted"]
+_TOOL_OUTCOMES: frozenset[ToolOutcome] = frozenset({"success", "failed", "denied", "interrupted"})
 
 
-def _tool_outcome(part: Any) -> str:  # noqa: ANN401
+def _tool_outcome(part: Any) -> ToolOutcome:  # noqa: ANN401
     """取工具结果的结构化 outcome，供前端区分成功与失败。
 
     用 outcome 而非让前端猜结果字符串；`RetryPromptPart` 无 outcome，本身就是参数校验失败，按 failed 处理。
     """
     outcome = getattr(part, "outcome", None)
-    if outcome in _TOOL_OUTCOMES:
+    if isinstance(outcome, str) and outcome in _TOOL_OUTCOMES:
+        # isinstance 收窄到 str 后，in 判定即锁定 Literal 成员
         return outcome
     if isinstance(part, RetryPromptPart):
         return "failed"

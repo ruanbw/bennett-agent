@@ -39,6 +39,7 @@ class ChangeNotifier(Protocol):
         调用方必须在**查版本号之前**进入这个上下文：反过来的话，落在「查完」与「开始等」
         之间的写入会丢唤醒，等待方只能白等到超时。
         """
+        ...
 
 
 class InMemoryNotifier:

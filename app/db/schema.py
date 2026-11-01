@@ -129,15 +129,17 @@ def _expected_named_objects() -> dict[str, str]:
             where = index.dialect_options["postgresql"].get("where")
             unique = "UNIQUE " if index.unique else ""
             suffix = f" WHERE {where}" if where is not None else ""
-            expected[index.name] = (
-                f"CREATE {unique}INDEX {preparer.quote(index.name)} ON {quoted_table} ({columns}){suffix};"
+            index_name = index.name or ""
+            expected[index_name] = (
+                f"CREATE {unique}INDEX {preparer.quote(index_name)} ON {quoted_table} ({columns}){suffix};"
             )
         for constraint in table.constraints:
             if not isinstance(constraint, UniqueConstraint) or not constraint.name:
                 continue
             columns = ", ".join(preparer.quote(column.name) for column in constraint.columns)
-            expected[constraint.name] = (
-                f"ALTER TABLE {quoted_table} ADD CONSTRAINT {preparer.quote(constraint.name)} UNIQUE ({columns});"
+            constraint_name = str(constraint.name)
+            expected[constraint_name] = (
+                f"ALTER TABLE {quoted_table} ADD CONSTRAINT {preparer.quote(constraint_name)} UNIQUE ({columns});"
             )
     return expected
 
