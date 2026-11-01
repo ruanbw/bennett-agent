@@ -39,9 +39,7 @@ def main() -> int:
     frontend, admin = (load_deps(p) for p in PACKAGES)
     shared = sorted(set(frontend) & set(admin))
 
-    mismatches = [
-        (name, frontend[name], admin[name]) for name in shared if frontend[name] != admin[name]
-    ]
+    mismatches = [(name, frontend[name], admin[name]) for name in shared if frontend[name] != admin[name]]
     if mismatches:
         print(f"发现 {len(mismatches)} 个共享依赖版本不一致:\n")
         for name, a, b in mismatches:
